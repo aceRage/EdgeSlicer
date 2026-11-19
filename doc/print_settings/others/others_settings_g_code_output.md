@@ -7,6 +7,7 @@ These settings control how G-code is generated and formatted. They impact readab
 - [Verbose G-code](#verbose-g-code)
 - [Label Objects](#label-objects)
 - [Exclude Objects](#exclude-objects)
+  - [Outline tolerance](#outline-tolerance)
 - [Filename Format](#filename-format)
 
 ## Reduce Infill Retraction
@@ -35,6 +36,10 @@ Insert comments that label moves with the object they belong to (object index or
 ## Exclude Objects
 
 Add an `EXCLUDE OBJECT` marker or command in the exported G-code for objects flagged as excluded. This helps post-processors or custom scripts recognise excluded parts.
+
+### Outline tolerance
+
+Shown on Klipper printers when Exclude Objects is on. Each object's outline in the `EXCLUDE_OBJECT_DEFINE` command is simplified to this tolerance, in mm. A larger value gives shorter commands with fewer points; a smaller value follows the object's shape more closely. The default of 0.5 mm matches earlier EdgeSlicer versions.
 
 ## Filename Format
 

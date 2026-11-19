@@ -403,7 +403,19 @@ Spec spec_from_json(const json& j)
     s.download_url_path     = text_of(dl, "url_field", 200);
     s.download_direct_field = text_of(dl, "direct_field", 200);
     s.downloads_limited     = dl.is_object() && dl.value("limited", false);
-    if (!s.download_path.empty() && s.download_url_path.empty())
+    // "GET" when absent, null or empty (connectors written before this key existed behave as before).
+    if (dl.is_object() && dl.contains("method") && !dl["method"].is_null()) {
+        if (!dl["method"].is_string())
+            throw std::runtime_error("The download method must be GET or POST.");
+        std::string method = trim(dl["method"].get<std::string>());
+        std::transform(method.begin(), method.end(), method.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+        if (!method.empty() && method != "GET" && method != "POST")
+            throw std::runtime_error("The download method must be GET or POST.");
+        s.download_method = method.empty() ? std::string("GET") : method;
+    }
+    // A path with no "url_field" key at all keeps its old default "url". A blank one (the key present
+    // and empty) means the endpoint's answer IS the file.
+    if (!s.download_path.empty() && s.download_url_path.empty() && !(dl.is_object() && dl.contains("url_field")))
         s.download_url_path = "url";
 
     const json& quota = obj(j, "quota");
@@ -449,12 +461,60 @@ json spec_to_json(const Spec& s)
             {"files", {{"path", s.subs_path}, {"fields", s.sub_fields}}},
             {"download", {{"path", s.download_path}, {"url_field", s.download_url_path}, {"direct_field", s.download_direct_field}, {"limited", s.downloads_limited}}},
             {"quota", {{"used", s.quota_used_header}, {"limit", s.quota_limit_header}, {"resets", s.quota_reset_header}}}};
-    // Only what is set, so templates without these stay as they were.
+    // Only what is set (like the csv keys), so a GET connector's file stays exactly as it was.
+    if (s.download_method == "POST")
+        out["download"]["method"] = "POST";
     if (s.csv_max_records > 0)
         out["csv"]["max_records"] = s.csv_max_records;
     if (!s.csv_rows.empty())
         out["csv"]["rows"] = s.csv_rows;
     return out;
+}
+
+// The placeholders ({...}) of a template, with what is wrong with its braces: "" or the message.
+static std::string template_names(const std::string& templ, std::vector<std::string>& names)
+{
+    size_t pos = 0;
+    while (pos < templ.size()) {
+        const size_t open = templ.find('{', pos);
+        if (open == std::string::npos)
+            break;
+        const size_t close = templ.find('}', open);
+        if (close == std::string::npos)
+            return "it has a { with no closing }";
+        const std::string name = templ.substr(open + 1, close - open - 1);
+        if (name.empty() || name.find('{') != std::string::npos)
+            return "it has an empty or unfinished {}";
+        names.push_back(name);
+        pos = close + 1;
+    }
+    return std::string();
+}
+
+std::string template_problems(const Spec& s)
+{
+    static const char* VALID = "{id} {name} {sub.id} {sub.name} {sub.variant}";
+    static const std::set<std::string> DOWNLOAD_NAMES { "id", "name", "sub.id", "sub.name", "sub.variant" };
+    std::vector<std::string> names;
+    std::string              brace = template_names(s.download_path, names);
+    if (!brace.empty())
+        return "The download path is wrong: " + brace + ". Valid placeholders: " + VALID + ".";
+    for (const std::string& n : names)
+        if (!DOWNLOAD_NAMES.count(n))
+            return "The download path uses {" + n + "}, which the connector does not know, so it would be sent empty. Valid placeholders: " +
+                   VALID + ".";
+    auto page = s.fields.find("page_url");
+    if (page != s.fields.end() && page->second.find('{') != std::string::npos) {
+        names.clear();
+        brace = template_names(page->second, names);
+        if (!brace.empty())
+            return "The page URL template is wrong: " + brace + ".";
+        for (const std::string& n : names)
+            if (starts_with(n, "sub."))
+                return "The page URL template uses {" + n + "}, but a page belongs to the model, not to one of its files. "
+                       "Use a field of the model, like {slug}.";
+    }
+    return std::string();
 }
 
 std::string make_id(const std::string& name, uint32_t random)
@@ -526,9 +586,10 @@ Request authorize(const Spec& spec, const Secrets& secrets, const std::string& u
 }
 
 Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url, bool credentials,
-               const std::function<bool(const char*, size_t)>& sink, int max_redirects)
+               const std::function<bool(const char*, size_t)>& sink, int max_redirects, const std::string& method)
 {
     std::string current = url;
+    std::string verb    = method == "POST" ? "POST" : "GET";
     for (int hop = 0;; ++hop) {
         Response error;
         if (!is_allowed_url(current)) {
@@ -537,6 +598,7 @@ Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, con
         }
         Request req = credentials && same_origin(current, spec.base_url) ? authorize(spec, secrets, current) : Request { current, {} };
         req.sink    = sink;
+        req.method  = verb;
         Response resp = http(req);
         const bool redirect = resp.status == 301 || resp.status == 302 || resp.status == 303 || resp.status == 307 || resp.status == 308;
         auto       location = resp.headers.find("location");
@@ -547,6 +609,9 @@ Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, con
             return error;
         }
         current = join_url(current, location->second);
+        // As a browser does: 301, 302 and 303 go on as a GET, 307 and 308 keep the method.
+        if (resp.status != 307 && resp.status != 308)
+            verb = "GET";
     }
 }
 
@@ -623,12 +688,25 @@ static std::string clean_url(const Spec& spec, const std::string& ref)
     return is_allowed_url(url) ? url : std::string();
 }
 
+// A mapping value starting with "=" is a fixed text used for every item ("=N3D"); "==x" is the
+// literal "=x". Anything else is a path into the item. Not used for id/name (they must differ per item).
+static bool literal_of(const std::string& mapping, std::string& out)
+{
+    if (mapping.empty() || mapping[0] != '=')
+        return false;
+    out = trim(mapping.substr(1)); // "==x" keeps one "="
+    return true;
+}
+
 static std::string field(const Spec& spec, const json& item, const char* name, size_t max_len = 400)
 {
     auto it = spec.fields.find(name);
     if (it == spec.fields.end() || it->second.empty())
         return std::string();
-    std::string v = trim(scalar_text(at_path(item, it->second)));
+    std::string v;
+    if (std::string(name) != "id" && std::string(name) != "name" && literal_of(it->second, v))
+        return v.size() > max_len ? v.substr(0, max_len) : v;
+    v = trim(scalar_text(at_path(item, it->second)));
     return v.size() > max_len ? v.substr(0, max_len) : v;
 }
 
@@ -677,7 +755,19 @@ std::vector<Item> map_items(const Spec& spec, const json& page)
         it.description = field(spec, raw, "description", 2000);
         it.updated     = field(spec, raw, "updated", 64);
         auto tg = spec.fields.find("tags");
-        if (tg != spec.fields.end() && !tg->second.empty()) {
+        std::string tag_lit;
+        if (tg != spec.fields.end() && literal_of(tg->second, tag_lit)) {
+            size_t pos = 0; // "=a, b": the same tags on every item
+            while (pos <= tag_lit.size()) {
+                const size_t c = tag_lit.find(',', pos);
+                const std::string v = trim(tag_lit.substr(pos, c == std::string::npos ? std::string::npos : c - pos));
+                if (!v.empty() && v.size() <= 80 && it.tags.size() < 30 && std::find(it.tags.begin(), it.tags.end(), v) == it.tags.end())
+                    it.tags.push_back(v);
+                if (c == std::string::npos)
+                    break;
+                pos = c + 1;
+            }
+        } else if (tg != spec.fields.end() && !tg->second.empty()) {
             const json t = at_path(raw, tg->second);
             auto add = [&it](const std::string& s) {
                 const std::string v = trim(s);
@@ -1047,6 +1137,8 @@ bool build_download_request(const Spec& spec, const Secrets& secrets, const Item
         return false;
     // Credentials go only to the API's own site.
     out = same_origin(url, spec.base_url) ? authorize(spec, secrets, url) : Request { url, {} };
+    // Only the endpoint is a POST; a direct link to the file is always a GET.
+    out.method = !is_direct && spec.download_method == "POST" ? "POST" : "GET";
     return true;
 }
 
@@ -1064,6 +1156,187 @@ std::string resolve_download(const Spec& spec, const Secrets& secrets, const Res
     } catch (...) {
         error = host_of(spec.base_url) + " did not answer with JSON.";
         return std::string();
+    }
+}
+
+std::string content_disposition_name(const std::string& v)
+{
+    auto base = [](std::string name) {
+        const size_t slash = name.find_last_of("/\\");
+        if (slash != std::string::npos)
+            name.erase(0, slash + 1);
+        name.erase(std::remove_if(name.begin(), name.end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; }), name.end());
+        return trim(name);
+    };
+    const std::string l    = lower(v);
+    const size_t      star = l.find("filename*=");
+    if (star != std::string::npos) { // filename*=UTF-8''percent%20encoded
+        const size_t q1 = v.find('\'', star + 10);
+        const size_t q2 = q1 == std::string::npos ? q1 : v.find('\'', q1 + 1);
+        if (q2 != std::string::npos) {
+            const size_t end = v.find(';', q2 + 1);
+            const std::string enc = trim(v.substr(q2 + 1, end == std::string::npos ? std::string::npos : end - q2 - 1));
+            std::string out;
+            for (size_t i = 0; i < enc.size(); ++i) {
+                if (enc[i] == '%' && i + 2 < enc.size() && std::isxdigit((unsigned char) enc[i + 1]) && std::isxdigit((unsigned char) enc[i + 2])) {
+                    out += char(std::stoi(enc.substr(i + 1, 2), nullptr, 16));
+                    i += 2;
+                } else
+                    out += enc[i];
+            }
+            out = base(out);
+            if (!out.empty())
+                return out;
+        }
+    }
+    const size_t at = l.find("filename=");
+    if (at == std::string::npos)
+        return std::string();
+    size_t p = at + 9;
+    while (p < v.size() && v[p] == ' ')
+        ++p;
+    if (p < v.size() && v[p] == '"') {
+        const size_t end = v.find('"', p + 1);
+        return base(v.substr(p + 1, end == std::string::npos ? std::string::npos : end - p - 1));
+    }
+    const size_t end = v.find(';', p);
+    return base(v.substr(p, end == std::string::npos ? std::string::npos : end - p));
+}
+
+EndpointResult call_download_endpoint(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url,
+                                      const std::function<bool(const std::string&)>& begin_file,
+                                      const std::function<bool(const char*, size_t)>& write_file)
+{
+    enum Mode { Undecided, AsJson, AsFile, AsPage, FileNotOpened };
+    constexpr size_t JSON_LIMIT = 4u * 1024 * 1024;
+    struct State
+    {
+        int                                status { 0 };
+        std::map<std::string, std::string> headers;
+        Mode                               mode { Undecided };
+        std::string                        json;
+        bool                               json_too_big { false };
+        int64_t                            size { 0 };
+        std::string                        file_name;
+    } st;
+    std::string last_url = url;
+
+    const HttpFn wrapped = [&](const Request& q) {
+        last_url = q.url;
+        Request r = q;
+        r.on_head = [&st](int status, const std::map<std::string, std::string>& headers) {
+            st.status  = status;
+            st.headers = headers;
+            st.mode    = Undecided;
+        };
+        return http(r);
+    };
+    auto header = [&st](const char* name) {
+        auto it = st.headers.find(name);
+        return it == st.headers.end() ? std::string() : it->second;
+    };
+    auto media_type = [&header]() {
+        std::string ct = lower(header("content-type"));
+        ct             = trim(ct.substr(0, ct.find(';')));
+        return ct;
+    };
+    const std::function<bool(const char*, size_t)> sink = [&](const char* data, size_t size) {
+        if (st.mode == Undecided) {
+            const std::string media = media_type();
+            if (media == "application/json" || (media.size() > 5 && media.compare(media.size() - 5, 5, "+json") == 0))
+                st.mode = AsJson;
+            else if (media == "text/html" || media == "application/xhtml+xml")
+                st.mode = AsPage;
+            else if (media.empty() || media == "text/plain") { // no say from the server: look at the first character
+                char first = 0;
+                for (size_t i = 0; i < size && first == 0; ++i)
+                    if (!std::isspace((unsigned char) data[i]))
+                        first = data[i];
+                st.mode = first == '{' || first == '[' || first == 0 ? AsJson : first == '<' ? AsPage : AsFile;
+            } else
+                st.mode = AsFile;
+            if (st.mode == AsFile) {
+                st.file_name = content_disposition_name(header("content-disposition"));
+                if (!begin_file(st.file_name))
+                    st.mode = FileNotOpened;
+            }
+        }
+        st.size += int64_t(size);
+        switch (st.mode) {
+        case AsJson:
+            if (st.json.size() + size > JSON_LIMIT) {
+                st.json_too_big = true;
+                return false;
+            }
+            st.json.append(data, size);
+            return true;
+        case AsFile: return write_file(data, size);
+        default: return false;
+        }
+    };
+
+    const Response resp = fetch(spec, secrets, wrapped, url, true, sink, 5, spec.download_method);
+    if (st.headers.empty()) // an error answer or a body that was returned whole: no on_head call, but the headers are here
+        st.headers = resp.headers;
+    if (st.mode == Undecided && resp.status >= 200 && resp.status < 300 && !resp.body.empty()) { // an HttpFn that returns the body
+        st.status = resp.status;
+        sink(resp.body.data(), resp.body.size());
+    }
+
+    EndpointResult out;
+    out.status = resp.status != 0 ? resp.status : st.status;
+    {
+        std::string ct = header("content-type");
+        if (has_control(ct))
+            ct.clear();
+        out.content_type = ct.substr(0, 100);
+    }
+    out.size = st.size;
+    const std::string host      = host_of(spec.base_url);
+    const std::string final_host = host_of(last_url);
+    BOOST_LOG_TRIVIAL(info) << "Vendor download endpoint: status " << out.status << ", content-type \"" << out.content_type << "\", " << out.size
+                            << " bytes, host " << final_host;
+    const std::string detail = out.status == 0 ? std::string()
+                                               : " (HTTP " + std::to_string(out.status) + ", " + (out.content_type.empty() ? std::string("no content type") : out.content_type) + ")";
+
+    if (st.mode == AsPage) {
+        out.error = host + " answered with a web page instead of a file or JSON." + detail;
+        return out;
+    }
+    if (st.json_too_big) {
+        out.error = host + " answered with JSON that is far too large." + detail;
+        return out;
+    }
+    if (st.mode == AsFile || st.mode == FileNotOpened) {
+        // The caller judges the transfer (its own write errors, `status`, `error`, `size`).
+        out.kind      = EndpointResult::Kind::File;
+        out.file_name = st.file_name;
+        if (resp.status < 200 || resp.status >= 300)
+            out.error = http_error(spec, resp, secrets) + detail;
+        return out;
+    }
+    if (resp.status < 200 || resp.status >= 300) {
+        out.error = http_error(spec, resp, secrets) + detail;
+        return out;
+    }
+    switch (st.mode) {
+    case AsJson: {
+        if (spec.download_url_path.empty()) {
+            out.error = host + " answered with JSON, but \"File link in its answer at\" is empty, so there is no link to read." + detail;
+            return out;
+        }
+        Response answer;
+        answer.status = 200;
+        answer.body   = st.json;
+        std::string error;
+        out.link = resolve_download(spec, secrets, answer, error);
+        if (out.link.empty())
+            out.error = error + detail;
+        else
+            out.kind = EndpointResult::Kind::Link;
+        return out;
+    }
+    default: out.error = host + " answered with nothing." + detail; return out;
     }
 }
 
@@ -1405,6 +1678,10 @@ ImportResult import_check(const std::string& raw)
         r.error = e.what();
         return r;
     }
+    // A connector from outside is checked strictly: a placeholder it does not know is refused.
+    r.error = template_problems(r.spec);
+    if (!r.error.empty())
+        return r;
     r.spec.id.clear();
     r.json = spec_to_json(r.spec);
     r.json.erase("id");
@@ -1576,7 +1853,7 @@ bool needs_full_fetch(const Spec& a, const Spec& b)
            a.size_param != b.size_param || a.page_size != b.page_size || a.has_more_path != b.has_more_path ||
            a.total_path != b.total_path || a.cursor_path != b.cursor_path || a.since_param != b.since_param ||
            a.since_field != b.since_field || a.fields != b.fields || a.subs_path != b.subs_path || a.sub_fields != b.sub_fields ||
-           a.download_path != b.download_path || a.download_url_path != b.download_url_path ||
+           a.download_path != b.download_path || a.download_method != b.download_method || a.download_url_path != b.download_url_path ||
            a.download_direct_field != b.download_direct_field;
 }
 

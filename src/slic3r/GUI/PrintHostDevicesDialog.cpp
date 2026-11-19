@@ -16,9 +16,13 @@
 #include "I18N.hpp"
 #include "MsgDialog.hpp"
 #include "PhysicalPrinterDialog.hpp"
+#include "ElegooCanvasUI.hpp"
+#include "CrealityDiscoveryDialog.hpp"
+#include "Tab.hpp"
 #include "format.hpp"
 #include "Widgets/Button.hpp"
 #include "../Utils/PrintHost.hpp"
+#include "../Utils/CrealityHostDiscovery.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -173,10 +177,12 @@ private:
 
 // ----------------------------------------------------------------- the list ----
 
-PrintHostDevicesDialog::PrintHostDevicesDialog(wxWindow* parent, DynamicPrintConfig* config, const std::string& model_key, const wxString& model_label)
+PrintHostDevicesDialog::PrintHostDevicesDialog(wxWindow* parent, DynamicPrintConfig* config, const std::string& model_key, const wxString& model_label,
+                                               bool allow_preset_switch)
     : DPIDialog(parent, wxID_ANY, _L("Devices"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
     , m_config(config)
     , m_model_key(model_key)
+    , m_allow_preset_switch(allow_preset_switch)
 {
     const int em = GetTextExtent("m").x;
 
@@ -207,18 +213,33 @@ PrintHostDevicesDialog::PrintHostDevicesDialog(wxWindow* parent, DynamicPrintCon
         return b;
     };
     m_btn_add        = make(_L("Add") + dots, ButtonStyle::Regular);
+    // Creality K-series only: their per-device DNS-SD names are invisible to the Bonjour browser.
+    m_btn_find       = make(_L("Find on network") + dots, ButtonStyle::Regular);
+    m_btn_find->SetToolTip(_L("Search this network for Creality K-series printers and add the one you pick"));
+    {
+        const Device from = m_config ? PrintHostDevices::from_config(*m_config) : Device();
+        m_btn_find->Show(CrealityHostDiscovery::applies_to(from.host_type, from.printer_model));
+    }
     m_btn_edit       = make(_L("Edit") + dots, ButtonStyle::Regular);
     m_btn_remove     = make(_L("Remove"), ButtonStyle::Alert);
     m_btn_test       = make(_L("Test"), ButtonStyle::Regular);
+    // A Centauri Carbon 1 on Elegoo Link: what its CANVAS says, redacted, into the log folder, so a
+    // payload can be sent in without anything identifying the printer.
+    m_btn_canvas     = make(_L("Capture Canvas data"), ButtonStyle::Regular);
+    m_btn_canvas->SetToolTip(_L("Read the CANVAS of the selected printer and save it, without its serial number, "
+                                "mainboard id or address, as a JSON file in the log folder"));
+    m_btn_canvas->Show(canvas_capable_model(m_model_key));
     m_btn_connection = make(_L("Edit connection") + dots, ButtonStyle::Regular);
     m_btn_connection->SetToolTip(_L("The printer preset's own address and credentials"));
     m_btn_close      = make(_L("Close"), ButtonStyle::Confirm);
     m_btn_close->SetId(wxID_CANCEL);
     const int gap = FromDIP(ButtonProps::ChoiceButtonGap());
     btns->Add(m_btn_add, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
+    btns->Add(m_btn_find, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
     btns->Add(m_btn_edit, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
     btns->Add(m_btn_remove, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
     btns->Add(m_btn_test, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
+    btns->Add(m_btn_canvas, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
     btns->AddStretchSpacer();
     btns->Add(m_btn_connection, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
     btns->Add(m_btn_close, 0, wxALIGN_CENTER_VERTICAL);
@@ -229,9 +250,11 @@ PrintHostDevicesDialog::PrintHostDevicesDialog(wxWindow* parent, DynamicPrintCon
     CenterOnParent();
 
     m_btn_add->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_add(); });
+    m_btn_find->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_find(); });
     m_btn_edit->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_edit(); });
     m_btn_remove->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_remove(); });
     m_btn_test->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_test(); });
+    m_btn_canvas->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_capture_canvas(); });
     m_btn_connection->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_edit_connection(); });
     m_btn_close->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { EndModal(wxID_CANCEL); });
     m_list->Bind(wxEVT_DATAVIEW_SELECTION_CHANGED, [this](wxDataViewEvent&) { update_buttons(); });
@@ -239,10 +262,12 @@ PrintHostDevicesDialog::PrintHostDevicesDialog(wxWindow* parent, DynamicPrintCon
 
     // Tab walks the list first, then the buttons left to right; Esc closes.
     m_btn_add->MoveAfterInTabOrder(m_list);
-    m_btn_edit->MoveAfterInTabOrder(m_btn_add);
+    m_btn_find->MoveAfterInTabOrder(m_btn_add);
+    m_btn_edit->MoveAfterInTabOrder(m_btn_find);
     m_btn_remove->MoveAfterInTabOrder(m_btn_edit);
     m_btn_test->MoveAfterInTabOrder(m_btn_remove);
-    m_btn_connection->MoveAfterInTabOrder(m_btn_test);
+    m_btn_canvas->MoveAfterInTabOrder(m_btn_test);
+    m_btn_connection->MoveAfterInTabOrder(m_btn_canvas);
     m_btn_close->MoveAfterInTabOrder(m_btn_connection);
     SetEscapeId(wxID_CANCEL);
     m_list->SetFocus();
@@ -292,6 +317,8 @@ void PrintHostDevicesDialog::update_buttons()
     m_btn_edit->Enable(has);
     m_btn_remove->Enable(has);
     m_btn_test->Enable(has);
+    Device d;
+    m_btn_canvas->Enable(has && selected(d) && d.host_type == "elegoolink");
 }
 
 void PrintHostDevicesDialog::on_add()
@@ -313,6 +340,84 @@ void PrintHostDevicesDialog::on_add()
         return;
     }
     reload();
+}
+
+void PrintHostDevicesDialog::on_find()
+{
+    CrealityDiscoveryDialog dlg(this, _L("Add"));
+    if (dlg.ShowModal() != wxID_OK || dlg.selected().ip.empty())
+        return;
+    const CrealityHost host = dlg.selected();
+
+    const Device current      = m_config ? PrintHostDevices::from_config(*m_config) : Device();
+    std::string  target_key   = m_model_key;
+    std::string  target_model = current.printer_model;
+    std::string  switch_to;
+    // A known model that is not this list's model belongs in its own model's list, with its own
+    // system preset. An unknown model (no /info, or a code not in the table) is never guessed at:
+    // it is added here, by address only.
+    if (!host.printer_model.empty() && host.printer_model != current.printer_model) {
+        std::vector<CrealityHostDiscovery::PresetRef> refs;
+        if (PresetBundle* bundle = wxGetApp().preset_bundle) {
+            for (const Preset& p : bundle->printers) {
+                const auto* pm = p.config.option<ConfigOptionString>("printer_model");
+                const auto* pv = p.config.option<ConfigOptionString>("printer_variant");
+                refs.push_back({p.name, pm ? pm->value : std::string(), pv ? pv->value : std::string(), p.is_system, p.is_visible});
+            }
+        }
+        switch_to = CrealityHostDiscovery::pick_printer_preset(refs, host.printer_model);
+        if (switch_to.empty()) {
+            show_error(this, format_wxstr(_L("This printer is a %1%, and no %1% printer preset is enabled. "
+                                             "Add it in the printer selection first, then search again."),
+                                          from_u8(host.printer_model)));
+            return;
+        }
+        target_model = host.printer_model;
+        target_key   = PrintHostDevices::model_key(host.printer_model, switch_to);
+    }
+
+    Device d;
+    d.alias         = host.label();
+    d.address       = host.ip;
+    d.host_type     = PrintHostDevices::host_type_key(htCrealityPrint);
+    d.printer_model = target_model;
+    std::string error;
+    const bool  added = PrintHostDevices::add(target_key, d, error);
+    // Already in that list: nothing to add, the rest (the preset switch) still applies.
+    if (!added) {
+        bool known = false;
+        for (const Device& e : PrintHostDevices::devices(target_key))
+            known = known || PrintHostDevices::normalize_address(e.address) == PrintHostDevices::normalize_address(d.address);
+        if (!known) {
+            show_error(this, from_u8(error));
+            return;
+        }
+    }
+    if (target_key == m_model_key) {
+        reload();
+        if (!added)
+            show_info(this, format_wxstr(_L("%1% is already in this list."), from_u8(host.ip)), _L("Devices"));
+        return;
+    }
+
+    // A different model: it went into that model's list. Offer that model's preset.
+    if (!m_allow_preset_switch) {
+        show_info(this,
+                  format_wxstr(_L("This printer is a %1%. It was added to the devices of %1%; select the printer preset "
+                                  "\"%2%\" to send to it."),
+                               from_u8(host.printer_model), from_u8(switch_to)),
+                  _L("Devices"));
+        return;
+    }
+    MessageDialog ask(this,
+                      format_wxstr(_L("This printer is a %1%. It was added to the devices of %1%.\n\n"
+                                      "Switch the printer preset to \"%2%\" now?"),
+                                   from_u8(host.printer_model), from_u8(switch_to)),
+                      _L("Devices"), wxICON_QUESTION | wxYES_NO);
+    if (ask.ShowModal() == wxID_YES) {
+        m_preset_to_select = switch_to;
+        EndModal(wxID_OK);
+    }
 }
 
 void PrintHostDevicesDialog::on_edit()
@@ -374,6 +479,14 @@ void PrintHostDevicesDialog::on_test()
         show_error(this, host->get_test_failed_msg(msg));
 }
 
+void PrintHostDevicesDialog::on_capture_canvas()
+{
+    Device d;
+    if (!selected(d) || d.host_type != "elegoolink")
+        return;
+    capture_canvas_data(this, d.address, m_model_key);
+}
+
 // The preset's own address, for whoever wants exactly that. It is behind a click on purpose: the
 // sidebar's connection icon used to open this editor unasked, which is how a list of printers ended
 // up looking like one printer's settings page.
@@ -410,9 +523,15 @@ void show_print_host_devices_dialog(wxWindow* parent, DynamicPrintConfig* config
     const Preset&     preset = bundle->printers.get_edited_preset();
     const std::string key    = PrintHostDevices::model_key_for(preset);
     const std::string label  = PrintHostDevices::from_config(preset.config).printer_model;
+    // Opened with a config, it sits on top of the host editor, which is editing the selected preset:
+    // switching presets underneath that is not allowed.
     PrintHostDevicesDialog dlg(parent, config ? config : &bundle->printers.get_edited_preset().config, key,
-                               from_u8(label.empty() ? preset.name : label));
+                               from_u8(label.empty() ? preset.name : label), config == nullptr);
     dlg.ShowModal();
+    if (!dlg.preset_to_select().empty()) {
+        if (Tab* tab = wxGetApp().get_tab(Preset::TYPE_PRINTER))
+            tab->select_preset(dlg.preset_to_select());
+    }
 }
 
 } // namespace GUI

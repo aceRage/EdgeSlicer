@@ -14,6 +14,7 @@ class FillHoneycomb : public Fill
 public:
     ~FillHoneycomb() override {}
     bool is_self_crossing() override { return false; }
+    bool aligned_to_origin() const override { return true; }
 
 protected:
     Fill* clone() const override { return new FillHoneycomb(*this); };

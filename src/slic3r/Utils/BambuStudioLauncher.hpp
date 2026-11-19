@@ -135,6 +135,31 @@ struct LaunchResult
     std::string   exe_path; // set when an install was found (Launched or LaunchFailed)
 };
 
+// The process calls the macOS and Linux launches make, injected so tests can check the decisions
+// without starting anything.
+struct LaunchOps
+{
+    // Runs argv (argv[0] looked up on PATH) and waits for it to exit. Returns its exit status, or
+    // -1 when it could not be started.
+    std::function<int(const std::vector<std::string> &argv)> run_and_wait;
+    // Starts argv (argv[0] a path, or a name looked up on PATH) and returns at once. False when it
+    // could not be started.
+    std::function<bool(const std::vector<std::string> &argv)> start;
+    // Whether an executable of this name is on PATH.
+    std::function<bool(const std::string &exe_name)> in_path;
+};
+
+// macOS: `open -a <custom path>` when a custom path is given (the caller passes it only when it
+// exists), else `open -a BambuStudio`, then `open -b com.bambulab.bambu-studio`. `open` returns once
+// Launch Services has handed the file over (without -W it does not wait for the application) and
+// exits non-zero when no application has that name or bundle id, so its exit status decides.
+LaunchResult launch_macos(const std::string &file_path, const std::string &custom_exe_path, const LaunchOps &ops);
+
+// Linux: the custom executable (the caller passes it only when it exists), else bambu-studio on
+// PATH, else the Flatpak app when `flatpak info` finds it installed. Bambu Studio itself is started
+// without waiting for it.
+LaunchResult launch_linux(const std::string &file_path, const std::string &custom_exe_path, const LaunchOps &ops);
+
 // Optional override, e.g. from Preferences > Other > "Bambu Studio path". When non-empty and it
 // exists on disk, this is used directly and normal discovery is skipped.
 LaunchResult open_in_bambu_studio(const std::string &file_path, const std::string &custom_exe_path = {});

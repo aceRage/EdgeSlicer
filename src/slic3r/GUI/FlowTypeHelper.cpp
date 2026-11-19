@@ -118,6 +118,9 @@ static void save_nozzle_volume_types_to_app_config()
     wxGetApp().app_config->set(APP_CONFIG_NOZZLE_FLOW_SECTION,
                                wxGetApp().preset_bundle->printers.get_selected_preset_name(),
                                boost::algorithm::join(display, ","));
+    // Owner bugs 2026-11-06: the per-printer nozzle memory (NozzleRackMemory.hpp) carries the flow types too, so a Flow combo
+    // change (H2C left / right) is back after a restart.
+    wxGetApp().preset_bundle->remember_nozzle_rack(*wxGetApp().app_config);
 }
 
 // Snap #1000: mark grouping dirty in the same call as the volume-type write.

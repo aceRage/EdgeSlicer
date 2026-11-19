@@ -115,8 +115,12 @@ std::string get_calib_mode_name(CalibMode cali_mode, int stage)
         return "input_shaping_damp_calib_mode";
     case CalibMode::Calib_Cornering:
         return "cornering_calib_mode";
+    case CalibMode::Calib_Ironing_Flow:
+        return "ironing_flow_calib_mode";
+    case CalibMode::Calib_Temp_Retract_Grid:
+        return calib_temp_retract_grid_mode_name;
     default:
-        assert(false);
+        // F9: reachable from send_to_print; callers map an empty name to "unknown_calib_mode".
         return "";
     }
 }
@@ -219,6 +223,12 @@ static bool check_nozzle_diameter_and_type(const DynamicPrintConfig &full_config
     return true;
 }
 
+static std::string get_calib_mode_name_or_unknown(CalibMode cali_mode, int stage)
+{
+    std::string name = get_calib_mode_name(cali_mode, stage);
+    return name.empty() ? std::string("unknown_calib_mode") : name;
+}
+
 CalibMode CalibUtils::get_calib_mode_by_name(const std::string name, int& cali_stage)
 {
     if (name == "pa_line_calib_mode") {
@@ -251,6 +261,10 @@ CalibMode CalibUtils::get_calib_mode_by_name(const std::string name, int& cali_s
         return CalibMode::Calib_Input_shaping_damp;
     else if (name == "cornering_calib_mode" || name == "junction_deviation_calib_mode")
         return CalibMode::Calib_Cornering;
+    else if (name == "ironing_flow_calib_mode")
+        return CalibMode::Calib_Ironing_Flow;
+    else if (name == calib_temp_retract_grid_mode_name)
+        return CalibMode::Calib_Temp_Retract_Grid;
     return CalibMode::Calib_None;
 }
 
@@ -727,6 +741,7 @@ bool CalibUtils::calib_generic_PA(const CalibInfo &calib_info, wxString &error_m
 
     DynamicPrintConfig print_config    = calib_info.print_prest->config;
     print_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
+    print_config.set_key_value("retract_after_outer_wall", new ConfigOptionBool(false));
     DynamicPrintConfig filament_config = calib_info.filament_prest->config;
     DynamicPrintConfig printer_config  = calib_info.printer_prest->config;
 
@@ -941,6 +956,7 @@ void CalibUtils::calib_VFA(const CalibInfo &calib_info, wxString &error_message)
     print_config.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
     print_config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
     print_config.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config.set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config.set_key_value("top_shell_layers", new ConfigOptionInt(0));
     print_config.set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
     print_config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
@@ -1000,6 +1016,7 @@ void CalibUtils::calib_retraction(const CalibInfo &calib_info, wxString &error_m
 
     DynamicPrintConfig print_config    = calib_info.print_prest->config;
     print_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
+    print_config.set_key_value("retract_after_outer_wall", new ConfigOptionBool(false));
     DynamicPrintConfig filament_config = calib_info.filament_prest->config;
     DynamicPrintConfig printer_config  = calib_info.printer_prest->config;
 
@@ -1233,7 +1250,8 @@ void CalibUtils::send_to_print(const CalibInfo &calib_info, wxString &error_mess
 {
     {  // before send
         json j;
-        j["print"]["cali_mode"]       = calib_info.params.mode;
+        // F12: persist / log the mode by name, never as an int.
+        j["print"]["cali_mode"]       = get_calib_mode_name_or_unknown(calib_info.params.mode, flow_ratio_mode);
         j["print"]["start"]           = calib_info.params.start;
         j["print"]["end"]             = calib_info.params.end;
         j["print"]["step"]            = calib_info.params.step;
@@ -1330,7 +1348,7 @@ void CalibUtils::send_to_print(const CalibInfo &calib_info, wxString &error_mess
     print_job->task_use_ams = select_ams == "[254]" ? false : true;
 
     CalibMode cali_mode       = calib_info.params.mode;
-    print_job->m_project_name = get_calib_mode_name(cali_mode, flow_ratio_mode);
+    print_job->m_project_name = get_calib_mode_name_or_unknown(cali_mode, flow_ratio_mode);
     print_job->set_calibration_task(true);
 
     print_job->sdcard_state = (int) obj_->get_sdcard_state();

@@ -59,5 +59,20 @@ bool normalize(std::vector<BedType> &plate_bed_types, const Allowed &allowed)
     return reset;
 }
 
+BedType listed_bed_type(BedType wanted, const std::vector<std::string> &listed_keys, BedType printer_default)
+{
+    const t_config_enum_values &keys_map = ConfigOptionEnum<BedType>::get_enum_values();
+    std::vector<BedType>        listed;
+    listed.reserve(listed_keys.size());
+    for (const std::string &key : listed_keys)
+        if (auto it = keys_map.find(key); it != keys_map.end())
+            listed.push_back(BedType(it->second));
+    if (listed.empty() || std::find(listed.begin(), listed.end(), wanted) != listed.end())
+        return wanted;
+    if (std::find(listed.begin(), listed.end(), printer_default) != listed.end())
+        return printer_default;
+    return listed.front();
+}
+
 } // namespace PlateBedTypes
 } // namespace Slic3r

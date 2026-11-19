@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -67,6 +68,13 @@ struct Record
 };
 Record record();
 std::pair<int, std::string> onvif_discover();                       // ONVIF WS-Discovery via the hub's go2rtc: {http status, body}
+// Decide, once at start-up, whether this copy may start or take over the hub (HubHandover::decide_hub_mode:
+// --take-hub > --no-hub > env > marker file next to the exe > normal) and log which rule applied.
+void init_hub_mode(bool no_hub_flag, bool take_hub_flag);
+// True when this copy is a client only: ensure_running() just asks for the running hub, set_phone() /
+// new_link() / post_state() / quit() leave it alone. The GUI says so instead of starting one.
+bool no_hub();
+void disable_spawn(); // from now on ensure_running() never spawns a hub and returns a dead Info (CLI render jobs)
 Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it, or for one
                                                                  // already starting (up to HubHandover::START_DEADLINE_MS)
 Info set_phone(bool on, const std::string& token = ""); // off and on keeps the same link; a valid
@@ -87,9 +95,25 @@ std::string saved_state();
 // POST /hub/event on the loopback control plane. Fire and forget: with no hub running it is a
 // failed connect and false, never an error anybody sees. The hub assigns the id and the time.
 bool post_event(const std::string& event_json);
+// The hub's remembered printer rows (GET /hub/printers on the loopback control plane): what the
+// app's /summary is built from, each row with age_s / stale and, once a window has reported its
+// list, `configured`. {http status, body}; 503 with no hub running.
+std::pair<int, std::string> hub_printers();
+// Forget one leftover row (POST /hub/printers/<id>/forget): 200, 404 (no such row) or 409 (still
+// set up in the slicer). {http status, body}.
+// `removed`: the printer was just removed at its source on the Printers tab, so the hub drops the
+// row even though its last configured list still names it (POST ...?removed=1), and takes the id
+// off that list.
+std::pair<int, std::string> forget_printer(const std::string& printer_id, bool removed = false);
 void quit();
 
 std::string hub_dir();
+// <datadir>/hub/removed_printers.json: the printers a person removed on the Printers tab, which
+// discovery must not re-add (PrintersMonitor::tombstoned).
+std::string removed_printers_path();
+// <datadir>/hub/printer_aliases.json: the person's own names for printers (Printers tab "Rename"),
+// put on the /api/printers rows (PrintersMonitor::apply_aliases).
+std::string printer_aliases_path();
 std::string instances_dir();
 std::string uploads_dir();
 std::string saves_dir();
@@ -235,6 +259,44 @@ struct CameraCandidate
 std::string camera_for_printer(const std::string& printer_id, const std::string& printer_ip,
                                const std::vector<CameraCandidate>& cams);
 
+// ---- a printer's running-job picture (/printers/<id>/thumbnail.png) ----
+// The picture is the plate image of a job this PC sent, out of the G-code archive's sidecars. It is
+// only shown for the job the printer says it is running: a printer running something this PC never
+// sent (another PC, the phone, the SD card) has no picture, not the previous job's.
+struct ArchiveRecord
+{
+    std::string printer;   // the sidecar's printer.id
+    std::string id;        // the record id, which is also the picture's file stem
+    std::string sent_name; // the name the printer was given
+    std::string file;      // the archived file name
+    long long   time { 0 };
+    std::string title;      // project_title: the project the plate came from
+    int         plate { -1 }; // 0-based plate index, -1 = unknown
+    std::string plate_name; // the plate's own name, "" = none
+};
+// Whether a printer's reported job name is this archived name. A Bambu printer reports its
+// subtask_name without the ".gcode.3mf" it was sent with, and a cloud / Bambu Studio send names
+// the job "<project>_plate_<n>.3mf" with characters such as '%' turned into '_', so names are
+// compared without the extension, case-insensitively, with everything but letters, digits and
+// - ( ) + . read as '_'.
+bool same_job_name(const std::string& reported, const std::string& archived);
+// Whether a reported job name is this record's plate: "<project>_plate_<n>" (n 1-based) or
+// "<project>_<plate name>", or the bare project for a record of a one-plate project (plate 0, no name).
+bool same_project_plate(const std::string& reported, const ArchiveRecord& r);
+// printer id -> record id for the job in `jobs` (printer id -> job name), in this order, newest
+// record within a step:
+//   1. a record of that printer whose sent / archived name is the job (same_job_name);
+//   2. a record of that printer whose project and plate are the job (same_project_plate);
+//   3. a record sent to another printer with the same name, or of the same project and plate - the
+//      same plate's picture, when the file was sliced here and reached this printer some other way
+//      (Bambu Studio, Handy, the SD card, a copy of the file sent to a second U1);
+//   4. none. Printers with no job are absent.
+std::map<std::string, std::string> pick_job_thumbnails(const std::vector<ArchiveRecord>& records,
+                                                       const std::map<std::string, std::string>& jobs);
+// The `?job=` value on a row's thumbnail URL: a short hash of the job name and the record behind
+// the picture, so a client caching by URL sees a new URL for every job.
+std::string thumbnail_version(const std::string& job, const std::string& record_id);
+
 // ---- the Device tab's own live view (spike, opt-in "liveview_go2rtc") ----
 // The go2rtc stream a Bambu printer's camera plays through, for the desktop camera panel.
 //
@@ -279,6 +341,31 @@ struct MergedPrinterRow
 };
 MergedPrinterRow merge_printer_row(const std::string& cached_row_json, long cached_instance, bool cached_fresh,
                                    const std::string& incoming_row_json, long incoming_instance);
+
+// ---- leftover printers (poll_printers / load_printers / POST .../printers/<id>/forget) ----
+// The hub remembers every printer a slicer window ever reported. A row stays only while the
+// printer is still set up in the slicer: each window's /api/printers carries `configured`, every
+// printer id it knows (bound or saved Bambu printers, LAN Snapmakers, saved print hosts - offline
+// ones included), and the hub keeps the union of the live windows' lists. A row missing from it
+// for `grace_ms` is dropped; load_printers applies the list saved with the rows at once (grace 0).
+//
+// `kind` is the row's kind, except that a cloud-bound Bambu row (kind bambu, lan_mode false) is
+// judged as "bambu_cloud": a window that is not signed in to Bambu cannot list those, so it says
+// so in `unsure_kinds` and such rows are kept rather than judged.
+//
+// Returns the row's new `unconfigured_since`: 0 while the printer is configured (or its kind
+// cannot be judged), the time it was first found missing while it is, and -1 once it has been
+// missing for grace_ms - the row goes.
+long long configured_row_fate(const std::string& id, const std::string& kind, const std::set<std::string>& configured,
+                              const std::set<std::string>& unsure_kinds, long long unconfigured_since, long long now_ms,
+                              long long grace_ms);
+// The kind configured_row_fate judges a cached row by (see there).
+std::string configured_judge_kind(const std::string& row_json);
+// POST .../printers/<id>/forget: 200 (the row goes), 404 (no such row) or 409 (the printer is still
+// set up in the slicer, by the last list a window gave - forgetting it would only last until the
+// next poll). With no list known yet (no window has reported one) a row can always be forgotten.
+int forget_printer_status(const std::string& id, bool row_exists, const std::set<std::string>& configured,
+                          bool configured_known);
 
 // What a new phone link (HubServer::new_link) revokes besides the token itself: every native-app
 // push device (AppPush) and every phone-page Web Push subscription (WebPush), all of which were
@@ -348,6 +435,13 @@ StreamSyncPlan plan_stream_sync(const std::map<std::string, std::string>& desire
 // hashes of the sources, so the two only differ on a hash collision).
 std::map<std::string, std::string> merge_desired_streams(const std::map<std::string, std::string>& stream_tab,
                                                          const std::map<std::string, std::string>& live_view);
+
+// ---- what the phone link exposes (slice_v1 and earlier) ----
+// Whether the hub proxies `method` `sub` (an /api/... path of a slicer instance, no query) through
+// /r/<token>/i/<pid>/api/...: the explicit allow-list, one entry per route of the instance manifest.
+bool instance_api_allowed(const std::string& method, const std::string& sub);
+// The `features` list /pair answers with.
+std::vector<std::string> pair_features();
 
 } // namespace Testing
 

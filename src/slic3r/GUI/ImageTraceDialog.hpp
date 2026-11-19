@@ -80,9 +80,13 @@ private:
     void             update_filament_rows();
     void             change_image();
     bool             finish();
+    void             export_dxf_file();
     void             save_to_config() const;
     std::string      level_color(size_t level) const;
     int              nearest_filament(const std::array<uint8_t, 3> &color) const;
+    void             refill_filament_choices();
+    void             show_match_menu();
+    void             match_filaments(TraceFilamentMatch mode);
     wxBitmap         render_preview(const ImageTraceResult &result, int max_px) const;
 
     TraceImage              m_image;
@@ -124,9 +128,12 @@ private:
 
     wxStaticBitmap *m_source_preview = nullptr;
     wxStaticBitmap *m_preview_bitmap = nullptr;
+    wxChoice       *m_preview_colors = nullptr; // Show: filament colours / image colours
     wxStaticText   *m_info           = nullptr;
     wxStaticText   *m_warning        = nullptr;
     wxButton       *m_ok             = nullptr;
+    wxButton       *m_export_dxf     = nullptr;
+    wxButton       *m_match_filaments = nullptr; // "Match filaments..." menu
 
     std::vector<wxWindow *> m_one_color;      // only for one colour level
     std::vector<wxWindow *> m_brightness;     // only for brightness threshold

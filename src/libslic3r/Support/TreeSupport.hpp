@@ -129,7 +129,6 @@ struct SupportNode
     TreeNodeType   type            = eCircle;
     bool           is_corner       = false;
     bool           is_processed    = false;
-    bool           need_extra_wall = false;
     bool           is_sharp_tail   = false;
     bool           valid = true;
     ExPolygon      overhang; // when type==ePolygon, set this value to get original overhang area
@@ -467,6 +466,12 @@ private:
      * \param contact_nodes The nodes to draw as support.
      */
     void draw_circles();
+
+    // Mixed nozzle diameters (AdaptiveLayerMerge step 4): fold the drawn base areas onto the slab partition of the
+    // support merge plan (SupportMergePlan.cpp), so a coarse nozzle prints the sparse base once per slab, on the slab
+    // top, at the slab height. Roofs, floors and the gap areas stay on the fine grid. A no-op unless the plate prints
+    // through more than one nozzle diameter.
+    void fold_base_areas_multi_diameter();
 
     /*!
      * \brief Drops down the nodes of the tree support towards the build plate.

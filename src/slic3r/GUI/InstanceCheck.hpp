@@ -63,6 +63,9 @@ public:
 
 	// inits listening, on each platform different. On linux starts background thread
 	void    init(wxEvtHandler* callback_evt_handler);
+	// Project strip P4 (one Plater per open project): events go to the Plater shown.
+	bool    is_initialized() const { return m_initialized; }
+	void    set_callback_evt_handler(wxEvtHandler *callback_evt_handler) { if (m_initialized) m_callback_evt_handler = callback_evt_handler; }
 	// stops listening, on linux stops the background thread
 	void    shutdown(MainFrame* main_frame);
 

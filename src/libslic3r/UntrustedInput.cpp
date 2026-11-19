@@ -262,6 +262,17 @@ bool host_is_or_under(const std::string &host, const std::string &domain)
     return h.size() > d.size() + 1 && h.compare(h.size() - d.size(), d.size(), d) == 0 && h[h.size() - d.size() - 1] == '.';
 }
 
+const std::vector<std::string> &local_host_suffixes()
+{
+    // localhost / *.local / *.lan / *.home / *.internal / *.intranet / *.localdomain /
+    // *.home.arpa / *.ts.net (Tailscale MagicDNS). "home" is a consumer suffix, distinct
+    // from "home.arpa".
+    static const std::vector<std::string> suffixes = {
+        "localhost", "local", "lan", "home", "internal", "intranet", "localdomain", "home.arpa", "ts.net",
+    };
+    return suffixes;
+}
+
 bool is_local_or_ip_host(const std::string &host_in)
 {
     const std::string host = to_lower(host_in);
@@ -271,7 +282,7 @@ bool is_local_or_ip_host(const std::string &host_in)
         return true; // any IPv6 literal
     if (looks_like_ipv4(host))
         return true;
-    for (const char *local : {"localhost", "local", "lan", "home.arpa", "internal", "intranet", "localdomain"})
+    for (const std::string &local : local_host_suffixes())
         if (host_is_or_under(host, local))
             return true;
     return host.find('.') == std::string::npos; // single-label names resolve on the LAN
@@ -474,7 +485,7 @@ DownloadCheck check_model_download(const std::string &file_url, const std::strin
         return r;
     }
     if (is_local_or_ip_host(u.host)) {
-        r.reason = "the file is on this computer or the local network, not on a model site";
+        r.reason = "the file is on this computer or a private network, not on a model site";
         return r;
     }
     // Model type: the last path segment must carry a model extension, unless the URL has none at
@@ -505,6 +516,26 @@ DownloadCheck check_model_download(const std::string &file_url, const std::strin
     r.verdict = DownloadVerdict::Ask;
     r.reason  = u.host + " is not one of the model sites EdgeSlicer knows";
     return r;
+}
+
+std::string redirect_target_refusal(const std::string &url)
+{
+    Url u;
+    if (!parse_url(url, u))
+        return "where the download was redirected to is not a valid web address";
+    if (u.scheme != "https")
+        return "the download was redirected to " + u.scheme + ":, which is not secure";
+    if (u.has_userinfo)
+        return "the download was redirected to an address that hides its real host behind a user name";
+    if (is_local_or_ip_host(u.host)) {
+        // This also covers a public IP literal, which is refused for a different reason: a Location
+        // header has no business naming an address instead of a host name, and that is exactly how a
+        // redirect gets bounced past a check that only reads names. Say which of the two it was.
+        if (u.host.front() == '[' || looks_like_ipv4(u.host))
+            return "the download was redirected to the IP address " + u.host + ", not a host name";
+        return "the download was redirected to " + u.host + ", which is on this computer or a private network";
+    }
+    return std::string();
 }
 
 std::string sanitize_download_filename(const std::string &name_in)
@@ -891,14 +922,14 @@ bool is_safe_archive_relative_path(const std::string &path)
         const std::string seg = path.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
         if (seg.empty() || seg == "." || seg == "..")
             return false;
-#ifdef _WIN32
-        // Windows strips trailing dots/spaces, so "..." or ".. " would still climb, and
-        // "foo." / "foo " would collide with "foo". Refuse both the all-dot/space case and
-        // an otherwise-valid name that only ends in a dot or space. DOS device names
-        // (CON, AUX, nul.txt, COM¹, …) open the device; on POSIX they are ordinary names
-        // (Auxiliaries/aux.png, con.jpg in a 3MF).
+        // Windows strips trailing dots/spaces, so "..." or ".. " would still climb. Refused on
+        // every platform, so an archive that is refused on one OS is refused on all of them.
         if (seg.find_first_not_of(". ") == std::string::npos)
             return false;
+#ifdef _WIN32
+        // "foo." / "foo " would collide with "foo": refuse a name that only ends in a dot or
+        // space. DOS device names (CON, AUX, nul.txt, COM¹, …) open the device; on POSIX they
+        // are ordinary names (Auxiliaries/aux.png, con.jpg in a 3MF).
         if (seg.back() == '.' || seg.back() == ' ')
             return false;
         if (is_windows_reserved_device_name(seg))
@@ -995,12 +1026,39 @@ boost::filesystem::path weakly_canonical_for_confine(const boost::filesystem::pa
 
 bool skip_dot_or_empty(const boost::filesystem::path &comp) { return comp.empty() || comp == "."; }
 
+// Win32 (unprefixed) path parsing drops trailing dots and spaces from a name, so "root\.. "
+// or "root\..." can open root or its parent, while the extended-length form used by the confine
+// check below takes the name literally. Refuse an element made only of dots and spaces (other
+// than the "." and ".." the lexical normalisation already resolves) so the check cannot pass a
+// path that unprefixed I/O would resolve elsewhere. "name." / "name " only lose their tail and
+// stay in the same folder, so they are left alone (preset names may end in a space). A stream
+// suffix ("..:x", "...:$DATA") is not resolved lexically either, so it is judged on the name part.
+bool has_win32_trimmed_element(const boost::filesystem::path &p)
+{
+#ifdef _WIN32
+    for (const boost::filesystem::path &elem : p.relative_path()) {
+        const std::wstring s     = elem.wstring();
+        const size_t       colon = s.find(L':');
+        if (colon == std::wstring::npos && (s.empty() || s == L"." || s == L".."))
+            continue;
+        const std::wstring name = s.substr(0, colon);
+        if (!name.empty() && name.find_first_not_of(L". ") == std::wstring::npos)
+            return true;
+    }
+#else
+    (void) p;
+#endif
+    return false;
+}
+
 } // namespace
 
 bool is_path_within_root(const boost::filesystem::path &root, const boost::filesystem::path &candidate)
 {
     try {
         if (has_embedded_nul(root) || has_embedded_nul(candidate))
+            return false;
+        if (has_win32_trimmed_element(candidate))
             return false;
         // Prefixed I/O follows a junction past MAX_PATH; canonicalise the same way so the
         // confine check sees the real target instead of the unresolved long path.

@@ -9,6 +9,7 @@
 #include <libnest2d/selections/firstfit.hpp>
 #include <libnest2d/utils/rotcalipers.hpp>
 
+#include <algorithm>
 #include <numeric>
 #include <ClipperUtils.hpp>
 
@@ -82,6 +83,17 @@ using ItemGroup = std::vector<std::reference_wrapper<Item>>;
 const double BIG_ITEM_TRESHOLD = 0.02;
 #define VITRIFY_TEMP_DIFF_THRSH 15  // bed temp can be higher than vitrify temp, but not higher than this thresh
 
+// The object distance a sequential (by object) print needs: a nozzle's width between short objects,
+// the extruder clearance radius otherwise. The user's own distance may only raise it.
+static coord_t seq_print_min_obj_distance(const ArrangeParams& params, const ArrangePolygons& selected)
+{
+    bool all_objects_are_short = std::all_of(selected.begin(), selected.end(), [&](const ArrangePolygon& ap) { return ap.height < params.nozzle_height; });
+    if (all_objects_are_short)
+        // The gap Print::sequential_print_clearance_valid() requires between short objects.
+        return std::max(params.min_obj_distance, scaled(std::max(float(MAX_OUTER_NOZZLE_DIAMETER), params.object_skirt_offset*2)+0.001));
+    return std::max(params.min_obj_distance, scaled(params.clearance_radius + 0.001)); // +0.001mm to avoid clearance check fail due to rounding error
+}
+
 void update_arrange_params(ArrangeParams& params, const DynamicPrintConfig* print_cfg, const ArrangePolygons& selected)
 {
     double                             skirt_distance = get_real_skirt_dist(*print_cfg);
@@ -90,10 +102,14 @@ void update_arrange_params(ArrangeParams& params, const DynamicPrintConfig* prin
     params.brim_skirt_distance = skirt_distance;
     params.bed_shrink_x += params.brim_skirt_distance;
     params.bed_shrink_y += params.brim_skirt_distance;
-    // for sequential print, we need to inflate the bed because clearance_radius is so large
+    // Orca #17011: printing by object, the objects' inflation (half the distance between them) may reach
+    // past the bed edge, so grow the bed by it. Short objects only need a nozzle's width between them,
+    // so they no longer get a bed grown by half the clearance radius. Edge keeps the growth here (not
+    // after the inflation is set) because Fill bed reads the shrunk bed before inflating its items.
     if (params.is_seq_print) {
-        params.bed_shrink_x -= params.clearance_radius / 2;
-        params.bed_shrink_y -= params.clearance_radius / 2;
+        const float grow = unscale<float>(seq_print_min_obj_distance(params, selected)) / 2;
+        params.bed_shrink_x -= grow;
+        params.bed_shrink_y -= grow;
     }
 }
 
@@ -103,12 +119,7 @@ void update_selected_items_inflation(ArrangePolygons& selected, const DynamicPri
     BoundingBox bedbb = Polygon(bedpts).bounding_box();
     // set obj distance for auto seq_print
     if (params.is_seq_print) {
-        bool all_objects_are_short = std::all_of(selected.begin(), selected.end(), [&](ArrangePolygon& ap) { return ap.height < params.nozzle_height; });
-        if (all_objects_are_short) {
-            params.min_obj_distance = std::max(params.min_obj_distance, scaled(std::max(MAX_OUTER_NOZZLE_DIAMETER/2.f, params.object_skirt_offset*2)+0.001));
-        }
-        else
-            params.min_obj_distance = std::max(params.min_obj_distance, scaled(params.clearance_radius + 0.001)); // +0.001mm to avoid clearance check fail due to rounding error
+        params.min_obj_distance = seq_print_min_obj_distance(params, selected);
     }
     double brim_max = 0;
     bool plate_has_tree_support = false;
@@ -135,11 +146,11 @@ void update_unselected_items_inflation(ArrangePolygons& unselected, const Dynami
 {
     float exclusion_gap = 1.f;
     if (params.is_seq_print) {
-        // bed_shrink_x is typically (-params.clearance_radius / 2+5) for seq_print
-        exclusion_gap = std::max(exclusion_gap, params.clearance_radius / 2 + params.bed_shrink_x + 1.f);  // +1mm gap so the exclusion region is not too close
-        // dont forget to move the excluded region
+        // bed_shrink_x includes the bed's growth by min_obj_distance / 2; add it back so the gap is the bed margin.
+        exclusion_gap = std::max(exclusion_gap, unscale<float>(params.min_obj_distance) / 2 + params.bed_shrink_x + 1.f);  // +1mm gap so the exclusion region is not too close
+        // dont forget to move the excluded region when the bed grows
         for (auto& region : unselected) {
-            if (region.is_virt_object) region.poly.translate(scaled(params.bed_shrink_x), scaled(params.bed_shrink_y));
+            if (region.is_virt_object) region.poly.translate(scaled(std::min(0.f, params.bed_shrink_x)), scaled(std::min(0.f, params.bed_shrink_y)));
         }
     }
     // For occulusion regions, inflation should be larger to prevent genrating brim on them.
@@ -660,6 +671,22 @@ protected:
                 score += height_score / valid_items_cnt;
         }
 
+        // Orca: the nozzle keeps coming down to a prime tower compacted by "No sparse layers", and
+        // the rod then sweeps the tower's Y span over the whole bed, so nothing taller than the rod
+        // clearance may share that span. Same test as compacted_wipe_tower_clearance().
+        if (params.compacted_tower_growth >= 0 && item.height > params.clearance_height_to_rod) {
+            const auto item_bb = item.boundingBox();
+            const auto iy1     = item_bb.minCorner().y() + item.inflation();
+            const auto iy2     = item_bb.maxCorner().y() - item.inflation();
+            for (const Item& p : m_items) {
+                if (!p.is_wipe_tower) continue;
+                const auto tower_bb = p.boundingBox();
+                const auto grown    = p.inflation() + params.compacted_tower_growth;
+                if (std::max(iy1, tower_bb.minCorner().y() + grown) - std::min(iy2, tower_bb.maxCorner().y() - grown) < scaled(params.clearance_dist_to_rod))
+                    score += LARGE_COST_TO_REJECT * 1.2;
+            }
+        }
+
         std::set<int> extruder_ids;
         for (int i = 0; i < m_items.size(); i++) {
             Item& p = m_items[i];
@@ -812,8 +839,11 @@ public:
                         (i1.height != i2.height ? (i1.height < i2.height) : (i1.area() > i2.area()));
             }
             else {
+                // By the first filament only: telling lists apart by all their filaments but ordering
+                // them by the first made {1} and {1, 2} compare neither way, not a strict weak ordering.
+                auto first_filament = [](const Item &i) { return i.extrude_ids.empty() ? -1 : i.extrude_ids.front(); };
                 return i1.bed_temp != i2.bed_temp ? (i1.bed_temp > i2.bed_temp) :
-                    (i1.extrude_ids != i2.extrude_ids ? (i1.extrude_ids.front() < i2.extrude_ids.front()) : (i1.area() > i2.area()));
+                    (first_filament(i1) != first_filament(i2) ? (first_filament(i1) < first_filament(i2)) : (i1.area() > i2.area()));
             }
         };
 
@@ -822,7 +852,8 @@ public:
 
     template<class It> inline void operator()(It from, It to) {
         m_rtree.clear();
-        m_item_count += size_t(to - from);
+        // The items to place: the fixed ones (prime towers, excluded areas) are never "left to place".
+        m_item_count += size_t(std::count_if(from, to, [](const Item &itm) { return !itm.isFixed(); }));
         m_pck.execute(from, to);
         m_item_count = 0;
     }
@@ -835,8 +866,6 @@ public:
             Item& itm = fixeditems[idx];
             itm.markAsFixedInBin(itm.binId());
         }
-
-        m_item_count += fixeditems.size();
     }
 };
 
@@ -927,13 +956,19 @@ std::function<double(const Item &, const ItemGroup&)> AutoArranger<ExPolygon>::g
     };
 }
 
-template<class Bin> void remove_large_items(std::vector<Item> &items, Bin &&bin)
+// Drop the fixed objects lying wholly outside the bin, such as those on other plates. One that reaches
+// into the bin still takes the room it covers there, like an object at the bed edge whose inflation
+// crosses the edge of a shrunk bed.
+template<class Bin> void remove_items_outside_bin(std::vector<Item> &items, const Bin &bin)
 {
+    const auto binbb = sl::boundingBox(bin);
     auto it = items.begin();
     while (it != items.end())
     {
+        const auto bb = it->boundingBox();
         //BBS: skip virtual object
-        if (!it->is_virt_object && !sl::isInside(it->transformedShape(), bin))
+        if (!it->is_virt_object && (bb.maxCorner().x() < binbb.minCorner().x() || bb.minCorner().x() > binbb.maxCorner().x() ||
+                                    bb.maxCorner().y() < binbb.minCorner().y() || bb.minCorner().y() > binbb.maxCorner().y()))
             it = items.erase(it);
         else
             it++;
@@ -976,10 +1011,15 @@ void _arrange(
     //sl::offset(corrected_bin, md);
     ArrangeParams mod_params = params;
     mod_params.min_obj_distance = 0;  // items are already inflated
+    // Orca: centring the finished pile would carry objects taller than the rod clearance back into
+    // the Y span of a compacted prime tower, which objfunc() has just kept them out of.
+    if (params.compacted_tower_growth >= 0 &&
+        std::any_of(shapes.begin(), shapes.end(), [&params](const Item &itm) { return itm.height > params.clearance_height_to_rod; }))
+        mod_params.do_final_align = false;
 
     AutoArranger<BinT> arranger{corrected_bin, mod_params, progressfn, stopfn};
 
-    remove_large_items(excludes, corrected_bin);
+    remove_items_outside_bin(excludes, corrected_bin);
 
     // If there is something on the plate
     if (!excludes.empty()) arranger.preload(excludes);
@@ -994,7 +1034,8 @@ void _arrange(
     // polygon nesting, a convex hull needs to be calculated.
     if (params.allow_rotations) {
         for (auto &itm : shapes) {
-            itm.rotation(min_area_boundingbox_rotation(itm.transformedShape()));
+            // Measured on the outline as already turned, so it adds to the object's turn.
+            itm.rotate(min_area_boundingbox_rotation(itm.transformedShape()));
 
             // If the item is too big, try to find a rotation that makes it fit
             if constexpr (std::is_same_v<BinT, Box>) {
@@ -1050,8 +1091,8 @@ static CircleBed to_circle(const Point &center, const Points& points) {
     return ret;
 }
 
-// Create Item from Arrangeable
-static void process_arrangeable(const ArrangePolygon &arrpoly,
+// Create Item from Arrangeable. Returns false, and adds nothing, for an outline with fewer than three corners.
+static bool process_arrangeable(const ArrangePolygon &arrpoly,
                                 std::vector<Item> &   outp)
 {
     Polygon        p        = arrpoly.poly.contour;
@@ -1061,7 +1102,7 @@ static void process_arrangeable(const ArrangePolygon &arrpoly,
     if (p.is_counter_clockwise()) p.reverse();
 
     if (p.size() < 3)
-        return;
+        return false;
 
     outp.emplace_back(std::move(p));
     Item& item = outp.back();
@@ -1081,6 +1122,7 @@ static void process_arrangeable(const ArrangePolygon &arrpoly,
     item.vitrify_temp = arrpoly.vitrify_temp;
     item.inflation(arrpoly.inflation);
     item.filament_temp_type = arrpoly.filament_temp_type;
+    return true;
 }
 
 template<class Fn> auto call_with_bed(const Points &bed, Fn &&fn)
@@ -1125,8 +1167,15 @@ void arrange(ArrangePolygons &      arrangables,
     std::vector<Item> items, fixeditems;
     items.reserve(arrangables.size());
 
-    for (ArrangePolygon &arrangeable : arrangables)
-        process_arrangeable(arrangeable, items);
+    // The arrangeable each item was made from: an outline with fewer than three corners makes none,
+    // so the two lists do not line up by position.
+    std::vector<size_t> source;
+    source.reserve(arrangables.size());
+    for (size_t i = 0; i < arrangables.size(); ++i)
+        if (process_arrangeable(arrangables[i], items))
+            source.push_back(i);
+        else
+            arrangables[i].bed_idx = UNARRANGED;
 
     for (const ArrangePolygon &fixed: excludes)
         process_arrangeable(fixed, fixeditems);
@@ -1136,11 +1185,12 @@ void arrange(ArrangePolygons &      arrangables,
     _arrange(items, fixeditems, to_nestbin(bed), params, params.progressind, params.stopcondition);
 
     for(size_t i = 0; i < items.size(); ++i) {
+        ArrangePolygon &arrangeable = arrangables[source[i]];
         Point tr = items[i].translation();
-        arrangables[i].translation = {coord_t(tr.x()), coord_t(tr.y())};
-        arrangables[i].rotation    = items[i].rotation();
-        arrangables[i].bed_idx     = items[i].binId();
-        arrangables[i].itemid      = items[i].itemId();  // arrange order is useful for sequential printing
+        arrangeable.translation = {coord_t(tr.x()), coord_t(tr.y())};
+        arrangeable.rotation    = items[i].rotation();
+        arrangeable.bed_idx     = items[i].binId();
+        arrangeable.itemid      = items[i].itemId();  // arrange order is useful for sequential printing
     }
 }
 
@@ -1148,6 +1198,44 @@ template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, c
 template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, const CircleBed &bed, const ArrangeParams &params);
 template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, const Polygon &bed, const ArrangeParams &params);
 template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, const InfiniteBed &bed, const ArrangeParams &params);
+
+ArrangePolygons nozzle_reach_blockers(const ExtruderAreas &areas, int num_beds, coord_t inflation)
+{
+    ArrangePolygons out;
+    if (!areas.multi() || !areas.has_exclusive_regions())
+        return out;
+    for (size_t e = 0; e < areas.only.size(); ++e)
+        for (size_t i = 0; i < areas.only[e].size(); ++i) {
+            const Polygon &strip = areas.only[e][i];
+            if (strip.size() < 3 || std::abs(strip.area()) <= 0.)
+                continue;
+            for (int bed = 0; bed < num_beds; ++bed) {
+                ArrangePolygon ap;
+                ap.poly.contour   = strip;
+                ap.translation    = Vec2crd(0, 0);
+                ap.rotation       = 0.;
+                ap.is_virt_object = true;
+                ap.bed_idx        = bed;
+                ap.height         = 1;
+                ap.name           = "NozzleReachRegion" + std::to_string(e) + "_" + std::to_string(i);
+                ap.inflation      = inflation;
+                out.emplace_back(std::move(ap));
+            }
+        }
+    return out;
+}
+
+bool clip_bed_to_nozzle_reach(Points &bed, const ExtruderAreas &areas)
+{
+    if (!areas.multi() || !areas.has_exclusive_regions() || areas.shared.empty() || bed.size() < 3)
+        return false;
+    Polygons clipped = intersection(Polygons{Polygon(bed)}, areas.shared);
+    if (clipped.size() != 1 || clipped.front().size() < 3 || std::abs(clipped.front().area()) <= 0.)
+        return false;
+    clipped.front().make_counter_clockwise();
+    bed = std::move(clipped.front().points);
+    return true;
+}
 
 } // namespace arr
 } // namespace Slic3r

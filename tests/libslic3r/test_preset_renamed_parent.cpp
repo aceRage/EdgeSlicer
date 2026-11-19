@@ -644,7 +644,10 @@ TEST_CASE("Detaching a user filament on a renamed parent drops the parent and ke
     CHECK(filaments.get_preset_parent(*preset) == nullptr);
     CHECK(nozzle_temperature(*preset) == 245);
     CHECK(flow_ratio(*preset) == Approx(0.95));
-    const nlohmann::json j = nlohmann::json::parse(read_file(file));
+    // The detached preset is a base preset now: its file moved into base/ and the old copy is gone.
+    CHECK_FALSE(fs::exists(file));
+    CHECK(fs::equivalent(fs::path(preset->file), temp_dir.path() / PRESET_FILAMENT_NAME / "base" / "My PETG.json"));
+    const nlohmann::json j = nlohmann::json::parse(read_file(fs::path(preset->file)));
     CHECK(j.value("inherits", std::string()).empty());
     CHECK(j.contains("filament_flow_ratio"));
     CHECK(filaments.legacy_user_filament_presets({ { k1_old_parent, { "Creality K1C 0.4 nozzle" } } }).empty());
@@ -753,6 +756,34 @@ void check_detach_from_parent(PresetCollection &presets, const DetachCase &c)
     }
 }
 } // namespace
+
+TEST_CASE("The selected preset is its own base when its parent is not loaded", "[Preset]")
+{
+    const auto               &defaults = static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults());
+    PrinterPresetCollection   printers(Preset::TYPE_PRINTER, Preset::printer_options(), defaults, "Default Printer");
+
+    auto add = [&](const std::string &name, const std::string &parent = {}) -> Preset & {
+        DynamicPrintConfig cfg = printers.default_preset().config;
+        if (!parent.empty())
+            Preset::inherits(cfg) = parent;
+        Preset &preset     = printers.load_preset("", name, std::move(cfg), false);
+        preset.is_visible  = true;
+        return preset;
+    };
+
+    add("Printer").is_system = true;
+    add("User Printer", "Printer");
+    add("Orphan Printer", "Uninstalled Vendor Printer");
+
+    printers.select_preset_by_name("User Printer", true);
+    REQUIRE(printers.get_selected_preset_name() == "User Printer");
+    CHECK(printers.get_selected_preset_base().name == "Printer");
+
+    printers.select_preset_by_name("Orphan Printer", true);
+    REQUIRE(printers.get_selected_preset_name() == "Orphan Printer");
+    REQUIRE(printers.get_preset_base(printers.get_selected_preset()) == nullptr);
+    CHECK(printers.get_selected_preset_base().name == "Orphan Printer");
+}
 
 TEST_CASE("Detach from parent works for process, filament and printer presets", "[Preset][Detach]")
 {

@@ -67,5 +67,18 @@ Vec3 operator * (float f, const Vec3& v) {
     return { f * v[0], f * v[1], f * v[2] };
 }
 
+bool counts_for_color_ranges(const PathVertex& v, const Settings& settings)
+{
+    if (!v.is_extrusion())
+        return false;
+    const size_t role = static_cast<size_t>(v.role);
+    return role >= settings.extrusion_roles_visibility.size() || settings.extrusion_roles_visibility[role];
+}
+
+bool counts_for_height_width_ranges(const PathVertex& v, const Settings& settings)
+{
+    return counts_for_color_ranges(v, settings) && !v.is_custom_gcode();
+}
+
 } // namespace libvgcode
 

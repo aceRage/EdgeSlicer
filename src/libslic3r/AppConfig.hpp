@@ -23,6 +23,19 @@ using namespace nlohmann;
 #define OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_ALL "load_all"
 #define OPTION_PROJECT_LOAD_BEHAVIOUR_ASK_WHEN_RELEVANT "ask_when_relevant"
 #define OPTION_PROJECT_LOAD_BEHAVIOUR_ALWAYS_ASK "always_ask"
+
+// Orca #13538: Preferences > Graphics.
+#define SETTING_OPENGL_AA_SAMPLES "opengl_antialiasing_samples"
+#define SETTING_OPENGL_FXAA_ENABLED "opengl_fxaa_enabled"
+#define SETTING_OPENGL_FPS_CAP "opengl_fps_cap"
+#define SETTING_OPENGL_SHOW_FPS_OVERLAY "opengl_show_fps_overlay"
+// Orca #13704: realistic view.
+#define SETTING_OPENGL_REALISTIC_MODE "opengl_realistic_mode"
+#define SETTING_OPENGL_REALISTIC_PHONG "opengl_realistic_phong"
+#define SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS "opengl_phong_basic_plate_shadows"
+#define SETTING_OPENGL_PHONG_SSAO "opengl_phong_ssao"
+// Orca #14080
+#define SETTING_OPENGL_PHONG_SMOOTH_NORMALS "opengl_phong_smooth_normals"
 #define OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY "load_geometry_only"
 
 #define SUPPORT_DARK_MODE
@@ -139,6 +152,9 @@ struct BBLocalMachine
     }
     bool operator!=(const BBLocalMachine& other) const { return !operator==(other); }
 };
+
+// The paths of the "recent_projects" section, ordered by their numeric keys ("01".."99", "100"...).
+std::vector<std::string> recent_projects_in_order(const std::map<std::string, std::string> &by_key);
 
 class AppConfig
 {
@@ -485,6 +501,9 @@ public:
 	static const std::string SECTION_FILAMENTS;
     static const std::string SECTION_MATERIALS;
     static const std::string SECTION_EMBOSS_STYLE;
+    // System process (print) presets the user hid in the Process manager (full name -> "true"). Every
+    // system process preset is shown unless it is listed here; user presets are always shown.
+    static const std::string SECTION_HIDDEN_PROCESSES;
 
     // 添加设备相关的方法
     void save_device_info(const DeviceInfo& device);

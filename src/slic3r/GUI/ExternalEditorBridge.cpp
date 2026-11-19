@@ -221,6 +221,10 @@ void ExternalEditorBridge::remove_session_for(const ModelVolume &volume)
 
 void ExternalEditorBridge::on_timer(wxTimerEvent &)
 {
+    // Project strip P4: a hidden project picks up the program's changes when it is shown again (the reload works on the
+    // project shown).
+    if (m_plater != nullptr && !m_plater->is_active_project())
+        return;
     for (auto it = m_sessions.begin(); it != m_sessions.end();) {
         if (poll(*it))
             ++it;

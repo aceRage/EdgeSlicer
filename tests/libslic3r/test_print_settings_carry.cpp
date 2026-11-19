@@ -768,3 +768,78 @@ TEST_CASE("Print settings carry: the owner's user presets, X1C -> H2S / H2D", "[
         CHECK(first(after, "sparse_infill_speed") == Approx(350.));
     }
 }
+
+// Owner decision 2026-11-05 (#854): an H2C -> H3C switch carried the H2C's accelerations and travel speed into the H3C's
+// Standard column (travel 1000, default 8000, outer 5000, inner 0). Accelerations and travel speed / jerk now stay with
+// the matched profile when the printer model changes; infill and everything else still carry.
+TEST_CASE("Print settings carry: accelerations and travel stay with the printer model", "[Preset][PrintSettingsCarry]")
+{
+    SECTION("the key set")
+    {
+        for (const char *key : { "default_acceleration", "outer_wall_acceleration", "inner_wall_acceleration", "travel_acceleration",
+                                 "initial_layer_acceleration", "initial_layer_travel_acceleration", "first_layer_travel_acceleration",
+                                 "top_surface_acceleration", "bridge_acceleration", "sparse_infill_acceleration",
+                                 "internal_solid_infill_acceleration", "travel_speed", "travel_speed_z", "initial_layer_travel_speed",
+                                 "travel_jerk", "first_layer_travel_jerk" }) {
+            INFO(key);
+            CHECK(print_carry_is_motion_key(key));
+        }
+        for (const char *key : { "outer_wall_speed", "sparse_infill_pattern", "sparse_infill_density", "wall_loops", "initial_layer_speed" }) {
+            INFO(key);
+            CHECK_FALSE(print_carry_is_motion_key(key));
+        }
+    }
+    SECTION("config rule: another model keeps them, the same model carries them")
+    {
+        DynamicPrintConfig src, dst;
+        for (DynamicPrintConfig *c : { &src, &dst }) {
+            c->set_key_value("default_acceleration", new ConfigOptionFloats{ c == &src ? 8000. : 20000. });
+            c->set_key_value("travel_speed", new ConfigOptionFloats{ c == &src ? 1000. : 1400. });
+            c->set_key_value("sparse_infill_density", new ConfigOptionPercent(c == &src ? 25. : 15.));
+        }
+        DynamicPrintConfig other = dst;
+        std::map<std::string, std::string> kept;
+        const auto changed = carry_print_settings(other, src, true, nullptr, &kept, false);
+        CHECK(other.option<ConfigOptionFloats>("default_acceleration")->values.front() == Approx(20000.));
+        CHECK(other.option<ConfigOptionFloats>("travel_speed")->values.front() == Approx(1400.));
+        CHECK(other.option<ConfigOptionPercent>("sparse_infill_density")->value == Approx(25.));
+        CHECK(kept.at("default_acceleration").rfind("printer-coupled", 0) == 0);
+        CHECK(std::find(changed.begin(), changed.end(), "sparse_infill_density") != changed.end());
+        DynamicPrintConfig same = dst;
+        carry_print_settings(same, src, true, nullptr, nullptr, true);
+        CHECK(same.option<ConfigOptionFloats>("default_acceleration")->values.front() == Approx(8000.));
+    }
+    SECTION("H2C 0.20mm Standard -> H3C 0.4: the H3C keeps its accelerations and travel, every column")
+    {
+        auto bbl = vendor_bundle("BBL");
+        REQUIRE(bbl->printers.select_preset_by_name("Bambu Lab H2C 0.4 nozzle", true));
+        bbl->update_compatible(PresetSelectCompatibleType::Always);
+        REQUIRE(bbl->prints.select_preset_by_name("0.20mm Standard @BBL H2C", true));
+        const PrintSettingsCarry carry = bbl->capture_print_settings_carry();
+        CHECK(carry.from_printer_model == "Bambu Lab H2C");
+        REQUIRE(bbl->printers.select_preset_by_name("Bambu Lab H3C 0.4 nozzle", true));
+        bbl->update_compatible(PresetSelectCompatibleType::Always);
+        REQUIRE(bbl->prints.select_preset_by_name("0.20mm Standard @BBL H3C", true));
+        std::map<std::string, std::string> kept;
+        bbl->apply_print_settings_carry(carry, &kept);
+        const DynamicPrintConfig &h3c = bbl->prints.get_edited_preset().config;
+        for (const auto &[key, values] : std::vector<std::pair<const char *, double>>{ { "default_acceleration", 20000. },
+                                                                                       { "travel_acceleration", 25000. },
+                                                                                       { "outer_wall_acceleration", 7000. },
+                                                                                       { "inner_wall_acceleration", 12000. },
+                                                                                       { "travel_speed", 1400. },
+                                                                                       { "initial_layer_travel_acceleration", 6000. } }) {
+            INFO(key);
+            const auto *opt = h3c.option<ConfigOptionFloats>(key);
+            REQUIRE(opt != nullptr);
+            REQUIRE(opt->values.size() == 3);
+            for (double v : opt->values)
+                CHECK(v == Approx(values));
+        }
+        for (const auto &[key, reason] : kept) {
+            INFO(key << ": " << reason);
+            CHECK(deliberate(reason));
+        }
+        bbl->prints.discard_current_changes();
+    }
+}

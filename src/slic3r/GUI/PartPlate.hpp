@@ -77,6 +77,22 @@ class PartPlateList;
 
 using GCodeResult = GCodeProcessorResult;
 
+// Whether the selected printer's prime tower can be rotated: WipeTower2 only. Bambu Lab printers
+// build the Type1 tower, which Print::apply keeps unrotated, so the Process field is greyed out
+// and the Rotate tool stays inert on it. GUI only (asks GUI_App's preset bundle).
+bool wipe_tower_rotation_supported();
+// The prime tower's rotation in degrees as the plate should draw, clamp and arrange it: the
+// config's wipe_tower_rotation_angle, or 0 for a Bambu Lab printer (wipe_tower_rotation_deg()).
+// Safe in the CLI.
+double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config);
+
+// Orca #16728: what estimate_wipe_tower_polygon did to a saved tower position that no longer fits.
+struct WipeTowerRelocation
+{
+    bool moved            = false; // re-placed, not just snapped onto the bound it was dropped past
+    bool overlaps_objects = false; // no spot on the plate was clear of the objects, so it sits on one
+};
+
 class PartPlate : public ObjectBase
 {
 public:
@@ -179,6 +195,9 @@ private:
     wxCoord m_name_texture_width;
     wxCoord m_name_texture_height;
 
+    // Copies m_name to the Print; invalidates the G-code export if a G-code template uses {plate_name}.
+    void sync_plate_name_to_print();
+
     void init();
     bool valid_instance(int obj_id, int instance_id) const;
     void generate_print_polygon(ExPolygon &print_polygon);
@@ -271,6 +290,9 @@ public:
     // full config (BambuStudio PartPlate::set_filament_maps / set_filament_map_mode).
     void set_manual_filament_map(const std::vector<int>& filament_map);
     void clear_manual_filament_map();
+    // The printer changed to another filament routing layout (PresetBundle::update_filament_routing_for_printer): the plate's
+    // map, manual grouping and dual-nozzle confirmation were made for the old printer's extruders. Returns whether any was set.
+    bool reset_filament_routing();
     // Empty unless this plate is in manual grouping.
     std::vector<int> get_manual_filament_map() const;
     // DualNozzleSync::Confirmation JSON (saved in the project; empty = never confirmed).
@@ -368,7 +390,18 @@ public:
     // assigned to plates - the layer height is then the project's thinnest, which over-reserves.
     WipeTowerFootprint estimate_wipe_tower_footprint(const DynamicPrintConfig & config, int plate_extruder_size = 0, bool use_global_objects = false) const;
     arrangement::ArrangePolygon estimate_wipe_tower_polygon(const DynamicPrintConfig & config, int plate_index, int plate_extruder_size = 0, bool use_global_objects = false) const;
-    arrangement::ArrangePolygon estimate_wipe_tower_polygon(const DynamicPrintConfig & config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size = 0, bool use_global_objects = false) const;
+    // relocation (Orca #16728): callers that store the returned position pass it, so a re-placed tower
+    // is moved clear of the plate's objects where there is room, and they are told it moved.
+    arrangement::ArrangePolygon estimate_wipe_tower_polygon(const DynamicPrintConfig & config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size = 0, bool use_global_objects = false,
+                                                            WipeTowerRelocation *relocation = nullptr) const;
+    // Orca #15146: move (mm) that pulls a prime tower footprint (world coordinates, mm) onto this plate's real
+    // printable outline (cut to the part every nozzle reaches on a dual-nozzle printer), `margin` mm inside it.
+    // Zero on a bed that fills its bounding box: the drag's bounding-box clamp already covers those.
+    Vec2d wipe_tower_move_onto_bed(const BoundingBoxf &tower_world, double margin) const;
+    // Orca #16728: what a re-placed tower keeps clear of: each printable instance's convex hull, grown
+    // by its brim and the tower margin, in plate coordinates. Public for the phone's plate layout
+    // (RemoteAccess, slice_prime_tower), which marks a tower that meets them.
+    Polygons wipe_tower_obstacles(const DynamicPrintConfig &config) const;
     std::vector<int> get_extruders(bool conside_custom_gcode = false) const;
     std::vector<int> get_extruders(bool conside_custom_gcode, const DynamicPrintConfig& glb_config, const DynamicPrintConfig& project_config) const;
     // expand_mixed_slots = false keeps mixed filament slots as slots instead of their components.
@@ -894,7 +927,10 @@ public:
 
     void postprocess_bed_index_for_selected(arrangement::ArrangePolygon& arrange_polygon);
     void postprocess_bed_index_for_unselected(arrangement::ArrangePolygon& arrange_polygon);
-    void postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon);
+    // Arranging only the current plate: bed 0 is that plate. With plates_before (the plate count before the
+    // arrangement), each further bed becomes a plate of its own after those, created when needed; without it
+    // (the CLI, which treats anything off the plate as a failure) it is put beside the last plate.
+    void postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon, int plates_before = -1);
 
     //postprocess an arrangement:;ArrangePolygon
     void postprocess_arrange_polygon(arrangement::ArrangePolygon& arrange_polygon, bool selected);

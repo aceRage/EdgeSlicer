@@ -36,6 +36,18 @@ void ContourZSamples::build_index()
         // were raycast against the same mesh at the same layer, so they agree to within the
         // resampling resolution.
         this->m_index.emplace(contour_key(this->points[i]), this->z[i]);
+    this->m_flow_index.clear();
+    if (this->flow.size() == this->points.size())
+        for (size_t i = 0; i < this->points.size(); ++i)
+            this->m_flow_index.emplace(contour_key(this->points[i]), this->flow[i]);
+}
+
+float ContourZSamples::flow_at(const Point &p) const
+{
+    if (this->m_flow_index.empty())
+        return 1.f;
+    auto it = this->m_flow_index.find(contour_key(p));
+    return it == this->m_flow_index.end() ? 1.f : it->second;
 }
 
 float ContourZSamples::z_at(const Point &p) const
@@ -189,6 +201,45 @@ void contour_z_smooth_profile(std::vector<double> &d, int radius)
     d.swap(out);
 }
 
+void contour_z_thin_samples(std::vector<Vec2d> &xy, std::vector<double> &d, std::vector<char> &is_original, double min_len)
+{
+    if (min_len <= 0.0 || xy.size() < 3)
+        return;
+    const double min_len2 = min_len * min_len;
+    size_t       out      = 1;
+    for (size_t k = 1; k < xy.size(); ++k) {
+        const bool keep = is_original[k] || k + 1 == xy.size() || (xy[k] - xy[out - 1]).squaredNorm() >= min_len2;
+        if (!keep)
+            continue;
+        xy[out]          = xy[k];
+        d[out]           = d[k];
+        is_original[out] = is_original[k];
+        ++out;
+    }
+    xy.resize(out);
+    d.resize(out);
+    is_original.resize(out);
+}
+
+// The fastest speed a contoured path of this role can run at: the role's configured speed (the
+// largest over extruders). Dynamic slow-downs only lower it, so a segment-rate cap computed from it
+// holds for the real feed rate too.
+static double contour_z_role_max_speed(const PrintRegionConfig &config, ExtrusionRole role)
+{
+    const ConfigOptionFloats *opt = nullptr;
+    switch (role) {
+    case erTopSolidInfill: opt = &config.top_surface_speed; break;
+    case erIroning: opt = &config.ironing_speed; break;
+    case erExternalPerimeter: opt = &config.outer_wall_speed; break;
+    case erPerimeter: opt = &config.inner_wall_speed; break;
+    default: return 0.0;
+    }
+    double v = 0.0;
+    for (double s : opt->values)
+        v = std::max(v, s);
+    return v;
+}
+
 double contour_z_segment_feedrate(double f_role_mm_min,
                                   double h_nominal,
                                   double h_seg,
@@ -252,8 +303,14 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
         return false;
 
     // Guard (2), sloped entities: scarf-joint seams already own the Z of their path. Upstream
-    // throws here; we skip, because this fork emits sloped loops routinely.
+    // throws here; we skip, because this fork emits sloped loops routinely. (The scarf is made in
+    // GCode::extrude_loop, after this pass, so no sloped path reaches it; extrude_loop makes no scarf
+    // on a contoured loop instead.)
     if (dynamic_cast<const ExtrusionPathSloped *>(&path) != nullptr)
+        return false;
+
+    // Curved tops (CurvedTops.cpp) already own the Z of their conformal paths.
+    if (path.z_contour != nullptr && path.z_contour->curved_top)
         return false;
 
     Layer         *layer = region->layer();
@@ -352,6 +409,13 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
         max_abs_d = std::max(max_abs_d, std::abs(v));
     if (max_abs_d < ZAA_MIN_PATH_DELTA_MM)
         return false;
+
+    // Pass 3b: zaa_max_segment_rate. Thin the added height samples so that the firmware is never
+    // asked for more than the configured number of moves per second at the role's top speed.
+    // Default 0: no change, the profile stays as upstream produced it.
+    if (const double rate = region->region().config().zaa_max_segment_rate.value; rate > 0.0)
+        contour_z_thin_samples(sample_xy, sample_d, sample_is_original,
+                               contour_z_min_segment_length(contour_z_role_max_speed(region->region().config(), path.role()), rate));
 
     // Pass 4: collapse collinear samples, as upstream, but on the smoothed profile.
     Pointf3s contoured_points;

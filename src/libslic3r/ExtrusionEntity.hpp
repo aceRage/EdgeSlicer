@@ -127,6 +127,14 @@ inline bool is_bridge(ExtrusionRole role) {
         || role == erOverhangPerimeter;
 }
 
+// Orca
+inline bool is_support(ExtrusionRole role)
+{
+    return role == erSupportMaterial
+        || role == erSupportMaterialInterface
+        || role == erSupportTransition;
+}
+
 class ExtrusionEntity
 {
 public:
@@ -191,6 +199,12 @@ public:
     float z_offset { 0.f };
     float extrusion_multiplier { 1.f };
 
+    // True for what a narrow internal solid area is filled with (detect_narrow_internal_solid_infill,
+    // FillConcentricInternal): loops along its outline, and a line down its middle where one fits. They are solid
+    // infill by role but not the straight lines of the pattern set for it, so what goes by the length of a line of
+    // solid infill does not go by the length of their moves (GCode::_needSAFC).
+    bool narrow_area_fill { false };
+
     // ZAA (Z contouring): per-position Z deltas relative to this path's own base Z
     // (print_z + z_offset * height). Null unless the posContouring step contoured this path.
     // Shared and immutable, so seam splits, clip_end and reversals cannot desynchronise it -
@@ -214,6 +228,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
     }
     ExtrusionPath(ExtrusionPath &&rhs)
@@ -228,6 +243,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
     }
     ExtrusionPath(const Polyline &polyline, const ExtrusionPath &rhs)
@@ -242,6 +258,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
     }
     ExtrusionPath(Polyline &&polyline, const ExtrusionPath &rhs)
@@ -256,6 +273,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
     }
 
@@ -270,6 +288,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
         return *this;
     }
@@ -284,6 +303,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
         return *this;
     }
@@ -475,6 +495,10 @@ public:
     // nothing to lean on until this layer is bridged, so the G-code writer holds it back until the
     // infill is down. See defer_unsupported_loops() in PerimeterGenerator.cpp.
     bool print_after_infill = false;
+    // Bambu Studio 2.9.1 (CustomizeFlag::cfCircleCompensation): a wall of a circle offset by the auto
+    // circle compensation below its diameter limit. GCode::extrude_loop prints it at the filament's
+    // circle_compensation_speed and, with apply_scarf_seam_on_circles, with a scarf seam.
+    bool circle_compensation = false;
 
     ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : m_loop_role(role) {}
     ExtrusionLoop(const ExtrusionPaths &paths, ExtrusionLoopRole role = elrDefault) : paths(paths), m_loop_role(role)

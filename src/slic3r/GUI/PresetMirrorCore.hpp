@@ -229,9 +229,30 @@ std::string source_tree_fingerprint(const std::string& src_uid_dir);
 std::string file_stamp(const std::string& path);
 
 // The part of a change fingerprint (see mirror_change_fingerprint) that describes the source:
-// everything before its trailing "manifest=" line. Every run rewrites the manifest, so a run is
-// judged by whether the source moved while it ran, and remembered by the stamp it left behind.
+// everything before its "manifest=" line. What follows (the manifest stamp and the listing of the
+// mirror's own output folder) is rewritten by every run, so a run is judged by whether the source
+// moved while it ran, and remembered by the whole fingerprint it left behind.
 std::string fingerprint_source_part(const std::string& fingerprint);
+
+// ---- the gate across restarts (startup fast path) ----------------------------------------------
+//
+// Startup ran the whole mirror on every start (9.1 s in the owner's profiled start of 2026-10-24,
+// with a cold file cache), because the skip gate below lived only in memory. The fingerprint of
+// the last clean run is now also kept on disk, as a record of the app version, a format number and
+// a digest of the fingerprint, and startup skips the run when the fingerprint it takes now has the
+// same digest under the same app version. The fingerprint covers the uid, the source folder, the
+// manifest and the mirror's output folder (user/default), so a Bambu Studio edit, a Re-pull all,
+// a deleted or edited copy here and a different login all make the next start run the mirror.
+// Bump kMirrorGateFormat whenever what a run copies changes for the same inputs (new sanitising
+// rules, a new folder), so a record written by the old rules is not trusted.
+constexpr int kMirrorGateFormat = 1;
+
+// The record to keep for a fingerprint left by a clean run. Empty for an empty fingerprint.
+std::string mirror_gate_record(const std::string& app_version, const std::string& fingerprint);
+
+// Whether a record kept on disk says a run on `fingerprint` would do nothing. False for an empty
+// fingerprint, an empty or unreadable record, another app version or format, or another digest.
+bool mirror_gate_record_allows_skip(const std::string& record, const std::string& app_version, const std::string& fingerprint);
 
 // Remembers the fingerprint left by the last clean run, and says whether a switch-time run can be
 // skipped because nothing changed since. Records nothing (and forgets the old one) when the run
@@ -250,6 +271,11 @@ public:
             m_last.clear();
     }
     void invalidate() { m_last.clear(); }
+    // Startup skipped its run because the record on disk matched: `fingerprint` is what that
+    // clean run left behind, so switches can skip on it too.
+    void seed(const std::string& fingerprint) { m_last = fingerprint; }
+    // The fingerprint of the last clean run, or empty when there is none to trust.
+    const std::string& last() const { return m_last; }
 
 private:
     std::string m_last;

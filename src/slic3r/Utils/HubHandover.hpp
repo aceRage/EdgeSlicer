@@ -296,7 +296,75 @@ inline SelfCheck self_check(int previous_misses, bool exe_exists, bool web_root_
     return r;
 }
 
+// ---- 3. Which copy owns the hub: --no-hub / --take-hub / the marker file ----
+//
+// Without any of these, every copy takes part in rules 1 and the start rules above: it starts the
+// hub when there is none, and takes it over (asks it to quit and starts its own) when the running
+// one is another build or another install. A test copy that does that moves the phone link off the
+// main install's hub. "No hub" makes a copy a pure client of whatever hub already runs: it never
+// starts, restarts, adopts or replaces one, and never asks one to quit.
+//
+// Precedence, strongest first: --take-hub or EDGESLICER_TAKE_HUB, then --no-hub or
+// EDGESLICER_NO_HUB, then the marker file `edgeslicer_no_hub` next to the executable (what
+// edgebuild --install writes into a test copy), then normal behaviour.
+
+enum class HubMode {
+    Normal, // starts, restarts and takes over the hub as described above
+    NoHub   // client only
+};
+
+enum class HubModeRule { Default, Marker, NoHubFlag, NoHubEnv, TakeHubFlag, TakeHubEnv };
+
+struct HubModeInputs
+{
+    bool take_hub_flag { false };
+    bool take_hub_env { false };
+    bool no_hub_flag { false };
+    bool no_hub_env { false };
+    bool marker_file { false };
+};
+
+struct HubModeDecision
+{
+    HubMode     mode { HubMode::Normal };
+    HubModeRule rule { HubModeRule::Default };
+};
+
+inline HubModeDecision decide_hub_mode(const HubModeInputs& in)
+{
+    if (in.take_hub_flag) return { HubMode::Normal, HubModeRule::TakeHubFlag };
+    if (in.take_hub_env) return { HubMode::Normal, HubModeRule::TakeHubEnv };
+    if (in.no_hub_flag) return { HubMode::NoHub, HubModeRule::NoHubFlag };
+    if (in.no_hub_env) return { HubMode::NoHub, HubModeRule::NoHubEnv };
+    if (in.marker_file) return { HubMode::NoHub, HubModeRule::Marker };
+    return { HubMode::Normal, HubModeRule::Default };
+}
+
+inline const char* hub_mode_rule_name(HubModeRule r)
+{
+    switch (r) {
+    case HubModeRule::Marker: return "marker file edgeslicer_no_hub next to the executable";
+    case HubModeRule::NoHubFlag: return "--no-hub";
+    case HubModeRule::NoHubEnv: return "EDGESLICER_NO_HUB";
+    case HubModeRule::TakeHubFlag: return "--take-hub";
+    case HubModeRule::TakeHubEnv: return "EDGESLICER_TAKE_HUB";
+    default: return "default";
+    }
+}
+
+// An environment switch is on when it is set to anything but "", "0", "false", "no" or "off".
+inline bool env_switch_on(const char* v)
+{
+    if (v == nullptr) return false;
+    const std::string s(v);
+    return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "False" || s == "no" || s == "off");
+}
+
+// The one gate in front of every spawn, restart and takeover.
+inline bool should_spawn_or_take_over(HubMode m) { return m == HubMode::Normal; }
+
 } // namespace HubHandover
+
 } // namespace Slic3r
 
 #endif // slic3r_HubHandover_hpp_

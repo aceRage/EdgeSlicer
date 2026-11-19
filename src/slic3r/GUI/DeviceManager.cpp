@@ -8,6 +8,8 @@
 #include "DeviceModelCode.hpp"
 #include "ChamberLights.hpp"
 #include "BambuSendDiagnosis.hpp"
+#include "BambuNetInfo.hpp"
+#include "AmsMatch.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
@@ -15,10 +17,16 @@
 #include "slic3r/Utils/ColorSpaceConvert.hpp"
 
 #include "GUI_App.hpp"
+#include "MainFrame.hpp"
 #include "MsgDialog.hpp"
+#include "Notebook.hpp"
 #include "Plater.hpp"
 #include "GUI_App.hpp"
 #include "ReleaseNote.hpp"
+#include "NotificationManager.hpp"
+#include "SelectMachinePop.hpp"
+#include "I18N.hpp"
+#include "format.hpp"
 #include <thread>
 #include <cstring>
 #include <functional>
@@ -881,15 +889,6 @@ bool MachineObject::is_support_ams_mapping()
     return true;
 }
 
-static float calc_color_distance(wxColour c1, wxColour c2)
-{
-    float lab[2][3];
-    RGB2Lab(c1.Red(), c1.Green(), c1.Blue(), &lab[0][0], &lab[0][1], &lab[0][2]);
-    RGB2Lab(c2.Red(), c2.Green(), c2.Blue(), &lab[1][0], &lab[1][1], &lab[1][2]);
-
-    return DeltaE76(lab[0][0], lab[0][1], lab[0][2], lab[1][0], lab[1][1], lab[1][2]);
-}
-
 void MachineObject::get_ams_colors(std::vector<wxColour> &ams_colors) {
     ams_colors.clear();
     ams_colors.reserve(amsList.size());
@@ -947,6 +946,13 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
     auto feeds_requested_extruder = [only_physical_extruder](const Ams *ams) {
         return only_physical_extruder < 0 || (ams && ams->nozzle == only_physical_extruder);
     };
+    // A rack printer (H3C): only the slots a rack nozzle is fed from can print (Bambu Studio
+    // DevMapping _collect_mapping_hotend_item_candidates), the AMS 3H's and the spool holders'.
+    const bool rack_printer = is_rack_printer();
+    const std::vector<std::pair<int, int>> rack_bound = rack_printer ? rack_bound_slots() : std::vector<std::pair<int, int>>();
+    auto rack_slot_bound = [&rack_bound](int ams, int slot) {
+        return std::find(rack_bound.begin(), rack_bound.end(), std::make_pair(ams, slot)) != rack_bound.end();
+    };
 
     // tray_index : tray_color
     std::map<int, FilamentInfo> tray_filaments;
@@ -959,12 +965,13 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
         for (auto tray = ams->second->trayList.begin(); tray != ams->second->trayList.end(); tray++) {
             int ams_id = atoi(ams->first.c_str());
             int tray_id = atoi(tray->first.c_str());
-            int tray_index = ams_id * 4 + tray_id;
+            // 28 + slot on the AMS 3H (GUI::AmsTypes::mapping_tray_index), ams_id * 4 + slot otherwise.
+            int tray_index = GUI::AmsTypes::mapping_tray_index(ams->second->type, ams_id, tray_id);
+            if (ams->second->is_rack() && !rack_slot_bound(ams_id, tray_id))
+                continue; // no rack nozzle is fed from this slot now
             // skip exclude id
-            for (int i = 0; i < exclude_id.size(); i++) {
-                if (tray_index == exclude_id[i])
-                    continue;
-            }
+            if (GUI::AmsMatch::excluded(tray_index, exclude_id))
+                continue;
             // push
             if (tray->second->is_tray_info_ready()) {
                 FilamentInfo info;
@@ -1001,11 +1008,38 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
             tray_filaments.emplace(std::make_pair(ext_id, ext_info));
     }
 
+    /* A rack printer's spool holders (255 down to 247): a holder a rack nozzle is fed from is a
+     * candidate like an AMS slot, named by its own id (Bambu Studio _parse_tray_info, EXT_SPOOL). */
+    if (rack_printer) {
+        for (const AmsTray& t : vir_slots) {
+            const int id = atoi(t.id.c_str());
+            if (!GUI::AmsTypes::is_rack_virtual_slot(id) || !rack_slot_bound(id, 0))
+                continue;
+            AmsTray tray = t;
+            if (!tray.is_tray_info_ready())
+                continue;
+            FilamentInfo info;
+            info.color       = tray.color;
+            info.type        = tray.get_filament_type();
+            info.id          = id;
+            info.tray_id     = id;
+            info.filament_id = tray.setting_id;
+            info.ctype       = tray.ctype;
+            info.colors      = tray.cols;
+            info.ams_id      = std::to_string(id);
+            info.slot_id     = "0";
+            tray_filaments.emplace(std::make_pair(id, info));
+        }
+    }
+
     // tray info list
     std::vector<FilamentInfo> tray_info_list;
     int flament_index_id = 0;
     for (auto ams = amsList.begin(); ams != amsList.end(); ams++) {
         if (!feeds_requested_extruder(ams->second))
+            continue;
+        // No order-based fallback onto a rack AMS: a running index is no AMS 3H tray number.
+        if (ams->second && ams->second->is_rack())
             continue;
         for (auto tray = ams->second->trayList.begin(); tray != ams->second->trayList.end(); tray++) {
 
@@ -1071,8 +1105,10 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
         return 1;
     }
 
+    // The nearest-colour pass (AmsMatch.cpp): the distance of every filament to every tray, then
+    // the closest pairs of the same type, each tray once.
     char buffer[256];
-    std::vector<std::vector<DisValue>> distance_map;
+    const std::vector<std::vector<GUI::AmsMatch::Distance>> distance_map = GUI::AmsMatch::distances(filaments, tray_filaments);
 
     // print title
     ::sprintf(buffer, "F(id)");
@@ -1082,105 +1118,20 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
         line += std::string(buffer);
     }
     BOOST_LOG_TRIVIAL(info) << "ams_mapping_distance:" << line;
-
     for (int i = 0; i < filaments.size(); i++) {
-        std::vector<DisValue> rol;
         ::sprintf(buffer, "F(%02d)", filaments[i].id+1);
         line = std::string(buffer);
-        for (auto tray = tray_filaments.begin(); tray != tray_filaments.end(); tray++) {
-            DisValue val;
-            val.tray_id = tray->second.id;
-            wxColour c = wxColour(filaments[i].color);
-            wxColour tray_c = AmsTray::decode_color(tray->second.color);
-            val.distance = calc_color_distance(c, tray_c);
-            if (filaments[i].type != tray->second.type) {
-                val.distance = 999999;
-                val.is_type_match = false;
-            } else {
-                if (c.Alpha() != tray_c.Alpha())
-                    val.distance = 999999;
-                val.is_type_match = true;
-            }
+        for (const GUI::AmsMatch::Distance& val : distance_map[i]) {
             ::sprintf(buffer, "  %6.0f", val.distance);
             line += std::string(buffer);
-            rol.push_back(val);
         }
         BOOST_LOG_TRIVIAL(info) << "ams_mapping_distance:" << line;
-        distance_map.push_back(rol);
     }
 
-    // mapping algorithm
-    for (int i = 0; i < filaments.size(); i++) {
-        FilamentInfo info;
-        info.id = filaments[i].id;
-        info.tray_id = -1;
-        result.push_back(info);
-    }
-
-    std::set<int> picked_src;
-    std::set<int> picked_tar;
-    for (int k = 0; k < distance_map.size(); k++) {
-        float min_val = INT_MAX;
-        int picked_src_idx = -1;
-        int picked_tar_idx = -1;
-        for (int i = 0; i < distance_map.size(); i++) {
-            if (picked_src.find(i) != picked_src.end())
-                continue;
-            for (int j = 0; j < distance_map[i].size(); j++) {
-                if (picked_tar.find(j) != picked_tar.end()){
-                    if (distance_map[i][j].is_same_color
-                        && distance_map[i][j].is_type_match
-                        && distance_map[i][j].distance < (float)0.0001) {
-                        min_val = distance_map[i][j].distance;
-                        picked_src_idx = i;
-                        picked_tar_idx = j;
-                    }
-                    continue;
-                }
-
-                if (distance_map[i][j].is_same_color
-                    && distance_map[i][j].is_type_match) {
-                    if (min_val > distance_map[i][j].distance) {
-
-                        min_val = distance_map[i][j].distance;
-                        picked_src_idx = i;
-                        picked_tar_idx = j;
-                    }
-                    else if (min_val == distance_map[i][j].distance&& filaments[picked_src_idx].filament_id!= tray_filaments[picked_tar_idx].filament_id && filaments[i].filament_id == tray_filaments[j].filament_id) {
-
-                        picked_src_idx = i;
-                        picked_tar_idx = j;
-                    }
-                }
-            }
-        }
-        if (picked_src_idx >= 0 && picked_tar_idx >= 0) {
-            auto tray = tray_filaments.find(distance_map[k][picked_tar_idx].tray_id);
-            if (tray != tray_filaments.end()) {
-                result[picked_src_idx].tray_id  = tray->first;
-                result[picked_src_idx].color    = tray->second.color;
-                result[picked_src_idx].type     = tray->second.type;
-                result[picked_src_idx].distance = tray->second.distance;
-                result[picked_src_idx].filament_id = tray->second.filament_id;
-                result[picked_src_idx].ctype = tray->second.ctype;
-                result[picked_src_idx].colors = tray->second.colors;
-
-
-                /*for new ams mapping*/
-                result[picked_src_idx].ams_id = tray->second.ams_id;
-                result[picked_src_idx].slot_id = tray->second.slot_id;
-            }
-            else {
-                FilamentInfo info;
-                info.tray_id = -1;
-            }
-            ::sprintf(buffer, "ams_mapping, picked F(%02d) AMS(%02d), distance=%6.0f", picked_src_idx+1, picked_tar_idx+1,
-                distance_map[picked_src_idx][picked_tar_idx].distance);
-            BOOST_LOG_TRIVIAL(info) << std::string(buffer);
-            picked_src.insert(picked_src_idx);
-            picked_tar.insert(picked_tar_idx);
-        }
-    }
+    result = GUI::AmsMatch::nearest_colour(filaments, tray_filaments, distance_map);
+    for (const FilamentInfo& r : result)
+        if (r.tray_id >= 0)
+            BOOST_LOG_TRIVIAL(info) << "ams_mapping, picked F(" << r.id + 1 << ") tray " << r.tray_id << ", distance=" << r.distance;
 
     std::vector<FilamentInfo> cache_map_result = result;
 
@@ -1230,11 +1181,7 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
     // try to match some color
     reset_mapping_result(result);
     result = cache_map_result;
-    for (auto it = result.begin(); it != result.end(); it++) {
-        if (it->distance >= 6000) {
-            it->tray_id = -1;
-        }
-    }
+    GUI::AmsMatch::drop_far_picks(result);
 
     return 0;
 }
@@ -1243,6 +1190,10 @@ bool MachineObject::is_valid_mapping_result(std::vector<FilamentInfo>& result, b
 {
     bool valid_ams_mapping_result = true;
     if (result.empty()) return false;
+
+    // A rack slot no rack nozzle is fed from is not valid; a rack AMS slot gets its own number.
+    if (strip_blocked_mapping(result) > 0)
+        valid_ams_mapping_result = false;
 
     for (int i = 0; i < result.size(); i++) {
         // invalid mapping result
@@ -1253,16 +1204,20 @@ bool MachineObject::is_valid_mapping_result(std::vector<FilamentInfo>& result, b
             // A two-extruder printer's external spool holder (tray 254/255, ams_id "254"/"255"):
             // not an AMS, valid as BambuStudio's is_valid_mapping_result accepts it. tray_id / 4
             // below would look for "AMS 63" and throw the mapping away.
+        } else if (is_rack_printer() && GUI::AmsTypes::is_rack_virtual_slot(result[i].tray_id) &&
+                   result[i].tray_id == atoi(result[i].ams_id.c_str())) {
+            // A rack printer's spool holder (H3C): valid, strip_blocked_mapping checked it is fed.
         } else {
-            int ams_id = result[i].tray_id / 4;
-            auto ams_item = amsList.find(std::to_string(ams_id));
+            // ams_id * 4 + slot, or 28 + slot on the AMS 3H (decode_tray_index).
+            std::string dec_ams, dec_slot;
+            decode_tray_index(result[i].tray_id, dec_ams, dec_slot);
+            auto ams_item = amsList.find(dec_ams);
             if (ams_item == amsList.end()) {
                 result[i].tray_id = -1;
                 valid_ams_mapping_result = false;
             } else {
                 if (check_empty_slot) {
-                    int  tray_id   = result[i].tray_id % 4;
-                    auto tray_item = ams_item->second->trayList.find(std::to_string(tray_id));
+                    auto tray_item = ams_item->second->trayList.find(dec_slot);
                     if (tray_item == ams_item->second->trayList.end()) {
                         result[i].tray_id        = -1;
                         valid_ams_mapping_result = false;
@@ -1286,8 +1241,12 @@ bool MachineObject::is_mapping_exceed_filament(std::vector<FilamentInfo> & resul
         if (is_multi_extruders() && result[i].tray_id == atoi(result[i].ams_id.c_str()) &&
             BambuExtruderMap::is_external_spool_ams_id(result[i].tray_id))
             continue; // an external spool holder, not an AMS slot (see is_valid_mapping_result)
-        int ams_id = result[i].tray_id / 4;
-        if (amsList.find(std::to_string(ams_id)) == amsList.end()) {
+        if (is_rack_printer() && GUI::AmsTypes::is_rack_virtual_slot(result[i].tray_id) &&
+            result[i].tray_id == atoi(result[i].ams_id.c_str()))
+            continue; // a rack printer's spool holder
+        std::string dec_ams, dec_slot;
+        decode_tray_index(result[i].tray_id, dec_ams, dec_slot);
+        if (amsList.find(dec_ams) == amsList.end()) {
             exceed_index = result[i].tray_id;
             result[i].tray_id = -1;
             is_exceed = true;
@@ -2005,7 +1964,8 @@ std::string MachineObject::command_error_ignore_key(const std::string& dev_id, i
 // thread and a wxWindow may not be made there. The weak token is what makes that safe: a
 // MachineObject destroyed between the reply and the callback (the printer went away, the user
 // switched devices) drops the token, and the callback returns without touching `this`.
-void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::json& action_json, const std::string& command)
+void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::json& action_json, const std::string& command,
+                                               const std::string& job_id)
 {
     if (command_err <= 0) return;
 
@@ -2032,7 +1992,7 @@ void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::
     // An empty name is a caller that does not know which command it was; that keeps the old set.
     const bool print_action = command.empty() || GUI::is_print_action_command(command);
 
-    GUI::wxGetApp().CallAfter([this, command_err, action_json, print_action, token = std::weak_ptr<int>(m_token)] {
+    GUI::wxGetApp().CallAfter([this, command_err, action_json, print_action, job_id, token = std::weak_ptr<int>(m_token)] {
         if (token.expired()) return;
 
         GUI::HMSQuery* q = GUI::wxGetApp().get_hms_query();
@@ -2065,9 +2025,11 @@ void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::
             m_command_error_dlg = new GUI::PrintErrorDialog(nullptr, wxID_ANY, _L("Error"));
         GUI::PrintErrorDialog* dlg = m_command_error_dlg;
 
-        // A refused command has no job to resume, so no job_id is passed: the dialog greys the
-        // buttons that carry one rather than sending something firmware would drop.
-        dlg->set_error_context(this, command_err, std::string());
+        // Only the job the refusal itself names, never the printer's current job_id_: a refused
+        // new job (05024007, "filament loading/unloading not completed") has no job of its own,
+        // and Stop with whatever the printer was holding would act on a different print. With no
+        // job named, the dialog hides the buttons that carry one and says why in a tooltip.
+        dlg->set_error_context(this, command_err, job_id);
         // ...and set_error_context clears any previous blob, so the new one goes on after it.
         if (!action_json.is_null()) dlg->set_action_json(action_json);
         dlg->set_suppress_handler([this, token = std::weak_ptr<int>(m_token)](int c) {
@@ -2301,6 +2263,29 @@ int MachineObject::command_ams_change_filament(bool load, std::string ams_id, st
         j["print"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
     } catch (const std::exception &) {}
 
+    return this->publish_json(j.dump());
+}
+
+int MachineObject::command_rack_change_filament(bool load, const std::string& ams_id, const std::string& slot_id, int old_temp, int new_temp)
+{
+    json j;
+    try {
+        const bool holder         = GUI::AmsTypes::is_rack_virtual_slot(std::atoi(ams_id.c_str()));
+        j["print"]                = GUI::FilamentCommands::rack_change_filament_json(load, ams_id, slot_id, old_temp, new_temp, holder);
+        j["print"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
+    } catch (const std::exception &) {}
+    return this->publish_json(j.dump());
+}
+
+int MachineObject::command_ams_get_rfid(int ams_id, int slot_id, int mode)
+{
+    // Bambu Studio command_ams_refresh_rfid2 (the reply token is not tracked here).
+    json j;
+    j["print"]["command"]     = "ams_get_rfid";
+    j["print"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
+    j["print"]["ams_id"]      = ams_id;
+    j["print"]["slot_id"]     = slot_id;
+    j["print"]["mode"]        = mode;
     return this->publish_json(j.dump());
 }
 
@@ -3094,6 +3079,10 @@ int MachineObject::connect(bool is_anonymous, bool use_openssl, bool session_up)
             note_dial_on_live_session();
         else
             note_dial_started();
+        // A dial with this code: how it ends tells a refused code from a printer that is off.
+        if (!session_up && !is_anonymous)
+            if (DeviceManager* dm = Slic3r::GUI::wxGetApp().getDeviceManager())
+                dm->note_lan_dial_started(dev_id, password);
         try {
             return m_agent->connect_printer(dev_id, dev_ip, username, password, use_openssl);
         } catch (...) {
@@ -3291,6 +3280,22 @@ static bool payload_needs_signature(const std::string& json_str)
         return GUI::bambu_command_needs_signature(it.key(), cmd->get<std::string>());
     }
     return false;
+}
+
+std::string MachineObject::print_command_blocker(const std::string& command) const
+{
+    // The same two refusals publish_json applies, asked before a button is drawn rather than
+    // after it is pressed. A status-only printer is sent nothing but status requests; a secured
+    // one drops every unsigned control command. Neither depends on LAN versus cloud.
+    json probe;
+    probe["print"]["command"] = command;
+    const std::string payload = probe.dump();
+    if (const AppConfig* cfg = Slic3r::GUI::wxGetApp().app_config;
+        cfg != nullptr && BambuConnectStatus::is_status_only(*cfg, dev_id) && !BambuConnectStatus::status_only_allows(payload))
+        return "status_only";
+    if (is_secured_mode() && payload_needs_signature(payload))
+        return "secured";
+    return std::string();
 }
 
 int MachineObject::publish_json(std::string json_str, int qos, int flag)
@@ -3510,7 +3515,8 @@ void MachineObject::note_unsigned_refusal(const std::string& command, int err_co
 std::string MachineObject::setting_id_to_type(std::string setting_id, std::string tray_type)
 {
     std::string type;
-    PresetBundle* preset_bundle = GUI::wxGetApp().preset_bundle;
+    // No app in the unit tests (parse_ams_report runs headless there): keep the reported type.
+    PresetBundle* preset_bundle = wxTheApp ? GUI::wxGetApp().preset_bundle : nullptr;
     if (preset_bundle) {
         for (auto it = preset_bundle->filaments.begin(); it != preset_bundle->filaments.end(); it++) {
 
@@ -3543,12 +3549,422 @@ static ENUM enum_index_of(char const *key, char const **enum_names, int enum_cou
     return defl;
 }
 
+// The "ams" block of a push_status print report (print.ams: the AMS units, their trays and the
+// exist / read bitmasks). Split out of parse_json so a throw here stays here, and so the tests
+// can feed it a report without the GUI.
+void MachineObject::parse_ams_report(const json& jj, bool key_field_only)
+{
+    if (!jj.is_object() || !jj.contains("ams") || !jj["ams"].is_object())
+        return;
+    if (jj["ams"].contains("ams")) {
+        long long last_ams_exist_bits = ams_exist_bits;
+        long long last_tray_exist_bits = tray_exist_bits;
+        long long last_is_bbl_bits = tray_is_bbl_bits;
+        long long last_read_done_bits = tray_read_done_bits;
+        long int last_ams_version = ams_version;
+        if (jj["ams"].contains("ams_exist_bits")) {
+            parse_hex_bits(jj["ams"]["ams_exist_bits"], ams_exist_bits);
+        }
+        if (jj["ams"].contains("tray_exist_bits")) {
+            parse_hex_bits(jj["ams"]["tray_exist_bits"], tray_exist_bits);
+        }
+        if (!key_field_only) {
+            if (jj["ams"].contains("tray_read_done_bits")) {
+                parse_hex_bits(jj["ams"]["tray_read_done_bits"], tray_read_done_bits);
+            }
+            if (jj["ams"].contains("tray_reading_bits")) {
+                parse_hex_bits(jj["ams"]["tray_reading_bits"], tray_reading_bits);
+            }
+            if (jj["ams"].contains("tray_is_bbl_bits")) {
+                parse_hex_bits(jj["ams"]["tray_is_bbl_bits"], tray_is_bbl_bits);
+            }
+            if (jj["ams"].contains("version")) {
+                if (jj["ams"]["version"].is_number())
+                    ams_version = jj["ams"]["version"].get<int>();
+            }
+            if (jj["ams"].contains("tray_now")) {
+                this->_parse_tray_now(jj["ams"]["tray_now"].get<std::string>());
+            }
+            if (jj["ams"].contains("tray_tar")) {
+                m_tray_tar = jj["ams"]["tray_tar"].get<std::string>();
+            }
+            if (jj["ams"].contains("ams_rfid_status"))
+                ams_rfid_status = jj["ams"]["ams_rfid_status"].get<int>();
+
+            if (jj["ams"].contains("insert_flag") || jj["ams"].contains("power_on_flag")
+                || jj["ams"].contains("calibrate_remain_flag")) {
+                if (ams_user_setting_hold_count > 0) {
+                    ams_user_setting_hold_count--;
+                } else {
+                    if (jj["ams"].contains("insert_flag")) {
+                        ams_insert_flag = jj["ams"]["insert_flag"].get<bool>();
+                    }
+                    if (jj["ams"].contains("power_on_flag")) {
+                        ams_power_on_flag = jj["ams"]["power_on_flag"].get<bool>();
+                    }
+                    if (jj["ams"].contains("calibrate_remain_flag")) {
+                        ams_calibrate_remain_flag = jj["ams"]["calibrate_remain_flag"].get<bool>();
+                    }
+                }
+            }
+            if (ams_exist_bits != last_ams_exist_bits
+                || tray_exist_bits != last_tray_exist_bits
+                || tray_is_bbl_bits != last_is_bbl_bits
+                || tray_read_done_bits != last_read_done_bits
+                || ams_version != last_ams_version) {
+                is_ams_need_update = true;
+            }
+            else {
+                is_ams_need_update = false;
+            }
+
+            json j_ams = jj["ams"]["ams"];
+            std::set<std::string> ams_id_set;
+
+            for (auto it = amsList.begin(); it != amsList.end(); it++) {
+                ams_id_set.insert(it->first);
+            }
+
+            for (auto it = j_ams.begin(); it != j_ams.end(); it++) {
+                if (!it->contains("id")) continue;
+                std::string ams_id = (*it)["id"].get<std::string>();
+
+                int nozzle_id = MAIN_NOZZLE_ID; // Default nozzle id
+                int type_id = 1;   // 0:dummy 1:ams 2:ams-lite 3:n3f 4:n3s
+
+                /*ams info*/
+                if (it->contains("info")) {
+                    std::string info = (*it)["info"].get<std::string>();
+                    type_id = get_flag_bits(info, 0, 4);
+                    nozzle_id = get_flag_bits(info, 8, 4);
+                }
+
+                /* A rack AMS (the H3C's AMS 3H, Bambu Studio ZMULTI_A / ZMULTI_B) feeds the one toolhead
+                 * through the nozzle rack: extruder 0xE there means the main extruder (Bambu Studio
+                 * DevFilaSystemParser::ParseAmsInfo). It is listed for the Device page and the filament
+                 * sync; the send mapping leaves it out (MachineObject::mapping_blocked_ams_id). */
+                const bool rack_ams = GUI::AmsTypes::is_rack_ams(type_id);
+                if (rack_ams && nozzle_id == 0xE)
+                    nozzle_id = MAIN_NOZZLE_ID;
+
+                /*AMS without initialization*/
+                if (nozzle_id == 0xE) {
+                    continue;
+                }
+
+                ams_id_set.erase(ams_id);
+                Ams* curr_ams = nullptr;
+                auto ams_it = amsList.find(ams_id);
+                if (ams_it == amsList.end()) {
+                    Ams* new_ams    = new Ams(ams_id, nozzle_id, type_id);
+                    amsList.insert(std::make_pair(ams_id, new_ams));
+                    // new ams added event
+                    curr_ams = new_ams;
+                } else {
+                    curr_ams = ams_it->second;
+                }
+                if (!curr_ams) continue;
+
+                /*set ams type flag*/
+                curr_ams->type = type_id;
+
+
+                /*set ams exist flag*/
+                try {
+                    if (!ams_id.empty()) {
+                        int ams_id_int = atoi(ams_id.c_str());
+                        curr_ams->is_exists = hex_bit_set(ams_exist_bits, GUI::AmsTypes::unit_exist_bit(type_id, ams_id_int));
+                    }
+                } catch (...) {
+                    ;
+                }
+
+                if (it->contains("dry_time") && (*it)["dry_time"].is_number())
+                {
+                    curr_ams->left_dry_time = (*it)["dry_time"].get<int>();
+                }
+
+                /* remote drying state (AMS 2 Pro / AMS HT), DevFilaSystemParser::ParseAmsInfo */
+                try {
+                    GUI::AmsDrying::parse_dry_fields(*it, curr_ams->dry);
+                } catch (...) {}
+
+                if (it->contains("humidity")) {
+                    std::string humidity = (*it)["humidity"].get<std::string>();
+
+                    try {
+                        curr_ams->humidity = atoi(humidity.c_str());
+                    }
+                    catch (...) {
+                        ;
+                    }
+                }
+
+                if (it->contains("humidity_raw"))
+                {
+                    std::string humidity_raw = (*it)["humidity_raw"].get<std::string>();
+
+                    try {
+                        curr_ams->humidity_raw = atoi(humidity_raw.c_str());
+                    } catch (...) {
+                        ;
+                    }
+
+                    if (curr_ams->humidity_raw != -1)
+                    {
+                        if (curr_ams->humidity_raw < 20)
+                        {
+                            curr_ams->humidity = 5;
+                        }
+                        else if (curr_ams->humidity_raw < 40)
+                        {
+                            curr_ams->humidity = 4;
+                        }
+                        else if (curr_ams->humidity_raw < 60)
+                        {
+                            curr_ams->humidity = 3;
+                        }
+                        else if (curr_ams->humidity_raw < 80)
+                        {
+                            curr_ams->humidity = 2;
+                        }
+                        else
+                        {
+                            curr_ams->humidity = 1;
+                        }
+                    }
+                }
+
+
+                if (it->contains("temp"))
+                {
+                    std::string temp = (*it)["temp"].get<std::string>();
+                    try
+                    {
+                        curr_ams->current_temperature = string_to_float(temp);
+                    }
+                    catch (...)
+                    {
+                        curr_ams->current_temperature = INVALID_AMS_TEMPERATURE;
+                    }
+                }
+
+                /* zone_info: the AMS 3H's drying zones (Bambu Studio DevFilaSystemParser::ParseAmsInfo).
+                 * The unit reports no humidity or temperature of its own; it takes the dampest zone's. */
+                curr_ams->zones.clear();
+                if (it->contains("zone_info") && (*it)["zone_info"].is_array()) {
+                    parse_ams_zones((*it)["zone_info"], *curr_ams);
+                    const bool unit_humidity = it->contains("humidity") || it->contains("humidity_raw");
+                    const bool unit_temp     = it->contains("temp");
+                    const Ams::Zone* damp = nullptr;
+                    for (const Ams::Zone& z : curr_ams->zones)
+                        if (!damp || z.humidity_raw > damp->humidity_raw || (z.humidity_raw == damp->humidity_raw && z.humidity >= 1 && z.humidity < damp->humidity))
+                            damp = &z;
+                    if (damp) {
+                        if (!unit_humidity) {
+                            curr_ams->humidity_raw = damp->humidity_raw;
+                            if (damp->humidity >= 1)
+                                curr_ams->humidity = damp->humidity;
+                        }
+                        if (!unit_temp)
+                            curr_ams->current_temperature = damp->temperature;
+                    }
+                }
+
+                if (it->contains("tray")) {
+                    std::set<std::string> tray_id_set;
+                    for (auto it = curr_ams->trayList.begin(); it != curr_ams->trayList.end(); it++) {
+                        tray_id_set.insert(it->first);
+                    }
+                    for (auto tray_it = (*it)["tray"].begin(); tray_it != (*it)["tray"].end(); tray_it++) {
+                        if (!tray_it->contains("id")) continue;
+                        std::string tray_id = (*tray_it)["id"].get<std::string>();
+                        tray_id_set.erase(tray_id);
+                        // compare tray_list
+                        AmsTray* curr_tray = nullptr;
+                        auto tray_iter = curr_ams->trayList.find(tray_id);
+                        if (tray_iter == curr_ams->trayList.end()) {
+                            AmsTray* new_tray = new AmsTray(tray_id);
+                            curr_ams->trayList.insert(std::make_pair(tray_id, new_tray));
+                            curr_tray = new_tray;
+                        }
+                        else {
+                            curr_tray = tray_iter->second;
+                        }
+                        if (!curr_tray) continue;
+
+                        if (curr_tray->hold_count > 0) {
+                            curr_tray->hold_count--;
+                            continue;
+                        }
+
+                        curr_tray->id = (*tray_it)["id"].get<std::string>();
+                        if (tray_it->contains("tag_uid"))
+                            curr_tray->tag_uid          = (*tray_it)["tag_uid"].get<std::string>();
+                        else
+                            curr_tray->tag_uid = "0";
+                        if (tray_it->contains("tray_info_idx") && tray_it->contains("tray_type")) {
+                            curr_tray->setting_id       = (*tray_it)["tray_info_idx"].get<std::string>();
+                            //std::string type            = (*tray_it)["tray_type"].get<std::string>();
+                            std::string type = setting_id_to_type(curr_tray->setting_id, (*tray_it)["tray_type"].get<std::string>());
+                            if (curr_tray->setting_id == "GFS00") {
+                                curr_tray->type = "PLA-S";
+                            }
+                            else if (curr_tray->setting_id == "GFS01") {
+                                curr_tray->type = "PA-S";
+                            } else {
+                                curr_tray->type = type;
+                            }
+                        } else {
+                            curr_tray->setting_id = "";
+                            curr_tray->type       = "";
+                        }
+                        if (tray_it->contains("tray_sub_brands"))
+                            curr_tray->sub_brands       = (*tray_it)["tray_sub_brands"].get<std::string>();
+                        else
+                            curr_tray->sub_brands = "";
+                        if (tray_it->contains("tray_weight"))
+                            curr_tray->weight           = (*tray_it)["tray_weight"].get<std::string>();
+                        else
+                            curr_tray->weight = "";
+                        if (tray_it->contains("tray_diameter"))
+                            curr_tray->diameter         = (*tray_it)["tray_diameter"].get<std::string>();
+                        else
+                            curr_tray->diameter = "";
+                        if (tray_it->contains("tray_temp"))
+                            curr_tray->temp             = (*tray_it)["tray_temp"].get<std::string>();
+                        else
+                            curr_tray->temp = "";
+                        if (tray_it->contains("tray_time"))
+                            curr_tray->time             = (*tray_it)["tray_time"].get<std::string>();
+                        else
+                            curr_tray->time = "";
+                        if (tray_it->contains("bed_temp_type"))
+                            curr_tray->bed_temp_type    = (*tray_it)["bed_temp_type"].get<std::string>();
+                        else
+                            curr_tray->bed_temp_type = "";
+                        if (tray_it->contains("bed_temp"))
+                            curr_tray->bed_temp         = (*tray_it)["bed_temp"].get<std::string>();
+                        else
+                            curr_tray->bed_temp = "";
+                        if (tray_it->contains("tray_color")) {
+                            auto color = (*tray_it)["tray_color"].get<std::string>();
+                            curr_tray->update_color_from_str(color);
+                        } else {
+                            curr_tray->color = "";
+                        }
+                        if (tray_it->contains("nozzle_temp_max")) {
+                            curr_tray->nozzle_temp_max = (*tray_it)["nozzle_temp_max"].get<std::string>();
+                        }
+                        else
+                            curr_tray->nozzle_temp_max = "";
+                        if (tray_it->contains("nozzle_temp_min"))
+                            curr_tray->nozzle_temp_min = (*tray_it)["nozzle_temp_min"].get<std::string>();
+                        else
+                            curr_tray->nozzle_temp_min = "";
+                        if (tray_it->contains("xcam_info"))
+                            curr_tray->xcam_info = (*tray_it)["xcam_info"].get<std::string>();
+                        else
+                            curr_tray->xcam_info = "";
+                        if (tray_it->contains("tray_uuid"))
+                            curr_tray->uuid = (*tray_it)["tray_uuid"].get<std::string>();
+                        else
+                            curr_tray->uuid = "0";
+
+                        if (tray_it->contains("ctype"))
+                            curr_tray->ctype = (*tray_it)["ctype"].get<int>();
+                        else
+                            curr_tray->ctype = 0;
+                        curr_tray->cols.clear();
+                        if (tray_it->contains("cols")) {
+                            if ((*tray_it)["cols"].is_array()) {
+                                for (auto it = (*tray_it)["cols"].begin(); it != (*tray_it)["cols"].end(); it++) {
+                                   curr_tray->cols.push_back(it.value().get<std::string>());
+                                }
+                            }
+                        }
+
+                        if (tray_it->contains("remain")) {
+                            curr_tray->remain = (*tray_it)["remain"].get<int>();
+                        } else {
+                            curr_tray->remain = -1;
+                        }
+                        // H3C keys: grams left, and the slot state (27 loaded, 160 empty).
+                        curr_tray->remain_g = tray_it->contains("remain_g") && (*tray_it)["remain_g"].is_number_integer()
+                                                  ? (*tray_it)["remain_g"].get<int>() : -1;
+                        curr_tray->state = tray_it->contains("state") && (*tray_it)["state"].is_number_integer()
+                                               ? (*tray_it)["state"].get<int>() : -1;
+                        int ams_id_int = 0;
+                        int tray_id_int = 0;
+                        try {
+                            if (!ams_id.empty() && !curr_tray->id.empty()) {
+                                ams_id_int = atoi(ams_id.c_str());
+                                tray_id_int = atoi(curr_tray->id.c_str());
+
+                                curr_tray->is_exists = hex_bit_set(tray_exist_bits, GUI::AmsTypes::tray_bit(type_id, ams_id_int, tray_id_int));
+
+                            }
+                        }
+                        catch (...) {
+                        }
+                        if (tray_it->contains("setting_id")) {
+                            curr_tray->filament_setting_id = (*tray_it)["setting_id"].get<std::string>();
+                        }
+                        auto curr_time = std::chrono::system_clock::now();
+                        auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(curr_time - extrusion_cali_set_hold_start);
+                        if (diff.count() > HOLD_TIMEOUT || diff.count() < 0
+                            || tray_index_of(ams_id_int, tray_id_int) != extrusion_cali_set_tray_id) { // 28 + slot on the AMS 3H
+                            if (tray_it->contains("k")) {
+                                curr_tray->k = (*tray_it)["k"].get<float>();
+                            }
+                            if (tray_it->contains("n")) {
+                                curr_tray->n = (*tray_it)["n"].get<float>();
+                            }
+                        }
+
+                        std::string temp = tray_it->dump();
+
+                        if (tray_it->contains("cali_idx")) {
+                            curr_tray->cali_idx = (*tray_it)["cali_idx"].get<int>();
+                        }
+                    }
+                    // remove not in trayList
+                    for (auto tray_it = tray_id_set.begin(); tray_it != tray_id_set.end(); tray_it++) {
+                        std::string tray_id = *tray_it;
+                        auto tray = curr_ams->trayList.find(tray_id);
+                        if (tray != curr_ams->trayList.end()) {
+                            curr_ams->trayList.erase(tray_id);
+                            BOOST_LOG_TRIVIAL(trace) << "parse_json: remove ams_id=" << ams_id << ", tray_id=" << tray_id;
+                        }
+                    }
+                }
+            }
+            // remove not in amsList
+            for (auto it = ams_id_set.begin(); it != ams_id_set.end(); it++) {
+                std::string ams_id = *it;
+                auto ams = amsList.find(ams_id);
+                if (ams != amsList.end()) {
+                    BOOST_LOG_TRIVIAL(trace) << "parse_json: remove ams_id=" << ams_id;
+                    amsList.erase(ams_id);
+                }
+            }
+        }
+    }
+}
+
+// A printer's report as the trace log shows it. The answer to get_access_code carries the
+// printer's LAN access code ("system": {"access_code": ...}): that one goes through the scrubber.
+static std::string report_for_trace_log(const std::string& report)
+{
+    return report.find("access_code") == std::string::npos ? report : NetworkAgent::body_for_log(report, 0);
+}
+
 int MachineObject::parse_json(std::string payload, bool key_field_only)
 {
     // The full status JSON (several KB per push, per printer) is trace-only: at info it made up ~90% of a day's log.
     // Set Preferences > Log level to "trace" to get it back. The per-message flush is only paid when it is wanted.
     if (get_logging_level() >= 5) {
-        BOOST_LOG_TRIVIAL(trace) << "parse_json: payload = " << payload;
+        BOOST_LOG_TRIVIAL(trace) << "parse_json: payload = " << report_for_trace_log(payload);
         flush_logs();
     }
 
@@ -3731,7 +4147,7 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
         else
             last_utc_time = last_update_time;
 
-        BOOST_LOG_TRIVIAL(trace) << "parse_json: dev_id=" << dev_id << ", playload=" << j.dump(4);
+        BOOST_LOG_TRIVIAL(trace) << "parse_json: dev_id=" << dev_id << ", playload=" << report_for_trace_log(j.dump(4));
 
         // Parse version info first, as if version arrive or change, 'print' need parse again with new compatible settings
         try {
@@ -4056,7 +4472,8 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         note_unsigned_refusal(reply_cmd, reply_err);
                     } else if (GUI::accept_command_refusal(jj, m_sent_commands, GUI::SentCommandTracker::Clock::now(),
                                                     command_err, action_json, refused_command)) {
-                        add_command_error_code_dlg(command_err, action_json, refused_command);
+                        const std::string refused_job = jj.contains("job_id") && jj["job_id"].is_string() ? jj["job_id"].get<std::string>() : std::string();
+                        add_command_error_code_dlg(command_err, action_json, refused_command, refused_job);
                     } else if (!refused_command.empty() && !GUI::is_status_or_info_command(refused_command)) {
                         // Somebody else's refusal (another slicer, the printer's screen, a previous
                         // session). Logged so it can be told apart from ours, never shown.
@@ -4152,6 +4569,15 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         if (jj.contains("net")) {
                             if (jj["net"].contains("conf")) {
                                 network_wired = (jj["net"]["conf"].get<int>() & (0x1)) != 0;
+                            }
+                            // The printer's own LAN address, for the camera when no announcement
+                            // has given us one (BambuNetInfo.hpp). Never written into dev_ip.
+                            const std::string reported_ip = BambuNetInfo::first_ip(jj["net"]);
+                            if (!reported_ip.empty() && reported_ip != net_reported_ip) {
+                                if (net_reported_ip.empty() && dev_ip.empty())
+                                    BOOST_LOG_TRIVIAL(info) << "MachineObject: the printer reported its LAN address; the camera can use it "
+                                                               "until discovery finds the printer";
+                                net_reported_ip = reported_ip;
                             }
                         }
                     }
@@ -4811,375 +5237,16 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                     if (!key_field_only && (jj.contains("ams") || jj.contains("vt_tray")))
                         m_full_report_seen = true; // DeviceManager::full_report_tick
                     if (jj.contains("ams")) {
-                        if (jj["ams"].contains("ams")) {
-                            long int last_ams_exist_bits = ams_exist_bits;
-                            long int last_tray_exist_bits = tray_exist_bits;
-                            long int last_is_bbl_bits = tray_is_bbl_bits;
-                            long int last_read_done_bits = tray_read_done_bits;
-                            long int last_ams_version = ams_version;
-                            if (jj["ams"].contains("ams_exist_bits")) {
-                                ams_exist_bits = stol(jj["ams"]["ams_exist_bits"].get<std::string>(), nullptr, 16);
-                            }
-                            if (jj["ams"].contains("tray_exist_bits")) {
-                                tray_exist_bits = stol(jj["ams"]["tray_exist_bits"].get<std::string>(), nullptr, 16);
-                            }
-                            if (!key_field_only) {
-                                if (jj["ams"].contains("tray_read_done_bits")) {
-                                    tray_read_done_bits = stol(jj["ams"]["tray_read_done_bits"].get<std::string>(), nullptr, 16);
-                                }
-                                if (jj["ams"].contains("tray_reading_bits")) {
-                                    tray_reading_bits = stol(jj["ams"]["tray_reading_bits"].get<std::string>(), nullptr, 16);
-                                }
-                                if (jj["ams"].contains("tray_is_bbl_bits")) {
-                                    tray_is_bbl_bits = stol(jj["ams"]["tray_is_bbl_bits"].get<std::string>(), nullptr, 16);
-                                }
-                                if (jj["ams"].contains("version")) {
-                                    if (jj["ams"]["version"].is_number())
-                                        ams_version = jj["ams"]["version"].get<int>();
-                                }
-                                if (jj["ams"].contains("tray_now")) {
-                                    this->_parse_tray_now(jj["ams"]["tray_now"].get<std::string>());
-                                }
-                                if (jj["ams"].contains("tray_tar")) {
-                                    m_tray_tar = jj["ams"]["tray_tar"].get<std::string>();
-                                }
-                                if (jj["ams"].contains("ams_rfid_status"))
-                                    ams_rfid_status = jj["ams"]["ams_rfid_status"].get<int>();
-
-                                if (jj["ams"].contains("insert_flag") || jj["ams"].contains("power_on_flag")
-                                    || jj["ams"].contains("calibrate_remain_flag")) {
-                                    if (ams_user_setting_hold_count > 0) {
-                                        ams_user_setting_hold_count--;
-                                    } else {
-                                        if (jj["ams"].contains("insert_flag")) {
-                                            ams_insert_flag = jj["ams"]["insert_flag"].get<bool>();
-                                        }
-                                        if (jj["ams"].contains("power_on_flag")) {
-                                            ams_power_on_flag = jj["ams"]["power_on_flag"].get<bool>();
-                                        }
-                                        if (jj["ams"].contains("calibrate_remain_flag")) {
-                                            ams_calibrate_remain_flag = jj["ams"]["calibrate_remain_flag"].get<bool>();
-                                        }
-                                    }
-                                }
-                                if (ams_exist_bits != last_ams_exist_bits
-                                    || tray_exist_bits != last_tray_exist_bits
-                                    || tray_is_bbl_bits != last_is_bbl_bits
-                                    || tray_read_done_bits != last_read_done_bits
-                                    || ams_version != last_ams_version) {
-                                    is_ams_need_update = true;
-                                }
-                                else {
-                                    is_ams_need_update = false;
-                                }
-
-                                json j_ams = jj["ams"]["ams"];
-                                std::set<std::string> ams_id_set;
-
-                                for (auto it = amsList.begin(); it != amsList.end(); it++) {
-                                    ams_id_set.insert(it->first);
-                                }
-
-                                for (auto it = j_ams.begin(); it != j_ams.end(); it++) {
-                                    if (!it->contains("id")) continue;
-                                    std::string ams_id = (*it)["id"].get<std::string>();
-
-                                    int nozzle_id = MAIN_NOZZLE_ID; // Default nozzle id
-                                    int type_id = 1;   // 0:dummy 1:ams 2:ams-lite 3:n3f 4:n3s
-
-                                    /*ams info*/
-                                    if (it->contains("info")) {
-                                        std::string info = (*it)["info"].get<std::string>();
-                                        type_id = get_flag_bits(info, 0, 4);
-                                        nozzle_id = get_flag_bits(info, 8, 4);
-                                    }
-
-                                    /*AMS without initialization*/
-                                    if (nozzle_id == 0xE) {
-                                        continue;
-                                    }
-
-                                    ams_id_set.erase(ams_id);
-                                    Ams* curr_ams = nullptr;
-                                    auto ams_it = amsList.find(ams_id);
-                                    if (ams_it == amsList.end()) {
-                                        Ams* new_ams    = new Ams(ams_id, nozzle_id, type_id);
-                                        amsList.insert(std::make_pair(ams_id, new_ams));
-                                        // new ams added event
-                                        curr_ams = new_ams;
-                                    } else {
-                                        curr_ams = ams_it->second;
-                                    }
-                                    if (!curr_ams) continue;
-
-                                    /*set ams type flag*/
-                                    curr_ams->type = type_id;
-
-
-                                    /*set ams exist flag*/
-                                    try {
-                                        if (!ams_id.empty()) {
-                                            int ams_id_int = atoi(ams_id.c_str());
-
-                                            if (type_id < 4) {
-                                                curr_ams->is_exists = (ams_exist_bits & (1 << ams_id_int)) != 0 ? true : false;
-                                            } else {
-                                                curr_ams->is_exists = get_flag_bits(ams_exist_bits, 4 + (ams_id_int - 128));
-                                            }
-                                        }
-                                    } catch (...) {
-                                        ;
-                                    }
-
-                                    if (it->contains("dry_time") && (*it)["dry_time"].is_number())
-                                    {
-                                        curr_ams->left_dry_time = (*it)["dry_time"].get<int>();
-                                    }
-
-                                    /* remote drying state (AMS 2 Pro / AMS HT), DevFilaSystemParser::ParseAmsInfo */
-                                    try {
-                                        GUI::AmsDrying::parse_dry_fields(*it, curr_ams->dry);
-                                    } catch (...) {}
-
-                                    if (it->contains("humidity")) {
-                                        std::string humidity = (*it)["humidity"].get<std::string>();
-
-                                        try {
-                                            curr_ams->humidity = atoi(humidity.c_str());
-                                        }
-                                        catch (...) {
-                                            ;
-                                        }
-                                    }
-
-                                    if (it->contains("humidity_raw"))
-                                    {
-                                        std::string humidity_raw = (*it)["humidity_raw"].get<std::string>();
-
-                                        try {
-                                            curr_ams->humidity_raw = atoi(humidity_raw.c_str());
-                                        } catch (...) {
-                                            ;
-                                        }
-
-                                        if (curr_ams->humidity_raw != -1)
-                                        {
-                                            if (curr_ams->humidity_raw < 20)
-                                            {
-                                                curr_ams->humidity = 5;
-                                            }
-                                            else if (curr_ams->humidity_raw < 40)
-                                            {
-                                                curr_ams->humidity = 4;
-                                            }
-                                            else if (curr_ams->humidity_raw < 60)
-                                            {
-                                                curr_ams->humidity = 3;
-                                            }
-                                            else if (curr_ams->humidity_raw < 80)
-                                            {
-                                                curr_ams->humidity = 2;
-                                            }
-                                            else
-                                            {
-                                                curr_ams->humidity = 1;
-                                            }
-                                        }
-                                    }
-
-
-                                    if (it->contains("temp"))
-                                    {
-                                        std::string temp = (*it)["temp"].get<std::string>();
-                                        try
-                                        {
-                                            curr_ams->current_temperature = string_to_float(temp);
-                                        }
-                                        catch (...)
-                                        {
-                                            curr_ams->current_temperature = INVALID_AMS_TEMPERATURE;
-                                        }
-                                    }
-
-                                    if (it->contains("tray")) {
-                                        std::set<std::string> tray_id_set;
-                                        for (auto it = curr_ams->trayList.begin(); it != curr_ams->trayList.end(); it++) {
-                                            tray_id_set.insert(it->first);
-                                        }
-                                        for (auto tray_it = (*it)["tray"].begin(); tray_it != (*it)["tray"].end(); tray_it++) {
-                                            if (!tray_it->contains("id")) continue;
-                                            std::string tray_id = (*tray_it)["id"].get<std::string>();
-                                            tray_id_set.erase(tray_id);
-                                            // compare tray_list
-                                            AmsTray* curr_tray = nullptr;
-                                            auto tray_iter = curr_ams->trayList.find(tray_id);
-                                            if (tray_iter == curr_ams->trayList.end()) {
-                                                AmsTray* new_tray = new AmsTray(tray_id);
-                                                curr_ams->trayList.insert(std::make_pair(tray_id, new_tray));
-                                                curr_tray = new_tray;
-                                            }
-                                            else {
-                                                curr_tray = tray_iter->second;
-                                            }
-                                            if (!curr_tray) continue;
-
-                                            if (curr_tray->hold_count > 0) {
-                                                curr_tray->hold_count--;
-                                                continue;
-                                            }
-
-                                            curr_tray->id = (*tray_it)["id"].get<std::string>();
-                                            if (tray_it->contains("tag_uid"))
-                                                curr_tray->tag_uid          = (*tray_it)["tag_uid"].get<std::string>();
-                                            else
-                                                curr_tray->tag_uid = "0";
-                                            if (tray_it->contains("tray_info_idx") && tray_it->contains("tray_type")) {
-                                                curr_tray->setting_id       = (*tray_it)["tray_info_idx"].get<std::string>();
-                                                //std::string type            = (*tray_it)["tray_type"].get<std::string>();
-                                                std::string type = setting_id_to_type(curr_tray->setting_id, (*tray_it)["tray_type"].get<std::string>());
-                                                if (curr_tray->setting_id == "GFS00") {
-                                                    curr_tray->type = "PLA-S";
-                                                }
-                                                else if (curr_tray->setting_id == "GFS01") {
-                                                    curr_tray->type = "PA-S";
-                                                } else {
-                                                    curr_tray->type = type;
-                                                }
-                                            } else {
-                                                curr_tray->setting_id = "";
-                                                curr_tray->type       = "";
-                                            }
-                                            if (tray_it->contains("tray_sub_brands"))
-                                                curr_tray->sub_brands       = (*tray_it)["tray_sub_brands"].get<std::string>();
-                                            else
-                                                curr_tray->sub_brands = "";
-                                            if (tray_it->contains("tray_weight"))
-                                                curr_tray->weight           = (*tray_it)["tray_weight"].get<std::string>();
-                                            else
-                                                curr_tray->weight = "";
-                                            if (tray_it->contains("tray_diameter"))
-                                                curr_tray->diameter         = (*tray_it)["tray_diameter"].get<std::string>();
-                                            else
-                                                curr_tray->diameter = "";
-                                            if (tray_it->contains("tray_temp"))
-                                                curr_tray->temp             = (*tray_it)["tray_temp"].get<std::string>();
-                                            else
-                                                curr_tray->temp = "";
-                                            if (tray_it->contains("tray_time"))
-                                                curr_tray->time             = (*tray_it)["tray_time"].get<std::string>();
-                                            else
-                                                curr_tray->time = "";
-                                            if (tray_it->contains("bed_temp_type"))
-                                                curr_tray->bed_temp_type    = (*tray_it)["bed_temp_type"].get<std::string>();
-                                            else
-                                                curr_tray->bed_temp_type = "";
-                                            if (tray_it->contains("bed_temp"))
-                                                curr_tray->bed_temp         = (*tray_it)["bed_temp"].get<std::string>();
-                                            else
-                                                curr_tray->bed_temp = "";
-                                            if (tray_it->contains("tray_color")) {
-                                                auto color = (*tray_it)["tray_color"].get<std::string>();
-                                                curr_tray->update_color_from_str(color);
-                                            } else {
-                                                curr_tray->color = "";
-                                            }
-                                            if (tray_it->contains("nozzle_temp_max")) {
-                                                curr_tray->nozzle_temp_max = (*tray_it)["nozzle_temp_max"].get<std::string>();
-                                            }
-                                            else
-                                                curr_tray->nozzle_temp_max = "";
-                                            if (tray_it->contains("nozzle_temp_min"))
-                                                curr_tray->nozzle_temp_min = (*tray_it)["nozzle_temp_min"].get<std::string>();
-                                            else
-                                                curr_tray->nozzle_temp_min = "";
-                                            if (tray_it->contains("xcam_info"))
-                                                curr_tray->xcam_info = (*tray_it)["xcam_info"].get<std::string>();
-                                            else
-                                                curr_tray->xcam_info = "";
-                                            if (tray_it->contains("tray_uuid"))
-                                                curr_tray->uuid = (*tray_it)["tray_uuid"].get<std::string>();
-                                            else
-                                                curr_tray->uuid = "0";
-
-                                            if (tray_it->contains("ctype"))
-                                                curr_tray->ctype = (*tray_it)["ctype"].get<int>();
-                                            else
-                                                curr_tray->ctype = 0;
-                                            curr_tray->cols.clear();
-                                            if (tray_it->contains("cols")) {
-                                                if ((*tray_it)["cols"].is_array()) {
-                                                    for (auto it = (*tray_it)["cols"].begin(); it != (*tray_it)["cols"].end(); it++) {
-                                                       curr_tray->cols.push_back(it.value().get<std::string>());
-                                                    }
-                                                }
-                                            }
-
-                                            if (tray_it->contains("remain")) {
-                                                curr_tray->remain = (*tray_it)["remain"].get<int>();
-                                            } else {
-                                                curr_tray->remain = -1;
-                                            }
-                                            int ams_id_int = 0;
-                                            int tray_id_int = 0;
-                                            try {
-                                                if (!ams_id.empty() && !curr_tray->id.empty()) {
-                                                    ams_id_int = atoi(ams_id.c_str());
-                                                    tray_id_int = atoi(curr_tray->id.c_str());
-
-                                                    if (type_id < 4) {
-                                                        curr_tray->is_exists = (tray_exist_bits & (1 << (ams_id_int * 4 + tray_id_int))) != 0 ? true : false;
-                                                    }
-                                                    else {
-                                                        curr_tray->is_exists = get_flag_bits(tray_exist_bits, 16 + (ams_id_int - 128));
-                                                    }
-
-                                                }
-                                            }
-                                            catch (...) {
-                                            }
-                                            if (tray_it->contains("setting_id")) {
-                                                curr_tray->filament_setting_id = (*tray_it)["setting_id"].get<std::string>();
-                                            }
-                                            auto curr_time = std::chrono::system_clock::now();
-                                            auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(curr_time - extrusion_cali_set_hold_start);
-                                            if (diff.count() > HOLD_TIMEOUT || diff.count() < 0
-                                                || ams_id_int != (extrusion_cali_set_tray_id / 4)
-                                                || tray_id_int != (extrusion_cali_set_tray_id % 4)) {
-                                                if (tray_it->contains("k")) {
-                                                    curr_tray->k = (*tray_it)["k"].get<float>();
-                                                }
-                                                if (tray_it->contains("n")) {
-                                                    curr_tray->n = (*tray_it)["n"].get<float>();
-                                                }
-                                            }
-
-                                            std::string temp = tray_it->dump();
-
-                                            if (tray_it->contains("cali_idx")) {
-                                                curr_tray->cali_idx = (*tray_it)["cali_idx"].get<int>();
-                                            }
-                                        }
-                                        // remove not in trayList
-                                        for (auto tray_it = tray_id_set.begin(); tray_it != tray_id_set.end(); tray_it++) {
-                                            std::string tray_id = *tray_it;
-                                            auto tray = curr_ams->trayList.find(tray_id);
-                                            if (tray != curr_ams->trayList.end()) {
-                                                curr_ams->trayList.erase(tray_id);
-                                                BOOST_LOG_TRIVIAL(trace) << "parse_json: remove ams_id=" << ams_id << ", tray_id=" << tray_id;
-                                            }
-                                        }
-                                    }
-                                }
-                                // remove not in amsList
-                                for (auto it = ams_id_set.begin(); it != ams_id_set.end(); it++) {
-                                    std::string ams_id = *it;
-                                    auto ams = amsList.find(ams_id);
-                                    if (ams != amsList.end()) {
-                                        BOOST_LOG_TRIVIAL(trace) << "parse_json: remove ams_id=" << ams_id;
-                                        amsList.erase(ams_id);
-                                    }
-                                }
-                            }
+                        // Its own try: a bad AMS field (the H3C's AMS 3H once overflowed tray_exist_bits)
+                        // must not skip the external spool, vir_slot and parse_new_info below.
+                        try {
+                            parse_ams_report(jj, key_field_only);
+                        } catch (const std::exception &e) {
+                            if (log_first_time(std::string("ams_report_error|") + e.what()))
+                                BOOST_LOG_TRIVIAL(warning) << "parse_json: the ams report could not be read (" << e.what() << "), skipped";
+                        } catch (...) {
+                            if (log_first_time("ams_report_error|unknown"))
+                                BOOST_LOG_TRIVIAL(warning) << "parse_json: the ams report could not be read, skipped";
                         }
                     }
 
@@ -5442,6 +5509,9 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                             else if (curr_tray_id >= 0 && curr_tray_id < 16){
                                 ams_id = curr_tray_id / 4;
                                 tray_id = curr_tray_id % 4;
+                            } else if (std::string dec_ams, dec_slot; decode_tray_index(curr_tray_id, dec_ams, dec_slot) && is_rack_ams_id(dec_ams)) {
+                                ams_id  = atoi(dec_ams.c_str()); // the AMS 3H: 28 + slot
+                                tray_id = atoi(dec_slot.c_str());
                             } else {
                                 BOOST_LOG_TRIVIAL(trace) << "extrusion_cali_set: unsupported tray_id = " << curr_tray_id;
                             }
@@ -5495,6 +5565,9 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                             else if (curr_tray_id >= 0 && curr_tray_id < 16) {
                                 ams_id  = curr_tray_id / 4;
                                 tray_id = curr_tray_id % 4;
+                            } else if (std::string dec_ams, dec_slot; decode_tray_index(curr_tray_id, dec_ams, dec_slot) && is_rack_ams_id(dec_ams)) {
+                                ams_id  = atoi(dec_ams.c_str()); // the AMS 3H: 28 + slot
+                                tray_id = atoi(dec_slot.c_str());
                             } else {
                                 BOOST_LOG_TRIVIAL(trace) << "extrusion_cali_sel: unsupported tray_id = " << curr_tray_id;
                             }
@@ -5799,7 +5872,9 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
 void MachineObject::set_ctt_dlg( wxString text){
     if (!m_set_ctt_dlg) {
         m_set_ctt_dlg = true;
-        auto print_error_dlg = new GUI::SecondaryCheckDialog(nullptr, wxID_ANY, _L("Warning"), GUI::SecondaryCheckDialog::ButtonStyle::ONLY_CONFIRM);
+        // Parented so it is destroyed with the main frame: a parentless top-level window,
+        // even hidden, keeps wx from leaving the event loop on exit.
+        auto print_error_dlg = new GUI::SecondaryCheckDialog(GUI::wxGetApp().mainframe, wxID_ANY, _L("Warning"), GUI::SecondaryCheckDialog::ButtonStyle::ONLY_CONFIRM);
         print_error_dlg->update_text(text);
         print_error_dlg->Bind(wxEVT_SHOW, [this](auto& e) {
             if (!e.IsShown()) {
@@ -6467,6 +6542,7 @@ void MachineObject::parse_new_info(json print)
                     switch ((char) std::toupper((unsigned char) type[1])) {
                     case 'H': nozzle_obj.volume_exact = NozzleVolumeType::nvtHighFlow; break;
                     case 'U': nozzle_obj.volume_exact = NozzleVolumeType::nvtTPUHighFlow; break;
+                    case 'T': nozzle_obj.volume_exact = NozzleVolumeType::nvtTPU285; break; // BBS 2.9.1 T_FLOW
                     case 'E': nozzle_obj.volume_exact = NozzleVolumeType::nvtE3DHighFlow; break;
                     default: nozzle_obj.volume_exact = NozzleVolumeType::nvtStandard; break;
                     }
@@ -6481,6 +6557,13 @@ void MachineObject::parse_new_info(json print)
                 nozzle_obj.stat         = njon.contains("stat") && njon["stat"].is_number() ? njon["stat"].get<int>() : 0;
                 if (njon.contains("fila_id") && njon["fila_id"].is_string()) nozzle_obj.fila_id = njon["fila_id"].get<std::string>();
                 if (njon.contains("color_m") && njon["color_m"].is_string()) nozzle_obj.color_m = njon["color_m"].get<std::string>();
+                // A rack nozzle's fixed position and the slot it is fed from now (ams << 8 | slot), used
+                // to pair the H3C's AMS 3H slots and spool holders with rack nozzles.
+                nozzle_obj.addr_id = njon.contains("addr_id") && njon["addr_id"].is_number_integer() ? njon["addr_id"].get<int>() : -1;
+                nozzle_obj.snow    = njon.contains("snow") && njon["snow"].is_number_integer() ? njon["snow"].get<int>() : -1;
+                // Bambu Studio DevNozzleSystemParser: bit <id> of "exist" says whether the nozzle is there (IsEmpty otherwise).
+                if (nozzle.contains("exist") && nozzle["exist"].is_number_integer() && nozzle_obj.id >= 0 && nozzle_obj.id < 31)
+                    nozzle_obj.exist = ((nozzle["exist"].get<long long>() >> nozzle_obj.id) & 1) != 0;
                 if (nozzle_obj.diameter == 0.0f) {nozzle_obj.diameter = 0.4f;}
                 m_nozzle_data.nozzles.push_back(nozzle_obj);
             }
@@ -6650,6 +6733,231 @@ int MachineObject::get_flag_bits(int num, int start, int count, int base) const
     }
 }
 
+bool MachineObject::parse_hex_bits(const json& value, long long& bits)
+{
+    // The printers send these masks as hex strings ("F0000000"). stol stopped at 32 bits on Windows
+    // and threw out_of_range once the H3C's AMS 3H set tray bit 31, which ended the whole push.
+    if (value.is_number_integer()) {
+        bits = value.get<long long>();
+        return true;
+    }
+    if (!value.is_string())
+        return false;
+    std::string s = value.get<std::string>();
+    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        s.erase(0, 2);
+    if (s.empty() || s.size() > 16)
+        return false;
+    unsigned long long v = 0;
+    for (char c : s) {
+        int d = AmsTray::hex_digit_to_int(c);
+        if (d < 0)
+            return false;
+        v = (v << 4) | (unsigned long long) d;
+    }
+    bits = (long long) v;
+    return true;
+}
+
+void MachineObject::parse_ams_zones(const json& zone_info, Ams& ams)
+{
+    auto read_int = [](const json& j, const char* key, int& out) {
+        if (!j.contains(key))
+            return;
+        const json& v = j[key];
+        if (v.is_number_integer())
+            out = v.get<int>();
+        else if (v.is_number())
+            out = int(v.get<double>());
+        else if (v.is_string()) {
+            char*       end = nullptr;
+            const std::string s = v.get<std::string>();
+            const long  n   = std::strtol(s.c_str(), &end, 10);
+            if (end != s.c_str())
+                out = int(n);
+        }
+    };
+    for (const json& jz : zone_info) {
+        if (!jz.is_object())
+            continue;
+        Ams::Zone z;
+        read_int(jz, "zone_id", z.id);
+        if (jz.contains("zone_slots") && jz["zone_slots"].is_array())
+            for (const json& s : jz["zone_slots"]) {
+                int slot = -1;
+                if (s.is_number_integer())
+                    slot = s.get<int>();
+                else if (s.is_string())
+                    slot = std::atoi(s.get<std::string>().c_str());
+                if (slot >= 0)
+                    z.slots.push_back(slot);
+            }
+        read_int(jz, "humidity", z.humidity);
+        read_int(jz, "humidity_raw", z.humidity_raw);
+        read_int(jz, "dry_time", z.left_dry_time);
+        if (jz.contains("temp")) {
+            const json& t = jz["temp"];
+            if (t.is_number())
+                z.temperature = t.get<float>();
+            else if (t.is_string() && !t.get<std::string>().empty())
+                z.temperature = string_to_float(t.get<std::string>());
+        }
+        ams.zones.push_back(z);
+    }
+}
+
+bool MachineObject::has_rack_ams() const
+{
+    for (const auto& kv : amsList)
+        if (kv.second && kv.second->is_rack())
+            return true;
+    return false;
+}
+
+bool MachineObject::is_rack_ams_id(const std::string& ams_id) const
+{
+    auto it = amsList.find(ams_id);
+    return it != amsList.end() && it->second && it->second->is_rack();
+}
+
+bool MachineObject::mapping_blocked_ams_id(const std::string& ams_id) const
+{
+    // Phase 2: the AMS 3H and the rack spool holders are mapped with Bambu Studio's numbering and
+    // rack pairing (tray_index_of, rack_bound_slots), so nothing is blocked any more.
+    (void) ams_id;
+    return false;
+}
+
+std::set<std::string> MachineObject::mapping_blocked_ams_ids() const
+{
+    std::set<std::string> out;
+    for (const auto& kv : amsList)
+        if (kv.second && mapping_blocked_ams_id(kv.first))
+            out.insert(kv.first);
+    return out;
+}
+
+int MachineObject::tray_index_of(const std::string& ams_id, const std::string& slot_id) const
+{
+    const int ams  = std::atoi(ams_id.c_str());
+    const int slot = std::atoi(slot_id.c_str());
+    // A spool holder is named by its own id (254 / 255; on a rack printer also 253..247).
+    if (BambuExtruderMap::is_external_spool_ams_id(ams) || (is_rack_printer() && GUI::AmsTypes::is_rack_virtual_slot(ams)))
+        return ams;
+    auto it = amsList.find(ams_id);
+    const int type = (it != amsList.end() && it->second) ? it->second->type : GUI::AmsTypes::AMS;
+    return GUI::AmsTypes::mapping_tray_index(type, ams, slot);
+}
+
+bool MachineObject::decode_tray_index(int tray_index, std::string& ams_id, std::string& slot_id) const
+{
+    if (tray_index < 0) {
+        // What the old tray_index / 4, tray_index % 4 gave: callers that decode "no tray" keep that.
+        ams_id  = std::to_string(tray_index / 4);
+        slot_id = std::to_string(tray_index % 4);
+        return false;
+    }
+    // A rack AMS first: its numbers (28 + slot) would otherwise read as AMS 7 / AMS 8.
+    for (const auto& kv : amsList) {
+        if (!kv.second || !kv.second->is_rack())
+            continue;
+        const int base = GUI::AmsTypes::mapping_tray_index(kv.second->type, std::atoi(kv.first.c_str()), 0);
+        const int slot = tray_index - base;
+        if (slot >= 0 && kv.second->trayList.count(std::to_string(slot)) != 0) {
+            ams_id  = kv.first;
+            slot_id = std::to_string(slot);
+            return true;
+        }
+    }
+    if (is_rack_printer() && GUI::AmsTypes::is_rack_virtual_slot(tray_index)) {
+        ams_id  = std::to_string(tray_index);
+        slot_id = "0";
+        return true;
+    }
+    ams_id  = std::to_string(tray_index / 4);
+    slot_id = std::to_string(tray_index % 4);
+    return true;
+}
+
+bool MachineObject::slot_reported(int ams_id, int slot_id) const
+{
+    auto it = amsList.find(std::to_string(ams_id));
+    if (it != amsList.end() && it->second && it->second->trayList.count(std::to_string(slot_id)) != 0)
+        return true;
+    // Bambu Studio's get_tray falls back to the spool holder of that id, whatever the slot.
+    for (const AmsTray& t : vir_slots)
+        if (t.id == std::to_string(ams_id))
+            return true;
+    return false;
+}
+
+std::vector<std::pair<int, int>> MachineObject::rack_bound_slots() const
+{
+    std::vector<std::pair<int, int>> out;
+    if (!is_rack_printer())
+        return out;
+    int rack_ams_id = -1, rack_ams_slots = 0;
+    for (const auto& kv : amsList)
+        if (kv.second && kv.second->is_rack()) {
+            rack_ams_id    = std::atoi(kv.first.c_str());
+            rack_ams_slots = int(kv.second->trayList.size());
+            break;
+        }
+    int rack_size = 0;
+    for (const Nozzle& n : m_nozzle_data.nozzles)
+        if (n.on_rack() || n.addr_id >= 0)
+            ++rack_size;
+    auto exists = [this](int ams, int slot) { return slot_reported(ams, slot); };
+    for (const Nozzle& n : m_nozzle_data.nozzles) {
+        if (!n.on_rack() && n.addr_id < 0)
+            continue;
+        GUI::AmsTypes::RackNozzle rn;
+        rn.addr     = n.addr_id >= 0 ? n.addr_id : (n.id & 0xF);
+        rn.snow     = n.snow;
+        rn.tpu_flow = n.volume_exact == NozzleVolumeType::nvtTPU285;
+        GUI::AmsTypes::RackSlot s = GUI::AmsTypes::bound_slot(rn, rack_ams_id, rack_ams_slots, rack_size, exists);
+        if (!s.valid())
+            continue;
+        if (GUI::AmsTypes::is_rack_virtual_slot(s.ams_id))
+            s.slot_id = 0; // a holder has one slot
+        out.emplace_back(s.ams_id, s.slot_id);
+    }
+    return out;
+}
+
+int MachineObject::strip_blocked_mapping(std::vector<FilamentInfo>& result) const
+{
+    // The last check on a mapping before it is used: an entry naming a rack AMS slot (the AMS 3H)
+    // carries that slot's own tray number (28 + slot, never ams_id * 4 + slot: 128..136 is the AMS
+    // HT's range on other printers), and a slot no rack nozzle is fed from is not mapped at all.
+    int stripped = 0;
+    if (!is_rack_printer())
+        return 0;
+    const std::vector<std::pair<int, int>> bound = rack_bound_slots();
+    for (FilamentInfo& f : result) {
+        if (f.ams_id.empty() || f.tray_id < 0)
+            continue;
+        const int ams = std::atoi(f.ams_id.c_str());
+        const bool rack_unit = is_rack_ams_id(f.ams_id);
+        const bool holder    = GUI::AmsTypes::is_rack_virtual_slot(ams);
+        if (!rack_unit && !holder)
+            continue;
+        const int slot = holder ? 0 : std::atoi(f.slot_id.c_str());
+        if (std::find(bound.begin(), bound.end(), std::make_pair(ams, slot)) == bound.end()) {
+            f.tray_id  = -1;
+            f.distance = 99999;
+            f.ams_id.clear();
+            f.slot_id.clear();
+            ++stripped;
+            continue;
+        }
+        f.tray_id = tray_index_of(f.ams_id, f.slot_id);
+    }
+    if (stripped > 0)
+        BOOST_LOG_TRIVIAL(info) << "ams_mapping: " << stripped << " filament(s) named a rack slot no rack nozzle is fed from, left unmapped";
+    return stripped;
+}
+
 void MachineObject::update_filament_list()
 {
     PresetBundle *preset_bundle = Slic3r::GUI::wxGetApp().preset_bundle;
@@ -6770,6 +7078,8 @@ void MachineObject::check_ams_filament_valid()
     for (auto &ams_pair : amsList) {
         auto ams_id = ams_pair.first;
         auto &ams = ams_pair.second;
+        if (ams && ams->is_rack())
+            continue; // no commands to a rack AMS (H3C AMS 3H) yet
         std::ostringstream stream;
         if (ams->nozzle < 0 || ams->nozzle >= m_extder_data.extders.size()) {
             return;
@@ -7151,6 +7461,17 @@ void DeviceManager::lan_reconnect_tick()
 {
     if (!m_agent) return;
 
+    // A LAN session that has stayed up long enough proves its access code (LanAccessCodeWatch.hpp).
+    if (!m_lan_code_watch.empty()) {
+        const long long steady = first_request_now_ms();
+        std::vector<std::pair<std::string, LanAccessCode::Verdict>> verdicts;
+        for (auto& kv : m_lan_code_watch)
+            if (LanAccessCode::Verdict v = kv.second.tick(steady); v != LanAccessCode::Verdict::None)
+                verdicts.emplace_back(kv.first, v);
+        for (const auto& v : verdicts)
+            lan_code_verdict(v.first, v.second);
+    }
+
     // Which printer this instance is meant to hold a session to.
     //
     // The hidden hub-managed instance owns the choice itself: nobody is there to pick one on the
@@ -7184,6 +7505,13 @@ void DeviceManager::lan_reconnect_tick()
 
     for (MachineObject* obj : want) {
         if (!obj->has_access_right() || obj->dev_ip.empty()) continue;
+        // A code the printer keeps refusing: wait for the user rather than redial every minute
+        // (LanAccessCode::redial_paused; the Device page offers the edit dialog).
+        if (auto w = m_lan_code_watch.find(obj->dev_id);
+            w != m_lan_code_watch.end() && LanAccessCode::redial_paused(w->second, hidden)) {
+            obj->m_redial_due = false;
+            continue;
+        }
         // The selection's first dial was refused (MachineObject::note_dial_failed): its one
         // re-dial, while what it held keeps waiting.
         if (obj->m_redial_due && std::chrono::steady_clock::now() >= obj->m_redial_at) {
@@ -7228,6 +7556,139 @@ void DeviceManager::lan_reconnect_tick()
     }
 }
 
+// --------------------------------------------------- the refused access code ----
+//
+// See LanAccessCodeWatch.hpp for the rule. The reconnect ladder keeps backing off as before (one
+// dial a minute at most once it is up to speed); this only decides when to tell the user.
+
+void DeviceManager::note_lan_dial_started(const std::string& dev_id, const std::string& code)
+{
+    if (dev_id.empty()) return;
+    m_lan_code_watch[dev_id].dial_started(first_request_now_ms(), LanAccessCode::code_fingerprint(code));
+}
+
+void DeviceManager::note_lan_dial_up(const std::string& dev_id)
+{
+    auto it = m_lan_code_watch.find(dev_id);
+    if (it != m_lan_code_watch.end())
+        it->second.session_up(first_request_now_ms());
+}
+
+void DeviceManager::note_lan_dial_ended(const std::string& dev_id, const std::string& msg)
+{
+    auto it = m_lan_code_watch.find(dev_id);
+    if (it == m_lan_code_watch.end()) return;
+    const LanAccessCode::Verdict v = it->second.dial_ended(first_request_now_ms(), msg);
+    if (it->second.last_outcome() == LanAccessCode::Outcome::Refused && !it->second.notice_shown())
+        BOOST_LOG_TRIVIAL(info) << "lan_access_code: dev_id=" << dev_id << " dial refused (" << it->second.refusals() << " in a row)";
+    lan_code_verdict(dev_id, v);
+}
+
+bool DeviceManager::lan_access_code_refused(const std::string& dev_id) const
+{
+    auto it = m_lan_code_watch.find(dev_id);
+    return it != m_lan_code_watch.end() && it->second.last_dial_refused();
+}
+
+bool DeviceManager::lan_access_code_blocked(const std::string& dev_id) const
+{
+    auto it = m_lan_code_watch.find(dev_id);
+    return it != m_lan_code_watch.end() && it->second.notice_shown();
+}
+
+bool DeviceManager::lan_access_code_bar(const std::string& dev_id) const
+{
+    auto it = m_lan_code_watch.find(dev_id);
+    return it != m_lan_code_watch.end() && it->second.bar_says_refused();
+}
+
+void DeviceManager::lan_code_verdict(const std::string& dev_id, LanAccessCode::Verdict v)
+{
+    if (v == LanAccessCode::Verdict::None) return;
+    GUI::GUI_App& app = Slic3r::GUI::wxGetApp();
+    GUI::NotificationManager* nm = (app.plater() != nullptr) ? app.plater()->get_notification_manager() : nullptr;
+    if (v == LanAccessCode::Verdict::Clear) {
+        BOOST_LOG_TRIVIAL(warning) << "lan_access_code: dev_id=" << dev_id << " the access code works again, notice closed";
+        if (nm) nm->close_notification_of_type(GUI::NotificationType::LanAccessCodeRejected);
+        return;
+    }
+    // Notify: once per code, the one line a user's log shows for it.
+    auto it = m_lan_code_watch.find(dev_id);
+    BOOST_LOG_TRIVIAL(warning) << "lan_access_code: dev_id=" << dev_id << " refused "
+                               << (it != m_lan_code_watch.end() ? it->second.refusals() : 0)
+                               << " dial(s) in a row with its saved access code: asking the user to re-enter it"
+                               << (app.is_hub_managed() ? "" : " (no more redials until then)");
+    // The hidden hub-managed instance has nobody to show it to.
+    if (!nm || app.is_hub_managed()) return;
+    MachineObject* obj  = get_my_machine(dev_id);
+    std::string    name = obj ? obj->dev_name : dev_id;
+    const std::string text = GUI::format(_u8L("The printer refused the access code for %1%. Re-enter it."), name);
+    nm->close_notification_of_type(GUI::NotificationType::LanAccessCodeRejected);
+    nm->push_notification(GUI::NotificationType::LanAccessCodeRejected, GUI::NotificationManager::NotificationLevel::WarningNotificationLevel,
+                          text, _u8L("Re-enter access code"), [dev_id](wxEvtHandler*) {
+                              // Out of the canvas's mouse handling before a modal dialog opens.
+                              Slic3r::GUI::wxGetApp().CallAfter([dev_id]() { GUI::open_printer_edit_dialog(dev_id); });
+                              // Stays up until a saved code or a working session closes it (a
+                              // cancelled dialog leaves it there to click again).
+                              return false;
+                          });
+
+    // That notice lives on the 3D canvas. Anywhere else (the Device page, where a connect is
+    // watched), ask in a dialog too.
+    GUI::MainFrame* mf = app.mainframe;
+    const int       tab = (mf && mf->m_tabpanel) ? mf->m_tabpanel->GetSelection() : -1;
+    if (tab == GUI::MainFrame::tp3DEditor || tab == GUI::MainFrame::tpPreview || tab == GUI::MainFrame::tpShowcase)
+        return;
+    static bool s_open = false;
+    if (s_open)
+        return;
+    s_open = true;
+    app.CallAfter([dev_id, name]() {
+        wxWindow* parent = Slic3r::GUI::wxGetApp().mainframe;
+        const wxString msg = wxString::FromUTF8(GUI::format(_u8L("%1% refused its access code. Without the right code the slicer cannot "
+                                                                  "connect to it, and stops trying until you enter it."), name)) +
+                             "\n\n" + _L("Enter the access code shown on the printer's screen now?");
+        GUI::MessageDialog dlg(parent, msg,
+                               _L("Access code refused"), wxYES_NO | wxYES_DEFAULT | wxICON_WARNING);
+        dlg.SetButtonLabel(wxID_YES, _L("Re-enter access code"));
+        dlg.SetButtonLabel(wxID_NO, _L("Later"));
+        const int answer = dlg.ShowModal();
+        s_open           = false;
+        if (answer == wxID_YES)
+            GUI::open_printer_edit_dialog(dev_id);
+    });
+}
+
+void DeviceManager::lan_access_code_changed(MachineObject* obj)
+{
+    if (!obj || obj->dev_id.empty()) return;
+    const std::string dev_id = obj->dev_id;
+    // The user typed this code in: if the printer refuses it too, say so after the quick re-dial.
+    m_lan_code_watch[dev_id].code_from_user();
+    GUI::GUI_App& app = Slic3r::GUI::wxGetApp();
+    if (app.plater() != nullptr)
+        if (GUI::NotificationManager* nm = app.plater()->get_notification_manager())
+            nm->close_notification_of_type(GUI::NotificationType::LanAccessCodeRejected);
+
+    // Redial now, from a clean ladder, when this is the printer the session is for. Any other
+    // printer uses the new code the next time it is selected.
+    m_lan_reconnect.erase(dev_id);
+    MachineObject* sel = get_selected_machine();
+    if (!m_agent || !sel || sel->dev_id != dev_id || !sel->is_lan_mode_printer() || sel->dev_ip.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "lan_access_code: dev_id=" << dev_id << " access code changed (not the selected printer, no redial)";
+        return;
+    }
+    // (Both copies of the printer object read the code from the app config by serial.)
+    sel->m_redial_due = false;
+    lan_reconnect_now(sel, "access code changed");
+    const long long now = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch()).count();
+    LanReconnect& r = m_lan_reconnect[dev_id];
+    r.last_try   = now;
+    r.attempts   = 1;
+    r.down_since = now;
+}
+
 void DeviceManager::full_report_tick()
 {
     // Only the cloud printers: a LAN printer is reached over the one LAN session the agent holds,
@@ -7245,6 +7706,44 @@ void DeviceManager::full_report_tick()
         BOOST_LOG_TRIVIAL(info) << "full_report: dev_id=" << m->dev_id << " has sent no AMS / spool report yet, asked for one (rc="
                                 << rc << ")";
     }
+}
+
+void DeviceManager::cloud_watch_tick()
+{
+    if (!m_agent || !Slic3r::GUI::wxGetApp().is_user_login()) {
+        // Signed out: whatever was subscribed went with the session, so a later sign-in starts over.
+        m_cloud_watch_asked.clear();
+        return;
+    }
+    const auto steady = std::chrono::steady_clock::now();
+    if (m_cloud_watch_at != std::chrono::steady_clock::time_point{} &&
+        steady - m_cloud_watch_at < std::chrono::milliseconds(CLOUD_WATCH_TICK_MS))
+        return;
+    m_cloud_watch_at = steady;
+
+    // Every online printer bound to the account and reached through the cloud. The selected one is
+    // left out: the agent subscribed it when it was selected and the Device tab keeps it reporting.
+    const MachineObject* sel = get_selected_machine();
+    const auto           now = std::chrono::system_clock::now();
+    std::vector<BambuCloudWatch::Candidate> cands;
+    for (const auto& kv : userMachineList) {
+        MachineObject* m = kv.second;
+        if (!m || m == sel || m->dev_id.empty() || m->is_lan_mode_printer() || !m->is_online()) continue;
+        BambuCloudWatch::Candidate c;
+        c.id = m->dev_id;
+        if (m->m_push_count > 0)
+            c.silence_ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(now - m->last_push_time).count();
+        cands.push_back(c);
+    }
+    const long long now_ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch()).count();
+    const std::vector<std::string> due = BambuCloudWatch::subscribe_due(m_cloud_watch_asked, cands, now_ms);
+    if (due.empty()) return;
+    // UltraNet's add_subscribe subscribes each printer's report topic and asks it for a full report.
+    m_agent->add_subscribe(due);
+    std::string ids;
+    for (const std::string& id : due) ids += (ids.empty() ? "" : ",") + id;
+    BOOST_LOG_TRIVIAL(info) << "cloud_watch: subscribed [" << ids << "] (" << cands.size() << " cloud printer(s) online besides the selected one)";
 }
 
 void DeviceManager::lan_watch_tick()
@@ -7283,7 +7782,8 @@ void DeviceManager::lan_watch_tick()
 //
 // Candidates: every Bambu machine this instance knows with a saved access code and an address -
 // the same test the Device tab applies before it offers to connect. Cloud-bound machines are not
-// here: with a login the agent's own server session already reports all of them at once.
+// here: they share the agent's one cloud session, which reports every printer subscribed on it -
+// and cloud_watch_tick subscribes all of them (the plug-in alone only subscribes the selected one).
 MachineObject* DeviceManager::lan_watch_rotate()
 {
     std::vector<MachineObject*> cands;
@@ -7564,7 +8064,16 @@ void DeviceManager::fetch_bind_list_async(std::function<void()> done)
     std::thread([this, agent, token = std::weak_ptr<int>(m_refresh_token), done = std::move(done)]() mutable {
         unsigned int http_code = 0;
         std::string  body;
-        const int    result = agent->get_user_print_info(&http_code, &body);
+        // This is a bare std::thread: an exception from the plug-in would be std::terminate. A failed
+        // fetch still has to reach the CallAfter below, so `done` runs and the UI does not wait for it.
+        int result = -1;
+        try {
+            result = agent->get_user_print_info(&http_code, &body);
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "Printer refresh: get_user_print_info threw: " << e.what();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "Printer refresh: get_user_print_info threw an unknown exception";
+        }
         Slic3r::GUI::wxGetApp().CallAfter([this, token, result, body = std::move(body), done = std::move(done)]() {
             if (token.expired())
                 return;
@@ -7837,7 +8346,7 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
             if (last_selected->second->is_connecting() && !need_disconnect)
                 return false;
 
-            if (!need_disconnect) {m_agent->disconnect_printer(); }
+            if (!need_disconnect && m_agent) {m_agent->disconnect_printer(); }
         }
     }
 
@@ -8409,59 +8918,13 @@ void DeviceManager::check_filaments_in_blacklist(std::string tag_vendor, std::st
         {"CF/GF: hard and brittle", _L("CF/GF filaments are hard and brittle, it's easy to break or get stuck in AMS, please use with caution.")}
     };
 
-    in_blacklist = false;
-
-    if (filaments_blacklist.contains("blacklist")) {
-        for (auto prohibited_filament : filaments_blacklist["blacklist"]) {
-
-            std::string vendor;
-            std::string type;
-            std::string action;
-            std::string description;
-
-            if (prohibited_filament.contains("vendor") &&
-                prohibited_filament.contains("type") &&
-                prohibited_filament.contains("action") &&
-                prohibited_filament.contains("description"))
-            {
-                vendor = prohibited_filament["vendor"].get<std::string>();
-                type = prohibited_filament["type"].get<std::string>();
-                if (GUI::wxGetApp().app_config->get("skip_ams_blacklist_check") == "true") {
-                    action = "warning";
-                } else {
-                    action = prohibited_filament["action"].get<std::string>();
-                }
-                description = prohibited_filament["description"].get<std::string>();
-
-                description = blacklist_prompt[description].ToUTF8().data();
-            }
-            else {
-                return;
-            }
-
-            std::transform(vendor.begin(), vendor.end(), vendor.begin(), ::tolower);
-            std::transform(tag_vendor.begin(), tag_vendor.end(), tag_vendor.begin(), ::tolower);
-            std::transform(tag_type.begin(), tag_type.end(), tag_type.begin(), ::tolower);
-            std::transform(type.begin(), type.end(), type.begin(), ::tolower);
-
-            //third party
-            if (vendor == "third party") {
-                if ("bambulab" != vendor && tag_type == type) {
-                    in_blacklist = true;
-                    ac = action;
-                    info = description;
-                    return;
-                }
-            }
-            else {
-                if (vendor == tag_vendor && tag_type == type) {
-                    in_blacklist = true;
-                    ac = action;
-                    info = description;
-                    return;
-                }
-            }
-        }
+    // The decision is AmsMatch::check_blacklist; here only its description is put in words.
+    const bool skip_check = GUI::wxGetApp().app_config->get("skip_ams_blacklist_check") == "true";
+    const GUI::AmsMatch::BlacklistHit hit = GUI::AmsMatch::check_blacklist(filaments_blacklist, tag_vendor, tag_type, skip_check);
+    in_blacklist = hit.in_blacklist;
+    if (hit.in_blacklist) {
+        ac   = hit.action;
+        info = blacklist_prompt[hit.description].ToUTF8().data();
     }
 }
 

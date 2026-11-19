@@ -301,6 +301,31 @@ void RemoteFileGridModel::QueryPrinter(std::function<void(const pstore::Result&,
                     });
 }
 
+void RemoteFileGridModel::CheckStart(const std::string& id,
+                                     std::function<void(const pstore::Result&, const std::string&, const std::string&, const std::string&)> done)
+{
+    if (!m_files || !m_cards.count(id)) {
+        if (done)
+            done(pstore::Result::failure(m_files ? pstore::Status::NotFound : pstore::Status::NotSupported,
+                                         m_files ? "That file is no longer listed." : m_message),
+                 std::string(), std::string(), std::string());
+        return;
+    }
+    auto                     files    = m_files;
+    auto                     result   = std::make_shared<pstore::Result>();
+    auto                     state    = std::make_shared<std::string>();
+    auto                     current  = std::make_shared<std::string>();
+    auto                     advice   = std::make_shared<std::string>();
+    const std::weak_ptr<int> lifetime = m_lifetime;
+    m_executor->run([files, id, result, state, current, advice]() { *result = files->start_check(id, *state, *current, *advice); },
+                    [lifetime, result, state, current, advice, done]() {
+                        if (lifetime.expired())
+                            return;
+                        if (done)
+                            done(*result, *state, *current, *advice);
+                    });
+}
+
 void RemoteFileGridModel::StartPrint(const std::string& id, std::function<void(const pstore::Result&)> done)
 {
     const FileGridCard* card = FindCard(id);

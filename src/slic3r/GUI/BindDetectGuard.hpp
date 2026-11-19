@@ -11,8 +11,12 @@
 #include "slic3r/Utils/bambu_networking.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <exception>
+#include <memory>
 #include <string>
+#include <utility>
 
 namespace Slic3r { namespace GUI {
 
@@ -76,6 +80,39 @@ inline int vet_bind_detect_result(int result, BBL::detectResult &d)
     d.bind_state = lower(trim(d.bind_state));
     if (d.bind_state.empty()) d.bind_state = "free";
     return 0;
+}
+
+// ---- Worker-thread safety for the dialog (found 2026-10-27, bind by IP crashed on macOS / Linux) ----
+//
+// 1. An exception that leaves a std::thread / boost::thread body is std::terminate: the whole slicer
+//    vanishes. run_guarded() runs the body and turns any exception (also a non-std one thrown by the
+//    network plug-in) into on_error(what) instead.
+// 2. A worker must never touch the dialog directly: Cancel / close can destroy it while bind_detect is
+//    still waiting on the network. The dialog owns an AliveToken that it clears on the UI thread when
+//    it goes away; the worker only posts UI-thread closures that re-check the token first
+//    (ui_alive()), so the dialog cannot be destroyed while a closure runs.
+using AliveToken = std::shared_ptr<std::atomic<bool>>;
+
+inline AliveToken make_alive_token() { return std::make_shared<std::atomic<bool>>(true); }
+inline bool ui_alive(const AliveToken &t) { return t && t->load(std::memory_order_acquire); }
+inline void kill_alive_token(const AliveToken &t)
+{
+    if (t) t->store(false, std::memory_order_release);
+}
+
+// Runs fn(); an exception goes to on_error(const std::string &what) (which must not throw; if it does
+// anyway that is swallowed too). Returns true when fn() completed.
+template<class Fn, class OnError> bool run_guarded(Fn &&fn, OnError &&on_error) noexcept
+{
+    try {
+        fn();
+        return true;
+    } catch (const std::exception &e) {
+        try { on_error(std::string(e.what())); } catch (...) {}
+    } catch (...) {
+        try { on_error(std::string("unknown exception")); } catch (...) {}
+    }
+    return false;
 }
 
 }} // namespace Slic3r::GUI

@@ -1,0 +1,44 @@
+{
+  "id": "qidi-stale-count",
+  "personality": "qidi",
+  "name": "EMU QIDI X-Max 4 (box_count 2 saved, 1 Box: the 2.4.6.3 report)",
+  "edgeslicer_preset": "Qidi X-Max 4 0.4 nozzle",
+  "bind": "127.0.0.15",
+  "port": 7125,
+  "lan": false,
+  "state": "standby",
+  "qidi": {
+    "box_report": "vars_only",
+    "mcc_shape": "array",
+    "boxes": 1,
+    "vars_box_count": 2,
+    "polar_cooler": true,
+    "stale_value_t": {
+      "1": "slot7"
+    }
+  },
+  "slots": [
+    {
+      "type": "PLA",
+      "color": "#E03030",
+      "loaded": true,
+      "untagged": true
+    },
+    {
+      "type": "PLA",
+      "color": "#F5F5F5",
+      "loaded": true,
+      "untagged": true
+    },
+    {
+      "type": "ASA",
+      "color": "#202020",
+      "loaded": true,
+      "untagged": true
+    },
+    {
+      "loaded": false
+    }
+  ],
+  "faults": {}
+}

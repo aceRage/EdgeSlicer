@@ -35,6 +35,15 @@ class DropDown : public PopupWindow
     bool   align_icon        = false;
     bool   text_off          = false;
 
+    // Type-to-filter (opt-in, see EnableTypeToFilter). While the list is open, printable keys build
+    // filter_text and the list shows only the matching rows. visible_items maps a shown row to the real
+    // item index, so selection, hover and the ComboBox's per-item data keep using real indices.
+    bool             filter_enabled = false;
+    wxString         filter_text;
+    std::vector<int> visible_items;
+    bool             kb_hover = false; // hover_item was set from the keyboard (drawn highlighted)
+    wxPoint          last_motion_screen{-1, -1};
+
     wxSize textSize;
     wxSize iconSize;
     int    actionIconWidth = 0;
@@ -91,6 +100,17 @@ public:
 
     void SetAlignIcon(bool align);
 
+    // Opt-in (off by default): typing while the list is open narrows it to the rows whose text
+    // contains the typed text (case-insensitive). See DropDown::HandleSpecialKey / HandlePrintableKey.
+    void EnableTypeToFilter(bool on);
+    bool IsTypeToFilterEnabled() const { return filter_enabled; }
+    const wxString &GetFilterText() const { return filter_text; }
+    // Esc, Backspace, Up, Down and Enter while the list is open. Returns true when consumed.
+    bool HandleSpecialKey(wxKeyEvent &event);
+    // A printable key (extends the filter). Returns true when consumed.
+    bool HandlePrintableKey(wxKeyEvent &event);
+    static bool IsPrintableKey(const wxKeyEvent &event);
+
     void SetItemExtras(const std::vector<wxBitmap> *action_icons, const std::vector<char> *disabled)
     {
         this->action_icons = action_icons;
@@ -112,6 +132,18 @@ private:
     void paintNow();
 
     void render(wxDC& dc);
+    // Rows currently shown (all items, or the filter matches) and the filter strip above them.
+    int  headerH() const;
+    int  rowCount() const { return filter_text.empty() ? int(texts.size()) : int(visible_items.size()); }
+    int  itemAt(int row) const;
+    int  rowOf(int item) const;
+    int  itemAtY(int y) const;
+    int  popupHeight() const;
+    void clampOffsetY(int &y) const;
+    void applyFilter();
+    void relayoutForFilter();
+    void resetFilterState();
+    void moveHighlight(int step);
     const wxBitmap *actionIcon(int n) const;
     std::pair<int, int> actionColumn() const;
 
@@ -126,6 +158,7 @@ private:
     void mouseCaptureLost(wxMouseCaptureLostEvent &event);
     void mouseMove(wxMouseEvent &event);
     void mouseWheelMoved(wxMouseEvent &event);
+    void charEvent(wxKeyEvent &event);
 
     void sendDropDownEvent();
     void sendDropDownActionEvent(int index);

@@ -405,3 +405,22 @@ TEST_CASE("solve_extruder_order returns the input order when an id is outside wi
         REQUIRE(ordered == ids);
     }
 }
+
+TEST_CASE("LayerTools::nominal_extruder_order rotates to the loaded extruder unless the order is fixed", "[ToolOrdering][Cyclic]")
+{
+    LayerTools lt(0.4);
+    lt.extruders = {0, 1, 2};
+
+    SECTION("default ordering starts with the loaded extruder") {
+        REQUIRE(lt.nominal_extruder_order(2) == std::vector<unsigned int>({2, 0, 1}));
+        REQUIRE(lt.nominal_extruder_order(1) == std::vector<unsigned int>({1, 2, 0}));
+    }
+    SECTION("a loaded extruder the layer does not use, or none, leaves the order alone") {
+        REQUIRE(lt.nominal_extruder_order(3) == lt.extruders);
+        REQUIRE(lt.nominal_extruder_order(-1) == lt.extruders);
+    }
+    SECTION("a Cyclic / custom-sequence layer is printed as given") {
+        lt.fixed_extruder_order = true;
+        REQUIRE(lt.nominal_extruder_order(2) == lt.extruders);
+    }
+}

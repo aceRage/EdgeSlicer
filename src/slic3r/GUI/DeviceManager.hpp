@@ -19,10 +19,13 @@
 #include "boost/bimap/bimap.hpp"
 #include "CameraPopup.hpp"
 #include "LanReconnectLadder.hpp"
+#include "LanAccessCodeWatch.hpp"
+#include "BambuCloudWatch.hpp"
 #include "FirstRequestGate.hpp"
 #include "SsdpConnectType.hpp"
 #include "BindListRefresh.hpp"
 #include "AmsDrying.hpp"
+#include "AmsTypes.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
 #include "NozzleInfo.hpp"
@@ -175,6 +178,9 @@ struct Nozzle
     int              stat{0};
     std::string      fila_id;
     std::string      color_m;
+    int              addr_id{-1}; // rack position 0..8 (H3C), -1 = not reported
+    int              snow{-1};    // slot feeding it now: ams_id << 8 | slot_id, -1 = not reported
+    bool             exist{true}; // its bit in device.nozzle.exist (bit n = report id n); true when not reported
     bool on_rack() const { return ((id >> 4) & 0xF) == 1; }
     bool is_normal() const { return ((stat >> 1) & 0x3) == 0; }
 };
@@ -304,6 +310,8 @@ public:
     bool            is_exists = false;
     int             hold_count = 0;
     int             remain = 0;         // filament remain: 0 ~ 100
+    int             remain_g = -1;      // grams left as the printer counts them, -1 = not reported
+    int             state = -1;         // the tray's "state" (H3C: 27 loaded, 160 empty), -1 = not reported
 
     AmsRoadPosition road_position;
     AmsStep         step_state;
@@ -343,9 +351,24 @@ public:
     std::map<std::string, AmsTray *> trayList;
 
     int nozzle;
-    int type{1}; // 0:dummy 1:ams 2:ams-lite 3:n3f 4:n3s
+    int type{1}; // GUI::AmsTypes: 0 dummy, 1 AMS, 2 AMS Lite, 3 AMS 2 Pro, 4 AMS HT, 5 AMS Lite (N9), 6 AMS 3H, 7 AMS-B
     // Remote drying state (AMS 2 Pro / AMS HT): info bits 4-7/18-23, dry_setting, dry_sf_reason.
     GUI::AmsDrying::DryState dry;
+
+    // The drying zones of an AMS 3H (zone_info[]): each has its own slots, humidity and temperature,
+    // and the unit itself reports neither (Bambu Studio DevAms::DevAmsZone).
+    struct Zone
+    {
+        int              id{-1};
+        std::vector<int> slots;
+        int              humidity{-1};     // level 1..5, larger is drier; -1 = not reported
+        int              humidity_raw{-1}; // percent, -1 = not reported
+        float            temperature{INVALID_AMS_TEMPERATURE};
+        int              left_dry_time{0};
+    };
+    std::vector<Zone> zones;
+
+    bool is_rack() const { return GUI::AmsTypes::is_rack_ams(type); }
 };
 
 enum PrinterFirmwareType {
@@ -419,13 +442,6 @@ public:
 #define UpgradePrinting         -4
 
 // calc distance map
-struct DisValue {
-    int  tray_id;
-    float distance;
-    bool  is_same_color = true;
-    bool  is_type_match = true;
-};
-
 class Preset;
 class MachineObject
 {
@@ -535,6 +551,9 @@ public:
     /* properties */
     std::string dev_name;
     std::string dev_ip;
+    // The address the printer reports in push_status net.info. Only the camera falls back to it
+    // while dev_ip is empty (no SSDP announcement got through); see BambuNetInfo.hpp.
+    std::string net_reported_ip;
     std::string dev_id;
     bool        local_use_ssl_for_mqtt { true };
     bool        local_use_ssl_for_ftp { true };
@@ -641,11 +660,13 @@ public:
 
     /* ams properties */
     std::map<std::string, Ams*> amsList;    // key: ams[id], start with 0
-    long  ams_exist_bits = 0;
-    long  tray_exist_bits = 0;
-    long  tray_is_bbl_bits = 0;
-    long  tray_read_done_bits = 0;
-    long  tray_reading_bits = 0;
+    // 64-bit like BambuStudio's (DeviceManager.hpp, "[N10] support N10"): the H3C's AMS 3H reports its
+    // nine slots as tray bits 28..36, past a 32-bit long (MSVC), and stol threw on them.
+    long long ams_exist_bits = 0;
+    long long tray_exist_bits = 0;
+    long long tray_is_bbl_bits = 0;
+    long long tray_read_done_bits = 0;
+    long long tray_reading_bits = 0;
     int   ams_rfid_status = 0;
     bool  ams_insert_flag { false };
     bool  ams_power_on_flag { false };
@@ -844,8 +865,10 @@ public:
     // Don't-remind buttons on every surface. Mirrors Bambu Studio's method of the same name.
     // `command` is the refused command's name: only a refused print action (project_file, pause,
     // resume, stop, ...) is offered Stop / Resume Printing; anything else gets OK.
+    // `job_id` is the job the refusal names, when the reply carries one; Stop / Resume are only
+    // offered for a job the printer itself named.
     void add_command_error_code_dlg(int command_err, const nlohmann::json& action_json = nlohmann::json(),
-                                    const std::string& command = std::string());
+                                    const std::string& command = std::string(), const std::string& job_id = std::string());
 
     // What this slicer has published to the printer and is still waiting on an answer for,
     // sequence id -> command name. A reply only counts as a refusal when it answers one of these;
@@ -1080,6 +1103,11 @@ public:
     // until the first report that carries "fun"; unknown is never treated as secured. When no report
     // has carried the bit, a printer's own "mqtt message verify failed" answer stands in for it.
     bool is_secured_mode() const;
+    // Why a print-control command ("stop", "resume", ...) cannot be sent to this printer right now:
+    // "status_only" (a Bambu Connect printer EdgeSlicer only reads), "secured" (Developer Mode off,
+    // unsigned commands rejected), or "" when it can - over LAN or cloud alike. The error dialog asks
+    // this to hide a button whose command would be dropped instead of showing one that does nothing.
+    std::string print_command_blocker(const std::string& command) const;
     void update_secured_mode_from_fun(const std::string& fun);
     // A reply to a command was the printer refusing it as unsigned (err_code 84033543..84033548 /
     // "mqtt message verify failed"). Shows the Developer Mode message once per printer per session.
@@ -1338,6 +1366,9 @@ public:
     /*for parse new info*/
     bool check_enable_np(const json& print) const;
     void parse_new_info(json print);
+    // print.ams of a push_status report (jj = the "print" object). May throw; parse_json catches it
+    // on its own so the rest of the report is still read.
+    void parse_ams_report(const json& jj, bool key_field_only);
     bool is_nozzle_data_invalid();
     // The diameter of the nozzle on extruder extder_id (0 = main/right, 1 = deputy/left); 0 when
     // the printer has not reported it (Orca #12814).
@@ -1362,6 +1393,44 @@ public:
     std::atomic<int>  m_secured_state { 0 };        // 0 unknown, 1 Developer Mode, 2 secured (print.fun bit 29)
     std::atomic<bool> m_unsigned_refused { false }; // the printer refused an unsigned command (used while the bit is unknown)
     int get_flag_bits(int num, int start, int count = 1, int base = 10) const;
+    // A hex bitmask from the status report ("ams_exist_bits", "tray_exist_bits", ...) into 64 bits.
+    // Never throws: a value that is not hex, or does not fit, leaves `bits` as it was and returns false.
+    static bool parse_hex_bits(const json& value, long long& bits);
+    // Bit `index` of a 64-bit report mask; an index outside 0..63 is not set.
+    static bool hex_bit_set(long long bits, int index) { return index >= 0 && index < 64 && ((bits >> index) & 1LL) != 0; }
+
+    // Rack AMS units (the H3C's AMS 3H, GUI::AmsTypes::is_rack_ams): each slot feeds one rack nozzle.
+    bool has_rack_ams() const;
+    // A printer with a nozzle rack's spool holders (one per rack position, ids 255 down to 247).
+    bool is_rack_printer() const { return has_rack_ams() || vir_slots.size() > 2; }
+    // zone_info[] of one AMS unit into ams.zones (strings or numbers, never throws).
+    static void parse_ams_zones(const json& zone_info, Ams& ams);
+    bool is_rack_ams_id(const std::string& ams_id) const;
+    // The tray number a send mapping names (ams_id, slot_id) by (GUI::AmsTypes::mapping_tray_index):
+    // 28 + slot on the AMS 3H, the holder's own id for a spool holder, ams_id * 4 + slot otherwise.
+    int  tray_index_of(const std::string& ams_id, const std::string& slot_id) const;
+    int  tray_index_of(int ams_id, int slot_id) const { return tray_index_of(std::to_string(ams_id), std::to_string(slot_id)); }
+    // The inverse: false when the number names no unit this printer reports.
+    bool decode_tray_index(int tray_index, std::string& ams_id, std::string& slot_id) const;
+    // Whether the printer reports that slot (Bambu Studio get_tray: a spool holder ignores the slot).
+    bool slot_reported(int ams_id, int slot_id) const;
+    // The slot each rack nozzle is fed from (GUI::AmsTypes::bound_slot): what the send mapping may
+    // map to on a rack printer. A spool holder comes back as (holder id, 0).
+    std::vector<std::pair<int, int>> rack_bound_slots() const;
+    // Kept as the one switch for slots that cannot be sent to: none since the AMS 3H numbering and the
+    // rack pairing are ported (phase 2). The gates that call it stay in place.
+    bool mapping_blocked_ams_id(const std::string& ams_id) const;
+    std::set<std::string> mapping_blocked_ams_ids() const;
+    // Takes every entry that names a blocked slot out of a mapping result (tray -1, no ams/slot) and
+    // returns how many it took out.
+    int strip_blocked_mapping(std::vector<FilamentInfo>& result) const;
+    // Device page actions (load, unload, edit, RFID re-read) refused on that slot: none since phase 2.
+    bool slot_actions_blocked(const std::string& ams_id) const { return mapping_blocked_ams_id(ams_id); }
+    // Load / unload on a rack AMS slot or rack spool holder, as Bambu Studio's hotend page sends it
+    // (GUI::FilamentCommands::rack_change_filament_json).
+    int command_rack_change_filament(bool load, const std::string& ams_id, const std::string& slot_id, int old_temp, int new_temp);
+    // RFID re-read of one rack AMS slot (Bambu Studio command_ams_refresh_rfid2, mode 0).
+    int command_ams_get_rfid(int ams_id, int slot_id, int mode = 0);
 
     /* Device Filament Check */
     struct FilamentData
@@ -1429,6 +1498,15 @@ public:
     void lan_watch_tick();
     static constexpr long long LAN_WATCH_SET_MS = 10 * 1000;
 
+    // Ultra: a cloud-bound printer only reports to a client subscribed to it, and the plug-in
+    // subscribes the selected printer and the Multi-device pages' list - nothing else. So every
+    // other cloud printer had no status at all on the hub's rows (BambuCloudWatch.hpp). This hands
+    // every online cloud printer to add_subscribe, and again one that has gone quiet, at the pace in
+    // BambuCloudWatch::subscribe_due. Signed in only; GUI thread, off the same heartbeat, every
+    // CLOUD_WATCH_TICK_MS.
+    void cloud_watch_tick();
+    static constexpr long long CLOUD_WATCH_TICK_MS = 5 * 1000;
+
     // The backoff ladder, in milliseconds: how long a LAN printer must have looked disconnected
     // before the first retry, and how long between retries after that. The numbers and the formula
     // live in LanReconnectLadder.hpp, which is wx-free, so a unit test can check the
@@ -1438,7 +1516,30 @@ public:
 
     static constexpr long long lan_backoff_ms(int attempts) { return LanReconnectLadder::backoff_ms(attempts); }
 
+    // EdgeSlicer: a LAN printer that refuses its saved access code (LanAccessCodeWatch.hpp).
+    // MachineObject::connect reports every LAN dial and the code it used; the on_local_connect
+    // handler reports how each one ended. REFUSALS_FOR_NOTICE refused dials in a row with one code
+    // show one notice whose button opens the printer's edit dialog; a session that stays up closes
+    // it. GUI thread only.
+    void note_lan_dial_started(const std::string& dev_id, const std::string& code);
+    void note_lan_dial_up(const std::string& dev_id);
+    void note_lan_dial_ended(const std::string& dev_id, const std::string& msg);
+    // The last LAN dial to this printer with its current code was refused.
+    bool lan_access_code_refused(const std::string& dev_id) const;
+    // The printer refused its saved code often enough to raise the notice, and it has not worked
+    // since: the Device page says so and the visible slicer stops redialling it
+    // (LanAccessCode::redial_paused).
+    bool lan_access_code_blocked(const std::string& dev_id) const;
+    // The Device page says the code was refused (from the second refused dial in a row).
+    bool lan_access_code_bar(const std::string& dev_id) const;
+    // The user saved a new access code for this LAN printer: forget the refusals, close the
+    // notice, and - when it is the printer this instance holds a session to - redial it now with
+    // the new code instead of waiting out the reconnect backoff.
+    void lan_access_code_changed(MachineObject* obj);
+
 private:
+    std::map<std::string, LanAccessCode::Watch> m_lan_code_watch;
+    void lan_code_verdict(const std::string& dev_id, LanAccessCode::Verdict v);
     // Per-printer reconnect bookkeeping. Keyed by dev_id so a printer that comes and goes does not
     // inherit another's backoff.
     // (down_since / probe_at / last_try / attempts - see LanReconnectLadder::lan_tick_step.)
@@ -1457,6 +1558,9 @@ private:
     std::string m_lan_watch_id;
     std::chrono::steady_clock::time_point m_lan_watch_set_at {};
     std::string m_lan_watch_set; // the last set handed to the plug-in, for the log
+    // cloud_watch_tick: when each cloud printer was last handed to add_subscribe, and the last tick.
+    BambuCloudWatch::Asked m_cloud_watch_asked;
+    std::chrono::steady_clock::time_point m_cloud_watch_at {};
     long long   m_lan_watch_since { 0 };
     MachineObject* lan_watch_rotate();
     // When something other than the rotation last chose a printer (set_selected_machine: a send,

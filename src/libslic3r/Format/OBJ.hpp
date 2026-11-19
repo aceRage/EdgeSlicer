@@ -1,6 +1,12 @@
 #ifndef slic3r_Format_OBJ_hpp_
 #define slic3r_Format_OBJ_hpp_
 #include "libslic3r/Color.hpp"
+#include "libslic3r/Point.hpp"
+#include <array>
+#include <functional>
+#include <map>
+#include <string>
+#include <vector>
 #include <unordered_map>
 namespace Slic3r {
 

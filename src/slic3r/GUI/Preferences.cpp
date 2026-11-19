@@ -33,7 +33,12 @@
 #include "SSWCP.hpp"
 #include "HomePanel.hpp"
 #include "HomeVaults.hpp"
+#include "ZipCleanup.hpp"
+#include "format.hpp"
+#include "libslic3r/ZipOpen.hpp"
+#include "libslic3r/ZipWorkCleaner.hpp"
 #include "ModelBrowserPanel.hpp"
+#include "LayerlingPanel.hpp"
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE
@@ -140,7 +145,9 @@ wxBoxSizer *PreferencesDialog::create_item_combobox(wxString title, wxWindow *pa
     if (!current_setting.empty()) {
         auto compare  = [current_setting](string possible_setting) { return current_setting == possible_setting; };
         auto iterator = find_if(config_name_index.begin(), config_name_index.end(), compare);
-        current_index = iterator - config_name_index.begin();
+        // Orca #13538: an unknown stored value keeps the first entry instead of indexing past the list.
+        if (iterator != config_name_index.end())
+            current_index = static_cast<unsigned int>(iterator - config_name_index.begin());
     }
 
     auto [sizer, combobox] = create_item_combobox_base(title, parent, tooltip, param, vlist, current_index);
@@ -905,6 +912,90 @@ wxWindow *PreferencesDialog::create_item_vault_downloads_dir(wxWindow *parent, w
     return item_panel;
 }
 
+// ZIP files (PR C): where opened ZIPs are extracted, how much is there, Open folder and Clean now.
+// The size is measured on the clean-up worker, never on the UI thread; the label is updated
+// through the ZipCleanup listener, which is removed when this row is destroyed.
+wxWindow *PreferencesDialog::create_item_zip_work_folder(wxWindow *parent, wxString tooltip)
+{
+    auto item_panel = new wxWindow(parent, wxID_ANY);
+    item_panel->SetBackgroundColour(*wxWHITE);
+    wxBoxSizer *outer = new wxBoxSizer(wxVERTICAL);
+    wxBoxSizer *row   = new wxBoxSizer(wxHORIZONTAL);
+
+    row->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+    auto label = new wxStaticText(item_panel, wxID_ANY, _L("Extracted files"));
+    label->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    label->SetFont(::Label::Body_13);
+    label->SetToolTip(tooltip);
+    label->Wrap(-1);
+
+    const wxString root = from_path(ZipCleanup::work_root());
+    auto path_text = new wxStaticText(item_panel, wxID_ANY, root, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_MIDDLE);
+    path_text->SetForegroundColour(DESIGN_GRAY600_COLOR);
+    path_text->SetFont(::Label::Body_13);
+    path_text->SetToolTip(root);
+
+    auto open = new Button(item_panel, _L("Open folder"));
+    open->SetStyle(ButtonStyle::Regular, ButtonType::Window);
+    open->Bind(wxEVT_BUTTON, [](wxCommandEvent &e) {
+        const boost::filesystem::path dir = ZipCleanup::work_root();
+        boost::system::error_code     ec;
+        boost::filesystem::create_directories(dir, ec);
+        desktop_open_folder(into_u8(from_path(dir)));
+        e.Skip();
+    });
+
+    auto clean = new Button(item_panel, _L("Clean now"));
+    clean->SetStyle(ButtonStyle::Regular, ButtonType::Window);
+    clean->SetToolTip(_L("Delete every extracted ZIP folder except the ones the open project uses."));
+
+    row->Add(label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    row->Add(path_text, 1, wxALIGN_CENTER_VERTICAL | wxALL, FromDIP(5));
+    row->Add(open, 0, wxALL, FromDIP(5));
+    row->Add(clean, 0, wxALL, FromDIP(5));
+
+    wxBoxSizer *size_row = new wxBoxSizer(wxHORIZONTAL);
+    size_row->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+    auto size_text = new wxStaticText(item_panel, wxID_ANY, _L("Size: calculating..."));
+    size_text->SetForegroundColour(DESIGN_GRAY600_COLOR);
+    size_text->SetFont(::Label::Body_13);
+    size_row->Add(size_text, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+
+    outer->Add(row, 0, wxEXPAND);
+    outer->Add(size_row, 0, wxEXPAND);
+    item_panel->SetSizer(outer);
+    item_panel->Layout();
+
+    ZipCleanup::set_listener([size_text, item_panel](const ZipWorkCleaner::Usage &usage, const ZipWorkCleaner::Result *result) {
+        wxString text = format_wxstr(_L("Size: %1% in %2% folder(s)"), format_zip_size(usage.bytes), usage.sessions);
+        if (result != nullptr && result->root_ok)
+            text += " - " + format_wxstr(_L("%1% removed, %2% kept"), result->removed,
+                                         result->kept_young + result->kept_in_use + result->untrusted + result->failed);
+        size_text->SetLabelText(text);
+        item_panel->Layout();
+    });
+    item_panel->Bind(wxEVT_DESTROY, [item_panel](wxWindowDestroyEvent &e) {
+        if (e.GetEventObject() == item_panel)
+            ZipCleanup::set_listener({});
+        e.Skip();
+    });
+
+    clean->Bind(wxEVT_BUTTON, [this, size_text](wxCommandEvent &e) {
+        MessageDialog dlg(this,
+                          _L("Delete all extracted ZIP files now? Folders used by the open project are kept. "
+                             "The ZIP files themselves are not touched."),
+                          _L("Clean now"), wxYES_NO | wxICON_QUESTION);
+        if (dlg.ShowModal() == wxID_YES) {
+            size_text->SetLabelText(_L("Cleaning..."));
+            ZipCleanup::start(ZipCleanup::Mode::Now);
+        }
+        e.Skip();
+    });
+
+    ZipCleanup::start(ZipCleanup::Mode::UsageOnly);
+    return item_panel;
+}
+
 // Ultra (G-code archive): how many sends to keep. Digits only, and clamped to 1..10000 when the
 // field is left, so a stray value never makes the archive grow without bound or delete everything.
 wxBoxSizer *PreferencesDialog::create_item_gcode_archive_max(wxWindow *parent, wxString tooltip)
@@ -1421,6 +1512,12 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " sync_user_preset: " << (sync ? "true" : "false");
         }
 
+        // The Layerling tab appears or goes at once.
+        if (param == "show_layerling_tab") {
+            if (MainFrame* mf = wxGetApp().mainframe; mf != nullptr)
+                mf->update_layerling_tab();
+        }
+
         // Home > Models appears or goes at once.
         if (param == "model_browser_beta") {
             if (MainFrame* mf = wxGetApp().mainframe; mf != nullptr && mf->m_home != nullptr)
@@ -1615,7 +1712,6 @@ wxBoxSizer* PreferencesDialog::create_item_link_association(wxWindow* parent, wx
     auto checkbox = new ::CheckBox(parent);
     checkbox->SetToolTip(tooltip);
     checkbox->SetValue(reg_to_current_instance); // If registered to the current instance, checkbox should be checked
-    checkbox->Enable(!reg_to_current_instance); // Since unregistering isn't supported, checkbox is disabled when checked
 
     h_sizer->Add(checkbox, 0, wxALIGN_CENTER, 0);
     h_sizer->Add(0, 0, 0, wxEXPAND | wxLEFT, 8);
@@ -1668,8 +1764,11 @@ wxBoxSizer* PreferencesDialog::create_item_link_association(wxWindow* parent, wx
     v_sizer->Add(registered_instance_title, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 60);
 
     checkbox->Bind(wxEVT_TOGGLEBUTTON, [=](wxCommandEvent& e) {
-        wxGetApp().associate_url(url_prefix.ToStdWstring());
-        checkbox->Disable();
+        // ORCA: allow unchecking to remove the association
+        if (checkbox->GetValue())
+            wxGetApp().associate_url(url_prefix.ToStdWstring());
+        else
+            wxGetApp().disassociate_url(url_prefix.ToStdWstring());
         update_current_association_str();
         e.Skip();
     });
@@ -1964,6 +2063,48 @@ wxWindow* PreferencesDialog::create_general_page()
             }
         });
 
+    // Orca #13538: Graphics (Orca's own Graphics tab; EdgeSlicer keeps it as a section of this page).
+    auto title_graphics = create_item_title(_L("Graphics"), page, _L("Graphics"));
+    auto item_antialiasing = create_item_combobox(_L("MSAA Multiplier"), page,
+        _L("Set the Multi-Sample Anti-Aliasing level.\n"
+           "Higher values result in smoother edges, but the impact on performance is exponential.\n"
+           "Lower values improve performance, at the cost of jagged edges.\n"
+           "If disabled, it is recommended to enable FXAA to reduce jagged edges with minimal performance impact.\n\n"
+           "Requires application restart."),
+        SETTING_OPENGL_AA_SAMPLES, { _L("Disabled"), "2x", "4x", "8x", "16x" }, { "0", "2", "4", "8", "16" });
+    auto item_fxaa = create_item_checkbox(_L("FXAA post-processing"), page,
+        _L("Applies Fast Approximate Anti-Aliasing as a screen-space pass.\n"
+           "Useful for disabling or reducing the MSAA setting to improve performance.\n\n"
+           "Takes effect immediately."),
+        50, SETTING_OPENGL_FXAA_ENABLED);
+    auto item_fps_cap = create_item_input(_L("FPS cap"), _L("FPS (0 = unlimited)"), page,
+        _L("Limits viewport frame rate to reduce GPU load and power usage.\n"
+           "Set to 0 for unlimited frame rate."),
+        SETTING_OPENGL_FPS_CAP, [this](wxString value) {
+            long fps_cap = 0;
+            if (!value.ToLong(&fps_cap))
+                fps_cap = 0;
+            fps_cap = std::clamp(fps_cap, 0L, 240L);
+            app_config->set(SETTING_OPENGL_FPS_CAP, std::to_string(fps_cap));
+        });
+    auto item_fps_overlay = create_item_checkbox(_L("Show FPS overlay"), page,
+        _L("Displays current viewport FPS in the top-right corner."), 50, SETTING_OPENGL_SHOW_FPS_OVERLAY);
+    // Orca #14080 / #14724: smooth normals, for the model whether or not the realistic view is on.
+    auto item_smooth_normals = create_item_checkbox(_L("Smooth normals"), page,
+        _L("Applies smooth normals to the model.\n\nRequires manual scene reload to take effect "
+           "(right-click on 3D view > \"Reload All\")."),
+        50, SETTING_OPENGL_PHONG_SMOOTH_NORMALS);
+    // Orca #13704: realistic view (also View > Realistic View).
+    auto item_realistic_mode = create_item_checkbox(_L("Realistic view"), page,
+        _L("Renders the objects of the 3D view more realistically, with the options below. Also in View > Realistic View."),
+        50, SETTING_OPENGL_REALISTIC_MODE);
+    auto item_realistic_phong = create_item_checkbox(_L("Phong shading"), page,
+        _L("Uses Phong shading inside realistic view."), 50, SETTING_OPENGL_REALISTIC_PHONG);
+    auto item_realistic_ssao = create_item_checkbox(_L("SSAO ambient occlusion"), page,
+        _L("Applies SSAO in realistic view."), 50, SETTING_OPENGL_PHONG_SSAO);
+    auto item_realistic_shadows = create_item_checkbox(_L("Shadows"), page,
+        _L("Renders cast shadows on the plate, other objects, and each object onto itself in realistic view."), 50, SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS);
+
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
     auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");
     auto item_check_updates = create_item_checkbox(_L("Check for new versions on startup"), page,
@@ -2044,6 +2185,19 @@ wxWindow* PreferencesDialog::create_general_page()
     }
 #endif
 
+    // The Layerling tab (LayerlingPanel): an optional download, never bundled.
+    wxBoxSizer* title_layerling = nullptr;
+    wxBoxSizer* item_layerling  = nullptr;
+    if (layerling_supported()) {
+        title_layerling = create_item_title(_L("Layerling"), page, _L("Layerling"));
+        item_layerling  = create_item_checkbox(_L("Show the Layerling tab"), page,
+                                               _L("Adds a Layerling tab: a free CAD for 3D printing by henmedia (AGPL-3.0) that "
+                                                  "EdgeSlicer can download from its GitHub releases and run on this computer. "
+                                                  "What you export there goes onto the plate. Hiding the tab keeps Layerling "
+                                                  "and your designs."),
+                                               50, "show_layerling_tab");
+    }
+
     // auto title_modelmall = create_item_title(_L("Online Models"), page, _L("Online Models"));
     // auto item_backup = create_item_switch(_L("Backup switch"), page, _L("Backup switch"), "units");
     // auto item_modelmall = create_item_checkbox(_L("Show online staff-picked models on the home page"), page, _L("Show online staff-picked models on the home page"), 50, "staff_pick_switch");
@@ -2054,6 +2208,23 @@ wxWindow* PreferencesDialog::create_general_page()
     std::vector<string> projectLoadSettingsConfigOptions = { OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_ALL, OPTION_PROJECT_LOAD_BEHAVIOUR_ASK_WHEN_RELEVANT, OPTION_PROJECT_LOAD_BEHAVIOUR_ALWAYS_ASK, OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY };
     auto item_project_load_behaviour = create_item_combobox(_L("Load Behaviour"), page, _L("Should printer/filament/process settings be loaded when opening a .3mf?"), SETTING_PROJECT_LOAD_BEHAVIOUR, projectLoadSettingsBehaviourOptions, projectLoadSettingsConfigOptions);
 
+    // Project strip P3 (D7): a project file double-clicked in Explorer / Finder while EdgeSlicer runs ("Allow only one
+    // instance" on) opens as another project in the strip, or in place of the current one as before.
+    std::vector<wxString>    shellOpenOptions       = { _L("New project tab"), _L("The current project") };
+    std::vector<std::string> shellOpenConfigOptions = { "strip", "replace" };
+    auto item_shell_open = create_item_combobox(_L("Open project files from Explorer / Finder in"), page,
+                                                _L("Where a project file opened from Explorer or Finder goes while EdgeSlicer is running (with \"Allow only one EdgeSlicer instance\" on)."),
+                                                "project_strip_shell_open", shellOpenOptions, shellOpenConfigOptions);
+    // Project strip P3: session restore (opt-in).
+    auto item_strip_session = create_item_checkbox(_L("Reopen the open projects at the next start"), page,
+                                                   _L("When EdgeSlicer closes with several projects in the project strip, they come back at the next start as they were, unsaved changes included."),
+                                                   50, "project_strip_restore_session");
+
+    // Project strip P4: each open project keeps a live Plater (its model, slice and preview), so the count bounds memory.
+    auto item_strip_max_open = create_item_input(_L("Maximum open projects"), "", page,
+                                                 _L("How many projects the project strip keeps open (2 to 16, 8 by default). Each one stays loaded, sliced "
+                                                    "results included, so more open projects use more memory. At the limit you are asked which one to close."),
+                                                 "project_strip_max_open", [](wxString) {});
     auto item_max_recent_count = create_item_input(_L("Maximum recent files"), "", page, _L("Maximum count of recent files"), "max_recent_count", [](wxString value) {
         long max = 0;
         if (value.ToLong(&max))
@@ -2073,6 +2244,21 @@ wxWindow* PreferencesDialog::create_general_page()
     //downloads
     auto title_downloads = create_item_title(_L("Downloads"), page, _L("Downloads"));
     auto item_downloads = create_item_downloads(page,50,"download_path");
+    // ZIP files (PR C): extraction folder clean-up.
+    auto title_zip_files  = create_item_title(_L("ZIP files"), page, _L("ZIP files"));
+    auto item_zip_cleanup = create_item_checkbox(_L("Delete extracted ZIP files automatically"), page,
+        _L("Files you open from a ZIP are extracted to a local folder. When this is on, extraction folders older than the "
+           "number of days below are deleted in the background at startup and after a ZIP is opened. Folders used by the "
+           "open project are never deleted."),
+        50, ZIP_WORK_CLEANUP_KEY);
+    auto item_zip_cleanup_days = create_item_input(_L("Delete after"), _L("days"), page,
+        _L("How old an extraction folder must be before it is deleted automatically (1 to 3650 days)."), ZIP_WORK_CLEANUP_DAYS_KEY,
+        [this](wxString value) {
+            app_config->set(ZIP_WORK_CLEANUP_DAYS_KEY, std::to_string(zip_cleanup_days_from_value(into_u8(value))));
+        });
+    auto item_zip_folder = create_item_zip_work_folder(page,
+        _L("Where files opened from a ZIP are extracted. Set zip_work_dir in the configuration file to use another folder."));
+
     auto item_vault_downloads = create_item_vault_downloads_dir(page,
         _L("Where files you download from a vault on the Home tab go. A vault can have its own folder in its settings. "
            "The folder is added to your Library the first time a file lands in it."));
@@ -2181,6 +2367,16 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_auto_arrange, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_reslice, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_warn_low_memory, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(title_graphics, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_antialiasing, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_fxaa, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_fps_cap, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_fps_overlay, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_smooth_normals, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_mode, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_phong, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_ssao, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_shadows, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
     if (item_user_sync)
@@ -2210,6 +2406,10 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(associate_url_cura, 0, wxTOP, FromDIP(3));
 #endif // _WIN32
 #if defined(_WIN32) || defined(__APPLE__)
+    if (title_layerling != nullptr && item_layerling != nullptr) {
+        sizer_page->Add(title_layerling, 0, wxTOP | wxEXPAND, FromDIP(20));
+        sizer_page->Add(item_layerling, 0, wxTOP, FromDIP(3));
+    }
     if (title_model_browser != nullptr && item_model_browser != nullptr) {
         sizer_page->Add(title_model_browser, 0, wxTOP | wxEXPAND, FromDIP(20));
         sizer_page->Add(item_model_browser, 0, wxTOP, FromDIP(3));
@@ -2229,6 +2429,9 @@ wxWindow* PreferencesDialog::create_general_page()
     // item_region->GetItem(size_t(2))->GetWindow()->Bind(wxEVT_COMBOBOX, update_modelmall);
     sizer_page->Add(title_project, 0, wxTOP| wxEXPAND, FromDIP(20));
     sizer_page->Add(item_project_load_behaviour, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_shell_open, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_strip_session, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_strip_max_open, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_max_recent_count, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_recent_models, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_save_choise, 0, wxTOP, FromDIP(3));
@@ -2239,6 +2442,11 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(title_downloads, 0, wxTOP| wxEXPAND, FromDIP(20));
     sizer_page->Add(item_downloads, 0, wxEXPAND, FromDIP(3));
     sizer_page->Add(item_vault_downloads, 0, wxEXPAND, FromDIP(3));
+
+    sizer_page->Add(title_zip_files, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_zip_cleanup, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_zip_cleanup_days, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_zip_folder, 0, wxEXPAND | wxTOP, FromDIP(3));
 
     sizer_page->Add(title_bambu_studio, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_bambu_studio_path, 0, wxTOP, FromDIP(3));

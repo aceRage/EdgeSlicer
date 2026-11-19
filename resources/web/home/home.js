@@ -910,6 +910,7 @@
     const missing = (c.slots || []).filter((s) => !s.set);
     if (missing.length) box.appendChild(el('div', 'line warn', t('credentials', 'Credentials') + ': ' + missing.map((s) => s.label).join(', ') + ' ' + t('not_set', 'not set')));
     if (c.full_next) box.appendChild(el('div', 'line warn', t('settings_changed', 'Settings changed: the next Fetch Changes reads every model again.')));
+    if (c.template_warning) { const w = el('div', 'line warn', c.template_warning); w.style.whiteSpace = 'normal'; box.appendChild(w); }
     if (c.last_error) { const e = el('div', 'line err', c.last_error); box.appendChild(e); }
 
     const row = el('div', 'row');
@@ -1757,9 +1758,9 @@
       { path: 'fields.id', label: 'Id' }, { path: 'fields.name', label: 'Name' },
       { path: 'fields.thumbnail', label: 'Thumbnail URL' },
       { path: 'fields.page_url', label: 'Page URL (field, or template like https://site/m/{slug})' },
-      { path: 'fields.designer', label: 'Designer' }, { path: 'fields.license', label: 'License' },
-      { path: 'fields.tags', label: 'Tags or category' },
-      { path: 'fields.updated', label: 'Updated' }, { path: 'fields.description', label: 'Description' },
+      { path: 'fields.designer', label: 'Designer (field, or =text for a fixed value)' }, { path: 'fields.license', label: 'License (field, or =text for a fixed value)' },
+      { path: 'fields.tags', label: 'Tags or category (field, or =a, b for fixed tags)' },
+      { path: 'fields.updated', label: 'Updated' }, { path: 'fields.description', label: 'Description (field, or =text for a fixed value)' },
     ] },
     { group: 'Files of an item (optional)', fields: [
       { path: 'files.path', label: 'Files at', hint: 'print_profiles' },
@@ -1769,8 +1770,9 @@
       { path: 'files.fields.colours', label: 'Colours list' }, { path: 'files.fields.colour', label: 'Colour in each', hint: 'hex' },
     ] },
     { group: 'Download (optional)', fields: [
+      { path: 'download.method', label: 'Method', options: [['GET', 'GET'], ['POST', 'POST (empty body)']] },
       { path: 'download.path', label: 'Endpoint path', hint: '/models/{id}/download?profile={sub.id}', wide: true },
-      { path: 'download.url_field', label: 'File link in its answer at', hint: 'download_url' },
+      { path: 'download.url_field', label: 'File link in its answer at (blank: the answer is the file itself)', hint: 'download_url' },
       { path: 'download.direct_field', label: 'Or: direct link field of a file' },
       { path: 'download.limited', label: 'Downloads count against a limit (ask first)', check: true },
     ] },
@@ -1789,7 +1791,7 @@
     list: { path: '/', items: '', query: {}, paging: { type: 'page', param: 'page', start: 1, size_param: 'limit', size: 100, has_more: '', total: '', cursor: '' },
       since: { param: '', field: '' } },
     fields: { id: 'id', name: 'name', thumbnail: 'thumbnail', page_url: '', designer: '', license: '', tags: '', updated: '', description: '' },
-    files: { path: '', fields: {} }, download: { path: '', url_field: '', direct_field: '', limited: false },
+    files: { path: '', fields: {} }, download: { path: '', method: 'GET', url_field: '', direct_field: '', limited: false },
     quota: { used: '', limit: '', resets: '' },
   };
   const editor = { id: '', spec: null, json: false };

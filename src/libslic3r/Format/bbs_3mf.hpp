@@ -100,6 +100,9 @@ struct PlateData
     bool            toolpath_outside {false};
     bool            is_label_object_enabled {false};
     bool            support_material_on_wipe_tower {false};
+    // AdaptiveLayerMerge step 5: Print::uses_multiple_nozzle_diameters() of the sliced plate. With a single-extruder
+    // rack it is Bambu Studio's multi_nozzle_diameter_mode for the plate (Format/BambuMultiDiameter.hpp).
+    bool            uses_multiple_nozzle_diameters {false};
     int             timelapse_warning_code = 0; // 1<<0 sprial vase, 1<<1 by object
 
     // Ultra (H2C 3MF schema): the multi-nozzle payload BambuStudio carries on PlateData.
@@ -236,6 +239,16 @@ const int IMPORT_STAGE_MAX              = 13;
 typedef std::function<void(int export_stage, int current, int total, bool& cancel)> Export3mfProgressFn;
 typedef std::function<void(int import_stage, int current, int total, bool& cancel)> Import3mfProgressFn;
 
+// slice_info.config's per-plate <metadata key="nozzle_diameters">, one value per extruder as Bambu Studio writes it ("0.4,0.4").
+// Each extruder gets the size this plate prints with on it: its own size (the project's, P7 nozzle_diameter_override, carried in
+// plate.nozzle_diameters) when the plate uses that nozzle or does not use the extruder at all, else the first nozzle of the
+// extruder the plate prints with (nozzle_change_sequence order, else the lowest nozzle id). An H2C rack: two cubes on the right's
+// 0.6 then 0.8 -> "0.4,0.6".
+// `config`, when given, supplies the sizes if the plate carries none (effective_nozzle_diameters) and the extruder count.
+// Before (owner report 2026-11-05) the exporter wrote the printer preset's nozzle_diameter, so Bambu Connect showed
+// "0.4 | 0.4" for a plate printed with 0.8 and 0.6 rack nozzles.
+std::string slice_info_nozzle_diameters(const PlateData &plate, const DynamicPrintConfig *config);
+
 typedef std::vector<PlateData*> PlateDataPtrs;
 
 typedef std::map<int, PlateData*> PlateDataMaps;
@@ -271,6 +284,8 @@ struct StoreParams
     // embedded printer presets (CostOverrides::strip_prices()).
     // Project saves never set it.
     bool strip_filament_prices = false;
+    // Output: the exporter's error text when store_bbs_3mf() returns false.
+    std::string error;
 
     StoreParams() {}
 };

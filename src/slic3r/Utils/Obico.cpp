@@ -76,7 +76,7 @@ bool Obico::test(wxString& msg) const
     const char* name = get_name();
     auto url = make_url("api/v1/version/");
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % Http::url_for_log(url);
     // Here we do not have to add custom "Host" header - the url contains host filled by user and libCurl will set the header by itself.
     auto http = Http::get(std::move(url));
     apply_tls(http); // verified as an internet host; against the CA file if one is set
@@ -108,7 +108,7 @@ bool Obico::get_printers(wxArrayString& printers) const
     const char* name = get_name();
     bool        res  = false;
     auto        url  = make_url("api/v1/printers/");
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: List printers at: %2%") % name % url;
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: List printers at: %2%") % name % Http::url_for_log(url);
 
     auto http = Http::get(std::move(url));
     apply_tls(http); // verified as an internet host; against the CA file if one is set
@@ -184,7 +184,7 @@ bool Obico::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn 
             BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: File uploaded: HTTP %2%: %3%") % name % status % body;
         })
         .on_error([&](std::string body, std::string error, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading file to %2%: %3%, HTTP %4%, body: `%5%`") % name % url % error %
+            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading file to %2%: %3%, HTTP %4%, body: `%5%`") % name % Http::url_for_log(url) % error %
                                             status % body;
             error_fn(format_error(body, error, status));
             res = false;

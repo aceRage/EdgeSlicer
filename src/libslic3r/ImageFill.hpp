@@ -193,11 +193,62 @@ struct ImageFillParams
     // Restrict the fill to facets already painted with this 1-based id (a face selection made
     // with the existing MMU paint tool). 0 = the whole part.
     int                 selection_state = 0;
+    // Phase 5a: which surfaces an image row bound to this part re-samples at nozzle resolution -
+    // a bitmask of IMAGE_FILL_SURFACE_TOP and IMAGE_FILL_SURFACE_WALLS (key `rs`). 0 is a params
+    // string from before phase 5a: the binding alone decides (a row named by wall_filament colours
+    // the walls, one named by solid_infill_filament the top). See ImageRowWalls.hpp.
+    int                 surfaces = 0;
+    // Phase 5b: how the walls carry the picture (key `wm`). IMAGE_FILL_WALL_RUNS (0, phase 4) cuts
+    // each layer's outer wall into runs of different filaments. IMAGE_FILL_WALL_STRIPES (1) is
+    // ImageMap's own side-wall method: every layer prints its walls with ONE filament, cycling
+    // through the row's filaments layer by layer, and the outer wall is wider where the picture
+    // wants that layer's filament and narrower where it does not - so from the side each colour
+    // shows more or less, and a layer costs at most one tool change.
+    int                 wall_method = 0;
+    // Phase 5b, stripes only (key `wd`): how far the outer wall's width swings either side of its
+    // nominal width, in percent - 40 means 60 % to 140 %.
+    int                 stripe_depth_pct = 40;
+
+    // ---- Phase 5c: where the picture sits -------------------------------------------------------
+    // Placement, applied in image space after the projection (image_fill_place_uv()): the picture's
+    // centre moves by (offset_u, offset_v) - fractions of the projected box - it is turned by
+    // rotation_deg, and it covers scale_u x scale_v of the box (1 x 1 = stretched over the whole
+    // box, which is what every params string before phase 5c meant). Outside the picture nothing
+    // is painted, unless `tile` repeats it. Keys `pu`, `pv`, `su`, `sv`, `pr`, `pt`; the defaults
+    // write nothing, so an old string reads back unchanged and maps exactly as it always did.
+    float               offset_u     = 0.f;
+    float               offset_v     = 0.f;
+    float               scale_u      = 1.f;
+    float               scale_v      = 1.f;
+    float               rotation_deg = 0.f;
+    bool                tile         = false;
+    // Phase 5c, the dialog's own state (key `pk`): scale_u / scale_v were worked out to keep the
+    // picture's proportions. The mapping reads only scale_u / scale_v.
+    bool                keep_aspect  = false;
+
+    // Phase 5c: the projection's own frame, so the picture stays where it was put when the part's
+    // MESH is rewritten - a cut, which re-centres each half and bakes the instance's rotation into
+    // it, or a simplify, which moves the extremes. `box` (key `bx`) is the mesh-space box the
+    // picture was laid over; `frame` (key `fr`) maps today's mesh coordinates into the mesh space
+    // that box is in (identity until a cut moves the mesh). Without `has_box` the box is the
+    // mesh's own, as before phase 5c. image_fill_apply() records the box the first time.
+    bool                has_box   = false;
+    std::array<double, 6> box     {0., 0., 0., 0., 0., 0.};   // min xyz, max xyz
+    bool                has_frame = false;
+    Transform3d         frame     = Transform3d::Identity();
 
     std::string to_string() const;
     static bool from_string(const std::string &s, ImageFillParams &out);
     bool        operator==(const ImageFillParams &r) const { return to_string() == r.to_string(); }
 };
+
+// ImageFillParams::surfaces bits.
+static constexpr int IMAGE_FILL_SURFACE_TOP   = 1;
+static constexpr int IMAGE_FILL_SURFACE_WALLS = 2;
+
+// ImageFillParams::wall_method values.
+static constexpr int IMAGE_FILL_WALL_RUNS    = 0;
+static constexpr int IMAGE_FILL_WALL_STRIPES = 1;
 
 static constexpr int IMAGE_FILL_MAX_SUBDIVISION = 6;
 // A hard ceiling on leaves per volume, so a dense mesh at depth 6 cannot allocate for ever.
@@ -244,6 +295,24 @@ bool image_fill_project(const ImageFillParams &params, const BoundingBoxf3 &box,
 //
 // flip_u and flip_v still apply on top, globally, as they do for every other projection.
 int image_fill_box_face(const Vec3f &normal);
+
+// Phase 5c: the placement step, on image coordinates the projection produced (0..1 over the box).
+// Returns false when the point falls outside a non-tiled picture. Identity - and true, with u and
+// v untouched - for the default placement.
+bool image_fill_place_uv(const ImageFillParams &params, float &u, float &v);
+
+// Phase 5c: the box a projection is laid over for this mesh (the recorded one, or the mesh's own),
+// and the frame that carries this mesh's coordinates into that box's space.
+BoundingBoxf3 image_fill_projection_box(const ImageFillParams &params, const indexed_triangle_set &mesh);
+Transform3d   image_fill_projection_frame(const ImageFillParams &params);
+
+// Phase 5c: the part's mesh was rewritten as new = new_from_old * old (a cut re-centres each half
+// and bakes the instance's rotation into it). Record the box the picture was laid over (from
+// `old_mesh`, if none was recorded) and fold the change into the frame, so every point of the new
+// mesh still samples the pixel the same surface point sampled before.
+void image_fill_rebase(ImageFillParams &params, const indexed_triangle_set &old_mesh, const Transform3d &new_from_old);
+// The same, on a volume's own image_fill_params; a volume without them is left alone.
+void image_fill_rebase_volume(ModelVolume &volume, const indexed_triangle_set &old_mesh, const Transform3d &new_from_old);
 
 // The unit direction a planar projection travels along: +axis, or -axis when axis_negative.
 Vec3f image_fill_direction(const ImageFillParams &params);
@@ -498,10 +567,39 @@ struct ImageRowRun
 // own candidate colour is closer to its own (the edge run has only one neighbour), repeated until
 // every run meets the floor or only one run is left; adjacent runs merged down to the same id are
 // then joined, so the output never has two consecutive entries with the same filament_id.
+//
+// Phase 5a: when `fallback_id` is non-zero, a sample with `has_color == false` is NOT carried on
+// from its neighbour - it is printed with `fallback_id` (the part's own filament, whose colour is
+// `fallback_color`), and the carried error is reset, because the dither never reached that point.
+// That is how a wall the image does not land on keeps the part's own colour instead of the
+// image's nearest edge colour. `fallback_id` takes part in the minimum-run folding like any
+// candidate. 0 keeps the behaviour above exactly.
 std::vector<ImageRowRun> image_fill_dither_segment(const std::vector<ImageRowSample>       &samples,
                                                    const std::vector<std::array<float, 3>> &candidate_colors,
                                                    const std::vector<int>                  &candidate_ids,
-                                                   float                                     min_run_len_mm);
+                                                   float                                     min_run_len_mm,
+                                                   int                                       fallback_id    = 0,
+                                                   const std::array<float, 3>               &fallback_color = {0.f, 0.f, 0.f});
+
+// ---------------------------------------------------------------------------------------------
+// 9. Phase 5b: layer stripes on the walls
+// ---------------------------------------------------------------------------------------------
+
+// The share of each candidate filament in the nearest reachable mix to `target` (sRGB 0..1),
+// one weight per entry of `candidate_colors`, summing to 1 - the phase 1 solver's continuous
+// answer (BlendClosestTwo). Empty when there are no candidates.
+std::vector<float> image_fill_mix_weights(const std::array<float, 3>              &target,
+                                          const std::vector<std::array<float, 3>> &candidate_colors);
+
+// The outer wall's width, as a factor of its nominal width, on a layer printed with candidate
+// `layer_component` (an index into `weights`), where the picture asks for the mix `weights`.
+//
+// t = clamp(w * N / 2, 0, 1) for that filament's share w among N filaments, and the factor is
+// 1 + depth * (2t - 1): an even mix puts every layer at its nominal width (so the part's size is
+// unchanged where the picture is a neutral mix of the filaments); a pure colour puts its own layers
+// at 1 + depth and every other layer at 1 - depth. `depth` is ImageFillParams::stripe_depth_pct /
+// 100.
+float image_fill_stripe_width_factor(const std::vector<float> &weights, size_t layer_component, float depth);
 
 } // namespace Slic3r
 

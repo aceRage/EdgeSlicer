@@ -5,6 +5,9 @@
     "from": "system",
     "filament_id": "GFP99",
     "instantiation": "false",
+    "filament_adhesiveness_category": [
+        "901"
+    ],
     "filament_cost": [
         "40.99"
     ],

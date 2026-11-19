@@ -262,57 +262,6 @@ static void sort_choices_natural(wxArrayString &choices)
 // "Bambu Lab X1 Carbon 0.4 nozzle"   -> "Bambu Lab X1 Carbon" + "0.4"
 static void split_printer_name_nozzle(const std::string &printer_name, std::string &base_name, std::string &nozzle);
 
-static bool delete_filament_preset_by_name(std::string delete_preset_name, std::string &selected_preset_name)
-{
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("select preset, name %1%") % delete_preset_name;
-    if (delete_preset_name.empty()) return false;
-
-    // Find an alternate preset to be selected after the current preset is deleted.
-    PresetCollection &m_presets = wxGetApp().preset_bundle->filaments;
-    if (delete_preset_name == selected_preset_name) {
-        const std::deque<Preset> &presets     = m_presets.get_presets();
-        size_t                    idx_current = m_presets.get_idx_selected();
-
-        // Find the visible preset.
-        size_t idx_new = idx_current;
-        if (idx_current > presets.size()) idx_current = presets.size();
-        if (idx_current < 0) idx_current = 0;
-        if (idx_new < presets.size())
-            for (; idx_new < presets.size() && (presets[idx_new].name == delete_preset_name || !presets[idx_new].is_visible); ++idx_new)
-                ;
-        if (idx_new == presets.size())
-            for (idx_new = idx_current - 1; idx_new > 0 && (presets[idx_new].name == delete_preset_name || !presets[idx_new].is_visible); --idx_new)
-                ;
-        selected_preset_name = presets[idx_new].name;
-        BOOST_LOG_TRIVIAL(info) << boost::format("cause by delete current ,choose the next visible, idx %1%, name %2%") % idx_new % selected_preset_name;
-    }
-
-    try {
-        // BBS delete preset
-        Preset *need_delete_preset = m_presets.find_preset(delete_preset_name);
-        if (!need_delete_preset) BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" can't find delete preset and name: %1%") % delete_preset_name;
-        if (!need_delete_preset->setting_id.empty()) {
-            BOOST_LOG_TRIVIAL(info) << "delete preset = " << need_delete_preset->name << ", setting_id = " << need_delete_preset->setting_id;
-            m_presets.set_sync_info_and_save(need_delete_preset->name, need_delete_preset->setting_id, "delete", 0);
-            wxGetApp().delete_preset_from_cloud(need_delete_preset->setting_id);
-        } else {
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" can't preset setting id is empty and name: %1%") % delete_preset_name;
-        }
-        if (m_presets.get_edited_preset().name == delete_preset_name) {
-            m_presets.discard_current_changes();
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("delete preset dirty and cancelled");
-        }
-        m_presets.delete_preset(need_delete_preset->name);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " preset has been delete from filaments, and preset name is: " << delete_preset_name;
-    } catch (const std::exception &ex) {
-        // FIXME add some error reporting!
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("found exception when delete: %1% and preset name: %%") % ex.what() % delete_preset_name;
-        return false;
-    }
-
-    return true;
-}
-
 static std::string get_curr_time(const char* format = "%Y_%m_%d_%H_%M_%S")
 {
     std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
@@ -403,24 +352,10 @@ static wxArrayString get_exist_vendor_choices(VendorMap& vendors)
     return choices;
 }
 
-static std::string get_machine_name(const std::string &preset_name)
-{
-    size_t index_at = preset_name.find_last_of("@");
-    if (std::string::npos == index_at) {
-        return "";
-    } else {
-        return preset_name.substr(index_at + 1);
-    }
-}
-
 static std::string get_filament_name(std::string &preset_name)
 {
-    size_t index_at = preset_name.find_last_of("@");
-    if (std::string::npos == index_at) {
-        return preset_name;
-    } else {
-        return preset_name.substr(0, index_at - 1);
-    }
+    // The same name the export table groups by (FilamentPresetExport.cpp).
+    return filament_group_name(preset_name);
 }
 
 static wxBoxSizer *create_preset_tree(wxWindow *parent, std::pair<std::string, std::vector<std::shared_ptr<Preset>>> printer_and_preset)
@@ -445,19 +380,6 @@ static wxBoxSizer *create_preset_tree(wxWindow *parent, std::pair<std::string, s
     sizer->Add(treeCtrl, 0, wxEXPAND | wxALL, 0);
 
     return sizer;
-}
-
-static std::string get_vendor_name(std::string& preset_name)
-{
-    if (preset_name.empty()) return "";
-    std::string vendor_name = preset_name.substr(preset_name.find_first_not_of(' ')); //remove the name prefix space
-    size_t index_at = vendor_name.find(" ");
-    if (std::string::npos == index_at) {
-        return vendor_name;
-    } else {
-        vendor_name = vendor_name.substr(0, index_at);
-        return vendor_name;
-    }
 }
 
 static wxString get_curr_radio_type(std::vector<std::pair<RadioBox *, wxString>> &radio_btns)
@@ -1122,7 +1044,7 @@ wxWindow *CreateFilamentPresetDialog::create_dialog_buttons()
         if (!m_can_not_find_vendor_checkbox->GetValue()) {
             if (_L("Select Vendor") == vendor_str) {
                 MessageDialog dlg(this, _L("Vendor is not selected, please reselect vendor."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                                  wxYES | wxYES_DEFAULT | wxCENTRE);
+                                  wxOK | wxCENTRE);
                 dlg.ShowModal();
                 return;
             } else {
@@ -1131,14 +1053,14 @@ wxWindow *CreateFilamentPresetDialog::create_dialog_buttons()
         } else {
             if (m_filament_custom_vendor_input->GetTextCtrl()->GetValue().empty()) {
                 MessageDialog dlg(this, _L("Custom vendor is not input, please input custom vendor."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                                  wxYES | wxYES_DEFAULT | wxCENTRE);
+                                  wxOK | wxCENTRE);
                 dlg.ShowModal();
                 return;
             } else {
                 vendor_name = into_u8(m_filament_custom_vendor_input->GetTextCtrl()->GetValue());
                 if (vendor_name == "Bambu" || vendor_name == "Generic") {
                     MessageDialog dlg(this, _L("\"Bambu\" or \"Generic\" cannot be used as a Vendor for custom filaments."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                                      wxYES | wxYES_DEFAULT | wxCENTRE);
+                                      wxOK | wxCENTRE);
                     dlg.ShowModal();
                     return;
                 }
@@ -1149,7 +1071,7 @@ wxWindow *CreateFilamentPresetDialog::create_dialog_buttons()
         wxString type_str = m_filament_type_combobox->GetLabel();
         std::string type_name;
         if (_L("Select Type") == type_str) {
-            MessageDialog dlg(this, _L("Filament type is not selected, please reselect type."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+            MessageDialog dlg(this, _L("Filament type is not selected, please reselect type."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         } else {
@@ -1160,7 +1082,7 @@ wxWindow *CreateFilamentPresetDialog::create_dialog_buttons()
         std::string serial_name;
         if (serial_str.empty()) {
             MessageDialog dlg(this, _L("Filament serial is not entered, please enter serial."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                              wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         } else {
@@ -1171,7 +1093,7 @@ wxWindow *CreateFilamentPresetDialog::create_dialog_buttons()
         
         if (vendor_name.empty() || serial_name.empty()) {
             MessageDialog dlg(this, _L("There may be escape characters in the vendor or serial input of filament. Please delete and re-enter."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                              wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         }
@@ -1179,20 +1101,20 @@ wxWindow *CreateFilamentPresetDialog::create_dialog_buttons()
         boost::algorithm::trim(serial_name);
         if (vendor_name.empty() || serial_name.empty()) {
             MessageDialog dlg(this, _L("All inputs in the custom vendor or serial are spaces. Please re-enter."),
-                              wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         }
         if (m_can_not_find_vendor_checkbox->GetValue() && str_is_all_digit(vendor_name)) {
             MessageDialog dlg(this, _L("The vendor cannot be a number. Please re-enter."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                              wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         }
 
         if (!is_preset_selected()) {
             MessageDialog dlg(this, _L("You have not selected a printer or preset yet. Please select at least one."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                              wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         }
@@ -1284,7 +1206,7 @@ wxArrayString CreateFilamentPresetDialog::get_filament_preset_choices()
     wxString    type_str = m_filament_type_combobox->GetLabel();
     std::string type_name;
     if (_L("Select Type") == type_str) {
-        /*MessageDialog dlg(this, _L("Filament type is not selected, please reselect type."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+        /*MessageDialog dlg(this, _L("Filament type is not selected, please reselect type."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
         dlg.ShowModal();*/
         return choices;
     } else {
@@ -2002,7 +1924,7 @@ wxBoxSizer *CreatePrinterPresetDialog::create_printer_item(wxWindow *parent)
                 m_select_model->SetLabelColor(*wxBLACK);
             }
         } else {
-            MessageDialog dlg(this, _L("The model was not found, please reselect vendor."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+            MessageDialog dlg(this, _L("The model was not found, please reselect vendor."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
             dlg.ShowModal();
         }
         e.Skip();
@@ -2857,14 +2779,14 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
         // Confirm if the printer preset exists
         if (!m_printer_preset) {
             MessageDialog dlg(this, _L("You have not yet chosen which printer preset to create based on. Please choose the vendor and model of the printer"),
-                              wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         }
 
         if (!save_printable_area_config(m_printer_preset)) {
             MessageDialog dlg(this, _L("You have entered an illegal input in the printable area section on the first page. Please check before creating it."),
-                              wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
             dlg.ShowModal();
             show_page1();
             return;
@@ -2885,7 +2807,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                 std::string custom_model  = into_u8(m_custom_model_text_ctrl->GetValue());
                 if (custom_vendor.empty() || custom_model.empty()) {
                     MessageDialog dlg(this, _L("The custom printer or model is not entered, please enter it."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                                      wxYES | wxYES_DEFAULT | wxCENTRE);
+                                      wxOK | wxCENTRE);
                     dlg.ShowModal();
                     show_page1();
                     return;
@@ -2944,12 +2866,12 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
         std::vector<Preset const *> selected_filament_presets;
         for (std::pair<::CheckBox *, Preset const *> filament_preset : m_filament_preset) {
             if (filament_preset.first->GetValue()) { selected_filament_presets.push_back(filament_preset.second); }
-            if (!filament_preset_is_exist && preset_bundle->filaments.find_preset(filament_preset.second->alias + " @ " + printer_preset_name) != nullptr) {
+            if (!filament_preset_is_exist && preset_bundle->filaments.find_preset(PresetCollection::name_for_printer_clone(filament_preset.second->name, printer_preset_name)) != nullptr) {
                 filament_preset_is_exist = true;
             }
         }
         if (selected_filament_presets.empty() && !filament_preset_is_exist) {
-            MessageDialog dlg(this, _L("You need to select at least one filament preset."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+            MessageDialog dlg(this, _L("You need to select at least one filament preset."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         }
@@ -2959,12 +2881,12 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
         std::vector<Preset const *> selected_process_presets;
         for (std::pair<::CheckBox *, Preset const *> process_preset : m_process_preset) {
             if (process_preset.first->GetValue()) { selected_process_presets.push_back(process_preset.second); }
-            if (!process_preset_is_exist && preset_bundle->prints.find_preset(process_preset.second->alias + " @" + printer_preset_name) != nullptr) {
+            if (!process_preset_is_exist && preset_bundle->prints.find_preset(PresetCollection::name_for_printer_clone(process_preset.second->name, printer_preset_name)) != nullptr) {
                 process_preset_is_exist = true;
             }
         }
         if (selected_process_presets.empty() && !process_preset_is_exist) {
-            MessageDialog dlg(this, _L("You need to select at least one process preset."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+            MessageDialog dlg(this, _L("You need to select at least one process preset."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         }
@@ -2981,7 +2903,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                     for (const std::string &failure : failures) { message += "\t" + failure + "\n"; }
                     MessageDialog dlg(this, _L("Create filament presets failed. As follows:\n") + from_u8(message) + _L("\nDo you want to rewrite it?"),
                                       wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                                      wxYES | wxYES_DEFAULT | wxCENTRE);
+                                      wxYES_NO | wxNO_DEFAULT | wxCENTRE);
                     int res = dlg.ShowModal();
                     if (wxID_YES == res) {
                         create_preset_result = preset_bundle->filaments.clone_presets_for_printer(selected_filament_presets, failures, printer_preset_name,
@@ -2993,7 +2915,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                 }
                 // save created successfully preset name
                 for (Preset const *sucessful_preset : selected_filament_presets)
-                    successful_preset_names.push_back(sucessful_preset->name.substr(0, sucessful_preset->name.find(" @")) + " @" + printer_preset_name);
+                    successful_preset_names.push_back(PresetCollection::name_for_printer_clone(sucessful_preset->name, printer_preset_name));
             }
 
             /******************************   clone process preset    ********************************/
@@ -3007,7 +2929,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                     for (const std::string &failure : failures) { message += "\t" + failure + "\n"; }
                     MessageDialog dlg(this, _L("Create process presets failed. As follows:\n") + from_u8(message) + _L("\nDo you want to rewrite it?"),
                                       wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                                      wxYES | wxYES_DEFAULT | wxCENTRE);
+                                      wxYES_NO | wxNO_DEFAULT | wxCENTRE);
                     int res = dlg.ShowModal();
                     if (wxID_YES == res) {
                         create_preset_result = preset_bundle->prints.clone_presets_for_printer(selected_process_presets, failures, printer_preset_name, get_filament_id, true);
@@ -3030,7 +2952,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                     }
                     MessageDialog dlg(this, _L("Create filament presets failed. As follows:\n") + from_u8(message) + _L("\nDo you want to rewrite it?"),
                                       wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                                      wxYES | wxYES_DEFAULT | wxCENTRE);
+                                      wxYES_NO | wxNO_DEFAULT | wxCENTRE);
                     int           res = dlg.ShowModal();
                     if (wxID_YES == res) {
                         create_preset_result = preset_bundle->filaments.clone_presets_for_printer(selected_filament_presets, failures, printer_preset_name, get_filament_id, true);
@@ -3050,7 +2972,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                     for (const std::string& failure : failures) {
                         message += "\t" + failure + "\n";
                     }
-                    MessageDialog dlg(this, _L("Create process presets failed. As follows:\n") + from_u8(message) + _L("\nDo you want to rewrite it?"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+                    MessageDialog dlg(this, _L("Create process presets failed. As follows:\n") + from_u8(message) + _L("\nDo you want to rewrite it?"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES_NO | wxNO_DEFAULT | wxCENTRE);
                     int           res = dlg.ShowModal();
                     if (wxID_YES == res) {
                         create_preset_result = preset_bundle->prints.clone_presets_for_printer(selected_process_presets, failures, printer_preset_name, get_filament_id, true);
@@ -3061,7 +2983,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                 }
                 // save created successfully preset name
                 for (Preset const *sucessful_preset : selected_filament_presets)
-                    successful_preset_names.push_back(sucessful_preset->name.substr(0, sucessful_preset->name.find(" @")) + " @" + printer_preset_name);
+                    successful_preset_names.push_back(PresetCollection::name_for_printer_clone(sucessful_preset->name, printer_preset_name));
             }
         }
          
@@ -3151,7 +3073,7 @@ bool CreatePrinterPresetDialog::data_init()
         
         wxArrayString printer_preset_model = printer_preset_sort_with_nozzle_diameter(m_printer_preset_vendor_selected, nozzle);
         if (printer_preset_model.size() == 0) {
-            MessageDialog dlg(this, _L("Current vendor has no models, please reselect."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+            MessageDialog dlg(this, _L("Current vendor has no models, please reselect."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         }
@@ -3180,7 +3102,7 @@ void CreatePrinterPresetDialog::set_current_visible_printer()
     m_printer_name_to_preset.clear();
     for (const Preset &printer_preset : printer_presets) {
         if (printer_preset.is_system || !printer_preset.is_visible) continue;
-        if (preset_bundle->printers.get_preset_base(printer_preset)->name != printer_preset.name) continue;
+        if (preset_bundle->printers.get_preset_base(printer_preset) != &printer_preset) continue;
         printer_choice.push_back(from_u8(printer_preset.name));
         m_printer_name_to_preset[printer_preset.name] = std::make_shared<Preset>(printer_preset);
     }
@@ -3351,7 +3273,7 @@ bool CreatePrinterPresetDialog::save_printable_area_config(Preset *preset)
         Utils::slash_to_back_slash(m_custom_model);
         config.set("bed_custom_model", m_custom_model);
         config.set("bed_custom_texture", m_custom_texture);
-    } else if(m_create_type.create_nozzle){
+    } else if (curr_selected_printer_type == m_create_type.create_nozzle) {
         std::string selected_printer_preset_name = into_u8(m_select_printer->GetStringSelection());
         std::unordered_map<std::string, std::shared_ptr<Preset>>::iterator itor = m_printer_name_to_preset.find(selected_printer_preset_name);
         assert(m_printer_name_to_preset.end() != itor);
@@ -3402,7 +3324,7 @@ bool CreatePrinterPresetDialog::validate_input_valid()
         }
         if ((vendor_name.empty() || model_name.empty())) {
             MessageDialog dlg(this, _L("You have not selected the vendor and model or entered the custom vendor and model."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                              wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxOK | wxCENTRE);
             dlg.ShowModal();
             return false;
         }
@@ -3411,7 +3333,7 @@ bool CreatePrinterPresetDialog::validate_input_valid()
         model_name  = remove_special_key(model_name);
         if (vendor_name.empty() || model_name.empty()) {
             MessageDialog dlg(this, _L("There may be escape characters in the custom printer vendor or model. Please delete and re-enter."),
-                              wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
             dlg.ShowModal();
             return false;
         }
@@ -3419,13 +3341,13 @@ bool CreatePrinterPresetDialog::validate_input_valid()
         boost::algorithm::trim(model_name);
         if (vendor_name.empty() || model_name.empty()) {
             MessageDialog dlg(this, _L("All inputs in the custom printer vendor or model are spaces. Please re-enter."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                              wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxOK | wxCENTRE);
             dlg.ShowModal();
             return false;
         }
 
         if (check_printable_area() == false) {
-            MessageDialog dlg(this, _L("Please check bed printable shape and origin input."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+            MessageDialog dlg(this, _L("Please check bed printable shape and origin input."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
             dlg.ShowModal();
             return false;
         }
@@ -3433,7 +3355,7 @@ bool CreatePrinterPresetDialog::validate_input_valid()
         wxString printer_name = m_select_printer->GetStringSelection();
         if (printer_name.empty()) {
             MessageDialog dlg(this, _L("You have not yet selected the printer to replace the nozzle, please choose."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                              wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxOK | wxCENTRE);
             dlg.ShowModal();
             return false;
         }
@@ -3656,22 +3578,22 @@ void ExportConfigsDialog::show_export_result(const ExportCase &export_case)
     MessageDialog *msg_dlg = nullptr;
     switch (export_case) {
     case ExportCase::INITIALIZE_FAIL:
-        msg_dlg = new MessageDialog(this, _L("initialize fail"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+        msg_dlg = new MessageDialog(this, _L("initialize fail"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
         break;
     case ExportCase::ADD_FILE_FAIL:
-        msg_dlg = new MessageDialog(this, _L("add file fail"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+        msg_dlg = new MessageDialog(this, _L("add file fail"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
         break;
     case ExportCase::ADD_BUNDLE_STRUCTURE_FAIL:
-        msg_dlg = new MessageDialog(this, _L("add bundle structure file fail"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+        msg_dlg = new MessageDialog(this, _L("add bundle structure file fail"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
         break;
     case ExportCase::FINALIZE_FAIL:
-        msg_dlg = new MessageDialog(this, _L("finalize fail"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+        msg_dlg = new MessageDialog(this, _L("finalize fail"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
         break;
     case ExportCase::OPEN_ZIP_WRITTEN_FILE:
-        msg_dlg = new MessageDialog(this, _L("open zip written fail"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+        msg_dlg = new MessageDialog(this, _L("open zip written fail"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
         break;
     case ExportCase::EXPORT_SUCCESS:
-        msg_dlg = new MessageDialog(this, _L("Export successful"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+        msg_dlg = new MessageDialog(this, _L("Export successful"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
         break;
     }
     
@@ -3745,14 +3667,14 @@ std::string ExportConfigsDialog::initial_file_name(const wxString &path, const s
                 MessageDialog dlg(this,
                                   wxString::Format(_L("The file: %s\nmay have been opened by another program.\nPlease close it and try again."),
                                                       encode_path(printer_export_path.string().c_str())),
-                                  wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+                                  wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
                 dlg.ShowModal();
                 return "initial_failed";
             }
             export_path = printer_export_path.string();
         } else if (wxID_NO == res) {
             export_path = printer_export_path.string();
-            export_path = export_path.substr(0, export_path.find(".zip"));
+            export_path = export_path.substr(0, export_path.rfind(".zip"));
             std::string              export_path_with_time;
             boost::filesystem::path *printer_export_path_with_time = nullptr;
             do {
@@ -4005,18 +3927,20 @@ ExportConfigsDialog::ExportCase ExportConfigsDialog::archive_preset_bundle_to_fi
             json filament_configs = json::array();
             json process_configs  = json::array();
 
-            mz_zip_archive zip_archive;
-            mz_bool        status = initial_zip_archive(zip_archive, export_path + "/" + printer_preset->name + ".orca_printer");
-            if (MZ_FALSE == status) {
-                BOOST_LOG_TRIVIAL(info) << "Failed to initialize ZIP archive";
-                return ExportCase::INITIALIZE_FAIL;
-            }
-            
+            // Checked before the archive is opened: skipping after it left the writer open and a broken
+            // .orca_printer behind, and the export said it succeeded.
             boost::filesystem::path printer_file_path      = boost::filesystem::path(printer_preset->file);
             std::string             preset_path       = printer_file_path.make_preferred().string();
             if (preset_path.empty()) {
                 BOOST_LOG_TRIVIAL(info) << "Export printer preset: " << printer_preset->name << " skip because of the preset file path is empty.";
                 continue;
+            }
+
+            mz_zip_archive zip_archive;
+            mz_bool        status = initial_zip_archive(zip_archive, export_path + "/" + printer_preset->name + ".orca_printer");
+            if (MZ_FALSE == status) {
+                BOOST_LOG_TRIVIAL(info) << "Failed to initialize ZIP archive";
+                return ExportCase::INITIALIZE_FAIL;
             }
 
             // Add a file to the ZIP file
@@ -4122,17 +4046,18 @@ ExportConfigsDialog::ExportCase ExportConfigsDialog::archive_filament_bundle_to_
             bundle_structure["filament_name"] = filament_name;
             std::unordered_map<std::string, json> vendor_structure;
 
+            // Checked before the archive is opened, as for the printer bundle above.
+            std::unordered_map<std::string, std::vector<std::pair<std::string, Preset *>>>::iterator iter = m_filament_name_to_presets.find(filament_name);
+            if (m_filament_name_to_presets.end() == iter) {
+                BOOST_LOG_TRIVIAL(info) << "Filament name do not find, filament name:" << filament_name;
+                continue;
+            }
+
             mz_zip_archive zip_archive;
             mz_bool        status = initial_zip_archive(zip_archive, export_path + "/" + filament_name + ".orca_filament");
             if (MZ_FALSE == status) {
                 BOOST_LOG_TRIVIAL(info) << "Failed to initialize ZIP archive";
                 return ExportCase::INITIALIZE_FAIL;
-            }
-
-            std::unordered_map<std::string, std::vector<std::pair<std::string, Preset *>>>::iterator iter = m_filament_name_to_presets.find(filament_name);
-            if (m_filament_name_to_presets.end() == iter) {
-                BOOST_LOG_TRIVIAL(info) << "Filament name do not find, filament name:" << filament_name;
-                continue;
             }
             std::set<std::pair<std::string, std::string>> vendor_to_filament_name;
             for (std::pair<std::string, Preset *> printer_name_to_preset : iter->second) {
@@ -4447,7 +4372,7 @@ ExportConfigsDialog::ExportCase ExportConfigsDialog::archive_table_selection(int
         wxString names;
         for (const std::string &s : skipped) names += "\n" + wxString::FromUTF8(s);
         MessageDialog dlg(this, _L("These presets could not be exported:") + names, wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                          wxYES | wxYES_DEFAULT | wxCENTRE);
+                          wxOK | wxCENTRE);
         dlg.ShowModal();
     }
     switch (write_presets_zip(export_file, entries)) {
@@ -4468,7 +4393,7 @@ wxWindow *ExportConfigsDialog::create_dialog_buttons(wxWindow* parent)
             const int table = current_table();
             MessageDialog dlg(this, table == PROCESS_TABLE ? _L("Please select at least one process preset.") :
                                     table == FILAMENT_TABLE ? _L("Please select at least one filament preset.") : _L("Please select at least one printer or filament."),
-                              wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         }
@@ -4610,8 +4535,7 @@ void ExportConfigsDialog::data_init()
             continue;
         }
         std::string filament_preset_name = base_filament_preset->name;
-        std::string machine_name         = get_machine_name(filament_preset_name);
-        m_filament_name_to_presets[get_filament_name(filament_preset_name)].push_back(std::make_pair(get_vendor_name(machine_name), new_filament_preset));
+        m_filament_name_to_presets[get_filament_name(filament_preset_name)].push_back(std::make_pair(filament_bundle_vendor(filament_preset_name), new_filament_preset));
     }
 }
 
@@ -4807,7 +4731,7 @@ void EditFilamentPresetDialog::delete_preset()
             if (count > 0) {
                 msg = _L("Presets inherited by other presets cannot be deleted");
                 msg += "\n";
-                msg += _L_PLURAL("The following presets inherits this preset.", "The following preset inherits this preset.", count);
+                msg += _L_PLURAL("The following preset inherits this preset.", "The following presets inherit this preset.", count);
                 wxString title = _L("Delete Preset");
                 MessageDialog(this, msg + presets, title, wxOK | wxICON_ERROR).ShowModal();
                 m_selected_printer.clear();
@@ -4830,7 +4754,7 @@ void EditFilamentPresetDialog::delete_preset()
 
         // delete preset
         std::string next_selected_preset_name = wxGetApp().preset_bundle->filaments.get_selected_preset().name;
-        bool        delete_result             = delete_filament_preset_by_name(need_delete_preset->name, next_selected_preset_name);
+        bool        delete_result             = delete_user_preset_by_name(Preset::TYPE_FILAMENT, need_delete_preset->name, next_selected_preset_name);
         BOOST_LOG_TRIVIAL(info) << __LINE__ << " filament preset name: " << need_delete_preset->name << (delete_result ? " delete successful" : " delete failed");
 
         wxGetApp().preset_bundle->filaments.select_preset_by_name(next_selected_preset_name, true);
@@ -5002,11 +4926,11 @@ wxWindow *EditFilamentPresetDialog::create_dialog_buttons()
             // delete inherit preset first
             std::string next_selected_preset_name = wxGetApp().preset_bundle->filaments.get_selected_preset().name;
             for (std::shared_ptr<Preset> preset : inherit_preset_names) {
-                bool delete_result = delete_filament_preset_by_name(preset->name, next_selected_preset_name);
+                bool delete_result = delete_user_preset_by_name(Preset::TYPE_FILAMENT, preset->name, next_selected_preset_name);
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " inherit filament name: " << preset->name << (delete_result ? " delete successful" : " delete failed");
             }
             for (std::shared_ptr<Preset> preset : root_preset_names) {
-                bool delete_result = delete_filament_preset_by_name(preset->name, next_selected_preset_name);
+                bool delete_result = delete_user_preset_by_name(Preset::TYPE_FILAMENT, preset->name, next_selected_preset_name);
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " root filament name: " << preset->name << (delete_result ? " delete successful" : " delete failed");
             }
             m_printer_compatible_presets.clear();
@@ -5082,7 +5006,7 @@ void CreatePresetForPrinterDialog::get_visible_printer_and_compatible_filament_p
                     if (filament_preset.is_default || !filament_preset.is_compatible || filament_preset.is_project_embedded) continue;
                     ConfigOptionStrings *filament_types;
                     const Preset *       filament_preset_base = m_preset_bundle->filaments.get_preset_base(filament_preset);
-                    if (filament_preset_base == &filament_preset) {
+                    if (filament_preset_base == &filament_preset || filament_preset_base == nullptr) {
                         filament_types = dynamic_cast<ConfigOptionStrings *>(const_cast<Preset *>(&filament_preset)->config.option("filament_type"));
                     } else {
                         filament_types = dynamic_cast<ConfigOptionStrings *>(const_cast<Preset *>(filament_preset_base)->config.option("filament_type"));
@@ -5192,7 +5116,7 @@ wxWindow *CreatePresetForPrinterDialog::create_dialog_buttons()
         } else {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "filament choice not find filament preset and choice is:" << filament_preset_name;
             MessageDialog dlg(this, _L("The filament choice not find filament preset, please reselect it"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                              wxYES | wxYES_DEFAULT | wxCENTRE);
+                              wxOK | wxCENTRE);
             dlg.ShowModal();
             return;
         }

@@ -4,7 +4,9 @@
 #include "Layer.hpp"
 #include "Print.hpp"
 #include "SupportMaterial.hpp"
+#include "SupportOverhangDetect.hpp"
 #include "SupportCommon.hpp"
+#include "SupportMergePlan.hpp"
 #include "Geometry.hpp"
 #include "Point.hpp"
 #include "MutablePolygon.hpp"
@@ -384,6 +386,15 @@ static constexpr const std::initializer_list<SupporLayerType> support_types_inte
     SupporLayerType::RaftInterface, SupporLayerType::BottomContact, SupporLayerType::BottomInterface, SupporLayerType::TopContact, SupporLayerType::TopInterface
 };
 
+// Edge (support highlight, phase 5): see SupportMaterial.hpp.
+void PrintObjectSupportMaterial::detect_overhangs_only(const PrintObject &object)
+{
+    SupportGeneratorLayerStorage layer_storage;
+    std::vector<Polygons> buildplate_covered = this->buildplate_covered(object);
+    // Fills Layer::support_overhangs as a side effect; the contact layers are dropped with the storage.
+    this->top_contact_layers(object, buildplate_covered, layer_storage);
+}
+
 void PrintObjectSupportMaterial::generate(PrintObject &object)
 {
     BOOST_LOG_TRIVIAL(info) << "Support generator - Start";
@@ -568,6 +579,15 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     }
 */
 
+    // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 SupportMaterial.cpp:516-526):
+    // merge the support areas into slabs a coarse nozzle can extrude. This has to run before
+    // generate_support_layers() installs them, because that is where the Z ladder is frozen. A no-op on every
+    // single-diameter plate and on an object with support groups.
+    SupportMergeResult support_merge;
+    merge_support_layers_multi_diameter(object, m_support_params, m_slicing_params, raft_layers,
+        bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers,
+        support_merge, -1., ! m_group_claims.empty());
+
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating layers";
 
 // For debugging purposes, one may want to show only some of the support extrusions.
@@ -581,6 +601,7 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     SupportGeneratorLayersPtr layers_sorted =
 #endif // SLIC3R_DEBUG
     generate_support_layers(object, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
+    apply_support_merge_result(object, support_merge);
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Generating tool paths";
 
@@ -1300,7 +1321,7 @@ namespace SupportMaterialInternal {
             // Surface supporting this layer, expanded by 0.5 * nozzle_diameter, as we consider this kind of overhang to be sufficiently supported.
             Polygons lower_grown_slices = expand(lower_layer_polygons,
                 //FIXME to mimic the decision in the perimeter generator, we should use half the external perimeter width.
-                0.5f * float(scale_(print_config.nozzle_diameter.get_at(layerm.region().config().wall_filament-1))),
+                0.5f * float(scale_(nozzle_diameter_for_filament(print_config, unsigned(layerm.region().config().wall_filament.value)))),
                 SUPPORT_SURFACES_OFFSET_PARAMETERS);
             // Collect perimeters of this layer.
             //FIXME split_at_first_point() could split a bridge mid-way
@@ -1460,11 +1481,10 @@ static inline ExPolygons detect_overhangs(
     // BBS.
     const bool   auto_normal_support = object_config.support_type.value == stNormalAuto;
     const bool   buildplate_only = ! annotations.buildplate_covered.empty();
-    // If user specified a custom angle threshold, convert it to radians.
-    // Zero means automatic overhang detection.
-    // +1 makes the threshold inclusive
-    double thresh_angle = object_config.support_threshold_angle.value > 0 ? object_config.support_threshold_angle.value + 1 : 0;
-    thresh_angle = std::min(thresh_angle, 89.); // BBS should be smaller than 90
+    // Edge: the layer rule (threshold, overlap, region overhangs, sliver filter) lives in
+    // Support/SupportOverhangDetect.cpp, shared with tree supports' twin and the support painting
+    // highlight. 0 means automatic overhang detection (overlap mode).
+    const double thresh_angle  = normal_support_threshold_angle(object_config.support_threshold_angle.value);
     const double threshold_rad = Geometry::deg2rad(thresh_angle);
     const bool bridge_no_support = object_config.bridge_no_support.value;
     const coordf_t xy_expansion = scale_(object_config.support_expansion.value);
@@ -1505,43 +1525,15 @@ static inline ExPolygons detect_overhangs(
             // Extrusion width accounts for the roundings of the extrudates.
             // It is the maximum widh of the extrudate.
             float fw = float(layerm->flow(frExternalPerimeter).scaled_width());
-            lower_layer_offset  = 
-                (layer_id < (size_t)object_config.enforce_support_layers.value) ? 
-                    // Enforce a full possible support, ignore the overhang angle.
-                    0.f :
-                (threshold_rad > 0. ? 
-                    // Overhang defined by an angle.
-                    float(scale_(lower_layer.height / tan(threshold_rad))) :
-                    // Overhang defined by overlap.
-                    fw - float(scale_(object_config.support_threshold_overlap.get_abs_value(unscale_(fw)))));
-            // Overhang polygons for this layer and region.
-            Polygons diff_polygons;
+            lower_layer_offset = normal_support_lower_layer_offset(layer_id, object_config.enforce_support_layers.value, threshold_rad,
+                                                                   lower_layer.height, fw, object_config.support_threshold_overlap);
+            // Overhang polygons for this layer and region (SupportOverhangDetect.cpp): with offset 0
+            // everything, else (auto only) what sticks out past the grown lower layer, grown back.
+            static const Polygons no_buildplate_covered;
             Polygons layerm_polygons = to_polygons(layerm->slices.surfaces);
-            if (lower_layer_offset == 0.f) {
-                // Support everything.
-                diff_polygons = diff(layerm_polygons, lower_layer_polygons);
-                if (buildplate_only) {
-                    // Don't support overhangs above the top surfaces.
-                    // This step is done before the contact surface is calculated by growing the overhang region.
-                    diff_polygons = diff(diff_polygons, annotations.buildplate_covered[layer_id]);
-                }
-            } else if (auto_normal_support) {
-                // Get the regions needing a suport, collapse very tiny spots.
-                //FIXME cache the lower layer offset if this layer has multiple regions.
-                diff_polygons = 
-                    diff(layerm_polygons,
-                            expand(lower_layer_polygons, lower_layer_offset, SUPPORT_SURFACES_OFFSET_PARAMETERS));
-                if (buildplate_only && ! annotations.buildplate_covered[layer_id].empty()) {
-                    // Don't support overhangs above the top surfaces.
-                    // This step is done before the contact surface is calculated by growing the overhang region.
-                    diff_polygons = diff(diff_polygons, annotations.buildplate_covered[layer_id]);
-                }
-                if (! diff_polygons.empty()) {
-                    // Offset the support regions back to a full overhang, restrict them to the full overhang.
-                    // This is done to increase size of the supporting columns below, as they are calculated by 
-                    // propagating these contact surfaces downwards.
-                    diff_polygons = diff(intersection(expand(diff_polygons, lower_layer_offset, SUPPORT_SURFACES_OFFSET_PARAMETERS), layerm_polygons), lower_layer_polygons);
-                }
+            Polygons diff_polygons   = normal_support_region_overhangs(layerm_polygons, lower_layer_polygons, lower_layer_offset, auto_normal_support,
+                                                                       buildplate_only, buildplate_only ? annotations.buildplate_covered[layer_id] : no_buildplate_covered);
+            if (lower_layer_offset != 0.f && auto_normal_support) {
                 //FIXME add user defined filtering here based on minimal area or minimum radius or whatever.
 
                 // BBS
@@ -1585,7 +1577,7 @@ static inline ExPolygons detect_overhangs(
                     print_config, lower_layer, lower_layer_polygons, *layerm, fw, diff_polygons);
             }
 
-            if (diff_polygons.empty() || offset(diff_polygons, -0.1 * fw).empty())
+            if (normal_support_overhang_too_thin(diff_polygons, fw))
                 continue;
 
             if (xy_expansion != 0) { diff_polygons = expand(diff_polygons, xy_expansion, SUPPORT_SURFACES_OFFSET_PARAMETERS); }
@@ -2224,7 +2216,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
 
     // check if the sharp tails should be extended higher
     bool detect_first_sharp_tail_only = false;
-    const coordf_t extrusion_width = m_object_config->line_width.get_abs_value(object.print()->config().nozzle_diameter.get_at(object.config().support_interface_filament-1));
+    const coordf_t extrusion_width = m_object_config->line_width.get_abs_value(nozzle_diameter_for_filament(object.print()->config(), unsigned(object.config().support_interface_filament.value)));
     const coordf_t extrusion_width_scaled = scale_(extrusion_width);
     if (is_auto(m_object_config->support_type.value) && g_config_support_sharp_tails && !detect_first_sharp_tail_only) {
         for (size_t layer_nr = layer_id_start; layer_nr < num_layers; layer_nr++) {
@@ -2400,6 +2392,11 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
                 , iRun
 #endif // SLIC3R_DEBUG
             );
+
+        // Edge (support highlight): keep a copy of what this layer's support holds up (overhangs
+        // after every filter, enforcers included) for the preview overlay. Layer 0 is the raft's.
+        if (layer_id > 0 && ! overhang_polygons.empty())
+            layer.support_overhangs = union_ex(overhang_polygons);
 
         // Now apply the contact areas to the layer where they need to be made.
         if (!contact_polygons.empty() || !overhang_polygons.empty()) {
@@ -3222,7 +3219,10 @@ void PrintObjectSupportMaterial::trim_support_layers_by_object(
                 // BOOST_LOG_TRIVIAL(trace) << "Support generator - trim_support_layers_by_object - trimmming non-empty layer " << idx_layer << " of " << nonempty_layers.size();
                 assert(! support_layer.polygons.empty() && support_layer.print_z >= m_slicing_params.raft_contact_top_z + EPSILON);
                 // Find the overlapping object layers including the extra above / below gap.
-                coordf_t z_threshold = support_layer.bottom_print_z() - gap_extra_below + EPSILON;
+                // A bottom contact must not be trimmed by the surface it rests on, even when its gap is rounded down.
+                coordf_t z_threshold = support_layer.layer_type == SupporLayerType::BottomContact
+                    ? support_layer.bottom_z + EPSILON
+                    : support_layer.bottom_print_z() - gap_extra_below + EPSILON;
                 idx_object_layer_overlapping = Layer::idx_higher_or_equal(
                     object.layers().begin(), object.layers().end(), idx_object_layer_overlapping,
                     [z_threshold](const Layer *layer){ return layer->print_z >= z_threshold; });
@@ -3234,16 +3234,23 @@ void PrintObjectSupportMaterial::trim_support_layers_by_object(
                     if (object_layer.bottom_z() > support_layer.print_z + gap_extra_above - EPSILON)
                         break;
 
-                    // Snapmaker #696: skip the object layer directly supported by this top contact layer: its
-                    // lslices cover the overhang itself, so trimming by it would cut away the contact area.
-                    // With variable layer heights the synchronised gap is shorter than the configured gap, so
-                    // this layer used to fall inside the trimming window and removed ~80% of the contact surface.
-                    if (support_layer.layer_type == SupporLayerType::TopContact &&
-                        i == support_layer.idx_object_layer_above)
-                        continue;
-
                     bool is_overlap = is_layers_overlap(support_layer, object_layer);
-                    for (const ExPolygon& expoly : object_layer.lslices) {
+                    // Only relax trimming across the gap to the overhang assigned to this top contact.
+                    // OrcaSlicer #13939, which replaces Snapmaker #696 here: with variable layer heights the
+                    // synchronised gap is shorter than the configured gap, so the supported overhang layer falls
+                    // inside the trimming window and its lslices cut away the contact area. #696 skipped that
+                    // layer outright; trimming by its continuing walls only (the part standing on the layer
+                    // below) keeps the overhang's interface and still clears walls that continue or expand into
+                    // the gap. A layer starting exactly at the contact height keeps its full trimming.
+                    const ExPolygons *trim_source = &object_layer.lslices;
+                    ExPolygons trim_continuous;
+                    if (support_layer.layer_type == SupporLayerType::TopContact && i > 0 &&
+                        i >= support_layer.idx_object_layer_above &&
+                        object_layer.bottom_z() > support_layer.print_z + EPSILON) {
+                        trim_continuous = intersection_ex(object_layer.lslices, object.layers()[i - 1]->lslices);
+                        trim_source = &trim_continuous;
+                    }
+                    for (const ExPolygon& expoly : *trim_source) {
                         // BBS
                         bool is_sharptail = !intersection_ex({ expoly }, object_layer.sharp_tails).empty();
                         coordf_t trimming_offset = is_sharptail ? scale_(sharp_tail_xy_gap) :

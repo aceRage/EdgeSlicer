@@ -24,6 +24,7 @@ public:
     RemeshDialog(wxWindow *parent, double auto_voxel, size_t triangles_before, double surface_area);
 
     // Valid after ShowModal() returns wxID_OK; also written back to AppConfig then.
+    // voxel_size is 0 when the field was left at the auto size: each part then gets its own.
     const RemeshOptions &options() const { return m_options; }
 
     // The stored options, clamped, with the voxel size defaulted to `auto_voxel`

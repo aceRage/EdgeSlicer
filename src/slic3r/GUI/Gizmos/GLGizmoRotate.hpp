@@ -211,6 +211,11 @@ private:
     RotoptimzeWindow::State m_rotoptimizewin_state = {};
 
     void load_rotoptimize_state();
+
+    // Prime tower selected: a Z-only angle panel in place of the object rotate panel.
+    void   render_wipe_tower_input_window(float x, float y, float bottom_limit);
+    double m_wipe_tower_angle_input   = 0.;
+    bool   m_wipe_tower_angle_editing = false;
 };
 
 } // namespace GUI

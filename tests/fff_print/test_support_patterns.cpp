@@ -58,10 +58,16 @@ StringObjectException validate_warning(std::initializer_list<ConfigBase::SetDese
     for (ModelObject *object : model.objects)
         print.auto_assign_extruders(object);
     print.apply(model, config);
-    StringObjectException warning;
-    const StringObjectException error = print.validate(&warning);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = print.validate(&warnings);
     INFO("validate error: " << error.string);
     REQUIRE(error.string.empty());
+    // validate() now returns every warning (Orca #14112); these tests look at the base-pattern one,
+    // the latest of which wins as the old single slot did.
+    StringObjectException warning;
+    for (const StringObjectException &w : warnings)
+        if (w.opt_key == "support_base_pattern")
+            warning = w;
     return warning;
 }
 
@@ -351,7 +357,7 @@ bool is_classic_tree(const char *style)
 // first one above the branches) with its own filler; on this small overhang the perimeters are a
 // large share of the interface length, so these checks look at line directions with a loose
 // parallelism bound rather than at the exact share of parallel lines.
-TEST_CASE("Each support interface pattern reaches the interface fill of every support style", "[SupportPatterns][SupportInterface]")
+TEST_CASE("Each support interface pattern reaches the interface fill of every support style", "[SupportPatterns][SupportInterface][slow]")
 {
     auto [type, style] = GENERATE(table<const char *, const char *>({
         { "normal(auto)", "grid" },        { "normal(auto)", "snug" },

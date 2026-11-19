@@ -1,0 +1,44 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1",
+      "name": "Golden: toolpaths, supports, brim and skirt hidden",
+      "plate_index": 0,
+      "source": "toolpaths",
+      "preset_base": "studio_white",
+      "background": {
+        "type": "radial_gradient",
+        "color1": "#FFFFFF",
+        "color2": "#D9DCE1"
+      },
+      "floor": {
+        "type": "shadow_catcher",
+        "color": "#F2F2F2",
+        "shadow_strength": 0.45
+      },
+      "materials": {
+        "toolpath_smoothness": 0.8,
+        "toolpath_supports": false,
+        "toolpath_skirt": false
+      },
+      "export": {
+        "width": 1920,
+        "height": 1080,
+        "quality": "high",
+        "format": "png"
+      }
+    }
+  ],
+  "_fixture": {
+    "settings": {
+      "enable_support": "1",
+      "support_type": "normal(auto)",
+      "support_threshold_angle": "40",
+      "brim_type": "outer_only",
+      "brim_width": "6",
+      "skirt_loops": "1"
+    }
+  }
+}

@@ -80,6 +80,7 @@ class UserManager;
 class DeviceManager;
 class NetworkAgent;
 class TaskManager;
+enum class PresetManagerKind; // libslic3r/PresetManagerModel.hpp
 
 namespace GUI{
 
@@ -501,8 +502,18 @@ private:
     bool is_gcode_viewer() const { return m_app_mode == EAppMode::GCodeViewer; }
     bool is_recreating_gui() const { return m_is_recreating_gui; }
     bool is_hub_managed() const { return m_hub_managed; }
+    // Showcase S5, --showcase-render: a hidden instance that loads one project, renders a Showcase
+    // video or still and exits with the job's code. It starts no network, no page server, no hub,
+    // registers no file types and never shows a window. Set before the app is constructed.
+    static void set_showcase_render_mode(bool on) { s_showcase_render_mode = on; }
+    static bool showcase_render_mode() { return s_showcase_render_mode; }
     // Ultra: this instance's loopback API + the hub handshake (was the Stream tab's job).
     void start_remote_access();
+private:
+    static bool s_showcase_render_mode;
+    // S5: runs the render job once the project is loaded, then ends the process with its code.
+    void run_showcase_render_job();
+public:
     bool flutter_web_config_update_dlg_open() const
     {
         return m_flutter_web_config_update_dlg_open.load(std::memory_order_acquire);
@@ -521,6 +532,10 @@ private:
 
     bool show_3d_navigator() const { return app_config->get_bool("show_3d_navigator"); }
     void toggle_show_3d_navigator() const { app_config->set_bool("show_3d_navigator", !show_3d_navigator()); }
+
+    // Orca #16291: center of mass markers in Prepare and Preview.
+    bool show_center_of_mass() const { return app_config->get_bool("show_center_of_mass"); }
+    void toggle_show_center_of_mass() const { app_config->set_bool("show_center_of_mass", !show_center_of_mass()); }
 
     wxString get_inf_dialog_contect () {return m_info_dialog_content;};
 
@@ -623,6 +638,8 @@ private:
     void            load_gcode(wxWindow* parent, wxString& input_file) const;
 
     wxString transition_tridid(int trid_id);
+    // rack_printer: the H3C's numbering (GUI::AmsTypes::rack_tray_label: "1".."9", "1-Ext".."9-Ext").
+    wxString transition_tridid(int trid_id, bool rack_printer);
     void            ShowUserGuide();
     // EdgeSlicer never downloads Bambu's network plug-in (owner decision, 2026-10). Everything that
     // used to offer that download - sign-in, the Device tab, the setup wizard, Preferences, the
@@ -841,6 +858,8 @@ private:
     std::string     get_mode_str();
     void            save_mode(const /*ConfigOptionMode*/int mode) ;
     void            update_mode();
+    // Curved tops P3: Developer mode on and the Developer setting lines shown (the developer-override gate).
+    bool            curved_tops_developer_lines_shown();
     void            update_internal_development();
     void            show_ip_address_enter_dialog(wxString title = wxEmptyString);
     void            show_ip_address_enter_dialog_handler(wxCommandEvent &evt);
@@ -883,6 +902,8 @@ private:
     // Makes the theme app_config "ui_theme" names the running look without a restart: colours,
     // corner radii, icons, title bar, 3D view and Home page. Fonts still need one (Theme::fonts_pending()).
     void            apply_theme_live();
+    // Project strip P4: the theme's colour pass for a window made after the main window was themed (a new project's Plater).
+    void            theme_new_window(wxWindow *window);
 
     virtual bool OnExceptionInMainLoop() override;
     // Calls wxLaunchDefaultBrowser if user confirms in dialog.
@@ -983,6 +1004,9 @@ private:
     void            open_web_page_localized(const std::string &http_address);
     bool            may_switch_to_SLA_preset(const wxString& caption);
     bool            run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage start_page = ConfigWizard::SP_WELCOME);
+    // The Filament manager (the Filaments row gear, "Add/Remove filaments") or the Process manager (the
+    // process row gear). Returns true when the presets were reloaded on the way out.
+    bool            run_preset_manager(PresetManagerKind kind);
     void            show_desktop_integration_dialog();
 
 #if ENABLE_THUMBNAIL_GENERATOR_DEBUG

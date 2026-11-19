@@ -71,6 +71,11 @@ struct Perimeter {
   // Stores precise seam coordinates found by Precise Seam modifiers
   std::optional<Vec3f> precise_seam_point;
   size_t precise_seam_index{};
+
+  // The loop came from extract_perimeter_polygons()' fallback: every point of an island collection with no
+  // recognisable outer loop, merged into one (self-intersecting) polygon. place_seam() uses it like any other
+  // loop; seam auto-paint skips it (plan_object_seams).
+  bool from_fallback = false;
 };
 
 //Struct over which all processing of perimeters is done. For each perimeter point, its respective candidate is created,
@@ -80,7 +85,7 @@ struct SeamCandidate {
   SeamCandidate(const Vec3f &pos, Perimeter &perimeter,
                 float local_ccw_angle,
                 EnforcedBlockedSeamPoint type) :
-                                                 position(pos), perimeter(perimeter), visibility(0.0f), overhang(0.0f), embedded_distance(0.0f), local_ccw_angle(
+                                                 position(pos), perimeter(perimeter), visibility(0.0f), overhang(0.0f), unsupported_dist(0.0f), embedded_distance(0.0f), local_ccw_angle(
                                                                                                                                                      local_ccw_angle), type(type), central_enforcer(false) {
   }
   const Vec3f position;
@@ -88,6 +93,7 @@ struct SeamCandidate {
   Perimeter &perimeter;
   float visibility;
   float overhang;
+  // Edge: set from the layer below; a point with no layer below (the object's first layer) is supported, 0 as overhang.
   float unsupported_dist;
   // distance inside the merged layer regions, for detecting perimeter points which are hidden indside the print (e.g. multimaterial join)
   // Negative sign means inside the print, comes from EdgeGrid structure

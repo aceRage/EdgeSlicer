@@ -4156,14 +4156,17 @@ void SSWCP_MachineConnect_Instance::sw_test_connect() {
                 port = m_param_data["port"].get<int>();
             }
 
-            auto p_config = &(wxGetApp().preset_bundle->printers.get_edited_preset().config);
+            // A copy, as sw_mqtt_set_engine does: a connection test leaves the printer preset alone. It
+            // used to write host_type htMoonRaker into the edited preset, a value that has no key in
+            // the host_type map, so the preset could not be serialized with it.
+            DynamicPrintConfig config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
 
             PrintHostType type = PrintHostType::htMoonRaker;
             // todo : add cin-type
             //            
-            p_config->option<ConfigOptionEnum<PrintHostType>>("host_type")->value = type;            
-            p_config->set("print_host", ip + (port == -1 ? "" : std::to_string(port)));
-            std::shared_ptr<PrintHost> host(PrintHost::get_print_host(&wxGetApp().preset_bundle->printers.get_edited_preset().config));
+            config.option<ConfigOptionEnum<PrintHostType>>("host_type")->value = type;            
+            config.set("print_host", print_host_address(ip, port));
+            std::shared_ptr<PrintHost> host(PrintHost::get_print_host(&config));
 
             if (!host) {                
                 finish_job();
@@ -5962,8 +5965,10 @@ void SSWCP_MachineManage_Instance::sw_AddDevice()
 {
     {
         wxGetApp().CallAfter([] {
-            if (wxGetApp().web_device_dialog)
-                delete wxGetApp().web_device_dialog;
+            if (wxGetApp().web_device_dialog) {
+                wxGetApp().web_device_dialog->Destroy();
+                wxGetApp().web_device_dialog = nullptr;
+            }
 
             wxGetApp().web_device_dialog = new WebDeviceDialog;
             wxGetApp().web_device_dialog->run();
@@ -6522,6 +6527,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_connect()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -6585,6 +6596,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_disconnect()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -6659,6 +6676,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_subscribe()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -6731,6 +6754,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_unsubscribe() {
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -6801,7 +6830,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
 
         config.option<ConfigOptionEnum<PrintHostType>>("host_type")->value = type;
 
-        config.set("print_host", ip + (port == -1 ? "" : ":" + std::to_string(port)));
+        config.set("print_host", print_host_address(ip, port));
 
         std::shared_ptr<PrintHost> tmp_host(PrintHost::get_print_host(&config));
         wxGetApp().set_connect_host(tmp_host);
@@ -7474,6 +7503,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_publish()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -7532,6 +7567,7 @@ std::unordered_map<std::string, int> SSWCP::m_tab_map = {
     {"Home", MainFrame::TabPosition::tpHome},
     {"3DEditor", MainFrame::TabPosition::tp3DEditor},
     {"Preview", MainFrame::TabPosition::tpPreview},
+    {"Showcase", MainFrame::TabPosition::tpShowcase},
     {"Monitor", MainFrame::TabPosition::tpMonitor},
     {"Stream", MainFrame::TabPosition::tpStream},
     {"MultiDevice", MainFrame::TabPosition::tpMultiDevice},

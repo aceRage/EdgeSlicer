@@ -87,3 +87,11 @@ Create small gaps in the wipe tower outer wall at tool change entry points. The 
 ## Stagger toolchange start
 
 Vary the prime-tower wipe start along the tower depth so startup ooze and ironing marks do not stack on the same purge line. The setting is off by default and is enabled only on Snapmaker U1 system process profiles. Stagger is 0 on the first layer, on local-Z tool changes, on tower-interface changes, and on the final purge. When stagger is on, the nozzle wipes from the offset start to the box top, then travels back to the original start and wipes the skipped band so the full purge volume is kept and the strip is filled.
+
+## Combine sparse layers
+
+If enabled, consecutive layers on which the prime tower has no filament change are printed as a single thicker tower layer instead of one thin layer each, the same way infill combination merges sparse infill. The merged layer is printed at the top of the run, at the height of everything it covers.
+
+Only whole layers are merged, and never past the maximum layer height of the nozzle printing the tower (three quarters of the nozzle diameter when that is left at 0). Two or more layers therefore have to fit under that limit before anything changes at all: at a 0.2 mm layer height under a 0.3 mm maximum nothing is merged, while at 0.1 mm three layers become one.
+
+Unlike "No sparse layers" the tower keeps following the model, so the toolhead never has to reach down to it. Has no effect with "No sparse layers" or smooth timelapse, which needs a tower on every layer.

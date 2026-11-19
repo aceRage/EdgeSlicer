@@ -4,13 +4,19 @@
 #include "RemoteHub.hpp"
 
 #include "BambuCamRelay.hpp"
+#include "ElegooCamRelay.hpp"
 #include "RemoteNotify.hpp"
+#include "RemotePaintV1.hpp"
+#include "RemoteSliceV1.hpp"
 #include "WebPush.hpp"
 #include "AppPush.hpp"
 #include "HubEventDedupe.hpp"
+#include "BambuCloudWatch.hpp" // a Bambu row's age is its report's, not only the poll's
 #include "HubPushOwner.hpp"
 #include "GcodeArchive.hpp" // normalize_printer: the Reprint list's printer names
 #include "SnapmakerLan.hpp" // the LAN cards a "connect" record may belong to
+#include "PrinterRowsBridge.hpp" // remove_files: the phone's Remove with no slicer window open
+#include "slic3r/Utils/PrintersMonitor.hpp" // removal_plan: what removing a row means
 #include "slic3r/Utils/HubAddresses.hpp" // which of this PC's addresses a phone is told about
 #include "HMS.hpp"
 #include "libslic3r/Utils.hpp"
@@ -20,7 +26,8 @@
 #include "slic3r/Utils/WinFirewall.hpp"
 #include "slic3r/Utils/TailscaleCli.hpp" // where the CLI lives per platform, and the POSIX way to run it
 #include "slic3r/Utils/HubPlatform.hpp"   // go2rtc/ffmpeg lookup, macOS/Linux firewall, port holder, route, keep-alive, child processes
-#include "slic3r/Utils/HubQuit.hpp"       // SIGTERM/SIGINT/SIGHUP -> the tray's Quit, and the shutdown safety net
+#include "slic3r/Utils/HubQuit.hpp"
+#include "slic3r/Utils/HubMosaic.hpp"     // the TV wall's camera mosaic (one H.264 stream per page)       // SIGTERM/SIGINT/SIGHUP -> the tray's Quit, and the shutdown safety net
 
 #include <boost/asio.hpp>
 #include <boost/beast/core/detail/base64.hpp>
@@ -160,11 +167,17 @@ static const size_t      MAX_EVENTS         = 200;
 static const int         PRINTERS_POLL_MS   = 10000;
 static const long long   PRINTERS_STALE_MS  = 30000;
 static const size_t      MAX_CACHED_PRINTERS = 64;
+// A remembered row whose printer the slicer no longer lists (a removed printer, a test printer a
+// test copy reported) goes once it has been missing from every live window's `configured` list for
+// this long. The grace covers a window that has just started and not yet read its Bambu cloud list.
+static const long long   PRINTERS_PRUNE_GRACE_MS = 5 * 60 * 1000;
 
 // ------------------------------------------------------------------ paths ----
 
 std::string hub_dir()       { return (fs::path(data_dir()) / "hub").string(); }
 std::string instances_dir() { return (fs::path(hub_dir()) / "instances").string(); }
+std::string removed_printers_path() { return (fs::path(hub_dir()) / "removed_printers.json").string(); }
+std::string printer_aliases_path() { return (fs::path(hub_dir()) / "printer_aliases.json").string(); }
 std::string uploads_dir()   { return (fs::path(hub_dir()) / "uploads").string(); }
 std::string saves_dir()     { return (fs::path(hub_dir()) / "saves").string(); }
 static std::string hub_json_path()     { return (fs::path(hub_dir()) / "hub.json").string(); }
@@ -1223,6 +1236,689 @@ static bool run_capture(const std::vector<std::string>& args, std::string& out, 
 #endif
 }
 
+// ---- A child process whose stdout is read as it runs (the camera mosaic's ffmpeg) ----------
+// run_capture() collects a command's whole output after it ends; the mosaic needs the opposite: an
+// ffmpeg that runs for as long as somebody watches, its raw H.264 read off stdout and passed on as
+// it arrives. stderr is kept (the last few KB) for the log when it fails. kill() may be called from
+// another thread; read() then returns 0.
+class StreamProc
+{
+public:
+    StreamProc() = default;
+    StreamProc(const StreamProc&) = delete;
+    StreamProc& operator=(const StreamProc&) = delete;
+    ~StreamProc() { kill(); wait_reap(); }
+
+    // `job` (Windows): the Job Object that ties the child to the hub (go2rtc's), or null.
+    // `with_stdin`: the child reads what write() sends (the mosaic encoder's raw frames);
+    // otherwise its stdin is empty.
+    bool start(const std::vector<std::string>& args, void* job, bool with_stdin = false)
+    {
+#ifdef _WIN32
+        std::wstring cmd;
+        for (const std::string& a : args) {
+            if (!cmd.empty()) cmd += L' ';
+            cmd += quote_arg(widen(a));
+        }
+        SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
+        HANDLE out_r = nullptr, out_w = nullptr, err_r = nullptr, err_w = nullptr;
+        if (!::CreatePipe(&out_r, &out_w, &sa, 1 << 20)) return false;
+        if (!::CreatePipe(&err_r, &err_w, &sa, 0)) { ::CloseHandle(out_r); ::CloseHandle(out_w); return false; }
+        ::SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+        ::SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
+        HANDLE in_r = nullptr, in_w = nullptr;
+        if (with_stdin) {
+            if (!::CreatePipe(&in_r, &in_w, &sa, 1 << 20)) {
+                ::CloseHandle(out_r); ::CloseHandle(out_w); ::CloseHandle(err_r); ::CloseHandle(err_w);
+                return false;
+            }
+            ::SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0);
+        }
+        // The child inherits exactly its own pipe ends. The mosaic starts several of these at once
+        // (a feeder per camera, the encoder, the cards), and a plain bInheritHandles=TRUE would
+        // hand each child the other children's pipe ends that happen to be open at that moment:
+        // a feeder whose camera died then never reads as ended, because a sibling still holds its
+        // stdout open.
+        HANDLE inherit[3];
+        DWORD  n_inherit = 0;
+        inherit[n_inherit++] = out_w;
+        inherit[n_inherit++] = err_w;
+        if (in_r) inherit[n_inherit++] = in_r;
+        SIZE_T attr_size = 0;
+        ::InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+        std::vector<char> attr_buf(attr_size);
+        auto attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+        const bool inited = attr_size > 0 && ::InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size);
+        const bool listed = inited && ::UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, n_inherit * sizeof(HANDLE),
+                                                        nullptr, nullptr);
+        STARTUPINFOEXW six = {};
+        STARTUPINFOW&  si  = six.StartupInfo;
+        si.cb         = listed ? sizeof(six) : sizeof(si);
+        si.dwFlags    = STARTF_USESTDHANDLES;
+        si.hStdInput  = in_r;
+        si.hStdOutput = out_w;
+        si.hStdError  = err_w;
+        if (listed) six.lpAttributeList = attrs;
+        PROCESS_INFORMATION  pi = {};
+        std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+        buf.push_back(L'\0');
+        const BOOL ok = ::CreateProcessW(nullptr, buf.data(), nullptr, nullptr, TRUE,
+                                         CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED |
+                                             (listed ? EXTENDED_STARTUPINFO_PRESENT : 0),
+                                         nullptr, nullptr, &si, &pi);
+        if (inited) ::DeleteProcThreadAttributeList(attrs);
+        ::CloseHandle(out_w);
+        ::CloseHandle(err_w);
+        if (in_r) ::CloseHandle(in_r);
+        if (!ok) { ::CloseHandle(out_r); ::CloseHandle(err_r); if (in_w) ::CloseHandle(in_w); return false; }
+        if (job) ::AssignProcessToJobObject((HANDLE) job, pi.hProcess); // dies with the hub
+        ::ResumeThread(pi.hThread);
+        ::CloseHandle(pi.hThread);
+        m_proc = pi.hProcess;
+        m_out  = out_r;
+        m_err  = err_r;
+        m_in   = in_w;
+        m_err_reader = std::thread([this]() {
+            char  b[2048];
+            DWORD n = 0;
+            while (::ReadFile((HANDLE) m_err, b, sizeof(b), &n, nullptr) && n > 0) append_err(b, n);
+        });
+        return true;
+#else
+        (void) job;
+        int out_p[2], err_p[2], in_p[2] = { -1, -1 };
+        if (::pipe(out_p) != 0) return false;
+        if (::pipe(err_p) != 0) { ::close(out_p[0]); ::close(out_p[1]); return false; }
+        if (with_stdin && ::pipe(in_p) != 0) {
+            ::close(out_p[0]); ::close(out_p[1]); ::close(err_p[0]); ::close(err_p[1]);
+            return false;
+        }
+        const pid_t pid = ::fork();
+        if (pid < 0) {
+            ::close(out_p[0]); ::close(out_p[1]); ::close(err_p[0]); ::close(err_p[1]);
+            if (in_p[0] >= 0) { ::close(in_p[0]); ::close(in_p[1]); }
+            return false;
+        }
+        if (pid == 0) {
+            ::dup2(out_p[1], 1);
+            ::dup2(err_p[1], 2);
+            ::close(out_p[0]); ::close(out_p[1]); ::close(err_p[0]); ::close(err_p[1]);
+            if (in_p[0] >= 0) {
+                ::dup2(in_p[0], 0);
+                ::close(in_p[0]); ::close(in_p[1]);
+            } else {
+                const int devnull = ::open("/dev/null", O_RDONLY);
+                if (devnull >= 0) { ::dup2(devnull, 0); ::close(devnull); }
+            }
+            std::vector<char*> argv;
+            for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+            argv.push_back(nullptr);
+            ::execv(args.front().c_str(), argv.data());
+            ::_exit(127);
+        }
+        ::close(out_p[1]);
+        ::close(err_p[1]);
+        if (in_p[0] >= 0) ::close(in_p[0]);
+        m_pid  = pid;
+        m_fd   = out_p[0];
+        m_efd  = err_p[0];
+        m_ifd  = in_p[1];
+        m_err_reader = std::thread([this]() {
+            char b[2048];
+            for (;;) {
+                const ssize_t n = ::read(m_efd, b, sizeof(b));
+                if (n <= 0) break;
+                append_err(b, (size_t) n);
+            }
+        });
+        return true;
+#endif
+    }
+
+    // Up to `cap` bytes of stdout; 0 at the end (the process ended or was killed).
+    size_t read(char* buf, size_t cap)
+    {
+#ifdef _WIN32
+        DWORD n = 0;
+        if (!m_out || !::ReadFile((HANDLE) m_out, buf, (DWORD) cap, &n, nullptr)) return 0;
+        return (size_t) n;
+#else
+        if (m_fd < 0) return 0;
+        for (;;) {
+            const ssize_t n = ::read(m_fd, buf, cap);
+            if (n < 0 && errno == EINTR) continue;
+            return n > 0 ? (size_t) n : 0;
+        }
+#endif
+    }
+
+    // All of `n` bytes to the child's stdin (started with_stdin); false once it is gone.
+    bool write(const char* data, size_t n)
+    {
+#ifdef _WIN32
+        while (n > 0) {
+            DWORD w = 0;
+            if (!m_in || !::WriteFile((HANDLE) m_in, data, (DWORD) std::min<size_t>(n, 1u << 20), &w, nullptr) || w == 0) return false;
+            data += w;
+            n -= w;
+        }
+        return true;
+#else
+        while (n > 0) {
+            if (m_ifd < 0) return false;
+            const ssize_t w = ::write(m_ifd, data, n);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) return false; // EPIPE: SIGPIPE is ignored by the hub
+            data += w;
+            n -= (size_t) w;
+        }
+        return true;
+#endif
+    }
+
+    void kill()
+    {
+        std::lock_guard<std::mutex> lock(m_kill_mutex);
+#ifdef _WIN32
+        if (m_proc && !m_killed) ::TerminateProcess((HANDLE) m_proc, 1);
+#else
+        if (m_pid > 0 && !m_killed) ::kill(m_pid, SIGKILL);
+#endif
+        m_killed = true;
+    }
+
+    std::string err_tail()
+    {
+        std::lock_guard<std::mutex> lock(m_err_mutex);
+        return m_err_text;
+    }
+
+private:
+    void append_err(const char* b, size_t n)
+    {
+        std::lock_guard<std::mutex> lock(m_err_mutex);
+        m_err_text.append(b, n);
+        if (m_err_text.size() > 4096) m_err_text.erase(0, m_err_text.size() - 4096);
+    }
+
+    void wait_reap()
+    {
+#ifdef _WIN32
+        if (m_proc) ::WaitForSingleObject((HANDLE) m_proc, 5000);
+        if (m_err_reader.joinable()) m_err_reader.join();
+        if (m_out) ::CloseHandle((HANDLE) m_out);
+        if (m_err) ::CloseHandle((HANDLE) m_err);
+        if (m_in) ::CloseHandle((HANDLE) m_in);
+        if (m_proc) ::CloseHandle((HANDLE) m_proc);
+        m_out = m_err = m_in = m_proc = nullptr;
+#else
+        if (m_pid > 0) { int st = 0; ::waitpid(m_pid, &st, 0); }
+        if (m_err_reader.joinable()) m_err_reader.join();
+        if (m_fd >= 0) ::close(m_fd);
+        if (m_efd >= 0) ::close(m_efd);
+        if (m_ifd >= 0) ::close(m_ifd);
+        m_pid = -1;
+        m_fd = m_efd = m_ifd = -1;
+#endif
+    }
+
+#ifdef _WIN32
+    void* m_proc = nullptr;
+    void* m_out  = nullptr;
+    void* m_err  = nullptr;
+    void* m_in   = nullptr;
+#else
+    pid_t m_pid = -1;
+    int   m_fd  = -1;
+    int   m_efd = -1;
+    int   m_ifd = -1;
+#endif
+    bool        m_killed = false;
+    std::mutex  m_kill_mutex;
+    std::mutex  m_err_mutex;
+    std::string m_err_text;
+    std::thread m_err_reader;
+};
+
+// ---- The camera mosaic's pipeline (the TV wall; see "Camera mosaic" below and HubMosaic.hpp) ----
+// One small ffmpeg per live cell decodes its camera into raw frames at the cell's size (a feeder);
+// a compositor thread puts the latest frame of every cell into the canvas at a steady rate and
+// writes it into ONE encoder ffmpeg; a reader thread passes the encoder's H.264 to whoever reads it
+// (go2rtc's /relay/mosaic connection) and keeps the latest GOP for the next one to connect.
+//
+// Startup is what this is built for. The encoder never waits on a camera: its first keyframe shows
+// a "Connecting..." card per cell, each camera appears when its own first frame arrives, and one
+// that fails becomes an "Offline" card (tried again with backoff) without disturbing the rest.
+// The hub starts the pipeline when the TV asks for a page, before go2rtc connects, so the cameras
+// connect while the TV's player is still setting up, and keeps it MOSAIC_LINGER_S after the last
+// viewer left (a page turn, a look at one camera and back) - then it stops by itself, so the GPU
+// encoder is never left running for nobody.
+//
+// Timing (ms after the TV's request) goes to the hub log as "RemoteHub: mosaic +<ms> ...": no
+// URLs there, they carry printer addresses and access codes.
+static const int MOSAIC_LINGER_S = 30;
+
+class MosaicPipeline
+{
+public:
+    using Clock = std::chrono::steady_clock;
+
+    // One reader of the encoded stream (a /relay/mosaic connection).
+    struct Sub
+    {
+        std::mutex              m;
+        std::condition_variable cv;
+        std::string             q;
+        bool                    closed = false;
+    };
+
+    MosaicPipeline(std::string ff, void* job, const HubMosaic::Spec& spec, Clock::time_point asked)
+        : m_ff(std::move(ff)), m_job(job), m_spec(spec), m_asked(asked), m_last_active(Clock::now())
+    {}
+    MosaicPipeline(const MosaicPipeline&)            = delete;
+    MosaicPipeline& operator=(const MosaicPipeline&) = delete;
+    ~MosaicPipeline() { stop(); }
+
+    // The encoder and every thread; false when the encoder did not even start.
+    bool start()
+    {
+        const HubMosaic::Spec spec = page();
+        if (!m_enc.start(HubMosaic::encoder_args_raw(m_ff, spec), m_job, true)) {
+            m_halted = true;
+            return false;
+        }
+        m_started = Clock::now();
+        log_at("encoder " + std::string(HubMosaic::encoder_name(spec.encoder)) + " started");
+        m_reader     = std::thread([this]() { read_encoder(); });
+        m_compositor = std::thread([this]() { composite(); });
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        start_page_locked();
+        return true;
+    }
+
+    // Idempotent; never from one of this pipeline's own threads.
+    void stop()
+    {
+        halt(false);
+        std::vector<std::unique_ptr<Feed>> feeds;
+        std::vector<std::thread>           aux;
+        {
+            std::lock_guard<std::mutex> lock(m_page_mutex);
+            feeds.swap(m_feeds);
+            aux.swap(m_aux);
+        }
+        for (auto& f : feeds) f->halt();
+        for (auto& f : feeds) if (f->th.joinable()) f->th.join();
+        for (auto& t : aux) if (t.joinable()) t.join();
+        if (m_compositor.joinable()) m_compositor.join();
+        if (m_reader.joinable()) m_reader.join();
+    }
+
+    bool running() const { return !m_halted; }
+    // The encoder ended by itself (not stopped): a GPU encoder that refused, say.
+    bool encoder_failed() const { return m_enc_failed; }
+    // ... and did so within a few seconds or before its first keyframe.
+    bool failed_early() const { return m_enc_failed && (!m_keyframe || m_ran_ms < 5000); }
+    std::string encoder_errors() { return m_enc.err_tail(); }
+
+    // Whether `s` can be shown by this encoder as it is (only the cells differ).
+    bool same_output(const HubMosaic::Spec& s) const
+    {
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        return s.size.w == m_spec.size.w && s.size.h == m_spec.size.h && HubMosaic::clamp_fps(s.fps) == HubMosaic::clamp_fps(m_spec.fps) &&
+               s.kbps == m_spec.kbps && s.encoder == m_spec.encoder;
+    }
+
+    // A new page on the running encoder: the old feeders go, the new ones start; the stream (and
+    // the TV's player) carries on.
+    void set_page(const HubMosaic::Spec& spec, Clock::time_point asked)
+    {
+        std::vector<std::unique_ptr<Feed>> old;
+        {
+            std::lock_guard<std::mutex> lock(m_page_mutex);
+            old.swap(m_feeds);
+            m_spec  = spec;
+            m_asked = asked;
+            start_page_locked();
+        }
+        for (auto& f : old) f->halt();
+        for (auto& f : old) if (f->th.joinable()) f->th.join();
+        touch();
+    }
+
+    void touch()
+    {
+        std::lock_guard<std::mutex> lock(m_sub_mutex);
+        m_last_active = Clock::now();
+    }
+
+    std::shared_ptr<Sub> subscribe()
+    {
+        auto s = std::make_shared<Sub>();
+        std::lock_guard<std::mutex> lock(m_sub_mutex);
+        s->q = m_cache.data(); // the latest keyframe on: a picture at once
+        s->closed = m_halted;
+        m_subs.push_back(s);
+        m_last_active = Clock::now();
+        return s;
+    }
+
+    void unsubscribe(const std::shared_ptr<Sub>& s)
+    {
+        std::lock_guard<std::mutex> lock(m_sub_mutex);
+        m_subs.erase(std::remove(m_subs.begin(), m_subs.end(), s), m_subs.end());
+        m_last_active = Clock::now();
+    }
+
+    long long ms_since_asked() const
+    {
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - m_asked).count();
+    }
+
+    void log_at(const std::string& what) const
+    {
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: mosaic +" << ms_since_asked() << " ms: " << what;
+    }
+
+private:
+    // One live cell's camera: its ffmpeg, retried with backoff while the page is up.
+    struct Feed
+    {
+        HubMosaic::Cell         cell;
+        HubMosaic::Rect         rect;
+        int                     index = 0;
+        std::mutex              m; // guards proc, frame, live, offline
+        std::condition_variable cv;
+        std::unique_ptr<StreamProc> proc;
+        std::vector<unsigned char> frame; // the latest whole frame (rect-sized yuv420p)
+        bool                    live    = false;
+        bool                    offline = false;
+        bool                    stop    = false;
+        std::thread             th;
+
+        void halt()
+        {
+            std::lock_guard<std::mutex> lock(m);
+            stop = true;
+            if (proc) proc->kill();
+            cv.notify_all();
+        }
+    };
+
+    static const char* kind_name(const HubMosaic::Cell& c) { return c.kind == HubMosaic::CellKind::Rtsp ? "rtsp" : "mjpeg"; }
+
+    HubMosaic::Spec page() const
+    {
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        return m_spec;
+    }
+
+    // m_page_mutex held: feeders for the live cells of m_spec, and the cards rendered.
+    void start_page_locked()
+    {
+        ++m_page_gen;
+        m_card_connecting.reset();
+        m_card_offline.reset();
+        for (int i = 0; i < m_spec.layout.cells() && i < (int) m_spec.cells.size(); ++i) {
+            const HubMosaic::Cell& c = m_spec.cells[i];
+            if (c.kind != HubMosaic::CellKind::Rtsp && c.kind != HubMosaic::CellKind::Mjpeg) continue;
+            auto f   = std::make_unique<Feed>();
+            f->cell  = c;
+            f->rect  = HubMosaic::cell_rect(m_spec.layout, m_spec.size, i);
+            f->index = i;
+            Feed* raw = f.get();
+            f->th     = std::thread([this, raw]() { feed(*raw); });
+            m_feeds.push_back(std::move(f));
+        }
+        const HubMosaic::Spec spec = m_spec;
+        const unsigned        gen  = m_page_gen;
+        m_aux.emplace_back([this, spec, gen]() { render_cards(spec, gen); });
+    }
+
+    // The "Connecting..." and "Offline" canvases of this page (one ffmpeg frame each).
+    void render_cards(const HubMosaic::Spec spec, unsigned gen)
+    {
+        const size_t n = HubMosaic::i420_size(spec.size.w, spec.size.h);
+        auto render = [&](const char* note) -> std::shared_ptr<std::vector<unsigned char>> {
+            StreamProc p;
+            if (!p.start(HubMosaic::card_args(m_ff, spec, note), m_job)) return nullptr;
+            auto   buf = std::make_shared<std::vector<unsigned char>>(n);
+            size_t got = 0;
+            while (got < n && !m_halted) {
+                const size_t r = p.read((char*) buf->data() + got, n - got);
+                if (r == 0) break;
+                got += r;
+            }
+            return got == n ? buf : nullptr;
+        };
+        auto connecting = render(HubMosaic::NOTE_CONNECTING);
+        {
+            std::lock_guard<std::mutex> lock(m_page_mutex);
+            if (m_page_gen != gen) return;
+            m_card_connecting = connecting;
+        }
+        auto offline = render(HubMosaic::NOTE_OFFLINE);
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        if (m_page_gen == gen) m_card_offline = offline;
+    }
+
+    void feed(Feed& f)
+    {
+        const size_t n        = HubMosaic::i420_size(f.rect.w, f.rect.h);
+        // An Elegoo CC1 has a viewer limit: the relay said it was free when the page was set; a
+        // failure is not retried in a loop (D12), the next page request asks again.
+        const bool   retry    = f.cell.url.find("/elegoo") == std::string::npos;
+        int          failures = 0;
+        bool         first    = true;
+        std::vector<unsigned char> buf(n);
+        // Lock order is m_page_mutex, then Feed::m (the compositor's): nothing below takes the
+        // page lock (log_at does) while holding f.m.
+        const std::vector<std::string> args = HubMosaic::feeder_args(m_ff, f.cell, f.rect, m_spec_font());
+        while (!m_halted) {
+            auto proc = std::make_unique<StreamProc>();
+            const auto t_spawn = Clock::now();
+            {
+                std::lock_guard<std::mutex> lock(f.m);
+                if (f.stop) return;
+                if (!proc->start(args, m_job)) {
+                    f.offline = true;
+                    return;
+                }
+                f.proc = std::move(proc);
+            }
+            StreamProc* p   = f.proc.get();
+            size_t      got = 0;
+            for (;;) {
+                const size_t r = p->read((char*) buf.data() + got, n - got);
+                if (r == 0) break;
+                got += r;
+                if (got < n) continue;
+                got = 0;
+                {
+                    std::lock_guard<std::mutex> lock(f.m);
+                    f.frame.swap(buf);
+                    if (buf.size() != n) buf.resize(n);
+                    f.live    = true;
+                    f.offline = false;
+                }
+                if (first) {
+                    first = false;
+                    log_at("cell " + std::to_string(f.index) + " (" + kind_name(f.cell) + ") first frame, " +
+                           std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t_spawn).count()) +
+                           " ms after its ffmpeg started");
+                }
+            }
+            const long long ran = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t_spawn).count();
+            {
+                std::lock_guard<std::mutex> lock(f.m);
+                f.live    = false;
+                f.offline = true;
+                if (f.stop || m_halted) return;
+            }
+            failures = ran > 30000 ? 1 : failures + 1;
+            const int wait = HubMosaic::retry_delay_ms(failures);
+            // The ffmpeg's own words may hold the camera URL (address, access code): not logged.
+            log_at("cell " + std::to_string(f.index) + " (" + kind_name(f.cell) + ") ended after " + std::to_string(ran) + " ms" +
+                   (retry ? ", again in " + std::to_string(wait) + " ms" : ", not retried"));
+            if (!retry) return;
+            std::unique_lock<std::mutex> lock(f.m);
+            f.cv.wait_for(lock, std::chrono::milliseconds(wait), [&]() { return f.stop || m_halted.load(); });
+            if (f.stop || m_halted) return;
+        }
+    }
+
+    std::string m_spec_font() const
+    {
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        return m_spec.font;
+    }
+
+    void composite()
+    {
+        HubMosaic::Spec spec   = page();
+        const size_t    n      = HubMosaic::i420_size(spec.size.w, spec.size.h);
+        std::vector<unsigned char> frame(n);
+        auto blank = [&]() {
+            std::fill(frame.begin(), frame.begin() + (size_t) spec.size.w * spec.size.h, (unsigned char) 0x22);
+            std::fill(frame.begin() + (size_t) spec.size.w * spec.size.h, frame.end(), (unsigned char) 0x80);
+        };
+        blank();
+        const auto period = std::chrono::microseconds(1000000 / HubMosaic::clamp_fps(spec.fps));
+        auto       next   = Clock::now();
+        unsigned   shown_gen = 0;
+        while (!m_halted) {
+            std::shared_ptr<std::vector<unsigned char>> connecting, offline;
+            std::vector<Feed*>                          feeds;
+            unsigned                                    gen = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_page_mutex);
+                spec       = m_spec;
+                connecting = m_card_connecting;
+                offline    = m_card_offline;
+                gen        = m_page_gen;
+                for (auto& f : m_feeds) feeds.push_back(f.get());
+                // Feeds are only destroyed after set_page()/stop() swapped them out and joined
+                // their threads; holding m_page_mutex while reading them keeps them alive.
+                if (gen != shown_gen && !connecting) blank();
+                if (connecting) {
+                    std::vector<bool> drawn(spec.layout.cells(), false);
+                    for (Feed* f : feeds) {
+                        std::lock_guard<std::mutex> fl(f->m);
+                        if (f->live && f->frame.size() == HubMosaic::i420_size(f->rect.w, f->rect.h)) {
+                            HubMosaic::blit_i420(frame.data(), spec.size, f->rect, f->frame.data());
+                        } else {
+                            const auto& card = (f->offline && offline) ? offline : connecting;
+                            HubMosaic::copy_cell_i420(frame.data(), card->data(), spec.size, f->rect);
+                        }
+                        drawn[f->index] = true;
+                    }
+                    for (int i = 0; i < spec.layout.cells(); ++i)
+                        if (!drawn[i])
+                            HubMosaic::copy_cell_i420(frame.data(), connecting->data(), spec.size,
+                                                      HubMosaic::cell_rect(spec.layout, spec.size, i));
+                    shown_gen = gen;
+                } else {
+                    for (Feed* f : feeds) {
+                        std::lock_guard<std::mutex> fl(f->m);
+                        if (f->live && f->frame.size() == HubMosaic::i420_size(f->rect.w, f->rect.h))
+                            HubMosaic::blit_i420(frame.data(), spec.size, f->rect, f->frame.data());
+                    }
+                    shown_gen = gen;
+                }
+            }
+            // The encoder is gone: read_encoder() sees it end and says why (halt(true)).
+            if (!m_enc.write((const char*) frame.data(), frame.size())) break;
+            // Nobody has read the stream (nor asked for a page) for a while: stop.
+            {
+                std::lock_guard<std::mutex> lock(m_sub_mutex);
+                if (m_subs.empty() && Clock::now() - m_last_active > std::chrono::seconds(MOSAIC_LINGER_S)) {
+                    log_at("no viewer for " + std::to_string(MOSAIC_LINGER_S) + " s, stopped");
+                    m_idle = true;
+                }
+            }
+            if (m_idle) break;
+            next += period;
+            const auto now = Clock::now();
+            if (next < now - period * 2) next = now; // fell behind (a stalled pipe): no burst after
+            std::this_thread::sleep_until(next);
+        }
+        if (m_idle) halt(false);
+    }
+
+    void read_encoder()
+    {
+        std::vector<char> buf(64 * 1024);
+        for (;;) {
+            const size_t r = m_enc.read(buf.data(), buf.size());
+            if (r == 0) break;
+            std::lock_guard<std::mutex> lock(m_sub_mutex);
+            const bool had = m_cache.keyframes_seen();
+            m_cache.feed(buf.data(), r);
+            if (!had && m_cache.keyframes_seen()) {
+                m_keyframe = true;
+                log_at("first keyframe");
+            }
+            if (!m_cache.keyframes_seen()) continue; // nothing a decoder can start on yet
+            for (auto& s : m_subs) {
+                std::lock_guard<std::mutex> sl(s->m);
+                if (s->closed) continue;
+                if (s->q.size() > (16u << 20)) {
+                    s->closed = true; // a reader that stopped reading: let it go
+                } else {
+                    s->q.append(buf.data(), r);
+                }
+                s->cv.notify_all();
+            }
+        }
+        m_ran_ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - m_started).count();
+        halt(!m_halted && !m_idle);
+    }
+
+    // Ends every process (no joins: stop() does those) and closes every reader.
+    void halt(bool encoder_failed)
+    {
+        if (encoder_failed) m_enc_failed = true;
+        const bool was = m_halted.exchange(true);
+        if (!was && encoder_failed) log_at("encoder ended by itself");
+        m_enc.kill();
+        {
+            std::lock_guard<std::mutex> lock(m_page_mutex);
+            for (auto& f : m_feeds) f->halt();
+        }
+        std::lock_guard<std::mutex> lock(m_sub_mutex);
+        for (auto& s : m_subs) {
+            std::lock_guard<std::mutex> sl(s->m);
+            s->closed = true;
+            s->cv.notify_all();
+        }
+    }
+
+    const std::string  m_ff;
+    void* const        m_job;
+    mutable std::mutex m_page_mutex; // guards the page: m_spec, m_asked, m_page_gen, cards, m_feeds, m_aux
+    HubMosaic::Spec    m_spec;
+    Clock::time_point  m_asked;
+    unsigned           m_page_gen = 0;
+    std::shared_ptr<std::vector<unsigned char>> m_card_connecting, m_card_offline;
+    std::vector<std::unique_ptr<Feed>>          m_feeds;
+    std::vector<std::thread>                    m_aux;
+
+    std::mutex                        m_sub_mutex; // guards m_subs, m_cache, m_last_active
+    std::vector<std::shared_ptr<Sub>> m_subs;
+    HubMosaic::GopCache               m_cache;
+    Clock::time_point                 m_last_active;
+
+    StreamProc         m_enc;
+    Clock::time_point  m_started;
+    std::thread        m_reader, m_compositor;
+    std::atomic<bool>  m_halted { false };
+    std::atomic<bool>  m_idle { false };
+    std::atomic<bool>  m_enc_failed { false };
+    std::atomic<bool>  m_keyframe { false };
+    std::atomic<long long> m_ran_ms { 0 };
+};
+
 // ---- Tailscale (remote access): the user's own Tailscale install publishes the hub inside their
 // tailnet with `tailscale serve`; the phone runs the Tailscale app signed in to the same account.
 static std::string tailscale_exe()
@@ -1773,6 +2469,88 @@ Testing::LinkRevocation Testing::revoke_push_for_old_link()
     return r;
 }
 
+static std::string job_name_stem(const std::string& s)
+{
+    size_t b = 0, e = s.size();
+    while (b < e && (s[b] == ' ' || s[b] == '\t')) ++b;
+    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t')) --e;
+    std::string lower = s.substr(b, e - b);
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char) std::tolower(c); });
+    for (const char* ext : { ".gcode.3mf", ".3mf", ".gcode" }) {
+        const size_t n = std::strlen(ext);
+        if (lower.size() > n && lower.compare(lower.size() - n, n, ext) == 0) {
+            lower.resize(lower.size() - n);
+            break;
+        }
+    }
+    // What a send does to a job name: Bambu Studio / the cloud turn '%' and other characters into
+    // '_' ("Dragon-Egg_120%(X1C)" runs as "Dragon-Egg_120_(X1C)"), and spaces become '_' too. Bytes
+    // >= 0x80 (UTF-8) are kept as they are.
+    for (char& c : lower) {
+        const unsigned char u = (unsigned char) c;
+        if (u >= 0x80 || std::isalnum(u) || c == '-' || c == '(' || c == ')' || c == '+' || c == '.') continue;
+        c = '_';
+    }
+    return lower;
+}
+
+bool Testing::same_job_name(const std::string& reported, const std::string& archived)
+{
+    const std::string a = job_name_stem(reported);
+    return !a.empty() && a == job_name_stem(archived);
+}
+
+bool Testing::same_project_plate(const std::string& reported, const ArchiveRecord& r)
+{
+    const std::string job     = job_name_stem(reported);
+    const std::string project = job_name_stem(r.title);
+    if (job.empty() || project.empty()) return false;
+    if (r.plate >= 0 && job == project + "_plate_" + std::to_string(r.plate + 1)) return true;
+    if (!r.plate_name.empty() && job == project + "_" + job_name_stem(r.plate_name)) return true;
+    return r.plate == 0 && r.plate_name.empty() && job == project;
+}
+
+std::map<std::string, std::string> Testing::pick_job_thumbnails(const std::vector<ArchiveRecord>& records,
+                                                                const std::map<std::string, std::string>& jobs)
+{
+    std::map<std::string, std::string> out;
+    for (const auto& job : jobs) {
+        if (job.first.empty() || job.second.empty()) continue;
+        // Steps 1-3 in order; within a step the newest record wins.
+        for (int step = 1; step <= 3; ++step) {
+            const ArchiveRecord* best = nullptr;
+            for (const ArchiveRecord& r : records) {
+                if (r.printer.empty() || r.id.empty()) continue;
+                const bool same_printer = r.printer == job.first;
+                bool       hit          = false;
+                if (step == 1) hit = same_printer && (same_job_name(job.second, r.sent_name) || same_job_name(job.second, r.file));
+                else if (step == 2) hit = same_printer && same_project_plate(job.second, r);
+                else hit = !same_printer && (same_job_name(job.second, r.sent_name) || same_job_name(job.second, r.file) ||
+                                             same_project_plate(job.second, r));
+                if (hit && (!best || r.time > best->time)) best = &r;
+            }
+            if (best) {
+                out[job.first] = best->id;
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+std::string Testing::thumbnail_version(const std::string& job, const std::string& record_id)
+{
+    // FNV-1a over "<job>\n<record>": stable across runs and platforms, which std::hash is not.
+    uint64_t h = 1469598103934665603ull;
+    auto feed = [&h](const std::string& s) { for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; } };
+    feed(job);
+    feed("\n");
+    feed(record_id);
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long) h);
+    return std::string(buf, 12);
+}
+
 Testing::MergedPrinterRow Testing::merge_printer_row(const std::string& cached_row_json, long cached_instance, bool cached_fresh,
                                                      const std::string& incoming_row_json, long incoming_instance)
 {
@@ -1786,6 +2564,19 @@ Testing::MergedPrinterRow Testing::merge_printer_row(const std::string& cached_r
         const bool bambu = incoming.value("kind", std::string()) == "bambu";
         if (bambu && cached_fresh && cached_instance != incoming_instance && cached.value("connected", false) &&
             !incoming.value("connected", false)) {
+            out.keep_cached = true;
+            return out;
+        }
+        // An Elegoo SDCP printer has one connection per PC, held by one window (ElegooSdcpMonitor's
+        // lock); another window's row for it says it has nothing, and the holder's row is kept.
+        if (incoming.contains("sdcp_connected") && cached_fresh && cached_instance != incoming_instance &&
+            cached.value("sdcp_connected", false) && !incoming.value("sdcp_connected", false)) {
+            out.keep_cached = true;
+            return out;
+        }
+        // The same for a Centauri Carbon 2's MQTT connection (ElegooCc2Monitor's lock).
+        if (incoming.contains("cc2_connected") && cached_fresh && cached_instance != incoming_instance &&
+            cached.value("cc2_connected", false) && !incoming.value("cc2_connected", false)) {
             out.keep_cached = true;
             return out;
         }
@@ -1808,8 +2599,53 @@ Testing::MergedPrinterRow Testing::merge_printer_row(const std::string& cached_r
     return out;
 }
 
+long long Testing::configured_row_fate(const std::string& id, const std::string& kind, const std::set<std::string>& configured,
+                                       const std::set<std::string>& unsure_kinds, long long unconfigured_since, long long now_ms,
+                                       long long grace_ms)
+{
+    if (configured.count(id) || unsure_kinds.count(kind)) return 0;
+    const long long since = unconfigured_since > 0 ? unconfigured_since : now_ms;
+    return now_ms - since >= grace_ms ? -1 : since;
+}
+
+std::string Testing::configured_judge_kind(const std::string& row_json)
+{
+    try {
+        const json row = json::parse(row_json);
+        if (!row.is_object()) return "";
+        const std::string kind = row.value("kind", std::string());
+        if (kind == "bambu" && !(row.contains("lan_mode") && row["lan_mode"].is_boolean() && row["lan_mode"].get<bool>()))
+            return "bambu_cloud";
+        return kind;
+    } catch (...) {}
+    return "";
+}
+
+int Testing::forget_printer_status(const std::string& id, bool row_exists, const std::set<std::string>& configured, bool configured_known)
+{
+    if (!row_exists) return 404;
+    if (configured_known && configured.count(id)) return 409;
+    return 200;
+}
+
 // The pairing document's origins and identity, pure so the shape can be tested without a hub.
 // Three named origins, one of them always empty today, and the public half of the hub identity.
+// "slice_v1" (+ "slice_result", "slice_cancel"): the companion app's native Slice tab
+// (EdgeSlicerApp docs/design_native_slice.md); the app shows it only on a hub that lists slice_v1.
+std::vector<std::string> Testing::pair_features()
+{
+    std::vector<std::string> f = { "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity",
+                                   // POST /printers/<id>/forget, and `configured` on the /summary rows
+                                   "forget_printer",
+                                   // the same route removes the printer at its source; /summary rows carry `remove`
+                                   "remove_printer" };
+    for (const std::string& s : SliceV1::pair_features())
+        f.push_back(s);
+    for (const std::string& s : PaintV1::pair_features())
+        f.push_back(s);
+    return f;
+}
+
 std::string Testing::pair_identity_json(const std::string& lan_url, const std::string& remote_url,
                                         const std::string& relay_url, const std::string& hubid,
                                         const std::string& public_key_hex)
@@ -2647,6 +3483,9 @@ static std::string ff_camera_url_from_detail(const std::string& body)
     return "";
 }
 
+static bool spool_body(tcp::socket& client, Request& r, const std::string& name, size_t max_bytes, std::string& out_path,
+                       std::string& error);
+
 // A phone upload: stream the body to <uploads>/<stamp>_<name>. Only model files, only
 // a bare file name (X-File-Name, percent-encoded UTF-8), Content-Length required.
 static bool spool_upload(tcp::socket& client, Request& r, std::string& out_path, std::string& error)
@@ -2666,8 +3505,16 @@ static bool spool_upload(tcp::socket& client, Request& r, std::string& out_path,
         error = "only .3mf, .stl, .obj, .step and .glb files can be opened";
         return false;
     }
+    return spool_body(client, r, clean, MAX_UPLOAD, out_path, error);
+}
+
+// The body of a request to <uploads>/<stamp>_<random>/<name> (one folder each, so a file keeps its own
+// name), Content-Length required and at most `max_bytes`. A stalled or broken body leaves nothing.
+static bool spool_body(tcp::socket& client, Request& r, const std::string& name, size_t max_bytes, std::string& out_path,
+                       std::string& error)
+{
     if (r.content_length == 0) { error = "empty upload (Content-Length required)"; return false; }
-    if (r.content_length > MAX_UPLOAD) { error = "file too large"; return false; }
+    if (r.content_length > max_bytes) { error = "file too large"; return false; }
     ensure_dirs();
     // One folder per upload so the file keeps its own name (it becomes the object / project name).
     // The stamp is only one-second precise, so a random suffix keeps two uploads in the same
@@ -2675,7 +3522,7 @@ static bool spool_upload(tcp::socket& client, Request& r, std::string& out_path,
     const fs::path folder = fs::path(uploads_dir()) / (timestamp_compact() + "_" + random_hex(4));
     boost::system::error_code ec;
     fs::create_directories(folder, ec);
-    out_path = (folder / clean).string();
+    out_path = (folder / name).string();
     boost::nowide::ofstream f(out_path, std::ios::binary | std::ios::trunc);
     if (!f) { error = "cannot write to " + uploads_dir(); return false; }
     set_read_timeout(client, UPLOAD_TIMEOUT_S); // a stalled upload frees its thread and its file
@@ -2756,6 +3603,9 @@ struct Instance
     long long   started { 0 };
     std::string title, path;
     bool        slicing { false };
+    int         slicing_plate { -1 };   // slice_v1: the plate being sliced, -1 while idle
+    int         slicing_percent { 0 };  // and how far
+    int         current_plate { 0 };    // slice_v1: the plate the PC shows
     bool        hidden { false };
     bool        needs_attention { false };
     std::string attention_reason;
@@ -2859,13 +3709,25 @@ public:
     // has to infer from an id going backwards (the app's follow-up 6).
     std::string hub_instance();
     void poll_printers();                   // one round: ask every live instance, merge, remember
+    // POST .../printers/<id>/forget: drop one leftover row and save (Testing::forget_printer_status
+    // says which status). {http status, JSON body}.
+    // `removed` (control plane only, ?removed=1): the printer was just removed at its source, so
+    // the last configured list no longer counts for it - it is taken off and the row goes.
+    std::pair<int, std::string> forget_printer(const std::string& id, bool removed = false);
+    // The phone's Forget (POST /r/<token>/printers/<id>/forget): the Printers tab's Remove printer,
+    // so any card but a cloud-bound Bambu one can go - at its source (a live slicer window does it,
+    // AppConfig included; with none open the hub deletes the files itself), then the row.
+    std::pair<int, std::string> phone_remove_printer(const std::string& id);
 
 private:
     void load_events();          // start(): the ring from the last run
     void save_events_locked();   // m_mutex held
     void load_printers();        // start(): the last-known printer status from the last run
     void save_printers_locked(); // m_mutex held
-    std::string archive_dir();   // where the G-code archive keeps its sidecars (see m_archive_dir)
+    // m_mutex held: drop the rows the slicer no longer lists (Testing::configured_row_fate); true
+    // when a row went or a row's unconfigured_since changed (the caller saves).
+    bool prune_unconfigured_locked(long long now_ms, long long grace_ms);
+    std::string archive_dir();  // where the G-code archive keeps its sidecars (see m_archive_dir)
 public:
     // The G-code archive as the Reprint tab lists it, read by the hub itself: one page of records,
     // newest first, from a cached pass over the sidecars. No slicer window is involved, so the
@@ -2897,6 +3759,11 @@ private:
     std::string state_for_phone();
     bool  lookup_host(const std::string& id, std::string& ip, std::string& code);
     std::string relay_h264_url(const std::string& id); // the U1 raw stream behind /relay/h264?id=, or ""
+    // The TV wall's camera mosaic (see the section "Camera mosaic").
+    std::string mosaic_request(const std::string& query, int& status); // GET /r/<token>/mosaic
+    void        relay_mosaic(tcp::socket& client);                      // GET /relay/mosaic: go2rtc's edge_mosaic source
+    void        mosaic_cells(HubMosaic::Spec& spec, const std::vector<std::string>& ids);
+    HubMosaic::Encoder mosaic_encoder_locked(const std::string& ff);    // m_mosaic_mutex held
     FirewallState  firewall_state(bool refresh);       // cached; the query runs on a detached thread
     FirewallState  lan_firewall_state(bool refresh);   // same, but for the phone/LAN listener port
     TailscaleState remote_state(bool refresh);         // cached ~15 s; runs the tailscale CLI off the lock
@@ -2948,6 +3815,16 @@ private:
     long long                      m_refused_no_login_at { 0 };   // ... the latest one (unix seconds)
     long long                      m_refused_no_login_logged { 0 }; // when the log last said so
     int                            m_go2rtc_port { 0 };
+    int                            m_rtsp_port { 0 };            // go2rtc's loopback RTSP listener (0 = none: no ffmpeg)
+    std::mutex                     m_mosaic_mutex;               // guards the six below
+    HubMosaic::Spec                m_mosaic_spec;                // the page the mosaic shows
+    bool                           m_mosaic_set { false };
+    bool                           m_mosaic_listed { false };    // `ffmpeg -encoders` was read
+    std::vector<HubMosaic::Encoder> m_mosaic_untested;           // listed, not test-encoded yet, best first
+    std::vector<HubMosaic::Encoder> m_mosaic_encoders;           // test-encoded fine here, best first
+    std::shared_ptr<MosaicPipeline> m_mosaic_pipe;               // running (or lingering) for the page
+    std::atomic<unsigned>          m_mosaic_gen { 0 };           // bumped by a new page
+    std::atomic<unsigned>          m_mosaic_owner { 0 };         // the /relay/mosaic connection that runs it
     // What register_streams() has put into this go2rtc (name -> source). Only its single worker
     // touches it; go2rtc lives exactly as long as this server, so it never goes stale.
     std::map<std::string, std::string> m_registered_streams;
@@ -2956,6 +3833,10 @@ private:
     // or replaces one. Guarded by m_mutex. Idle streams cost nothing: go2rtc only connects to the
     // printer while somebody watches.
     std::map<std::string, std::string> m_own_streams;
+    // When somebody last looked at the printers (/summary, /state, a proxied /api/printers): the
+    // background poll tells the instances watching=0 otherwise, so an Elegoo printer's CANVAS is only
+    // read while a person can see it (ElegooSdcpMonitor).
+    std::atomic<long long>         m_watch_ms { 0 };
     std::atomic<bool>              m_streams_dirty { false };  // a Stream-tab save not synced yet
     std::atomic<bool>              m_streams_worker { false }; // the sync worker is running
     int                            m_webrtc_port { 0 };          // go2rtc's WebRTC media port (0 = WebRTC off)
@@ -2986,8 +3867,22 @@ private:
         json      row;             // the instance's own /api/printers row, as it sent it
         long long at { 0 };        // unix ms when this value was read
         long      instance { 0 };  // the pid that reported it; 0 once that window is gone
+        long long unconfigured_since { 0 }; // unix ms the slicer first stopped listing it (Testing::configured_row_fate)
     };
     std::map<std::string, CachedPrinter> m_printers;
+    // Every printer id the live windows say is set up in the slicer (their /api/printers
+    // `configured`), as of the last poll round in which every live window answered with one, and
+    // the kinds a window could not judge (unsure_kinds). Saved with the rows, so a hub that starts
+    // with no window open still knows which remembered rows are leftovers. `known` is false until a
+    // window has said, which keeps every row (an older slicer never says).
+    std::set<std::string>          m_configured;
+    // Printers removed on request (Remove printer / the phone's Forget) and when: unix ms. A poll
+    // that asked a window BEFORE that moment carries the printer's last report and must not put
+    // its row (or its id on the configured list) back - that race re-created a removed card as a
+    // leftover (owner's hand test of #918). Kept ten minutes; later reports count as usual.
+    std::map<std::string, long long> m_removed_at;
+    std::set<std::string>          m_configured_unsure;
+    bool                           m_configured_known { false };
     // Where the archive's sidecars are, as an instance reported it (GET /api/info). Remembered so
     // a thumbnail still resolves after the window that told us closed; empty falls back to
     // <datadir>/gcode_archive, which is the archive's own default.
@@ -3416,19 +4311,44 @@ static long long now_millis()
 void HubServer::poll_printers()
 {
     const std::vector<Instance> live = instances(false);
+    const long long             seen = m_watch_ms.load();
+    const bool                  watched = seen != 0 && now_millis() - seen < 45000;
+    // Whether a notification would go anywhere (a destination, a browser, the app): an Elegoo printer's
+    // print is then watched to its end even with nobody looking (ElegooSdcpMonitor).
+    bool notify = false;
+    try { notify = RemoteNotify::has_destinations(); } catch (...) {}
+    // What the live windows say is set up in the slicer, this round (see m_configured). Judged only
+    // when every live window answered with its list: one that is still starting, busy past the
+    // timeout or too old to send `configured` could be the one that knows a printer.
+    std::set<std::string> round_configured, round_unsure;
+    bool                  round_complete = !live.empty();
+    const long long       round_started  = now_millis();
     for (const Instance& inst : live) {
-        if (inst.port <= 0) continue;
+        if (inst.port <= 0) { round_complete = false; continue; }
+        const long long asked = now_millis(); // what this answer can know about (m_removed_at)
         std::string body;
         int         status = 0;
-        Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers")
+        Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers?watching=" + (watched ? "1" : "0") +
+                  "&notify=" + (notify ? "1" : "0"))
             .timeout_connect(1).timeout_max(10)
             .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
             .on_error([&](std::string, std::string, unsigned) {})
             .perform_sync();
-        if (status != 200) continue;
+        if (status != 200) { round_complete = false; continue; }
         json rows;
-        try { rows = json::parse(body); } catch (...) { continue; }
-        if (!rows.is_object() || !rows.contains("printers") || !rows["printers"].is_array()) continue;
+        try { rows = json::parse(body); } catch (...) { round_complete = false; continue; }
+        if (!rows.is_object() || !rows.contains("printers") || !rows["printers"].is_array()) { round_complete = false; continue; }
+        if (rows.contains("configured") && rows["configured"].is_array()) {
+            for (const json& id : rows["configured"])
+                if (id.is_string() && !id.get<std::string>().empty()) round_configured.insert(id.get<std::string>());
+            if (rows.contains("configured_unsure_kinds") && rows["configured_unsure_kinds"].is_array())
+                for (const json& k : rows["configured_unsure_kinds"])
+                    if (k.is_string()) round_unsure.insert(k.get<std::string>());
+            // A row the window reports is set up there by definition (the print host, "connect").
+            for (const json& row : rows["printers"])
+                if (row.is_object() && row.contains("id") && row["id"].is_string()) round_configured.insert(row["id"].get<std::string>());
+        } else
+            round_complete = false;
         const long long at = now_millis();
         std::lock_guard<std::mutex> lock(m_mutex);
         std::set<std::string> reported;
@@ -3436,6 +4356,8 @@ void HubServer::poll_printers()
             if (!row.is_object()) continue;
             const std::string id = row.value("id", std::string());
             if (id.empty() || id.size() > 200) continue;
+            // Removed while this window was answering: its report predates the removal.
+            if (const auto rm = m_removed_at.find(id); rm != m_removed_at.end() && rm->second >= asked) continue;
             CachedPrinter& c = m_printers[id];
             reported.insert(id);
             // Several windows report the same printer; keep the one that is connected to it
@@ -3471,6 +4393,23 @@ void HubServer::poll_printers()
             m_printers.erase(oldest);
         }
         save_printers_locked();
+    }
+    // The rows of printers the slicer no longer has: a removed printer, or a test printer a test
+    // copy reported. Offline printers that are still set up stay (they are in `configured`).
+    if (round_complete) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        // Same race for the list: a printer removed after this round began is not configured.
+        const long long now = now_millis();
+        for (auto it = m_removed_at.begin(); it != m_removed_at.end();) {
+            if (it->second >= round_started) round_configured.erase(it->first);
+            if (now - it->second > 10 * 60 * 1000) it = m_removed_at.erase(it);
+            else ++it;
+        }
+        const bool changed = !m_configured_known || m_configured != round_configured || m_configured_unsure != round_unsure;
+        m_configured        = std::move(round_configured);
+        m_configured_unsure = std::move(round_unsure);
+        m_configured_known  = true;
+        if (prune_unconfigured_locked(now_millis(), PRINTERS_PRUNE_GRACE_MS) || changed) save_printers_locked();
     }
     // Where the archive keeps its sidecars, so a thumbnail still resolves once every window is
     // closed. Asked once per round off the same instances, and only while we do not have it.
@@ -3524,9 +4463,29 @@ json HubServer::printers_json()
         json row = kv.second.row;
         row["id"] = kv.first;
         const long long age_ms = now > kv.second.at ? now - kv.second.at : 0;
-        row["age_s"]  = (long long) (age_ms / 1000);
-        row["stale"]  = age_ms > PRINTERS_STALE_MS;
+        // A Bambu row also carries how old the printer's own report was when it was polled: a
+        // cloud printer nobody subscribed to was polled every ten seconds and served as fresh
+        // while it had never reported at all (BambuCloudWatch::row_freshness).
+        const bool has_report_age = row.contains("report_age_s") && row["report_age_s"].is_number_integer();
+        const BambuCloudWatch::Freshness fr = BambuCloudWatch::row_freshness(
+            age_ms, PRINTERS_STALE_MS, has_report_age, has_report_age ? row["report_age_s"].get<long long>() : 0,
+            row.value("printing", false));
+        row["age_s"]  = (long long) (fr.age_ms / 1000);
+        row["stale"]  = fr.stale;
         row["seen_at"] = kv.second.at;
+        // Whether the printer is still set up in the slicer, once a window has said: false marks a
+        // leftover the app and the Printers tab offer to Forget (it also goes by itself after
+        // PRINTERS_PRUNE_GRACE_MS). Absent while no window has reported its list.
+        if (m_configured_known)
+            row["configured"] = m_configured.count(kv.first) > 0 ||
+                                m_configured_unsure.count(Testing::configured_judge_kind(kv.second.row.dump())) > 0;
+        // What the app's Remove does with this card (PrintersMonitor::removal_plan): remove |
+        // logout | explain, with the kind for its wording. A leftover is the hub row alone.
+        {
+            json judged = row;
+            if (row.contains("configured") && row["configured"].is_boolean() && !row["configured"].get<bool>()) judged["leftover"] = true;
+            row["remove"] = PrintersMonitor::removal_json(judged);
+        }
         // The pid only stays in the row while that window is still there: the app addresses the
         // control route as /i/<pid>/..., so a pid that has gone would be worse than none.
         long pid = 0;
@@ -3548,10 +4507,133 @@ void HubServer::save_printers_locked()
         e["row"]      = kv.second.row;
         e["at"]       = kv.second.at;
         e["instance"] = (long long) kv.second.instance;
+        if (kv.second.unconfigured_since > 0) e["unconfigured_since"] = kv.second.unconfigured_since;
         j["printers"].push_back(e);
+    }
+    if (m_configured_known) {
+        j["configured"]              = m_configured;
+        j["configured_unsure_kinds"] = m_configured_unsure;
     }
     if (!m_archive_dir.empty()) j["archive_dir"] = m_archive_dir;
     write_file(printers_json_path(), j.dump());
+}
+
+bool HubServer::prune_unconfigured_locked(long long now_ms, long long grace_ms)
+{
+    if (!m_configured_known) return false;
+    bool changed = false;
+    for (auto it = m_printers.begin(); it != m_printers.end();) {
+        const long long fate = Testing::configured_row_fate(it->first, Testing::configured_judge_kind(it->second.row.dump()), m_configured,
+                                                            m_configured_unsure, it->second.unconfigured_since, now_ms, grace_ms);
+        if (fate < 0) {
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: forgetting printer row " << it->first.substr(0, 6)
+                                    << "... (no longer set up in the slicer)";
+            it      = m_printers.erase(it);
+            changed = true;
+            continue;
+        }
+        if (fate != it->second.unconfigured_since) {
+            it->second.unconfigured_since = fate;
+            changed                       = true;
+        }
+        ++it;
+    }
+    return changed;
+}
+
+std::pair<int, std::string> HubServer::forget_printer(const std::string& id, bool removed)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (removed) {
+        m_removed_at[id] = now_millis(); // a poll already in flight must not bring it back
+        if (m_configured.erase(id) > 0) save_printers_locked();
+    }
+    const auto it     = m_printers.find(id);
+    const int  status = Testing::forget_printer_status(id, it != m_printers.end(), m_configured, m_configured_known);
+    if (status == 404) return { 404, json_error("no such printer") };
+    if (status == 409)
+        return { 409, json_error("this printer is still set up in EdgeSlicer; remove it there first (Device tab, or the saved "
+                                 "printer list) and it disappears here by itself") };
+    m_printers.erase(it);
+    save_printers_locked();
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: printer row " << id.substr(0, 6) << "... forgotten on request";
+    json j;
+    j["ok"]        = true;
+    j["id"]        = id;
+    j["forgotten"] = true;
+    return { 200, j.dump() };
+}
+
+std::pair<int, std::string> HubServer::phone_remove_printer(const std::string& id)
+{
+    json row;
+    bool leftover = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it = m_printers.find(id);
+        if (it == m_printers.end()) return { 404, json_error("no such printer") };
+        row       = it->second.row.is_object() ? it->second.row : json::object();
+        row["id"] = id;
+        leftover  = m_configured_known && !m_configured.count(id) &&
+                   !m_configured_unsure.count(Testing::configured_judge_kind(it->second.row.dump()));
+    }
+    if (leftover) return forget_printer(id); // nothing of it is left in the slicer
+    const PrintersMonitor::RemovalPlan plan = PrintersMonitor::removal_plan(row);
+    if (plan.mode == PrintersMonitor::RemovalPlan::Mode::Explain) {
+        json e;
+        e["error"]       = plan.reason;
+        e["reason_kind"] = plan.reason_kind;
+        return { 409, e.dump() };
+    }
+    // A live window removes it the way the Printers tab does (AppConfig and the device manager
+    // included). The window lists the row itself; one that does not know it answers 404.
+    bool                     done_by_window = false;
+    std::vector<std::string> done;
+    for (const Instance& inst : instances(false)) {
+        if (inst.port <= 0) continue;
+        int         status = 0;
+        std::string body;
+        Http::post("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers/" + percent_encode(id) + "/remove")
+            .timeout_connect(1).timeout_max(30)
+            .header("Content-Type", "application/json")
+            .set_post_body(std::string("{}")) // a bodyless POST hangs the fork's Http
+            .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
+            .on_error([&](std::string b, std::string, unsigned s) { status = (int) s; body = b; })
+            .perform_sync();
+        if (status == 0 || status == 404) continue; // gone, or not this window's printer
+        if (status != 200) return { status, body.empty() ? json_error("the slicer could not remove it") : body };
+        try {
+            const json j = json::parse(body);
+            for (const json& d : j.value("done", json::array()))
+                if (d.is_string()) done.push_back(d.get<std::string>());
+        } catch (...) {}
+        done_by_window = true;
+        break;
+    }
+    if (!done_by_window) {
+        // No slicer window: the files the hub can reach itself. The Device tab's saved devices
+        // stay in AppConfig, but the tombstone keeps them from bringing the printer back; a Bambu
+        // LAN printer's access code lives in AppConfig only, so that one needs the slicer.
+        if (plan.mode == PrintersMonitor::RemovalPlan::Mode::Logout) {
+            json e;
+            e["error"]       = "Open EdgeSlicer on the PC to log out of this printer (its access code is kept by the slicer).";
+            e["reason_kind"] = "needs_slicer";
+            return { 409, e.dump() };
+        }
+        try { PrinterRowsBridge::remove_files(plan, id, done); } catch (...) {}
+    }
+    forget_printer(id, /* removed */ true);
+    done.push_back("hub_printers");
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: printer " << id.substr(0, 6) << "... removed from the phone ("
+                            << (done_by_window ? "by a slicer window" : "by the hub") << ")";
+    json j;
+    j["ok"]          = true;
+    j["id"]          = id;
+    j["forgotten"]   = true;
+    j["removed"]     = true;
+    j["done"]        = done;
+    j["reason_kind"] = plan.reason_kind;
+    return { 200, j.dump() };
 }
 
 // What the printers were doing when this hub last ran. Served straight away (with an age that says
@@ -3568,9 +4650,20 @@ void HubServer::load_printers()
             c.row      = e["row"];
             c.at       = e.value("at", (long long) 0);
             c.instance = 0; // whatever window reported it last time is certainly gone
+            c.unconfigured_since = e.value("unconfigured_since", (long long) 0);
             m_printers[id] = c;
         }
         m_archive_dir = j.value("archive_dir", std::string());
+        // The list of printers set up in the slicer, as the last run knew it: a row that was not
+        // on it is a leftover and goes now (no grace - the list is not a window still starting).
+        if (j.contains("configured") && j["configured"].is_array()) {
+            for (const json& id : j["configured"])
+                if (id.is_string()) m_configured.insert(id.get<std::string>());
+            for (const json& k : j.value("configured_unsure_kinds", json::array()))
+                if (k.is_string()) m_configured_unsure.insert(k.get<std::string>());
+            m_configured_known = true;
+            if (prune_unconfigured_locked(now_millis(), 0)) save_printers_locked();
+        }
     } catch (...) {}
 }
 
@@ -3718,14 +4811,16 @@ std::string HubServer::archive_thumbnail(const std::string& id)
 
 // The running job's picture, from the G-code archive: the hub reads the sidecars itself (they are
 // plain JSON next to a <id>.png), so this works with every slicer window closed - which is the
-// case the app asked about. Preference goes to the record whose sent name is the job the printer
-// says it is running; failing that, the newest record for that printer, which is what a person
-// looking at a card would expect. "" when there is nothing to show, and the caller answers 404.
+// case the app asked about. Only a record of the job the printer says it is running - by name,
+// then by project and plate, then the same on another printer (Testing::pick_job_thumbnails has
+// the order): the "newest record for that printer" fallback served the
+// previous job's picture for any job this PC did not send, and - because a Bambu printer reports
+// its subtask_name without the ".gcode.3mf" the archive recorded - for every Bambu job, so the
+// picture never changed. Absent when there is nothing to show, and the route answers 404.
 std::map<std::string, std::string> HubServer::printer_thumbnail_paths(const std::map<std::string, std::string>& jobs)
 {
-    struct Pick { std::string best, named; long long best_t { -1 }, named_t { -1 }; };
-    std::map<std::string, Pick>        picks;
-    std::map<std::string, std::string> out;
+    std::vector<Testing::ArchiveRecord> records;
+    std::map<std::string, std::string>  out;
 
     const fs::path            root(archive_dir());
     boost::system::error_code ec;
@@ -3743,18 +4838,21 @@ std::map<std::string, std::string> HubServer::printer_thumbnail_paths(const std:
         // is involved in building this path.
         const fs::path png = root / (id + ".png");
         if (!fs::is_regular_file(png, ig)) continue;
-        const long long t = j.value("time", (long long) 0);
-        Pick& p = picks[printer];
-        if (t > p.best_t) { p.best_t = t; p.best = png.string(); }
-        // The job the printer says it is running, matched against the name the printer was really
-        // given and against the archived file name: either can be what it reports.
-        const auto job = jobs.find(printer);
-        if (job != jobs.end() && !job->second.empty() &&
-            (j.value("sent_name", std::string()) == job->second || j.value("file", std::string()) == job->second))
-            if (t > p.named_t) { p.named_t = t; p.named = png.string(); }
+        Testing::ArchiveRecord r;
+        r.printer   = printer;
+        r.id        = id;
+        r.sent_name = j.value("sent_name", std::string());
+        r.file      = j.value("file", std::string());
+        r.time      = j.value("time", (long long) 0);
+        r.title     = j.value("project_title", std::string());
+        if (j.contains("plate") && j["plate"].is_number_integer()) r.plate = j["plate"].get<int>();
+        r.plate_name = j.value("plate_name", std::string());
+        records.push_back(std::move(r));
     }
-    for (const auto& kv : picks)
-        out[kv.first] = kv.second.named.empty() ? kv.second.best : kv.second.named;
+    // The job the printer says it is running, matched against the name the printer was really
+    // given and against the archived file name: either can be what it reports.
+    for (const auto& kv : Testing::pick_job_thumbnails(records, jobs))
+        out[kv.first] = (root / (kv.second + ".png")).string();
     return out;
 }
 
@@ -3881,6 +4979,11 @@ json HubServer::summary_json()
         if (row.contains("ip"))          p["ip"]          = row["ip"];
         if (row.contains("print_error")) p["print_error"] = row["print_error"];
         if (row.contains("stage"))       p["stage"]       = row["stage"];
+        // A Bambu row's provenance: "report" (the printer's own push, with progress behind it),
+        // "cloud_list" (the account's printer list - a status word and nothing more) or "none",
+        // and how old the printer's last report was when the window was polled (-1: none yet).
+        if (row.contains("status_source")) p["status_source"] = row["status_source"];
+        if (row.contains("report_age_s"))  p["report_age_s"]  = row["report_age_s"];
         // How the job ended ("cancelled" for a stop the person asked for): the instance's watcher
         // keeps it after the printer drops print_error. Absent when there is nothing to say.
         if (row.contains("ended") && row["ended"].is_string() && !row["ended"].get<std::string>().empty()) p["ended"] = row["ended"];
@@ -3889,9 +4992,18 @@ json HubServer::summary_json()
         // row carried them. A stale row keeps them for display; the app offers no control on one.
         for (const char* k : { "controls", "toolheads", "ams", "ext_spools", "hms" })
             if (row.contains(k)) p[k] = row[k];
+        // An Elegoo SDCP printer's chamber reading, where its camera is found, and what the printer
+        // itself says it is doing (ElegooSdcp::fill_row).
+        for (const char* k : { "chamber_temp", "chamber_target", "camera_hint", "sdcp", "cc2" })
+            if (row.contains(k)) p[k] = row[k];
         p["stale"]    = row.value("stale", false);
         p["age_s"]    = row.value("age_s", 0);
         p["instance"] = row.value("instance", 0);
+        // false: a leftover the slicer no longer has - the app offers Forget (POST
+        // /printers/<id>/forget). Absent while no window has listed its printers.
+        if (row.contains("configured")) p["configured"] = row["configured"];
+        // What Remove does with it: {mode remove|logout|explain, kind, reason?} (removal_json).
+        if (row.contains("remove")) p["remove"] = row["remove"];
         // The opaque per-hub id a Live Activity push carries instead of the printer id (the alerts'
         // thread-id), so the app can put a name to an activity the hub started by push.
         p["push_id"]  = AppPush::push_id(id);
@@ -3906,8 +5018,11 @@ json HubServer::summary_json()
         if (!cam.empty()) p["camera"] = cam;
         // The thumbnail URL is offered whenever there is a picture to serve, so the app can draw
         // it without a probe that would 404 most of the time.
-        if (thumbs.find(id) != thumbs.end())
-            p["thumbnail"] = "/r/" + token + "/printers/" + percent_encode(id) + "/thumbnail.png";
+        // `?job=` changes with the job and the picture behind it, so a client caching by URL fetches
+        // the new job's picture (the route itself ignores the query). No picture: no field.
+        if (const auto th = thumbs.find(id); th != thumbs.end())
+            p["thumbnail"] = "/r/" + token + "/printers/" + percent_encode(id) + "/thumbnail.png?job=" +
+                             Testing::thumbnail_version(p["job"].get<std::string>(), fs::path(th->second).stem().string());
         out["printers"].push_back(p);
     }
     return out;
@@ -3957,7 +5072,7 @@ json HubServer::pair_json(bool via_serve_https)
     }
     // "push_levels": /push/device takes priority_kinds / all_events / level_hint, and /push/test exists.
     // "live_activity": /push/activity and the live_activity field on /push/device (hub-driven updates).
-    j["features"] = json::array({ "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity" });
+    j["features"] = Testing::pair_features();
     j["capabilities"] = j["features"];
     return j;
 }
@@ -4241,6 +5356,10 @@ void HubServer::start_go2rtc()
         // than 8554 so two hubs on one PC cannot collide.
         const bool want_ffmpeg = !ffmpeg_path().empty();
         int rtsp_port = want_ffmpeg ? free_loopback_port() : 0;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_rtsp_port = rtsp_port; // the mosaic reads go2rtc streams from here
+        }
         if (want_ffmpeg && rtsp_port == 0)
             BOOST_LOG_TRIVIAL(warning) << "RemoteHub: no free loopback port for go2rtc's RTSP; quality variants will not start";
         if (rtsp_port > 0) cfg << "rtsp:\n  listen: \"127.0.0.1:" << rtsp_port << "\"\n";
@@ -4458,6 +5577,10 @@ std::map<std::string, std::string> HubServer::desired_streams()
         own    = m_own_streams;
     }
     std::map<std::string, std::string> want;
+    // The TV wall's mosaic: one fixed stream, fed by /relay/mosaic on the control plane like the
+    // U1 relay. go2rtc pulls it only while somebody watches, so the ffmpeg behind it runs only then.
+    if (port > 0 && !ffmpeg_path().empty())
+        want[HubMosaic::STREAM_NAME] = "http://127.0.0.1:" + std::to_string(port) + "/relay/mosaic?lt=" + secret;
     if (state.empty()) return Testing::merge_desired_streams(want, own);
     try {
         json j = json::parse(state);
@@ -4710,6 +5833,7 @@ std::string HubServer::state_for_phone()
     out["quality"]      = json::array();
     for (const std::string& q : quality_variants()) out["quality"].push_back(q);
     out["quality_mjpeg"] = true; // ?fps= on the Bambu relay, decoder-free
+    out["mosaic"]        = !ffmpeg_path().empty(); // /r/<token>/mosaic (the TV wall), needs the bundled ffmpeg
     try {
         json j = json::parse(state);
         for (const auto& h : j.value("hosts", json::array())) {
@@ -4717,6 +5841,7 @@ std::string HubServer::state_for_phone()
             p["id"]    = h.value("id", "");
             p["alias"] = h.value("alias", "");
             p["rkind"] = h.value("rkind", "");
+            p["rcam"]  = h.value("rcam", ""); // the camera type picked on the PC (no address): words the phone's "No video" hint
             p["rname"] = h.value("rname", "");
             p["rurl"]  = h.value("rurl", "");
             if (!u1_h264_url(h).empty()) {
@@ -4773,6 +5898,386 @@ bool HubServer::lookup_host(const std::string& id, std::string& ip, std::string&
     return false;
 }
 
+// ---- Camera mosaic (the TV wall) --------------------------------------------------------------
+// One H.264 stream with a whole page of cameras in it, so a TV with a couple of hardware decoders
+// plays a 2x2 or 3x3 wall with ONE (HubMosaic.hpp has the why). The TV asks for a page with
+// /r/<token>/mosaic, then plays the go2rtc stream "edge_mosaic" through the ordinary player. go2rtc
+// pulls that stream from /relay/mosaic here only while somebody watches; this runs one ffmpeg for
+// it and passes its raw H.264 on. A new page restarts the ffmpeg on the same connection (a short
+// gap), and when go2rtc drops the connection - the last viewer left - the ffmpeg is killed.
+//
+// Inputs are the sources the hub already serves, never a new connection to a printer: go2rtc
+// streams through go2rtc's own loopback RTSP (one camera connection however many watch), Bambu
+// P1/A1 and Elegoo CC1 cameras through the hub's MJPEG relay (one printer connection however many
+// watch). A CC1 the relay reports busy (its viewer limit) is not connected at all; its cell says
+// so, as does a camera that does not answer.
+
+static std::string mosaic_font()
+{
+    std::vector<std::string> cands;
+#ifdef _WIN32
+    const char* windir = std::getenv("WINDIR");
+    const std::string w = windir && *windir ? std::string(windir) : std::string("C:/Windows");
+    cands = { w + "/Fonts/arial.ttf", w + "/Fonts/segoeui.ttf" };
+#elif defined(__APPLE__)
+    cands = { "/System/Library/Fonts/Supplemental/Arial.ttf", "/Library/Fonts/Arial.ttf", "/System/Library/Fonts/Helvetica.ttc" };
+#else
+    cands = { "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+              "/usr/share/fonts/TTF/DejaVuSans.ttf" };
+#endif
+    for (const std::string& c : cands) {
+        boost::system::error_code ec;
+        if (fs::exists(c, ec)) return c;
+    }
+    return "";
+}
+
+// The best H.264 encoder that works on this PC: listed by `ffmpeg -encoders` (once), then
+// test-encoded for a moment in order of preference (a listed NVENC on a PC without an NVIDIA GPU
+// fails here, not on the TV) until one works. The rest are only tried when that one fails later
+// (relay_mosaic drops it from m_mosaic_encoders): testing all of them up front cost the first
+// request ~2 s. m_mosaic_mutex held.
+HubMosaic::Encoder HubServer::mosaic_encoder_locked(const std::string& ff)
+{
+    if (!m_mosaic_listed) {
+        m_mosaic_listed = true;
+        std::string out;
+        int         code = 0;
+        if (run_capture({ ff, "-hide_banner", "-encoders" }, out, code, 10000) && code == 0)
+            m_mosaic_untested = HubMosaic::encoder_preference(out);
+    }
+    while (m_mosaic_encoders.empty() && !m_mosaic_untested.empty()) {
+        const HubMosaic::Encoder e = m_mosaic_untested.front();
+        m_mosaic_untested.erase(m_mosaic_untested.begin());
+        std::vector<std::string> args = { ff, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
+                                          "color=c=black:s=1280x720:r=15", "-frames:v", "10", "-pix_fmt", "yuv420p" };
+        const std::vector<std::string> enc = HubMosaic::encoder_args(e, 2000);
+        args.insert(args.end(), enc.begin(), enc.end());
+        args.insert(args.end(), { "-f", "null", "-" });
+        std::string o;
+        int         c  = 0;
+        const auto  t0 = std::chrono::steady_clock::now();
+        const bool  ok = run_capture(args, o, c, 15000) && c == 0;
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: mosaic encoder " << HubMosaic::encoder_name(e) << (ok ? " works" : " does not work here")
+                                << " (tested in "
+                                << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()
+                                << " ms)";
+        if (ok) m_mosaic_encoders.push_back(e);
+    }
+    return m_mosaic_encoders.empty() ? HubMosaic::Encoder::None : m_mosaic_encoders.front();
+}
+
+// The cells for `ids`, in order, each with what to play or what to say.
+void HubServer::mosaic_cells(HubMosaic::Spec& spec, const std::vector<std::string>& ids)
+{
+    std::string state;
+    int         rtsp = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        state = m_state;
+        rtsp  = m_rtsp_port;
+    }
+    std::map<std::string, json> hosts;
+    try {
+        json j = json::parse(state);
+        for (const auto& h : j.value("hosts", json::array()))
+            if (!h.value("id", "").empty()) hosts[h.value("id", "")] = h;
+    } catch (...) {}
+    const int relay = BambuCamRelay::get().port();
+    const int fps   = HubMosaic::clamp_fps(spec.fps);
+    spec.cells.assign(spec.layout.cells(), HubMosaic::Cell{});
+    for (size_t i = 0; i < ids.size() && i < spec.cells.size(); ++i) {
+        HubMosaic::Cell& c = spec.cells[i];
+        c.id               = ids[i];
+        auto it            = hosts.find(ids[i]);
+        if (it == hosts.end()) {
+            c.kind = HubMosaic::CellKind::Placeholder;
+            c.note = "Not on the hub";
+            continue;
+        }
+        const json&       h     = it->second;
+        const std::string rkind = h.value("rkind", "");
+        c.label                 = h.value("alias", "").empty() ? ids[i] : h.value("alias", "");
+        std::string rname       = h.value("rname", "");
+        if (!u1_h264_url(h).empty()) rname = u1_stream_name(ids[i]);
+        if (!rname.empty() && (rkind == "go2rtc" || !u1_h264_url(h).empty())) {
+            if (rtsp > 0) {
+                c.kind = HubMosaic::CellKind::Rtsp;
+                c.url  = "rtsp://127.0.0.1:" + std::to_string(rtsp) + "/" + rname;
+            } else {
+                c.kind = HubMosaic::CellKind::Placeholder;
+                c.note = "Not available";
+            }
+        } else if (rkind == "p1") {
+            const std::string ip = h.value("ip", ""), code = h.value("code", "");
+            if (relay > 0 && !ip.empty() && !code.empty()) {
+                c.kind = HubMosaic::CellKind::Mjpeg;
+                c.url  = "http://127.0.0.1:" + std::to_string(relay) + "/bambu?ip=" + percent_encode(ip) + "&code=" + percent_encode(code) +
+                        "&fps=" + std::to_string(fps);
+            } else {
+                c.kind = HubMosaic::CellKind::Placeholder;
+                c.note = "Offline";
+            }
+        } else if (rkind == "elegoo") {
+            const std::string ip = ElegooCam::host_from_address(h.value("ip", ""));
+            if (relay <= 0 || ip.empty()) {
+                c.kind = HubMosaic::CellKind::Placeholder;
+                c.note = "Offline";
+                continue;
+            }
+            // The relay's own word on the printer first: at its viewer limit, connecting would only
+            // be refused (and would never take a slot from anybody, but would cost a try).
+            std::string st;
+            Http::get("http://127.0.0.1:" + std::to_string(relay) + "/elegoo/status?ip=" + percent_encode(ip))
+                .timeout_connect(2)
+                .timeout_max(4)
+                .on_complete([&st](std::string body, unsigned) {
+                    try { st = json::parse(body).value("state", ""); } catch (...) {}
+                })
+                .perform_sync();
+            const std::string note = HubMosaic::elegoo_note(st);
+            if (!note.empty()) {
+                c.kind = HubMosaic::CellKind::Placeholder;
+                c.note = note;
+            } else {
+                c.kind = HubMosaic::CellKind::Mjpeg;
+                c.url  = "http://127.0.0.1:" + std::to_string(relay) + "/elegoo?ip=" + percent_encode(ip) + "&fps=" + std::to_string(fps);
+            }
+        } else {
+            c.kind = HubMosaic::CellKind::Placeholder;
+            c.note = "Plays only on the PC";
+        }
+    }
+    // No camera is tried here (that cost the TV up to 9 s before the first picture): each live
+    // cell gets its own feeder in MosaicPipeline, and one that does not answer turns into an
+    // "Offline" card there without holding up the others.
+}
+
+static const char* mosaic_cell_state(const HubMosaic::Cell& c)
+{
+    switch (c.kind) {
+    case HubMosaic::CellKind::Rtsp:
+    case HubMosaic::CellKind::Mjpeg: return "live";
+    case HubMosaic::CellKind::Placeholder: return "placeholder";
+    default: return "empty";
+    }
+}
+
+// GET /r/<token>/mosaic?ids=a,b,c,d&layout=2x2[&fps=15][&h=1080][&q=low|med|high]
+// Sets the page the mosaic shows (the one mosaic of this hub: a new page replaces the last) and
+// says what each cell shows. The TV then plays the go2rtc stream named in "stream".
+std::string HubServer::mosaic_request(const std::string& query, int& status)
+{
+    const auto  t_asked = std::chrono::steady_clock::now();
+    json        out;
+    const std::string ff = ffmpeg_path();
+    int         go2rtc   = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        go2rtc = m_go2rtc_port;
+    }
+    out["ok"] = false;
+    if (ff.empty() || go2rtc == 0) {
+        status        = 503;
+        out["reason"] = ff.empty() ? "no_ffmpeg" : "no_go2rtc";
+        return out.dump();
+    }
+    HubMosaic::Layout layout;
+    const std::string lname = query_param(query, "layout");
+    if (!HubMosaic::parse_layout(lname.empty() ? "2x2" : lname, layout)) {
+        status        = 400;
+        out["reason"] = "bad_layout";
+        return out.dump();
+    }
+    const std::vector<std::string> ids = HubMosaic::parse_ids(query_param(query, "ids"), (size_t) layout.cells());
+    if (ids.empty()) {
+        status        = 400;
+        out["reason"] = "no_ids";
+        return out.dump();
+    }
+    HubMosaic::Spec spec;
+    spec.layout = layout;
+    spec.size   = HubMosaic::output_size(std::atoi(query_param(query, "h").c_str()));
+    spec.fps    = HubMosaic::clamp_fps(std::atoi(query_param(query, "fps").c_str()));
+    spec.kbps   = HubMosaic::default_kbps(spec.size, spec.fps, query_param(query, "q"));
+    spec.font   = mosaic_font();
+    {
+        std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+        spec.encoder = mosaic_encoder_locked(ff);
+    }
+    if (spec.encoder == HubMosaic::Encoder::None) {
+        status        = 503;
+        out["reason"] = "no_encoder";
+        return out.dump();
+    }
+    const long long enc_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_asked).count();
+    mosaic_cells(spec, ids);
+    bool     restarted = false;
+    unsigned gen       = 0;
+    // Start (or re-page) the pipeline now, before go2rtc connects: the cameras connect while the
+    // TV is still setting its player up. It stops by itself MOSAIC_LINGER_S after the last viewer.
+    std::shared_ptr<MosaicPipeline> old;
+    const char*                     how = "kept";
+    {
+        std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+        restarted = !m_mosaic_set || !spec.same_page(m_mosaic_spec);
+        m_mosaic_spec = spec;
+        m_mosaic_set  = true;
+        if (restarted) ++m_mosaic_gen;
+        gen = m_mosaic_gen;
+        auto& pipe = m_mosaic_pipe;
+        if (pipe && pipe->running() && pipe->same_output(spec)) {
+            if (restarted) {
+                pipe->set_page(spec, t_asked);
+                how = "new page on the running encoder";
+            }
+            pipe->touch();
+        } else {
+            old = std::move(pipe);
+            void* job = nullptr;
+            {
+                std::lock_guard<std::mutex> l2(m_mutex);
+                job = m_job;
+            }
+            pipe = std::make_shared<MosaicPipeline>(ff, job, spec, t_asked);
+            how  = "started";
+            if (!pipe->start()) {
+                pipe.reset();
+                how = "encoder did not start";
+            }
+        }
+    }
+    if (old) old->stop(); // its reader (a /relay/mosaic connection) moves to the new one
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: mosaic page " << layout.name() << " asked: answered in "
+                            << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_asked).count()
+                            << " ms (encoder choice " << enc_ms << " ms), pipeline " << how;
+    out["ok"]         = true;
+    out["stream"]     = HubMosaic::STREAM_NAME;
+    out["generation"] = gen;
+    out["restarted"]  = restarted;
+    out["layout"]     = layout.name();
+    out["width"]      = spec.size.w;
+    out["height"]     = spec.size.h;
+    out["fps"]        = spec.fps;
+    out["encoder"]    = HubMosaic::encoder_name(spec.encoder);
+    json cells        = json::array();
+    for (int i = 0; i < layout.cells(); ++i) {
+        const HubMosaic::Cell& c = spec.cells[i];
+        const HubMosaic::Rect  r = HubMosaic::cell_rect(layout, spec.size, i);
+        cells.push_back({ { "id", c.id }, { "state", mosaic_cell_state(c) }, { "note", c.note }, { "label", c.label },
+                          { "x", r.x }, { "y", r.y }, { "w", r.w }, { "h", r.h } });
+    }
+    out["cells"] = cells;
+    status       = 200;
+    return out.dump();
+}
+
+// go2rtc's source for "edge_mosaic" (loopback + hub secret, like /relay/h264): the mosaic
+// pipeline's raw H.264 for as long as go2rtc holds the connection, starting at the latest keyframe
+// it already has. The pipeline normally runs already (mosaic_request started it); after it went
+// idle this starts it again.
+void HubServer::relay_mosaic(tcp::socket& client)
+{
+    const std::string ff = ffmpeg_path();
+    const unsigned    me = ++m_mosaic_owner; // one mosaic at a time: a newer connection ends this one
+    set_read_timeout(client, 0);
+    set_write_timeout(client, TUNNEL_WRITE_S);
+    set_keepalive(client, 30);
+    void* job = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        job = m_job;
+    }
+    bool headed = false;
+    int  quick  = 0;
+    while (m_mosaic_owner == me && !m_life.stopping()) {
+        std::shared_ptr<MosaicPipeline> pipe;
+        {
+            std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+            if (!m_mosaic_set || ff.empty() || m_mosaic_spec.encoder == HubMosaic::Encoder::None) {
+                if (!headed) respond(client, 404, "text/plain", "no mosaic requested");
+                return;
+            }
+            pipe = m_mosaic_pipe;
+            if (!pipe || !pipe->running()) {
+                pipe = std::make_shared<MosaicPipeline>(ff, job, m_mosaic_spec, std::chrono::steady_clock::now());
+                if (!pipe->start()) pipe.reset();
+                m_mosaic_pipe = pipe;
+            }
+        }
+        if (!pipe) {
+            if (!headed) respond(client, 503, "text/plain", "mosaic encoder did not start");
+            return;
+        }
+        if (!headed) {
+            write_all(client, "HTTP/1.1 200 OK\r\nContent-Type: video/h264\r\nCache-Control: no-store\r\n"
+                              "X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n");
+            headed = true;
+        }
+        auto   sub     = pipe->subscribe();
+        size_t waiting = 0;
+        {
+            std::lock_guard<std::mutex> lock(sub->m);
+            waiting = sub->q.size();
+        }
+        pipe->log_at("go2rtc connected, " + std::to_string(waiting) + " bytes from the latest keyframe ready");
+        size_t sent      = 0;
+        bool   client_ok = true;
+        for (;;) {
+            std::string chunk;
+            bool        closed = false;
+            {
+                std::unique_lock<std::mutex> lock(sub->m);
+                sub->cv.wait_for(lock, std::chrono::milliseconds(200), [&]() { return !sub->q.empty() || sub->closed; });
+                chunk.swap(sub->q);
+                closed = sub->closed;
+            }
+            if (!chunk.empty()) {
+                boost::system::error_code e;
+                asio::write(client, asio::buffer(chunk), e);
+                if (e) {
+                    client_ok = false; // go2rtc let go: nobody is watching any more
+                    break;
+                }
+                if (sent == 0) pipe->log_at("first bytes to go2rtc");
+                sent += chunk.size();
+            } else if (closed) {
+                break;
+            }
+            if (m_mosaic_owner != me || m_life.stopping()) break;
+        }
+        pipe->unsubscribe(sub);
+        if (!client_ok || m_mosaic_owner != me || m_life.stopping()) break;
+        if (!pipe->encoder_failed()) {
+            quick = 0;
+            continue; // replaced by a pipeline for another size, rate or encoder: read that one
+        }
+        std::string tail = pipe->encoder_errors();
+        if (tail.size() > 300) tail = tail.substr(tail.size() - 300);
+        HubMosaic::Encoder failed = HubMosaic::Encoder::None;
+        {
+            std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+            failed = m_mosaic_spec.encoder;
+        }
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: mosaic encoder ended (" << HubMosaic::encoder_name(failed) << "): " << tail;
+        quick = pipe->failed_early() ? quick + 1 : 0;
+        if (quick >= 2) {
+            // Twice in a row at once: give up on this encoder for the next one (a GPU encoder busy
+            // elsewhere, say). The cameras are not it: each is its own process now.
+            std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+            auto& encs = m_mosaic_encoders;
+            encs.erase(std::remove(encs.begin(), encs.end(), m_mosaic_spec.encoder), encs.end());
+            m_mosaic_spec.encoder = mosaic_encoder_locked(ff);
+            BOOST_LOG_TRIVIAL(warning) << "RemoteHub: mosaic falls back to " << HubMosaic::encoder_name(m_mosaic_spec.encoder);
+            if (m_mosaic_pipe == pipe) m_mosaic_pipe.reset();
+            quick = 0;
+            if (m_mosaic_spec.encoder == HubMosaic::Encoder::None) break;
+        } else if (!sleep_unless_stopping(1000)) {
+            break;
+        }
+    }
+}
+
 std::string HubServer::relay_h264_url(const std::string& id)
 {
     std::string state;
@@ -4800,6 +6305,9 @@ Instance HubServer::probe_instance(Instance inst)
                 inst.title    = j.value("title", "");
                 inst.path     = j.value("path", "");
                 inst.slicing  = j.value("slicing", false);
+                inst.slicing_plate   = j.value("slicing_plate", -1);
+                inst.slicing_percent = j.value("slicing_percent", 0);
+                inst.current_plate   = j.value("current_plate", 0);
                 inst.hidden   = j.value("hidden", inst.hidden);
                 inst.needs_attention  = j.value("needs_attention", false);
                 inst.attention_reason = j.value("attention_reason", "");
@@ -4881,6 +6389,9 @@ json HubServer::instances_json()
         ji["title"]   = inst.title;
         ji["path"]    = inst.path;
         ji["slicing"] = inst.slicing;
+        ji["slicing_plate"]   = inst.slicing ? inst.slicing_plate : -1; // slice_v1
+        ji["slicing_percent"] = inst.slicing ? inst.slicing_percent : 0;
+        ji["current_plate"]   = inst.current_plate;
         ji["hidden"]  = inst.hidden;
         ji["needs_attention"]  = inst.needs_attention;
         ji["attention_reason"] = inst.attention_reason;
@@ -5297,6 +6808,23 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         respond_json(client, 200, e.dump());
     } else if (r.path == "/hub/events" && r.method == "GET") {
         respond_json(client, 200, events_json(std::atoi(query_param(r.query, "since").c_str())).dump());
+    } else if (r.path == "/hub/printers" && r.method == "GET") {
+        // The remembered rows, as /summary builds on them: the slicer's Printers tab adds the
+        // leftovers (configured: false) to its own cards so they can be forgotten there too.
+        json j;
+        j["printers"] = printers_json();
+        respond_json(client, 200, j.dump());
+    } else if (r.path.compare(0, 14, "/hub/printers/") == 0 && r.method == "POST" && r.path.size() > 21 &&
+               r.path.compare(r.path.size() - 7, 7, "/forget") == 0) {
+        // The same forget as the phone plane's POST /r/<token>/printers/<id>/forget.
+        if (r.content_type.compare(0, 16, "application/json") != 0) { respond_json(client, 415, json_error("Content-Type must be application/json")); return; }
+        std::string body;
+        if (!read_small_body(client, r, body, 4096)) { respond_json(client, 413, json_error("request too large")); return; }
+        const std::string id = percent_decode(r.path.substr(14, r.path.size() - 21));
+        if (id.empty() || id.size() > 200 || id.find('/') != std::string::npos) { respond_json(client, 404, json_error("no such printer")); return; }
+        // ?removed=1: the Printers tab's "Remove printer" just deleted it at its source.
+        const auto res = forget_printer(id, query_param(r.query, "removed") == "1");
+        respond_json(client, res.first, res.second);
     } else if (r.path == "/hub/phone" && r.method == "POST") {
         set_phone(query_param(r.query, "on") == "1", query_param(r.query, "token") /* only used by a hub with no link yet */);
         respond_json(client, 200, info_json().dump());
@@ -5481,6 +7009,10 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     auto is_index = [](const std::string& s) {
         return !s.empty() && s.size() <= 9 && s.find_first_not_of("0123456789") == std::string::npos;
     };
+    // PR D (arrange): the instances on no plate. A name, not an index, so it is matched here,
+    // before the index check below turns it away.
+    if (sub == "/api/plates/loose") return get;
+    if (sub == "/api/plates/add") return post; // PR G: the toolbar's Add plate
     // /api/plates/<index>/<what> and /api/jobs/<id>
     if (sub.compare(0, 12, "/api/plates/") == 0) {
         const std::string  rest  = sub.substr(12);
@@ -5488,10 +7020,22 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         if (slash == std::string::npos || !is_index(rest.substr(0, slash))) return false;
         const std::string what = rest.substr(slash);
         if (what == "/send") return post; // send the sliced plate to a printer (RemoteSend)
+        if (what == "/send/preview") return post; // slice_v1: that send's mapping sheet, nothing sent
+        if (what == "/arrange" || what == "/orient") return post; // PR D: arrange / orient that plate (or all)
+        if (what == "/prime_tower") return post; // slice_prime_tower: move that plate's prime tower
+        if (what == "/delete" || what == "/rename" || what == "/bed_type") return post; // PR G: plate edits
         return get && (what == "/thumbnail.png" || what == "/layout" || what == "/preview" ||
-                       what == "/preview.png" || what == "/preview/status");
+                       what == "/preview.png" || what == "/preview/status" ||
+                       what == "/preview/legend" || what == "/preview/layers" || // PR E: preview v2
+                       what == "/result"); // slice_v1: results detail and warnings
     }
-    if (sub.compare(0, 10, "/api/jobs/") == 0) return get && is_index(sub.substr(10));
+    if (sub.compare(0, 10, "/api/jobs/") == 0) {
+        const std::string rest  = sub.substr(10);
+        const size_t      slash = rest.find('/');
+        if (slash == std::string::npos) return get && is_index(rest);
+        // slice_v1: cancel a running slice job
+        return post && is_index(rest.substr(0, slash)) && rest.substr(slash) == "/cancel";
+    }
     // /api/printers/<id>/control - <id> is a Bambu dev_id, the literal "host" / "connect" or a LAN
     // Snapmaker's sm:<id> (hence the colon and the percent escape the page makes of it), so this
     // segment is a name, not an index; keep it to what a printer id can hold and nothing else. The
@@ -5533,6 +7077,20 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         return false;
     }
 
+    // paint_v1 (H1, the read side of tablet paint sessions): the object list, opening a session and
+    // a session's state, one volume's mesh and its painting (volume= / rev= are query values). The
+    // session id is 16 lowercase hex characters the instance made; nothing else reaches it.
+    if (sub == "/api/paint/objects")  return get;
+    if (sub == "/api/paint/sessions") return post;
+    if (sub.compare(0, 20, "/api/paint/sessions/") == 0) {
+        const std::string rest  = sub.substr(20);
+        const size_t      slash = rest.find('/');
+        const std::string id    = slash == std::string::npos ? rest : rest.substr(0, slash);
+        if (id.size() != 16 || id.find_first_not_of("0123456789abcdef") != std::string::npos) return false;
+        const std::string what = slash == std::string::npos ? std::string() : rest.substr(slash);
+        return get && (what.empty() || what == "/mesh" || what == "/paint");
+    }
+
     if (sub == "/api" || sub == "/api/")             return get;
     if (sub == "/api/info")                          return get;
     if (sub == "/api/window")                        return get || post;
@@ -5541,6 +7099,11 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     if (sub == "/api/project/open")                  return post;
     if (sub == "/api/plates")                        return get;
     if (sub == "/api/objects/transform")             return post;
+    if (sub == "/api/objects/printable")             return post; // PR D: the object list's Printable toggle
+    if (sub == "/api/undo")                          return post; // PR D: one undo step (expect= guards it)
+    if (sub == "/api/objects/delete")                return post; // PR G: delete an object or one instance
+    if (sub == "/api/objects/duplicate")             return post; // PR G: Clone
+    if (sub == "/api/project/save")                  return post; // PR G: Save project
     if (sub == "/api/printers")                      return get;
     if (sub == "/api/snapmaker/devices")             return get;
     if (sub == "/api/snapmaker/add")                 return post;
@@ -5557,8 +7120,17 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     if (sub == "/api/settings/process")              return get || post;
     if (sub == "/api/settings/process/revert")       return post;
     if (sub == "/api/settings/process/save")         return post;
+    if (sub == "/api/settings/filament")             return get || post; // PR F: index= in the query
+    if (sub == "/api/settings/filament/revert")      return post;
+    if (sub == "/api/settings/filament/save")        return post;
+    if (sub == "/api/presets/filament_remove")       return post;
     if (sub == "/api/archive")                       return get;
     return false;
+}
+
+bool Testing::instance_api_allowed(const std::string& method, const std::string& sub)
+{
+    return RemoteHub::instance_api_allowed(method, sub);
 }
 
 void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string& rest)
@@ -5568,6 +7140,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
     // the requirement: the app's Devices screen used to be able to say nothing at all with the
     // slicer closed, because the printers were only reachable through /i/<pid>/api/printers.
     if (r.method == "GET" && (rest == "/summary" || rest == "/summary/")) {
+        m_watch_ms = now_millis();
         respond_json(client, 200, summary_json().dump());
         return;
     }
@@ -5581,6 +7154,21 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
     // G-code archive's sidecars. The id is whatever /api/printers calls the printer, so it is
     // percent-decoded and then only ever compared against what a sidecar says; nothing from the
     // request reaches a file name (printer_thumbnail() builds the path from the sidecar's own id).
+    // POST /printers/<id>/forget - drop a remembered printer row the slicer no longer has (a test
+    // printer, a printer removed while the hub was not looking). JSON content type like every
+    // other POST here (a cross-site form cannot send one without a preflight); the body is ignored.
+    // 409 while the printer is still set up in the slicer: it would be back at the next poll.
+    if (r.method == "POST" && rest.compare(0, 10, "/printers/") == 0 && rest.size() > 17 &&
+        rest.compare(rest.size() - 7, 7, "/forget") == 0) {
+        if (r.content_type.compare(0, 16, "application/json") != 0) { respond_json(client, 415, json_error("Content-Type must be application/json")); return; }
+        std::string body;
+        if (!read_small_body(client, r, body, 4096)) { respond_json(client, 413, json_error("that is too large")); return; }
+        const std::string id = percent_decode(rest.substr(10, rest.size() - 17));
+        if (id.empty() || id.size() > 200 || id.find('/') != std::string::npos) { respond_json(client, 404, json_error("no such printer")); return; }
+        const auto res = phone_remove_printer(id);
+        respond_json(client, res.first, res.second);
+        return;
+    }
     if (r.method == "GET" && rest.compare(0, 10, "/printers/") == 0 && rest.size() > 10) {
         const std::string tail = rest.substr(10);
         const size_t      slash = tail.rfind('/');
@@ -5759,9 +7347,10 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             { {"method", "POST"}, {"path", "/i/{id}/open?mode=load|import"}, {"description", "same upload, opened in instance {id}: load = save the current project, then open this project (default for .3mf); import = add the model to the current plate (default otherwise)"} },
             { {"method", "*"},    {"path", "/i/{id}/api/..."},      {"description", "the instance's own API (see GET /i/{id}/api)"} },
             { {"method", "GET"},  {"path", "/state"},               {"description", "camera list for the stream wall, plus lan_url / remote_url / ips (the two origins this hub answers on), the last-known printer rows and hub_instance"} },
-            { {"method", "GET"},  {"path", "/summary"},             {"description", "one answer for a phone's device list: hub / host / version / hub_instance, both URLs, last_id, and the printers (id, name, model, vendor, state, percent, left_time_s, job, temps when known, camera, thumbnail, instance pid, plus age_s and stale). Answers with no slicer window open: these are the rows the hub last read off the open windows"} },
+            { {"method", "GET"},  {"path", "/summary"},             {"description", "one answer for a phone's device list: hub / host / version / hub_instance, both URLs, last_id, and the printers (id, name, model, vendor, state, percent, left_time_s, job, temps when known, camera, thumbnail, instance pid, plus age_s, stale and configured - false for a leftover the slicer no longer has, absent until a slicer window has listed its printers). Answers with no slicer window open: these are the rows the hub last read off the open windows"} },
             { {"method", "GET"},  {"path", "/pair"},                {"description", "the pairing document: name (this PC), hub, version, hub_instance, urls {lan, remote}, ips, push {webpush, apns, fcm, unified}, token_version and features"} },
             { {"method", "GET"},  {"path", "/printers/{id}/thumbnail.png"}, {"description", "the running job's picture for that printer, from the G-code archive; 404 when there is none"} },
+            { {"method", "POST"}, {"path", "/printers/{id}/forget"}, {"description", "Content-Type application/json, body ignored ({}): remove a printer - the Printers tab's Remove printer. A leftover (/summary configured: false) loses its hub row; any other printer is deleted at its source first (a saved print-host device, a LAN Snapmaker with a tombstone so discovery does not re-add it, a Bambu LAN printer's login), by a live slicer window or, with none open, by the hub itself. /summary rows carry remove {mode remove|logout|explain, kind, reason?}. {ok, id, forgotten, removed, done[], reason_kind} on 200; 404 no such row; 409 {error, reason_kind} for what cannot be removed here: bambu_cloud (remove it from the Bambu account), preset_host, device_connection, needs_slicer (a Bambu LAN log out with no slicer open). Rows the slicer stops listing also go by themselves after 5 minutes, and at once when the hub starts. (The loopback control plane's POST /hub/printers/{id}/forget?removed=1 is the Printers tab's Remove printer: the printer was just deleted at its source, so it is taken off the configured list and its row goes.)"} },
             { {"method", "GET"},  {"path", "/ping.gif"},            {"description", "a 43-byte never-cached GIF; the phone page's beacon for \"is the home network reachable from here\""} },
             { {"method", "GET"},  {"path", "/events?since={id}"},   {"description", "printer events the slicer instances reported (started / finished / failed / cancelled / paused / resumed / runout / error), newest last: {events, last_id, hub_instance}. hub_instance changes only when a data dir's hub settings are created, so a client can tell an id reset from an id it has already seen"} },
             { {"method", "GET"},  {"path", "/push/key"},            {"description", "the hub's VAPID public key, for PushManager.subscribe()"} },
@@ -5831,6 +7420,37 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             if (inst.pid == pid) target = inst;
         if (!target.alive) { respond_json(client, 404, json_error("no such slicer instance")); return; }
         const std::string base = "http://127.0.0.1:" + std::to_string(target.port);
+        // paint_v1 (H2): the tablet's paint for a session. Spooled like an upload - a painted object's
+        // body is MBs and the proxy takes 64 KiB - then handed to the slicer, which reads it once and
+        // deletes it. The session id is 16 lowercase hex characters the slicer made.
+        if (sub.compare(0, 7, "/paint/") == 0 && r.method == "POST") {
+            const std::string tail  = sub.substr(7);
+            const size_t      cut   = tail.find('/');
+            const std::string sid   = cut == std::string::npos ? tail : tail.substr(0, cut);
+            if (cut == std::string::npos || tail.substr(cut) != "/apply" || !PaintV1::is_session_id(sid)) {
+                respond_json(client, 404, json_error("no such route; see /api"));
+                return;
+            }
+            std::string path, error;
+            if (!spool_body(client, r, "apply.psapply", PaintV1::MAX_APPLY_BYTES, path, error)) {
+                respond_json(client, error == "file too large" ? 413 : 400, json_error(error));
+                return;
+            }
+            gc_uploads();
+            int         status = 502;
+            std::string body   = json_error("the slicer did not answer");
+            Http::post(base + "/api/paint/sessions/" + sid + "/apply")
+                .timeout_connect(2).timeout_max(300)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .set_post_body("path=" + percent_encode(path))
+                .on_complete([&](std::string b, unsigned st) { status = (int) st; body = b; })
+                .on_error([&](std::string b, std::string err, unsigned st) { status = st ? (int) st : 502; body = b.empty() ? json_error(err) : b; })
+                .perform_sync();
+            boost::system::error_code ig;
+            fs::remove_all(fs::path(path).parent_path(), ig); // the slicer deleted it already; never leave it
+            respond_json(client, status, body);
+            return;
+        }
         if (sub == "/open" && r.method == "POST") {
             std::string path, error;
             if (!spool_upload(client, r, path, error)) { respond_json(client, 400, json_error(error)); return; }
@@ -5851,6 +7471,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         }
         if (sub.compare(0, 4, "/api") == 0 && (sub.size() == 4 || sub[4] == '/')) {
             if (!instance_api_allowed(r.method, sub)) { respond_json(client, 404, json_error("route not proxied; see /api")); return; }
+            if (r.method == "GET" && sub == "/api/printers") m_watch_ms = now_millis();
             if (r.content_length > MAX_API_BODY) { respond_json(client, 413, json_error("body too large")); return; }
             // Replay the request against the instance with the prefix stripped; the instance
             // answers with Connection: close, so the splice ends by itself.
@@ -5929,7 +7550,7 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
 
         // The control plane answers only on the admin listener, and the admin listener answers
         // only the control plane. Anything a tunnel can front is on the other socket.
-        const bool control_route = r.path.compare(0, 5, "/hub/") == 0 || r.path == "/relay/h264";
+        const bool control_route = r.path.compare(0, 5, "/hub/") == 0 || r.path == "/relay/h264" || r.path == "/relay/mosaic";
         if (admin != control_route) { respond(client, 404, "text/plain", "not found"); return; }
 
         // Through Tailscale Serve (a loopback peer carrying Tailscale-User-Login, which Serve sets
@@ -6005,6 +7626,12 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             relay_h264(client, url);
             return;
         }
+        // go2rtc pulls the TV wall's camera mosaic through here (loopback + hub secret; see relay_mosaic).
+        if (r.path == "/relay/mosaic") {
+            if (!(peer.is_loopback() && ct_equal(query_param(r.query, "lt"), secret))) { respond(client, 404, "text/plain", "not found"); return; }
+            relay_mosaic(client);
+            return;
+        }
         // Control routes for the slicer instances and the hub page on this PC. They only exist on
         // the loopback-only admin listener (checked above), and on top of that: loopback peer,
         // loopback Host (no DNS rebinding), never cross-site, and the per-run secret as a custom
@@ -6052,6 +7679,7 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             respond(client, 200, "text/html; charset=utf-8", page,
                     "X-Frame-Options: DENY\r\nSet-Cookie: rt=" + token + "; Path=/; SameSite=Lax" + cookie_flags + "\r\n");
         } else if (rest == "/state") {
+            m_watch_ms = now_millis();
             // Through Tailscale Serve the phone learns who it is signed in as (shown in its top bar).
             std::string st = state_for_phone();
             if (via_serve) {
@@ -6067,6 +7695,13 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             // event fields: nothing here names this PC, its data dir, its instances' ports or the
             // secret, and the token gate above is the same one the page itself passed.
             respond_json(client, 200, events_json(std::atoi(query_param(r.query, "since").c_str())).dump());
+        } else if (rest == "/mosaic") {
+            // The TV wall: one H.264 stream for a page of cameras (relay_mosaic). Sets the page; the
+            // answer names the go2rtc stream to play and what each cell shows.
+            m_watch_ms = now_millis();
+            int               status = 500;
+            const std::string body   = mosaic_request(r.query, status);
+            respond_json(client, status, body);
         } else if (rest == "/bambu") {
             std::string ip, code;
             if (!lookup_host(query_param(r.query, "id"), ip, code) || code.empty()) { respond(client, 404, "text/plain", "unknown camera"); return; }
@@ -6079,6 +7714,22 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             int fps = std::atoi(query_param(r.query, "fps").c_str());
             if (fps < 0 || fps > 60) fps = 0;
             const std::string new_head = "GET /bambu?ip=" + percent_encode(ip) + "&code=" + percent_encode(code) +
+                                         (fps > 0 ? "&fps=" + std::to_string(fps) : "") + " HTTP/1.1\r\n" +
+                                         r.head.substr(r.head.find("\r\n") + 2);
+            tunnel(client, relay, force_close(new_head), "");
+        } else if (rest == "/elegoo" || rest == "/elegoo/status") {
+            // A Centauri Carbon camera: the same relay the PC's Stream tab uses, so a phone is one
+            // more viewer of the one connection the printer is given - never a connection of its own.
+            // The printer's address comes from the saved camera list, not from the phone.
+            std::string ip, unused_code;
+            if (!lookup_host(query_param(r.query, "id"), ip, unused_code)) { respond(client, 404, "text/plain", "unknown camera"); return; }
+            ip = ElegooCam::host_from_address(ip);
+            if (ip.empty()) { respond(client, 404, "text/plain", "unknown camera"); return; }
+            const int relay = BambuCamRelay::get().port();
+            if (relay == 0) { respond(client, 503, "text/plain", "camera relay is not running"); return; }
+            int fps = std::atoi(query_param(r.query, "fps").c_str());
+            if (fps < 0 || fps > 60) fps = 0;
+            const std::string new_head = std::string("GET ") + (rest == "/elegoo" ? "/elegoo" : "/elegoo/status") + "?ip=" + percent_encode(ip) +
                                          (fps > 0 ? "&fps=" + std::to_string(fps) : "") + " HTTP/1.1\r\n" +
                                          r.head.substr(r.head.find("\r\n") + 2);
             tunnel(client, relay, force_close(new_head), "");
@@ -6339,6 +7990,14 @@ bool HubServer::shutdown()
     // (firewall, Tailscale) - to be gone before anything they use is destroyed. Not under m_mutex:
     // the connections take it. Crash a2375b06 was a tunnel thread destroying its socket after
     // HubApp had already destroyed this server, and the io_context with it.
+    // The mosaic's ffmpegs and threads end first: their readers (/relay/mosaic connections) are
+    // among the threads waited for below.
+    std::shared_ptr<MosaicPipeline> mosaic;
+    {
+        std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+        mosaic.swap(m_mosaic_pipe);
+    }
+    if (mosaic) mosaic->stop();
     const bool drained = m_life.stop(std::chrono::milliseconds(SHUTDOWN_DRAIN_MS));
     if (!drained)
         BOOST_LOG_TRIVIAL(warning) << "RemoteHub: " << m_life.running() << " connection/helper thread(s) still running after "
@@ -6757,6 +8416,9 @@ int run_server(const std::string& token_hint, bool phone_on)
 // --------------------------------------------------------------- client ----
 
 static std::mutex  s_state_mutex;
+// --no-hub / marker file (init_hub_mode): this copy is a client of the running hub only.
+static std::atomic<bool> s_no_hub { false };
+static std::atomic<bool> s_no_hub_logged { false };
 static std::string s_last_state;
 // ensure_running() one caller at a time within this process: the startup call
 // (GUI_App::start_remote_access), the Stream tab and the Home tab can all ask at once, and two
@@ -6887,12 +8549,13 @@ std::pair<int, std::string> onvif_discover()
 
 Info set_phone(bool on, const std::string& token)
 {
+    if (s_no_hub) return query(); // the hub belongs to another copy: report it, change nothing
     return hub_call("POST", std::string("/hub/phone?on=") + (on ? "1" : "0") + (valid_token(token) ? "&token=" + token : ""), "", 5);
 }
 
-Info new_link() { return hub_call("POST", "/hub/newlink", "", 5); }
+Info new_link() { return s_no_hub ? query() : hub_call("POST", "/hub/newlink", "", 5); }
 
-void quit() { hub_call("POST", "/hub/quit", "", 3); }
+void quit() { if (s_no_hub) return; hub_call("POST", "/hub/quit", "", 3); }
 
 std::string saved_state()
 {
@@ -6921,6 +8584,7 @@ bool post_state(const std::string& state_json)
         std::lock_guard<std::mutex> lock(s_state_mutex);
         s_last_state = state_json;
     }
+    if (s_no_hub) return false; // this copy's camera list never overwrites the hub owner's
     const HubFile hf = hub_file();
     if (hf.admin_port == 0) return false;
     bool ok = false;
@@ -6968,6 +8632,39 @@ bool post_event(const std::string& event_json)
         .on_complete([&ok](std::string, unsigned status) { ok = status == 200; })
         .perform_sync();
     return ok;
+}
+
+std::pair<int, std::string> hub_printers()
+{
+    const HubFile hf = hub_file();
+    if (hf.admin_port == 0) return { 503, json_error("the hub is not running") };
+    int         status = 0;
+    std::string body;
+    Http::get("http://127.0.0.1:" + std::to_string(hf.admin_port) + "/hub/printers")
+        .timeout_connect(1).timeout_max(5)
+        .header("X-Hub-Secret", hf.secret)
+        .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
+        .on_error([&](std::string b, std::string err, unsigned s) { status = s ? (int) s : 502; body = b.empty() ? json_error(err) : b; })
+        .perform_sync();
+    return { status == 0 ? 502 : status, body };
+}
+
+std::pair<int, std::string> forget_printer(const std::string& printer_id, bool removed)
+{
+    const HubFile hf = hub_file();
+    if (hf.admin_port == 0) return { 503, json_error("the hub is not running") };
+    int         status = 0;
+    std::string body;
+    Http::post("http://127.0.0.1:" + std::to_string(hf.admin_port) + "/hub/printers/" + percent_encode(printer_id) + "/forget" +
+               (removed ? "?removed=1" : ""))
+        .timeout_connect(1).timeout_max(5)
+        .header("Content-Type", "application/json")
+        .header("X-Hub-Secret", hf.secret)
+        .set_post_body(std::string("{}")) // a bodyless POST hangs the fork's Http
+        .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
+        .on_error([&](std::string b, std::string err, unsigned s) { status = s ? (int) s : 502; body = b.empty() ? json_error(err) : b; })
+        .perform_sync();
+    return { status == 0 ? 502 : status, body };
 }
 
 // Ask the hub to quit and say whether it accepted: hub_call() hides the status (its answer parses
@@ -7062,8 +8759,46 @@ static bool port_free_for_hub(int port)
     } catch (...) { return false; }
 }
 
+static std::atomic<bool> s_spawn_disabled { false };
+
+void disable_spawn() { s_spawn_disabled = true; }
+
+bool no_hub() { return s_no_hub.load(); }
+
+void init_hub_mode(bool no_hub_flag, bool take_hub_flag)
+{
+    HubHandover::HubModeInputs in;
+    in.take_hub_flag = take_hub_flag;
+    in.no_hub_flag   = no_hub_flag;
+    in.take_hub_env  = HubHandover::env_switch_on(std::getenv("EDGESLICER_TAKE_HUB"));
+    in.no_hub_env    = HubHandover::env_switch_on(std::getenv("EDGESLICER_NO_HUB"));
+    boost::system::error_code ec;
+    const fs::path            exe = fs::path(current_exe());
+    in.marker_file                = !exe.empty() && fs::exists(exe.parent_path() / "edgeslicer_no_hub", ec);
+    const HubHandover::HubModeDecision d = HubHandover::decide_hub_mode(in);
+    s_no_hub = !HubHandover::should_spawn_or_take_over(d.mode);
+    if (s_no_hub)
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: no-hub mode (" << HubHandover::hub_mode_rule_name(d.rule)
+                                << "): this copy never starts, restarts or takes over the hub or go2rtc, and uses a running hub as a client only";
+    else if (d.rule != HubHandover::HubModeRule::Default)
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: normal hub mode (" << HubHandover::hub_mode_rule_name(d.rule) << ")";
+}
+
 Info ensure_running(const std::string& token_hint, bool phone_on)
 {
+    // --no-hub / marker: a client of whatever hub runs. No spawn, no handover, no phone switch, no
+    // state push, no kill; a dead Info (alive == false) when there is none.
+    if (s_no_hub) {
+        if (!s_no_hub_logged.exchange(true))
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: no-hub mode, not starting or taking over a hub; using the running one if there is one";
+        return query();
+    }
+    // Showcase S5: a --showcase-render job never starts a hub (nor, through it, go2rtc), whichever
+    // caller asks - the Stream page's hub_start included. A hub would outlive the job.
+    if (s_spawn_disabled) {
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: not started (spawning disabled for this process)";
+        return Info{};
+    }
     std::lock_guard<std::mutex> ensure_lock(s_ensure_mutex);
     Info i = query();
     // A hub answers: an earlier spawn of ours either is that hub or, unable to take hub.lock, is on

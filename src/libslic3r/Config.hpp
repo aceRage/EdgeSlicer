@@ -93,6 +93,8 @@ extern std::string  escape_string_cstyle(const std::string &str);
 extern std::string  escape_strings_cstyle(const std::vector<std::string> &strs);
 extern bool         unescape_string_cstyle(const std::string &str, std::string &out);
 extern bool         unescape_strings_cstyle(const std::string &str, std::vector<std::string> &out);
+// Reads the number a float option's text starts with, the same on every platform. See Config.cpp.
+extern bool         deserialize_float_value(const std::string &str, double &value);
 
 extern std::string  escape_ampersand(const std::string& str);
 
@@ -616,9 +618,11 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
-        std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        double value;
+        if (! deserialize_float_value(str, value))
+            return false;
+        this->value = value;
+        return true;
     }
 
     bool operator==(const ConfigOption &rhs) const override
@@ -712,10 +716,8 @@ public:
         		else
         			{ BOOST_LOG_TRIVIAL(warning) << "deserialize: skipping nil item in non-nullable vector"; continue; }
         	} else {
-	            std::istringstream iss(item_str);
 	            double value;
-	            iss >> value;
-	            if (iss.fail())
+	            if (! deserialize_float_value(item_str, value))
 	            	return false;
 	            this->values.push_back(value);
 	        }
@@ -806,8 +808,12 @@ public:
     {
         UNUSED(append);
         std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        int value;
+        iss >> value;
+        if (iss.fail())
+            return false;
+        this->value = value;
+        return true;
     }
 
     ConfigOptionInt& operator=(const ConfigOption *opt)
@@ -1015,9 +1021,11 @@ public:
     {
         UNUSED(append);
         // don't try to parse the trailing % since it's optional
-        std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        double value;
+        if (! deserialize_float_value(str, value))
+            return false;
+        this->value = value;
+        return true;
     }
 
 private:
@@ -1128,10 +1136,12 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
+        double value;
+        if (! deserialize_float_value(str, value))
+            return false;
+        this->value   = value;
         this->percent = str.find_first_of("%") != std::string::npos;
-        std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        return true;
     }
 
 private:
@@ -1207,9 +1217,9 @@ public:
                     { BOOST_LOG_TRIVIAL(warning) << "deserialize: skipping nil item in non-nullable vector"; continue; }
             } else {
                 bool percent = item_str.find_first_of("%") != std::string::npos;
-                std::istringstream iss(item_str);
+                // Never fails: an item that is not a number reads as 0.
                 double value;
-                iss >> value;
+                deserialize_float_value(item_str, value);
                 this->values.push_back({ value, percent });
             }
         }
@@ -1294,9 +1304,13 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
-        char dummy;
-        return sscanf(str.data(), " %lf , %lf %c", &this->value(0), &this->value(1), &dummy) == 2 ||
-               sscanf(str.data(), " %lf x %lf %c", &this->value(0), &this->value(1), &dummy) == 2;
+        char  dummy;
+        Vec2d value = Vec2d::Zero();
+        if (sscanf(str.data(), " %lf , %lf %c", &value(0), &value(1), &dummy) != 2 &&
+            sscanf(str.data(), " %lf x %lf %c", &value(0), &value(1), &dummy) != 2)
+            return false;
+        this->value = value;
+        return true;
     }
 
 private:
@@ -1525,9 +1539,13 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
-        char dummy;
-        return sscanf(str.data(), " %lf , %lf , %lf %c", &this->value(0), &this->value(1), &this->value(2), &dummy) == 3 ||
-               sscanf(str.data(), " %lf x %lf x %lf %c", &this->value(0), &this->value(1), &this->value(2), &dummy) == 3;
+        char  dummy;
+        Vec3d value = Vec3d::Zero();
+        if (sscanf(str.data(), " %lf , %lf , %lf %c", &value(0), &value(1), &value(2), &dummy) != 3 &&
+            sscanf(str.data(), " %lf x %lf x %lf %c", &value(0), &value(1), &value(2), &dummy) != 3)
+            return false;
+        this->value = value;
+        return true;
     }
 
 private:

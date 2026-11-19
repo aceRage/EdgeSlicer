@@ -762,6 +762,96 @@ bool build_primitive(const cgltf_primitive &prim, const Matrix4d &world, Primiti
 
 } // anonymous namespace
 
+bool sample_obj_textures(const std::string                       &base_dir,
+                         const std::vector<std::string>          &face_texture,
+                         const std::vector<std::array<Vec2f, 3>> &uvs,
+                         const std::vector<RGBA>                 &fallback_colors,
+                         int                                      depth,
+                         std::vector<RGBA>                       &face_colors,
+                         std::vector<RGBA>                       &sub_face_colors,
+                         std::string                             &warning)
+{
+    face_colors.clear();
+    sub_face_colors.clear();
+    if (face_texture.size() != uvs.size() || fallback_colors.size() != uvs.size() || uvs.empty())
+        return false;
+
+    // Each image once. The name is an mtl `map_Kd` value: options such as "-s 1 1 1" may come
+    // first, and the file is then the last word.
+    std::map<std::string, std::shared_ptr<TextureImage>> cache;
+    auto texture_for = [&](const std::string &raw) -> const TextureImage * {
+        std::string name = raw;
+        while (!name.empty() && (name.back() == '\r' || name.back() == ' ' || name.back() == '\t'))
+            name.pop_back();
+        if (!name.empty() && name.front() == '-') {
+            const size_t sp = name.find_last_of(" \t");
+            name = sp == std::string::npos ? std::string() : name.substr(sp + 1);
+        }
+        if (name.empty())
+            return nullptr;
+        auto found = cache.find(name);
+        if (found != cache.end())
+            return found->second.get();
+        std::shared_ptr<TextureImage> decoded;
+        // Only a path inside the OBJ's own folder, exactly the rule glTF images follow.
+        if (uri_is_safe_relative(name)) {
+            boost::nowide::ifstream in((base_dir + "/" + name).c_str(), std::ios::in | std::ios::binary);
+            if (in) {
+                in.seekg(0, std::ios::end);
+                const std::streamoff len = in.tellg();
+                if (len > 0 && (size_t) len <= MAX_TEXTURE_BYTES) {
+                    std::vector<unsigned char> bytes((size_t) len);
+                    in.seekg(0, std::ios::beg);
+                    in.read((char *) bytes.data(), len);
+                    auto img = std::make_shared<TextureImage>();
+                    if (in.gcount() == len &&
+                        (decode_png_image(bytes.data(), bytes.size(), *img) || decode_jpeg_image(bytes.data(), bytes.size(), *img)))
+                        decoded = img;
+                }
+            }
+        }
+        if (!decoded)
+            warning = _L("A texture named by this OBJ's materials could not be read; those faces keep their material colour.");
+        cache.emplace(name, decoded);
+        return decoded.get();
+    };
+
+    size_t sub_per = 1;
+    for (int i = 0; i < depth; ++i)
+        sub_per *= 4;
+    face_colors.reserve(uvs.size());
+    sub_face_colors.reserve(uvs.size() * sub_per);
+    bool any = false;
+    std::vector<ImageFillLeaf> uv_leaves;
+    for (size_t f = 0; f < uvs.size(); ++f) {
+        const TextureImage *tex = face_texture[f].empty() ? nullptr : texture_for(face_texture[f]);
+        if (tex == nullptr || !tex->ok()) {
+            face_colors.push_back(fallback_colors[f]);
+            for (size_t k = 0; k < sub_per; ++k)
+                sub_face_colors.push_back(fallback_colors[f]);
+            continue;
+        }
+        any = true;
+        // OBJ's v runs up from the image's bottom row; TextureImage::sample() reads from the top.
+        auto at = [tex](float u, float v) { return tex->sample(u, 1.f - v); };
+        const std::array<Vec2f, 3> &uv = uvs[f];
+        const Vec2f c = (uv[0] + uv[1] + uv[2]) / 3.f;
+        face_colors.push_back(at(c.x(), c.y()));
+        uv_leaves.clear();
+        image_fill_subdivide(Vec3f(uv[0].x(), uv[0].y(), 0.f), Vec3f(uv[1].x(), uv[1].y(), 0.f),
+                             Vec3f(uv[2].x(), uv[2].y(), 0.f), depth, uv_leaves);
+        for (const ImageFillLeaf &leaf : uv_leaves) {
+            const Vec3f lc = leaf.centroid();
+            sub_face_colors.push_back(at(lc.x(), lc.y()));
+        }
+    }
+    if (!any) {
+        face_colors.clear();
+        sub_face_colors.clear();
+    }
+    return any;
+}
+
 bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &message,
                const char *object_name_in, ImportstlProgressFn progressFn)
 {

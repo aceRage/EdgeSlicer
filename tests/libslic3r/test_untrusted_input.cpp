@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <set>
@@ -43,6 +44,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <winioctl.h>
 #endif
 
 using namespace Slic3r;
@@ -126,9 +128,11 @@ TEST_CASE("the model-site link checks match real URLs and nothing spoofed", "[Un
 TEST_CASE("local and IP hosts are recognised", "[Untrusted][Url]")
 {
     for (const char *h : {"127.0.0.1", "10.0.0.5", "192.168.1.20", "127.1", "2130706433", "0x7f.1", "[::1]", "localhost",
-                          "foo.localhost", "printer.local", "nas.lan", "box.home.arpa", "printer"})
+                          "foo.localhost", "printer.local", "nas.lan", "nas.home", "box.ts.net", "ts.net",
+                          "box.home.arpa", "printer"})
         CHECK(is_local_or_ip_host(h));
-    for (const char *h : {"files.printables.com", "public-cdn.bblmw.com", "1password.com", "3dprint.example.org"})
+    for (const char *h : {"files.printables.com", "public-cdn.bblmw.com", "1password.com", "3dprint.example.org",
+                          "nas.home.example.com", "home.com", "box.ts.network", "ts.net.example.com"})
         CHECK_FALSE(is_local_or_ip_host(h));
 }
 
@@ -336,6 +340,83 @@ TEST_CASE("model downloads that are never allowed", "[Untrusted][Download]")
                             "not a url"}) {
         INFO(url);
         CHECK(check_model_download(url, "edgeslicer").verdict == DownloadVerdict::Refuse);
+    }
+}
+
+TEST_CASE("a redirect is kept on https and off this machine", "[Untrusted][Download][Redirect]")
+{
+    // The link check above only ever sees the address it was given. This is the check for where
+    // curl actually ended up (Http::restrict_redirects -> untrusted::redirect_target_refusal).
+    for (const char *u : {"https://files.printables.com/a.3mf", "https://public-cdn.bblmw.com/models/a.3mf",
+                          // a redirect legitimately lands on another public host: the allowlist and the
+                          // file extension are not applied here
+                          "https://s3.us-west-2.amazonaws.com/x/a.3mf", "https://storage.example.org/abc?sig=1"}) {
+        INFO(u);
+        CHECK(redirect_target_refusal(u).empty());
+    }
+
+    const std::string downgraded = redirect_target_refusal("http://files.printables.com/a.3mf");
+    CHECK_FALSE(downgraded.empty());
+    CHECK(downgraded.find("not secure") != std::string::npos);
+    CHECK_FALSE(redirect_target_refusal("ftp://files.printables.com/a.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("ftps://files.printables.com/a.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("file:///C:/Windows/evil.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("not a url").empty());
+    CHECK_FALSE(redirect_target_refusal("https://user:pw@files.printables.com/a.3mf").empty());
+
+    // A public https host that redirects onto the user's own machine or LAN.
+    for (const char *u : {"https://127.0.0.1/a.3mf", "https://169.254.169.254/latest/meta-data/",
+                          "https://192.168.1.20/a.3mf", "https://10.0.0.5:8443/a.3mf", "https://[::1]/a.3mf",
+                          "https://localhost/a.3mf", "https://printer.local/a.3mf", "https://nas.lan/a.3mf",
+                          "https://nas.home/a.3mf", "https://box.ts.net/a.3mf", "https://octopi/a.3mf"}) {
+        INFO(u);
+        CHECK_FALSE(redirect_target_refusal(u).empty());
+    }
+}
+
+TEST_CASE("a redirect is refused however the loopback address is spelled", "[Untrusted][Download][Redirect]")
+{
+    // The address in a redirect's Location is chosen by whoever answered the request, so every
+    // spelling a resolver or a browser would accept for this machine or the LAN has to be refused
+    // too - not just the canonical "127.0.0.1". Each of these is a way to reach loopback, a
+    // link-local address, a unique-local address, or a name that only resolves on the LAN.
+    for (const char *u : {
+             "https://[::ffff:127.0.0.1]/x",   // IPv4-mapped IPv6 loopback
+             "https://[fe80::1]/x",            // IPv6 link-local
+             "https://[fc00::1]/x",            // IPv6 unique-local (fc00::/7)
+             "https://2130706433/x",           // 127.0.0.1 as one decimal integer
+             "https://0x7f000001/x",           // 127.0.0.1 in hex
+             "https://127.1/x",                // 127.0.0.1 abbreviated to two parts
+             "https://localhost./x",           // the trailing root dot
+             "https://LOCALHOST/x",            // host names are case-insensitive
+             "https://a@b@127.0.0.1/x",        // userinfo that hides the real host
+             "https://%31%32%37.0.0.1/x",      // percent-encoded digits are not a host name
+             "https:///x",                     // no host at all
+         }) {
+        INFO(u);
+        CHECK_FALSE(redirect_target_refusal(u).empty());
+    }
+
+    // A public IP literal is refused too, and for its own reason: the address is not this machine,
+    // but a Location that names an address instead of a host name is how a redirect gets past a
+    // check that reads names only. It must not be reported as being on a private network.
+    for (const char *u : {"https://8.8.8.8/x", "https://[2606:4700:4700::1111]/x", "https://1.1.1.1/x"}) {
+        INFO(u);
+        const std::string why = redirect_target_refusal(u);
+        CHECK(why.find("IP address") != std::string::npos);
+        CHECK(why.find("private network") == std::string::npos);
+    }
+    // A name on the LAN is still described as one. .home is the widening that matters here:
+    // a redirect onto a consumer .home host is refused as local, not as a public model site.
+    CHECK(redirect_target_refusal("https://printer.local/x").find("private network") != std::string::npos);
+    CHECK(redirect_target_refusal("https://nas.home/x").find("private network") != std::string::npos);
+
+    // The same spellings that must still be allowed: this check is about where a transfer went,
+    // not about which sites may be downloaded from.
+    for (const char *u : {"https://files.printables.com/a.3mf", "https://cdn.example.co.uk/a.3mf",
+                          "https://storage.example.org:8443/abc?sig=1"}) {
+        INFO(u);
+        CHECK(redirect_target_refusal(u).empty());
     }
 }
 
@@ -718,12 +799,8 @@ TEST_CASE("archive entry names may not leave the extraction folder", "[Untrusted
                           "Bob's notes.pdf", "Other Files/Bob's notes.pdf"})
         CHECK(is_safe_archive_relative_path(p));
     for (const char *p : {"", "../x", "a/../../x", "..", ".", "./x", "a/./b", "/etc/passwd", "a//b", "a/", "..\\x",
-                          "a\\b", "C:/x", "C:x", "x\x01y"})
+                          "a\\b", "C:/x", "C:x", "a/.../b", "a/.. /b", "x\x01y"})
         CHECK_FALSE(is_safe_archive_relative_path(p));
-#ifdef _WIN32
-    for (const char *p : {"a/.../b", "a/.. /b"})
-        CHECK_FALSE(is_safe_archive_relative_path(p));
-#endif
 }
 
 TEST_CASE("archive entry names refuse a trailing dot or space and DOS device names", "[Untrusted][ZipSlip]")
@@ -750,9 +827,12 @@ TEST_CASE("archive entry names refuse a trailing dot or space and DOS device nam
     }
 #else
     // On POSIX these are ordinary names; 3MF entries like Auxiliaries/aux.png must still load.
-    for (const char *p : {"Auxiliaries/aux.png", "con.jpg", "foo.", "foo ", "nul.txt", "CON", "COM1.stl", "a/.../b",
+    for (const char *p : {"Auxiliaries/aux.png", "con.jpg", "foo.", "foo ", "nul.txt", "CON", "COM1.stl",
                           "..a/b..", "COM\xC2\xB9.txt"})
         CHECK(is_safe_archive_relative_path(p));
+    // All-dot / all-space segments stay refused on every platform (as before this change).
+    for (const char *p : {"a/.../b", "a/.. /b", "a/. /b", "...", ". ."})
+        CHECK_FALSE(is_safe_archive_relative_path(p));
     std::string out;
     CHECK(normalize_archive_entry_path("Auxiliaries/aux.png", out) == ArchiveEntryName::Ok);
     CHECK(out == "Auxiliaries/aux.png");
@@ -815,7 +895,7 @@ TEST_CASE("archive entry names are normalised before they are judged", "[Untrust
     for (const char *p : {"", "..", "../x", "a/../x", "a/..", ".\\..\\x", "a\\..\\..\\x", "./../x", "a//../../x",
                           "/x", "//x", "\\x", "\\\\x", "\\\\server\\share\\x", "//server/share/x", "\\\\?\\C:\\x", "/C:/x",
                           "C:", "C:x", "C:/x", "C:\\x", ".\\C:\\x", "a/b:stream", "a\\b:stream",
-                          "x\x01y", "x\ty",
+                          "a/.../b", "a/.. /b", "a/. /b", "x\x01y", "x\ty",
                           "\xEF\xBC\x8E\xEF\xBC\x8E\xEF\xBC\x8F" "x", "a\\\xEF\xBC\x8E\xEF\xBC\x8E\xEF\xBC\xBC" "x"}) {
         INFO(p);
         CHECK(normalize_archive_entry_path(p, out) == ArchiveEntryName::Reject);
@@ -1492,6 +1572,39 @@ TEST_CASE("An untextured OBJ still loads with no UVs", "[obj][uv]")
     CHECK(loaded.info.face_colors.empty());
 }
 
+// OBJ vertex indices start at 1. Index 0 (or a relative index reaching before the first vertex)
+// used to become -1, the parser's end-of-face marker, so the face was cut there and the file read
+// with the wrong faces instead of being refused.
+TEST_CASE("An OBJ face naming vertex 0 is refused as an invalid vertex index", "[obj][Regression]")
+{
+    const std::string vertices = "v 0 0 0\nv 10 0 0\nv 0 10 0\nv 0 0 10\n";
+
+    SECTION("vertex 0 at the start of a quad") {
+        LoadedObj loaded = load_obj_body(vertices + "f 0 1 2 3\n", false);
+        CHECK_FALSE(loaded.ok);
+        CHECK(loaded.message.find("invalid vertex index") != std::string::npos);
+    }
+    SECTION("vertex 0 in the middle of a face of seven") {
+        // Read as two triangles, 1 2 3 and 2 4 3, before; one face of seven vertices, refused, now.
+        LoadedObj loaded = load_obj_body(vertices + "f 1 2 3 0 2 4 3\n", false);
+        CHECK_FALSE(loaded.ok);
+    }
+    SECTION("a relative index one before the first vertex") {
+        LoadedObj loaded = load_obj_body(vertices + "f -5 1 2 3\n", false);
+        CHECK_FALSE(loaded.ok);
+        CHECK(loaded.message.find("invalid vertex index") != std::string::npos);
+    }
+    SECTION("with a material too") {
+        LoadedObj loaded = load_obj_body(vertices + "f 0 1 2 3\n", true);
+        CHECK_FALSE(loaded.ok);
+    }
+    SECTION("valid relative indices still load") {
+        LoadedObj loaded = load_obj_body(vertices + "f -4 -2 -3\nf -4 -3 -1\nf -4 -1 -2\nf -3 -2 -1\n", false);
+        REQUIRE(loaded.ok);
+        CHECK(loaded.mesh.facets_count() == 4);
+    }
+}
+
 // ---- CLI assemble list ------------------------------------------------------------------------
 //
 // Port of Orca #15978's tests/libslic3r/test_assemble_list.cpp to Catch2 v2, kept in this existing
@@ -2141,6 +2254,342 @@ TEST_CASE("is_path_within_root canonicalizes a dest path longer than MAX_PATH", 
     }
 
     boost::system::error_code ec;
+    fs::remove_all(extended_path(root), ec);
+    fs::remove_all(dir, ec);
+}
+
+namespace {
+
+// is_path_within_root exactly as it was on main before the long-path change (104ee3adb3). It is
+// the reference for the corpus below: the new check must refuse everything this one refused.
+fs::path legacy_strip_trailing_separators(const fs::path &p)
+{
+    std::string s = p.generic_string();
+    while (s.size() > 1 && (s.back() == '/' || s.back() == '\\'))
+        s.pop_back();
+    return fs::path(s);
+}
+
+bool legacy_has_nul(const fs::path &p)
+{
+    return p.string().find('\0') != std::string::npos || p.generic_string().find('\0') != std::string::npos;
+}
+
+fs::path legacy_weakly_canonical_for_confine(const fs::path &p)
+{
+    const fs::path            stripped = legacy_strip_trailing_separators(p);
+    boost::system::error_code ec;
+    if (fs::is_symlink(fs::symlink_status(stripped, ec))) {
+        const fs::path parent = stripped.parent_path();
+        if (parent.empty())
+            return stripped;
+        return fs::weakly_canonical(parent) / stripped.filename();
+    }
+    return fs::weakly_canonical(stripped);
+}
+
+bool legacy_is_path_within_root(const fs::path &root, const fs::path &candidate)
+{
+    try {
+        if (legacy_has_nul(root) || legacy_has_nul(candidate))
+            return false;
+        const fs::path root_c = fs::weakly_canonical(legacy_strip_trailing_separators(root));
+        const fs::path cand_c = legacy_weakly_canonical_for_confine(candidate);
+        if (legacy_has_nul(root_c) || legacy_has_nul(cand_c))
+            return false;
+        auto skip = [](const fs::path &e) { return e.empty() || e == "."; };
+        auto r    = root_c.begin();
+        auto c    = cand_c.begin();
+        while (r != root_c.end()) {
+            if (skip(*r)) {
+                ++r;
+                continue;
+            }
+            while (c != cand_c.end() && skip(*c))
+                ++c;
+            if (c == cand_c.end() || *r != *c)
+                return false;
+            ++r;
+            ++c;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+#ifdef _WIN32
+// A directory junction made with FSCTL_SET_REPARSE_POINT: no privilege, no shell, and it works
+// for a link path past MAX_PATH. `target` must be an absolute, unprefixed drive path.
+bool make_test_junction(const fs::path &target, const fs::path &link)
+{
+    const std::wstring link_io = extended_path(link).wstring();
+    if (!CreateDirectoryW(link_io.c_str(), nullptr))
+        return false;
+    HANDLE h = CreateFileW(link_io.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        RemoveDirectoryW(link_io.c_str());
+        return false;
+    }
+    const std::wstring print = fs::path(target).make_preferred().wstring();
+    const std::wstring subst = L"\\??\\" + print;
+    // REPARSE_DATA_BUFFER (MountPointReparseBuffer) laid out by hand; the struct is in the DDK only.
+    const size_t          subst_bytes = subst.size() * sizeof(wchar_t);
+    const size_t          print_bytes = print.size() * sizeof(wchar_t);
+    const size_t          path_bytes  = subst_bytes + sizeof(wchar_t) + print_bytes + sizeof(wchar_t);
+    std::vector<unsigned char> buf(8 + 8 + path_bytes, 0);
+    auto put16 = [&buf](size_t at, size_t v) { buf[at] = (unsigned char) (v & 0xff); buf[at + 1] = (unsigned char) ((v >> 8) & 0xff); };
+    const DWORD tag = IO_REPARSE_TAG_MOUNT_POINT;
+    std::memcpy(buf.data(), &tag, 4);
+    put16(4, 8 + path_bytes);                      // ReparseDataLength
+    put16(8, 0);                                   // SubstituteNameOffset
+    put16(10, subst_bytes);                        // SubstituteNameLength
+    put16(12, subst_bytes + sizeof(wchar_t));      // PrintNameOffset
+    put16(14, print_bytes);                        // PrintNameLength
+    std::memcpy(buf.data() + 16, subst.data(), subst_bytes);
+    std::memcpy(buf.data() + 16 + subst_bytes + sizeof(wchar_t), print.data(), print_bytes);
+    DWORD      returned = 0;
+    const BOOL ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, buf.data(), DWORD(buf.size()), nullptr, 0, &returned, nullptr);
+    CloseHandle(h);
+    if (!ok)
+        RemoveDirectoryW(link_io.c_str());
+    return ok != FALSE;
+}
+
+// Removes only the link (RemoveDirectoryW on the reparse point), never the target's contents.
+void remove_test_junction(const fs::path &link) { RemoveDirectoryW(extended_path(link).wstring().c_str()); }
+#else
+bool make_test_junction(const fs::path &target, const fs::path &link)
+{
+    boost::system::error_code ec;
+    fs::create_directory_symlink(target, link, ec);
+    return !ec;
+}
+
+void remove_test_junction(const fs::path &link)
+{
+    boost::system::error_code ec;
+    fs::remove(link, ec);
+}
+#endif
+
+enum class Confine { Inside, Outside, Either };
+
+struct ConfineCase
+{
+    fs::path    candidate;
+    Confine     expect;
+    std::string label;
+};
+
+void check_confine_corpus(const fs::path &root, const std::vector<ConfineCase> &cases)
+{
+    for (const ConfineCase &c : cases) {
+        const bool before = legacy_is_path_within_root(root, c.candidate);
+        const bool now    = is_path_within_root(root, c.candidate);
+        INFO(c.label << " | candidate " << c.candidate.string() << " | before " << before << " now " << now);
+        if (!before)
+            CHECK_FALSE(now); // nothing refused before is accepted now
+        if (c.expect == Confine::Outside)
+            CHECK_FALSE(now);
+        else if (c.expect == Confine::Inside)
+            CHECK(now);
+    }
+}
+
+} // namespace
+
+TEST_CASE("is_path_within_root refuses every path the pre-long-path check refused", "[Untrusted][ZipSlip]")
+{
+    const fs::path dir  = fs::temp_directory_path() / fs::unique_path("edgeslicer_confine_corpus_%%%%%%%%");
+    const fs::path root = dir / "root";
+    fs::create_directories(root / "sub");
+    fs::create_directories(dir / "root2");
+    fs::create_directories(dir / "outside_folder_with_a_long_name");
+    const fs::path outside = dir / "outside_folder_with_a_long_name";
+    {
+        boost::nowide::ofstream f(root.string() + "/file.txt");
+        f << "x";
+    }
+    const bool jout = make_test_junction(outside, root / "jout");
+    const bool jin  = make_test_junction(root / "sub", root / "jin");
+    if (!jout || !jin)
+        WARN("junction unavailable; link cases skipped");
+
+    std::vector<ConfineCase> cases = {
+        {root / "a", Confine::Inside, "plain child"},
+        {root / "sub" / "x.json", Confine::Inside, "nested child"},
+        {root, Confine::Inside, "root itself"},
+        {root / "sub" / ".." / "a", Confine::Inside, "dot-dot that stays inside"},
+        {root / ".." / "x", Confine::Outside, "dot-dot traversal"},
+        {root / "sub" / ".." / ".." / "x", Confine::Outside, "nested dot-dot traversal"},
+        {root / ".." / "root2" / "a", Confine::Outside, "sibling with a shared prefix"},
+        {dir / "root2" / "a", Confine::Outside, "sibling, absolute"},
+        {dir / "x", Confine::Outside, "parent, absolute"},
+        {outside / "x", Confine::Outside, "other folder, absolute"},
+        {root / "CON", Confine::Either, "reserved name CON"},
+        {root / "nul.txt", Confine::Either, "reserved name nul.txt"},
+        {root / "COM1" / "x", Confine::Either, "reserved name COM1 as a folder"},
+        {root / "sub" / "aux", Confine::Either, "reserved name aux"},
+        {root / "sub." / "x", Confine::Either, "folder with a trailing dot"},
+        {root / "a " / "x", Confine::Either, "folder with a trailing space"},
+    };
+    if (jout) {
+        cases.push_back({root / "jout" / "x", Confine::Outside, "junction to outside, then a child"});
+        cases.push_back({root / "jout" / "sub" / "x", Confine::Outside, "junction to outside, deeper"});
+        cases.push_back({root / "jout", Confine::Either, "junction itself (last hop is replaced, not followed)"});
+    }
+    if (jin)
+        cases.push_back({root / "jin" / "x", Confine::Inside, "junction to a folder inside the root"});
+#ifdef _WIN32
+    const std::wstring rw = root.wstring();
+    const std::wstring dw = dir.wstring();
+    const std::wstring drive = root.root_name().wstring(); // "C:"
+    const std::vector<ConfineCase> win = {
+        // absolute and drive-relative
+        {fs::path(L"Z:\\x"), Confine::Outside, "other drive"},
+        {fs::path(drive + L"\\Windows\\x"), Confine::Outside, "same drive, other folder"},
+        {fs::path(drive + L"x"), Confine::Outside, "drive-relative"},
+        {fs::path(drive + L"..\\x"), Confine::Outside, "drive-relative dot-dot"},
+        {fs::path(L"\\x"), Confine::Outside, "root-relative"},
+        {fs::path(L"\\" + root.relative_path().wstring() + L"\\a"), Confine::Either, "root-relative spelling of a child"},
+        {fs::path(L"\\" + root.relative_path().wstring() + L"\\..\\x"), Confine::Outside, "root-relative dot-dot"},
+        // UNC (an .invalid host never resolves)
+        {fs::path(L"\\\\edgeslicer-nohost.invalid\\share\\x"), Confine::Outside, "UNC"},
+        {fs::path(L"//edgeslicer-nohost.invalid/share/x"), Confine::Outside, "UNC, forward slashes"},
+        {fs::path(L"\\\\?\\UNC\\edgeslicer-nohost.invalid\\share\\x"), Confine::Outside, "extended UNC"},
+        // \\?\ and \\.\ spellings
+        {fs::path(L"\\\\?\\" + rw + L"\\a"), Confine::Either, "extended child"},
+        {fs::path(L"\\\\?\\" + rw + L"\\..\\x"), Confine::Outside, "extended dot-dot"},
+        {fs::path(L"\\\\?\\" + dw + L"\\x"), Confine::Outside, "extended parent"},
+        {fs::path(L"\\\\.\\" + rw + L"\\a"), Confine::Either, "device-path child"},
+        {fs::path(L"\\\\.\\" + rw + L"\\..\\x"), Confine::Outside, "device-path dot-dot"},
+        {fs::path(L"\\\\.\\" + dw + L"\\x"), Confine::Outside, "device-path parent"},
+        {fs::path(L"\\\\.\\CON"), Confine::Outside, "console device"},
+        {fs::path(L"\\\\.\\PhysicalDrive0"), Confine::Outside, "raw disk"},
+        // alternate data streams
+        {fs::path(rw + L"\\file.txt:evil"), Confine::Either, "stream of a file inside"},
+        {fs::path(rw + L"\\a:b"), Confine::Either, "stream of a new file inside"},
+        {fs::path(rw + L"\\..:x"), Confine::Outside, "stream on dot-dot"},
+        {fs::path(rw + L"\\...:x"), Confine::Outside, "stream on all-dots"},
+        {fs::path(rw + L"\\..\\x:y"), Confine::Outside, "stream after traversal"},
+        // mixed separators
+        {fs::path(rw + L"/sub\\..\\..\\x"), Confine::Outside, "mixed separators, traversal"},
+        {fs::path(root.generic_wstring() + L"\\a/b"), Confine::Inside, "mixed separators, child"},
+        {fs::path(rw + L"\\sub/../a"), Confine::Inside, "mixed separators, dot-dot inside"},
+        // names Win32 trims
+        {fs::path(rw + L"\\.. \\x"), Confine::Outside, "dot-dot-space"},
+        {fs::path(rw + L"\\...\\x"), Confine::Outside, "three dots"},
+        {fs::path(rw + L"\\. \\x"), Confine::Outside, "dot-space"},
+        {fs::path(rw + L"\\.. "), Confine::Outside, "trailing dot-dot-space"},
+        {fs::path(rw + L"\\..."), Confine::Outside, "trailing three dots"},
+        {fs::path(rw + L"\\..  .\\x"), Confine::Outside, "dots and spaces"},
+        {fs::path(rw + L"\\sub\\.. \\.. \\x"), Confine::Outside, "nested dot-dot-space"},
+        {fs::path(rw + L"\\...\\CON"), Confine::Outside, "three dots then a device"},
+    };
+    cases.insert(cases.end(), win.begin(), win.end());
+
+    // 8.3 short names, when the volume makes them.
+    wchar_t short_buf[MAX_PATH * 2] = {};
+    const DWORD n = GetShortPathNameW(dw.c_str(), short_buf, DWORD(std::size(short_buf)));
+    const fs::path short_dir = (n > 0 && n < std::size(short_buf)) ? fs::path(std::wstring(short_buf, n)) : fs::path();
+    wchar_t out_buf[MAX_PATH * 2] = {};
+    const DWORD n2 = GetShortPathNameW(outside.wstring().c_str(), out_buf, DWORD(std::size(out_buf)));
+    const fs::path short_outside = (n2 > 0 && n2 < std::size(out_buf)) ? fs::path(std::wstring(out_buf, n2)) : fs::path();
+    if (!short_dir.empty() && short_dir != dir) {
+        cases.push_back({short_dir / "root" / "a", Confine::Either, "8.3 spelling of a child"});
+        cases.push_back({short_dir / "root" / ".." / "x", Confine::Outside, "8.3 spelling, traversal"});
+        cases.push_back({short_dir / "x", Confine::Outside, "8.3 spelling of the parent"});
+        CHECK_FALSE(is_path_within_root(short_dir / "root", outside / "x"));
+        CHECK_FALSE(is_path_within_root(short_dir / "root", dir / "x"));
+        if (legacy_is_path_within_root(short_dir / "root", root / "a"))
+            CHECK(is_path_within_root(short_dir / "root", root / "a"));
+    } else {
+        WARN("no 8.3 name for the temp folder; short-name spelling of the root skipped");
+    }
+    if (!short_outside.empty() && short_outside != outside) {
+        cases.push_back({short_outside / "x", Confine::Outside, "8.3 name of the outside folder"});
+        cases.push_back({root / ".." / short_outside.filename() / "x", Confine::Outside, "traversal to an 8.3 name"});
+    }
+#endif
+
+    check_confine_corpus(root, cases);
+
+    // Preset names go through is_relative_name_within_root (PresetBundle import).
+    for (const char *name : {"..", "../x", "..\\x", "/x", "\\x", "C:x", "C:\\x"}) {
+        INFO(name);
+        CHECK_FALSE(is_relative_name_within_root(name, root));
+    }
+#ifdef _WIN32
+    for (const char *name : {".. ", "...", ". ", "a/.. /b", "..:x", "...\\x"}) {
+        INFO(name);
+        CHECK_FALSE(is_relative_name_within_root(name, root));
+    }
+    // Ordinary preset names, including one ending in a space or a dot, still pass.
+    for (const char *name : {"Generic PLA", "My PLA ", "PLA v2.", "a..b"}) {
+        INFO(name);
+        CHECK(is_relative_name_within_root(name, root));
+    }
+#endif
+
+    CHECK(fs::exists(outside)); // the junctions were never followed for writing
+    boost::system::error_code ec;
+    remove_test_junction(root / "jout");
+    remove_test_junction(root / "jin");
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("is_path_within_root keeps refusing escapes under a root longer than MAX_PATH", "[Untrusted][ZipSlip]")
+{
+    const fs::path dir     = fs::temp_directory_path() / fs::unique_path("edgeslicer_confine_long_%%%%%%%%");
+    const fs::path outside = dir / "outside";
+    const fs::path root    = dir / std::string(240, 'r');
+    fs::create_directories(outside);
+    fs::create_directories(extended_path(root / "sub"));
+    REQUIRE(root.string().size() > 260);
+    const bool jout = make_test_junction(outside, root / "jout");
+    const fs::path outside2 = dir / "outside2";
+    fs::create_directories(outside2);
+    const bool jin  = make_test_junction(outside2, root / "sub" / "jup"); // a deeper hop that leaves the root
+    if (!jout || !jin)
+        WARN("junction unavailable under the long root; link cases skipped");
+
+    std::vector<ConfineCase> cases = {
+        {root / "a", Confine::Inside, "long: plain child"},
+        {root / "sub" / "b.json", Confine::Inside, "long: nested child"},
+        {root / ".." / "x", Confine::Outside, "long: dot-dot"},
+        {root / "sub" / ".." / ".." / "x", Confine::Outside, "long: nested dot-dot"},
+        {dir / "x", Confine::Outside, "long: parent"},
+        {outside / "x", Confine::Outside, "long: other folder"},
+    };
+    std::vector<ConfineCase> link_cases;
+    if (jout)
+        link_cases.push_back({root / "jout" / "x", Confine::Outside, "long: junction to outside"});
+    if (jin)
+        link_cases.push_back({root / "sub" / "jup" / "x", Confine::Outside, "long: nested junction to outside"});
+#ifdef _WIN32
+    const std::wstring rw = root.wstring();
+    cases.push_back({fs::path(L"\\\\?\\" + rw + L"\\..\\x"), Confine::Outside, "long: extended dot-dot"});
+    cases.push_back({fs::path(L"\\\\.\\" + rw + L"\\..\\x"), Confine::Outside, "long: device-path dot-dot"});
+    cases.push_back({fs::path(rw + L"\\.. \\x"), Confine::Outside, "long: dot-dot-space"});
+    cases.push_back({fs::path(rw + L"\\...\\x"), Confine::Outside, "long: three dots"});
+    cases.push_back({fs::path(rw + L"\\..:x"), Confine::Outside, "long: stream on dot-dot"});
+    cases.push_back({fs::path(rw + L"/sub\\..\\..\\x"), Confine::Outside, "long: mixed separators"});
+#endif
+    // The legacy check could not see a junction past MAX_PATH: these cases are judged on the new
+    // check alone (that blind spot is what the change fixes). Everything else also keeps the
+    // "nothing refused before is accepted now" rule.
+    check_confine_corpus(root, cases);
+    for (const ConfineCase &c : link_cases) {
+        INFO(c.label << " | before " << legacy_is_path_within_root(root, c.candidate));
+        CHECK_FALSE(is_path_within_root(root, c.candidate));
+    }
+
+    CHECK(fs::exists(outside));
+    boost::system::error_code ec;
+    remove_test_junction(root / "jout");
+    remove_test_junction(root / "sub" / "jup");
     fs::remove_all(extended_path(root), ec);
     fs::remove_all(dir, ec);
 }

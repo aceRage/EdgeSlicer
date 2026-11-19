@@ -18,10 +18,12 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/MeshRepair.hpp"
 #include "libslic3r/MeshRemesh.hpp"
+#include "libslic3r/Airbrush/AirbrushBake.hpp"
 #include "libslic3r/MeshRound.hpp"
 #include "libslic3r/SliceBake.hpp"
 #include "libslic3r/Support/StabilizerBake.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/HeightPatternInput.hpp"
 #include "GLCanvas3D.hpp"
 #include "Selection.hpp"
 #include "3DScene.hpp"
@@ -44,6 +46,8 @@
 #include "QuadRemeshDialog.hpp"
 // RE-EDITABLE CUTS: edit_cut() arms the Cut gizmo with a stored recipe.
 #include "Gizmos/GLGizmoCut.hpp"
+#include "Gizmos/GLGizmoSVG.hpp" // remake an SVG / text after a type change
+#include "libslic3r/EmbossPlacement.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <wx/progdlg.h>
@@ -360,11 +364,13 @@ ObjectList::ObjectList(wxWindow* parent) :
     //Bind(wxCUSTOMEVT_LAST_VOLUME_IS_DELETED, [this](wxCommandEvent& e)   { last_volume_is_deleted(e.GetInt()); });
 
     Bind(wxEVT_SIZE, ([this](wxSizeEvent &e) {
-             if (m_last_size == this->GetSize()) {
+             // ORCA: compare client size instead window size
+             // Name column stays wide that shows horizontal scrollbar when vertical scrollbar (dis)appears
+             if (m_last_size == this->GetClientSize()) {
                  e.Skip();
                  return;
              } else {
-                 m_last_size = this->GetSize();
+                 m_last_size = this->GetClientSize();
              }
 
         update_name_column_width();
@@ -374,7 +380,7 @@ ObjectList::ObjectList(wxWindow* parent) :
 
         e.Skip();
     }));
-    m_last_size = this->GetSize();
+    m_last_size = this->GetClientSize();
 }
 
 ObjectList::~ObjectList()
@@ -528,6 +534,12 @@ void ObjectList::create_objects_ctrl()
         if (type & (itObject | itVolume | itInstance)) {
             if (GLCanvas3D* canvas = wxGetApp().plater()->get_current_canvas3D())
                 canvas->zoom_to_selection();
+        }
+        else if (type == itInfo && m_objects_model->GetInfoItemType(item) == InfoItemType::HeightPattern) {
+            // Double-click on the pattern's row edits it. Deferred: the dialog rebuilds the rows.
+            const int obj_idx = m_objects_model->GetObjectIdByItem(item);
+            const int pat_id  = m_objects_model->GetHeightPatternId(item);
+            wxGetApp().CallAfter([this, obj_idx, pat_id]() { height_pattern_dialog(obj_idx, pat_id); });
         }
     });
 
@@ -694,12 +706,14 @@ void ObjectList::set_tooltip_for_item(const wxPoint& pt)
             tooltip = _(L("Click the icon to reset all settings of the object"));
 #endif //__WXMSW__
     }
-    else if (col->GetModelColumn() == (unsigned int)colPrint)
+    else if (col->GetModelColumn() == (unsigned int)colPrint) {
+        if (node->IsPrintable() != piUndef)
 #ifdef __WXOSX__
-        tooltip = _(L("Right button click the icon to drop the object printable property"));
+            tooltip = _(L("Right button click the icon to drop the object printable property"));
 #else
-        tooltip = _(L("Click the icon to toggle printable property of the object"));
+            tooltip = _(L("Click the icon to toggle printable property of the object"));
 #endif //__WXMSW__
+    }
     // BBS
     else if (col->GetModelColumn() == (unsigned int)colSupportPaint) {
         if (node->HasSupportPainting())
@@ -1225,10 +1239,7 @@ void ObjectList::update_name_in_model(const wxDataViewItem& item) const
         int plate_idx = -1;
         const ItemType type0 = m_objects_model->GetItemType(item, plate_idx);
         if (plate_idx >= 0) {
-            auto plate = wxGetApp().plater()->get_partplate_list().get_plate(plate_idx);
-            if (plate->get_plate_name() != name) {
-                plate->set_plate_name(name);
-            }
+            wxGetApp().plater()->rename_plate(plate_idx, name);
             m_objects_model->SetCurSelectedPlateFullName(plate_idx, name);
         }
         return;
@@ -1622,6 +1633,10 @@ void ObjectList::show_context_menu(const bool evt_context_menu)
         if (item)
         {
             const ItemType type = m_objects_model->GetItemType(item);
+            if (type == itInfo && m_objects_model->GetInfoItemType(item) == InfoItemType::HeightPattern) {
+                show_height_pattern_menu(item);
+                return;
+            }
             if (!(type & (itPlate | itObject | itVolume | itInstance)))
                 return;
             if (type & itVolume) {
@@ -2654,6 +2669,11 @@ void ObjectList::del_subobject_item(wxDataViewItem& item)
     wxDataViewItem parent = m_objects_model->GetParent(item);
 
     InfoItemType item_info_type = m_objects_model->GetInfoItemType(item);
+    if ((type & itInfo) && obj_idx != -1 && item_info_type == InfoItemType::HeightPattern) {
+        // Removes the pattern's ranges and rebuilds the rows itself (this item included).
+        height_pattern_remove(obj_idx, m_objects_model->GetHeightPatternId(item));
+        return;
+    }
     if (type & itSettings)
         del_settings_from_config(parent);
     else if (type & itInstanceRoot && obj_idx != -1)
@@ -2722,6 +2742,7 @@ void ObjectList::del_info_item(const int obj_idx, InfoItemType type)
     }
 
     // BBS: remove Sinking
+    case InfoItemType::HeightPattern: return;   // handled by height_pattern_remove()
     case InfoItemType::Undef : assert(false); break;
     }
     cnv->post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
@@ -2786,7 +2807,18 @@ void ObjectList::del_layer_from_object(const int obj_idx, const t_layer_height_r
 
 void ObjectList::del_layers_from_object(const int obj_idx)
 {
-    object(obj_idx)->layer_config_ranges.clear();
+    // The Height ranges row only shows the ranges that are not a height colour pattern's output
+    // (those have their own row), so removing it must leave the patterns' ranges alone.
+    ModelObject *mo = object(obj_idx);
+    if (mo->height_colour_patterns.empty())
+        mo->layer_config_ranges.clear();
+    else
+        for (auto it = mo->layer_config_ranges.begin(); it != mo->layer_config_ranges.end();) {
+            if (height_pattern_owns_range(*mo, it->first))
+                ++it;
+            else
+                it = mo->layer_config_ranges.erase(it);
+        }
 
     changed_object(obj_idx);
 }
@@ -3049,11 +3081,13 @@ void ObjectList::merge(bool to_multipart_object)
         std::vector<int> obj_idxs;
         wxDataViewItemArray sels;
         GetSelections(sels);
-        assert(!sels.IsEmpty());
+        get_object_idxs(obj_idxs, sels);
+        // Nothing usable selected (e.g. the Assembly gizmo's Merge parts when the list selection did not take):
+        // the merged object would get no instance and instances[0] below would read null (EDGESLICER-D).
+        if (obj_idxs.size() < 2)
+            return;
 
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Assemble");
-
-        get_object_idxs(obj_idxs, sels);
 
         // resulted objects merge to the one
         Model* model = (*m_objects)[0]->get_model();
@@ -3324,6 +3358,13 @@ void ObjectList::layers_editing()
             // BBS: remove snapshot name "Add layers"
             take_snapshot("Add layers");
             ranges[{ 0.0f, 2.0f }].assign_config(get_default_layer_config(obj_idx));
+        } else if (const ModelObject *mo = object(obj_idx);
+                   std::all_of(ranges.begin(), ranges.end(), [mo](const auto &r) { return height_pattern_owns_range(*mo, r.first); })) {
+            // Every range belongs to a height colour pattern, whose rows are not part of the
+            // Height ranges row: start the row with a new range just above the last one.
+            take_snapshot("Add layers");
+            const coordf_t top = ranges.rbegin()->first.second;
+            ranges[{ top, top + 2.0 }].assign_config(get_default_layer_config(obj_idx));
         }
 
         // create layer root item
@@ -3352,22 +3393,24 @@ void ObjectList::boolean()
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "boolean");
 
     ModelObject* object = (*m_objects)[obj_idxs.front()];
-    TriangleMesh mesh = Plater::combine_mesh_fff(*object, -1, [this](const std::string& msg) {return wxGetApp().notification_manager()->push_plater_error_notification(msg); });
+    // The parts in the object's own coordinates: combine_mesh_fff() applies no instance's
+    // matrix for an id that is neither -1 (every copy merged into one mesh) nor a copy's.
+    // The copies are kept as copies below; merged, they became one body of one copy.
+    TriangleMesh mesh = Plater::combine_mesh_fff(*object, -2, [this](const std::string& msg) {return wxGetApp().notification_manager()->push_plater_error_notification(msg); });
 
-    // add mesh to model as a new object, keep the original object's name and config
+    // add mesh to model as a new object, keep the original object's name, config and copies
     Model* model = object->get_model();
     ModelObject* new_object = model->add_object();
     new_object->name = object->name;
     new_object->config.assign_config(object->config);
+    // Centred on its own volume, whose offset keeps it where the parts were in the object.
+    new_object->add_volume(mesh);
+    for (const ModelInstance* instance : object->instances)
+        new_object->add_instance(*instance);
     if (new_object->instances.empty())
         new_object->add_instance();
-    ModelVolume* new_volume = new_object->add_volume(mesh);
 
-    // BBS: ensure on bed but no need to ensure locate in the center around origin
     new_object->ensure_on_bed();
-    new_object->center_around_origin();
-    new_object->translate_instances(-new_object->origin_translation);
-    new_object->origin_translation = Vec3d::Zero();
 
     // BBS: notify it before move
     notify_instance_updated(m_objects->size() - 1);
@@ -3389,6 +3432,15 @@ wxDataViewItem ObjectList::add_layer_root_item(const wxDataViewItem obj_item)
         printer_technology() == ptSLA)
         return wxDataViewItem(nullptr);
 
+    // A height colour pattern's ranges have their own row; with nothing else there is no
+    // Height ranges row to show (an empty one would never go away).
+    {
+        const ModelObject *mo = object(obj_idx);
+        if (std::all_of(mo->layer_config_ranges.begin(), mo->layer_config_ranges.end(),
+                        [mo](const auto &r) { return height_pattern_owns_range(*mo, r.first); }))
+            return wxDataViewItem(nullptr);
+    }
+
     // create LayerRoot item
     wxDataViewItem layers_item = m_objects_model->AddLayersRoot(obj_item);
 
@@ -3407,10 +3459,7 @@ DynamicPrintConfig ObjectList::get_default_layer_config(const int obj_idx)
                             object(obj_idx)->config.opt_float("layer_height") :
                             wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
     config.set_key_value("layer_height",new ConfigOptionFloat(layer_height));
-    // BBS
-    int extruder = object(obj_idx)->config.has("extruder") ?
-        object(obj_idx)->config.opt_int("extruder") :
-        wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("extruder");
+    // BBS: a new range follows the object's filament (0 = inherit).
     config.set_key_value("extruder",    new ConfigOptionInt(0));
 
     return config;
@@ -3563,16 +3612,12 @@ void ObjectList::edit_cut()
     const ModelObject *src    = object(src_idx);
     const CutRecipe    recipe = *src->cut_recipe;
 
-    // Every object of the same cut. When only one is left the re-edit still runs;
+    // Every object of the same cut, the halves of a plain cut (which carry no cut_id)
+    // included: see edit_cut_objects(). When only one is left the re-edit still runs;
     // the gizmo notices and warns that cutting again brings back both halves.
     std::vector<ObjectID> ids;
-    for (size_t i = 0; i < m_objects->size(); ++i) {
-        const ModelObject *o = (*m_objects)[i];
-        // CutObjectBase::has_same_id() is not const-qualified, and these are const
-        // ModelObjects, so compare the ids directly - which is exactly what it does.
-        if (o == src || (o->is_cut() && src->is_cut() && o->cut_id.id() == src->cut_id.id()))
-            ids.push_back(o->id());
-    }
+    for (size_t i : edit_cut_objects(*m_objects, size_t(src_idx)))
+        ids.push_back((*m_objects)[i]->id());
     if (ids.empty())
         ids.push_back(src->id());
 
@@ -3806,6 +3851,7 @@ void ObjectList::delete_all_connectors_for_object(int obj_idx)
 
             if (obj->volumes.empty() || !obj->has_solid_mesh()) {
                 model.delete_object(idx);
+                wxGetApp().plater()->get_partplate_list().notify_instance_removed(idx, -1);
                 m_objects_model->Delete(m_objects_model->GetItemById(idx));
                 continue;
             }
@@ -3896,6 +3942,7 @@ void ObjectList::changed_object(const int obj_idx/* = -1*/) const
 void ObjectList::part_selection_changed()
 {
     if (m_extruder_editor) m_extruder_editor->Hide();
+    show_height_pattern_overlay(-1, 0);   // Color Pattern bands only while a pattern row is selected
     int obj_idx = -1;
     int volume_id = -1;
     m_config = nullptr;
@@ -4011,6 +4058,10 @@ void ObjectList::part_selection_changed()
                             gizmos_mgr.open_gizmo(gizmo_type);
                         break;
                     }
+                    case InfoItemType::HeightPattern:
+                        // The pattern's bands are drawn on the object while its row is selected.
+                        show_height_pattern_overlay(obj_idx, m_objects_model->GetHeightPatternId(item));
+                        break;
                     // BBS: remove Sinking
                     //case InfoItemType::Sinking: { break; }
                     default: { break; }
@@ -4399,6 +4450,7 @@ void ObjectList::add_object_to_list(size_t obj_idx, bool call_selection_changed,
 
     // Add layers if it has
     add_layer_root_item(item);
+    add_height_pattern_rows(item);
 
 #ifndef __WXOSX__
     if (call_selection_changed) {
@@ -4836,7 +4888,7 @@ void ObjectList::add_layer_range_after_current(const t_layer_height_range curren
     else if (const std::pair<coordf_t, coordf_t> &next_range = it_next_range->first; current_range.second <= next_range.first)
     {
         const int layer_idx = m_objects_model->GetItemIdByLayerRange(obj_idx, next_range);
-        assert(layer_idx >= 0);
+        assert(layer_idx >= 0 || height_pattern_owns_range(*object(obj_idx), next_range));
         if (layer_idx >= 0)
         {
             if (current_range.second == next_range.first)
@@ -4930,6 +4982,10 @@ void ObjectList::add_layer_item(const t_layer_height_range& range,
 {
     const int obj_idx = m_objects_model->GetObjectIdByItem(layers_item);
     if (obj_idx < 0) return;
+
+    // An untouched output of a height colour pattern is shown by the pattern's own row.
+    if (height_pattern_owns_range(*object(obj_idx), range))
+        return;
 
     const DynamicPrintConfig& config = object(obj_idx)->layer_config_ranges[range].get();
     if (!config.has("extruder"))
@@ -5193,6 +5249,11 @@ void ObjectList::update_selections()
                 int obj_idx = gl_vol->object_idx();
                 int vol_idx = gl_vol->volume_idx();
                 assert(obj_idx >= 0 && vol_idx >= 0);
+                if (obj_idx >= static_cast<int>(m_objects->size()) ||
+                    vol_idx >= static_cast<int>(object(obj_idx)->volumes.size())) {
+                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": stale volume index, obj " << obj_idx << ", vol " << vol_idx;
+                    continue;
+                }
                 if (object(obj_idx)->volumes[vol_idx]->is_cut_connector())
                     sels.Add(m_objects_model->GetInfoItemByType(m_objects_model->GetItemById(obj_idx), InfoItemType::CutConnectors));
                 else {
@@ -5982,6 +6043,9 @@ void ObjectList::set_volume_type(ModelVolumeType new_type, bool preserve_ps_subt
 
     std::set<const ModelVolume*> changed_volumes;
     std::set<int>                touched_objects;
+    // Edge: text and SVG volumes that moved to the other side of the surface (part <-> modifier or
+    // negative volume) get their mesh made again, as the Text / SVG tool does on its own type change.
+    std::vector<ObjectID>        remake_emboss;
     for (const auto& sel : volumes) {
         const ModelVolumeType target   = effective_new_type(sel.volume);
         const ModelVolumeType old_type = sel.volume->type();
@@ -5993,6 +6057,8 @@ void ObjectList::set_volume_type(ModelVolumeType new_type, bool preserve_ps_subt
             continue;
 
         sel.volume->set_type(target);
+        if (sel.volume->emboss_shape.has_value() && Slic3r::Emboss::type_change_needs_new_mesh(old_type, target))
+            remake_emboss.push_back(sel.volume->id());
 
         if (precise_seam_group_changed(old_type, target))
             move_volume_to_end((*m_objects)[sel.object_idx], sel.volume);
@@ -6015,6 +6081,13 @@ void ObjectList::set_volume_type(ModelVolumeType new_type, bool preserve_ps_subt
         SetSelections(new_selection);
         m_prevent_list_events = false;
     }
+
+    for (const ObjectID &id : remake_emboss)
+        for (const ModelObject *object : *m_objects)
+            for (const ModelVolume *volume : object->volumes)
+                if (volume->id() == id && !GLGizmoSVG::remake_after_type_change(*volume))
+                    BOOST_LOG_TRIVIAL(info) << "Change part type: the embossed mesh of \"" << volume->name
+                                            << "\" is kept as it was (edit it in its tool to remake it)";
 }
 
 void ObjectList::last_volume_is_deleted(const int obj_idx)
@@ -6423,12 +6496,10 @@ void ObjectList::repair_by_remesh()
 
     size_t total_before = 0, total_after = 0, flat_kept = 0, flat_declined = 0;
     auto remesh_volume = [&](const ModelObject& mo, ModelVolume& mv) -> bool {
-        RemeshOptions o = opts;
-        // An untouched voxel field means "auto", and auto is per part - so a
-        // multi-part selection still gets each part's own scale-appropriate value
-        // rather than the first part's.
-        if (std::abs(o.voxel_size - auto_voxel) < 1e-9)
-            o.voxel_size = 0.;
+        // An untouched voxel field means "auto" (the dialog gives voxel_size 0), and auto
+        // is per part - so a multi-part selection still gets each part's own
+        // scale-appropriate value rather than the first part's.
+        const RemeshOptions &o = opts;
         RemeshReport rep;
         indexed_triangle_set its = remesh_with_options(mv.mesh().its, o, &remesh_by_voxels,
                                                        volume_bed_direction(mo, mv), &rep);
@@ -6442,9 +6513,14 @@ void ObjectList::repair_by_remesh()
                                 << " -> " << rep.triangles_after << " triangles, flat bottom "
                                 << (rep.kept_bottom_flat ? "kept" : (rep.fell_back ? "declined: " + rep.note : "off"))
                                 << ", sharp vertices snapped " << rep.sharp_snapped;
+        // Edge (Airbrush P3, A4): re-bake the colour field on the remeshed part (positions kept).
+        const std::shared_ptr<const TriangleMesh>     old_mesh  = mv.mesh_ptr();
+        const TriangleSelector::TriangleSplittingData old_paint = mv.mmu_segmentation_facets.get_data();
         mv.set_mesh(std::move(its));
         mv.set_new_unique_id();
         mv.calculate_convex_hull();
+        if (mv.airbrush_field)
+            Airbrush::airbrush_after_mesh_replaced(mv, old_mesh->its, old_paint);
         return true;
     };
 
@@ -6593,9 +6669,13 @@ void ObjectList::round_all_edges(bool close_gizmos)
                                                ? std::string("kept (mirrored base, no slab)")
                                                : "kept (slab " + std::to_string(rep.bottom_margin_used) + " mm)")
                                         : (rep.fell_back ? "declined: " + rep.note : std::string("off")));
+        const std::shared_ptr<const TriangleMesh>     old_mesh  = mv.mesh_ptr();
+        const TriangleSelector::TriangleSplittingData old_paint = mv.mmu_segmentation_facets.get_data();
         mv.set_mesh(std::move(its));
         mv.set_new_unique_id();
         mv.calculate_convex_hull();
+        if (mv.airbrush_field)
+            Airbrush::airbrush_after_mesh_replaced(mv, old_mesh->its, old_paint);
         return true;
     };
 
@@ -7383,7 +7463,13 @@ void ObjectList::OnEditingStarted(wxDataViewEvent &event)
 
         get_selected_item_indexes(obj_idx, vol_idx, item);
         //wxGetApp().plater()->PopupObjectTable(obj_idx, vol_idx, mouse_pos);
-        dynamic_cast<TabPrintModel*>(wxGetApp().get_model_tab(vol_idx >= 0))->reset_model_config();
+        // The row's own settings, as list_manipulation() picks them: a plate's, a height range's, a part's or an object's.
+        if (m_objects_model->GetItemType(item) & itPlate)
+            dynamic_cast<TabPrintPlate*>(wxGetApp().get_plate_tab())->reset_model_config();
+        else if (m_objects_model->GetItemType(item) & itLayer)
+            dynamic_cast<TabPrintLayer*>(wxGetApp().get_layer_tab())->reset_model_config();
+        else if (item.IsOk())
+            dynamic_cast<TabPrintModel*>(wxGetApp().get_model_tab(vol_idx >= 0))->reset_model_config();
         return;
     }
 #ifdef __WXOSX__

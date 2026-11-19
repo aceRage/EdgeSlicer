@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -112,6 +113,7 @@ struct Target
         None,        // no printer: the Device page shows no Storage tab
         Moonraker,   // Moonraker's file API at base_url
         Unsupported, // a printer whose connection has no file API this tab speaks; `reason` says why
+        ElegooSdcp,  // an Elegoo Centauri Carbon 1 over SDCP at base_url's host (ElegooSdcpFiles)
     };
     Kind        kind { Kind::None };
     std::string key;      // stable id: "host", "ph:<device id>", "sm:<serial or address>"
@@ -119,12 +121,16 @@ struct Target
     std::string base_url; // http(s)://host[:port], no trailing slash
     std::string apikey;   // Moonraker's X-Api-Key, when the printer has one
     std::string reason;   // Unsupported: one sentence for the person
+    // ElegooSdcp: the preset's printer_model (the CANVAS read needs it), and the send dialog's
+    // remembered start choices ("timeLapse", "heatedBedLeveling", "bedType") for a start from storage.
+    std::string                        printer_model;
+    std::map<std::string, std::string> start_options;
 
-    bool supported() const { return kind == Kind::Moonraker && !base_url.empty(); }
+    bool supported() const { return (kind == Kind::Moonraker || kind == Kind::ElegooSdcp) && !base_url.empty(); }
     bool operator==(const Target& o) const
     {
         return kind == o.kind && key == o.key && name == o.name && base_url == o.base_url && apikey == o.apikey &&
-               reason == o.reason;
+               reason == o.reason && printer_model == o.printer_model && start_options == o.start_options;
     }
     bool operator!=(const Target& o) const { return !(*this == o); }
 };
@@ -137,10 +143,12 @@ std::string base_url_of(const std::string& address);
 
 // A print host printer, by its preset's host_type key (PrintHostDevices::host_type_key):
 // "octoprint" (the fork's "Octo/Klipper"), "moonraker" and "moonraker_mqtt" are asked as Moonraker
-// printers; every other host type is Unsupported with a reason naming it. Kind::None without an
-// address.
+// printers; "elegoolink" on an Elegoo Centauri Carbon (1) model is ElegooSdcp; every other host
+// type (and Elegoo Link on any other model) is Unsupported with a reason naming it. Kind::None
+// without an address.
 Target target_for_host(const std::string& host_type, const std::string& address, const std::string& apikey,
-                       const std::string& name, const std::string& key);
+                       const std::string& name, const std::string& key, const std::string& printer_model = std::string(),
+                       const std::map<std::string, std::string>& start_options = {});
 // A Snapmaker printer on the LAN (SnapmakerLan::Device): Moonraker on its own port.
 Target target_for_snapmaker(const std::string& ip, int port, const std::string& name, const std::string& key);
 // Unsupported, with that reason.
@@ -198,9 +206,9 @@ std::shared_ptr<Transport> make_http_transport(const Target& target);
 
 // ---- the backend ------------------------------------------------------------------------------
 
-// What a printer's storage offers, whatever it speaks. Today Moonraker (MoonrakerFiles); Part B
-// (filament mapping on the start of a multi-material print) and Part C build on this, and another
-// protocol (Elegoo's SDCP, a Bambu adapter over PrinterFileSystem) would be another implementation.
+// What a printer's storage offers, whatever it speaks: Moonraker (MoonrakerFiles) and an Elegoo
+// Centauri Carbon 1 over SDCP (SdcpFiles::Cc1Files, ElegooSdcpFiles.hpp). A Bambu adapter over
+// PrinterFileSystem would be another implementation.
 // Every call blocks: call it from a worker thread, never the GUI one.
 class IPrinterFiles
 {
@@ -215,6 +223,16 @@ public:
     // print_stats.state ("standby", "printing", "paused", "complete", "cancelled", "error") and the
     // file the printer is on.
     virtual Result printer_state(std::string& state, std::string& current_file)       = 0;
+    // Before the confirmation of a start: printer_state(), plus anything the person must read
+    // before this printer starts `path` (`advice`, English, may be empty - the choices the start
+    // uses, a CANVAS that picks its own trays). A failure means the start is not offered at all.
+    // The default has no advice.
+    virtual Result start_check(const std::string& path, std::string& state, std::string& current_file, std::string& advice)
+    {
+        (void) path;
+        advice.clear();
+        return printer_state(state, current_file);
+    }
     // Start a file the printer already has, as it was sliced. Refuses (Busy) while the printer is
     // printing or paused, asking it first, so a second start can never replace a running job.
     virtual Result start_print(const std::string& path)                               = 0;
@@ -236,7 +254,8 @@ private:
     std::shared_ptr<Transport> m_transport;
 };
 
-// The backend for a target: MoonrakerFiles over Http, or nullptr when the target is not supported.
+// The backend for a target: MoonrakerFiles over Http, SdcpFiles::Cc1Files over the printer's shared
+// SDCP connection, or nullptr when the target is not supported.
 std::shared_ptr<IPrinterFiles> make_files(const Target& target);
 
 // What an HTTP answer means: Ok for 2xx, otherwise the Status and the printer's own message

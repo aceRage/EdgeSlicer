@@ -5,6 +5,13 @@
     "from": "system",
     "setting_id": "9DjHFRqI041QXR50",
     "instantiation": "true",
+    "filament_id": "EPCB00",
+    "cool_plate_temp": [
+        "30"
+    ],
+    "cool_plate_temp_initial_layer": [
+        "30"
+    ],
     "pressure_advance": [
         "0.052"
     ],

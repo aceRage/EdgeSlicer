@@ -2,6 +2,7 @@
 
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtruderAreas.hpp"
+#include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
@@ -424,6 +425,8 @@ DynamicPrintConfig h2d_config(const std::string &sequence, const std::string &mo
             { "wipe_tower_x", tower_x },
             { "wipe_tower_y", 250. },
             { "wipe_tower_rotation_angle", 0 },
+            // These cases size a rectangle tower by prime_tower_width; the BBL presets default to rib.
+            { "wipe_tower_wall_type", "rectangle" },
         });
     return cfg;
 }
@@ -458,9 +461,12 @@ std::string validate_warning(const DynamicPrintConfig &cfg, Model &model)
     Print print;
     print.is_BBL_printer() = true;
     print.apply(model, cfg);
-    StringObjectException warning;
-    print.validate(&warning);
-    return warning.string;
+    std::vector<StringObjectException> warnings;
+    print.validate(&warnings);
+    std::string text;
+    for (const StringObjectException &w : warnings)
+        text += w.string;
+    return text;
 }
 
 // The blocking error validate() gives for a plate with objects in the shared middle, so that only the tower can be at fault.
@@ -834,6 +840,44 @@ SCENARIO("the geometric unprintables the grouping gets", "[ExtruderAreas][H2D]")
     }
 }
 
+// Upstream Orca #16947 for Edge's mixed filaments: a mixed filament's virtual slot sits above the real filament
+// count, so it used to be dropped and its components were never kept off the nozzle that cannot reach the object.
+SCENARIO("a mixed filament's components are what the grouping keeps off an unreachable nozzle", "[ExtruderAreas][H2D][MixedFilament]")
+{
+    GIVEN("an H2D plate with an object printed in a mix of filaments 1 and 2 in the left strip")
+    {
+        DynamicPrintConfig   cfg = h2d_config("by layer", "Auto For Flush", "1,1");
+        MixedFilamentManager mixed;
+        mixed.add_custom_filament(1, 2, 50, { "#E01919", "#1943E0" });
+        const unsigned int virtual_id = mixed.filament_id_from_mixed_index(0, 2);
+        REQUIRE(virtual_id == 3);
+        cfg.set("mixed_filament_definitions", mixed.serialize_custom_entries());
+        Model model;
+        add_cube(model, 12., int(virtual_id));
+        Print print;
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        print.validate();
+        print.set_status_silent();
+        Test::gcode(print);
+        const auto &unprintables = print.get_geometric_unprintable_filaments();
+        REQUIRE(unprintables.size() == 2);
+        THEN("both components are unprintable on the right nozzle, neither on the left")
+        {
+            CHECK(unprintables[1].count(0) == 1);
+            CHECK(unprintables[1].count(1) == 1);
+            CHECK(unprintables[0].empty());
+        }
+        THEN("the grouping puts both components on the left nozzle")
+        {
+            const auto group = print.get_layered_nozzle_group_result();
+            REQUIRE(group);
+            CHECK(group->get_extruder_id(0) == 0);
+            CHECK(group->get_extruder_id(1) == 0);
+        }
+    }
+}
+
 // Every filament prints on the prime tower, so a tower in the strip only the left nozzle reaches means the
 // right nozzle cannot print anything. An automatic grouping has to know that.
 SCENARIO("an automatic grouping keeps every filament off a nozzle that cannot reach the prime tower", "[ExtruderAreas][H2D][PrimeTower]")
@@ -1061,4 +1105,20 @@ SCENARIO("slice_info reports the X2D's second extruder as Bowden", "[ExtruderAre
     cfg.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ int(etBowden), int(etDirectDrive) }));
     cfg.set_key_value("extruder_variant_list", new ConfigOptionStrings({ "Direct Drive Standard", "Bowden Standard" }));
     CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etBowden), int(etDirectDrive) });
+}
+
+// Review #1056 S1: with the side scrape on (H3C presets; a user may turn it on on the H2D), the nozzle travels up to
+// wall gap + scrape length (2.2 mm) outside the tower, so the reach check counts what of that ring the tower brim
+// does not already cover.
+SCENARIO("the side scrape's ring beyond the tower brim counts in the prime tower reach check", "[ExtruderAreas][H2D][PrimeTower]")
+{
+    auto has_tower_text = [](const std::string &text) { return text.find("prime tower is outside") != std::string::npos; };
+    // Brimless tower 1 mm inside the right nozzle's area (X 25..350), both nozzles printing on it.
+    auto config = [](bool side_scrape) {
+        DynamicPrintConfig cfg = h2d_config("by layer", "Manual", "1,2", 26.);
+        cfg.set_deserialize_strict({ { "prime_tower_brim_width", "0" }, { "prime_tower_side_scrape", side_scrape ? "1" : "0" } });
+        return cfg;
+    };
+    GIVEN("the scrape off") { THEN("the tower is fine") { CHECK_FALSE(has_tower_text(tower_error(config(false)))); } }
+    GIVEN("the scrape on") { THEN("the right nozzle cannot reach the scrape's ring: refused") { CHECK(has_tower_text(tower_error(config(true)))); } }
 }

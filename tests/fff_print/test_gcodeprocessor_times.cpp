@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -354,6 +355,50 @@ G1 X40 Y0 E0.5
         if (r.moves[i].type == EMoveType::Extrude || r.moves[i].type == EMoveType::Travel)
             CHECK(r.moves[i].time[NORMAL] > 0.f);
     CHECK(sum_move_times(r) == Approx(r.print_statistics.modes[NORMAL].time).epsilon(1e-5));
+}
+
+// OrcaSlicer #16718: the pause vertex moves to the first extrusion after it, and the actual speed
+// points inserted in the time pass must not leave it (or the moves around it) out of order. Our
+// OptionsZCorrector already shifts the stored id on insertion and the queued blocks on the erase
+// (libvgcode stage 1); this is the upstream regression test, run with actual speed moves on.
+TEST_CASE("A pause keeps the moves around it in order and on their own layers", "[GCodeProcessor][Regression]")
+{
+    std::ostringstream gcode;
+    gcode << "M83\nG90\nM204 S1500\n";
+    for (int layer = 1; layer <= 3; ++layer) {
+        gcode << "; CHANGE_LAYER\n; LAYER_HEIGHT: 0.2\n";
+        if (layer == 2)
+            gcode << "G1 E-0.8 F3000\n; PAUSE_PRINTING\nM601\n";
+        gcode << "G1 X10 Y10 F12000\nG1 Z" << 0.2 * layer << "\n";
+        if (layer == 2)
+            gcode << "G1 E0.8 F3000\n";
+        gcode << "; FEATURE: Outer wall\n"
+              << "G1 X50 Y10 E2 F3000\nG1 X50 Y50 E2\nG1 X10 Y50 E2\nG1 X10 Y10 E2\n";
+    }
+    GCodeProcessorResult result;
+    process(result, gcode.str(), true);
+    const auto &moves = result.moves;
+
+    REQUIRE(result.custom_gcode_per_print_z.size() == 1);
+    CHECK(std::abs(result.custom_gcode_per_print_z.front().print_z - 0.4) < 1e-4);
+    REQUIRE(std::count_if(moves.begin(), moves.end(), [](const Move &move) { return move.internal_only; }) > 0);
+
+    const auto pause = std::find_if(moves.begin(), moves.end(), [](const Move &move) { return move.type == EMoveType::Pause_Print; });
+    REQUIRE(pause != moves.end());
+    CHECK(pause->layer_id == 1);
+    CHECK(std::abs(pause->position.z() - 0.4f) < 1e-4f);
+
+    const Move *previous = nullptr;
+    for (const Move &move : moves) {
+        if (move.type == EMoveType::Pause_Print)
+            continue;
+        if (previous != nullptr) {
+            CAPTURE(previous->gcode_id, move.gcode_id, static_cast<int>(move.type));
+            CHECK(move.layer_id >= previous->layer_id);
+            CHECK(move.gcode_id >= previous->gcode_id);
+        }
+        previous = &move;
+    }
 }
 
 TEST_CASE("Actual speed profile", "[GCodeProcessor][ActualSpeed]")

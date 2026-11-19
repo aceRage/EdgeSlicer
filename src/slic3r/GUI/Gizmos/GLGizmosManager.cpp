@@ -27,6 +27,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoSculpt.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoEdit.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoCadFillet.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoSplitToFit.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoEmboss.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSVG.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMeshBoolean.hpp"
@@ -76,9 +77,19 @@ std::vector<size_t> GLGizmosManager::get_selectable_idxs() const
                 out.push_back(i);
     }
     else {
-        for (size_t i = 0; i < m_gizmos.size(); ++i)
+        // Split to Fit P4: its button sits right after Cut's. Only the toolbar ORDER changes: its EType
+        // stays last, so m_gizmos, the sprite ids and icon texture rows, the shortcut lookup and every
+        // index by EType are unchanged. Everything that maps a toolbar slot to a gizmo goes through
+        // this list (mouse hit test, drawing, the arrow, lookup by icon name).
+        const bool split_fit_known = size_t(SplitToFit) < m_gizmos.size();
+        for (size_t i = 0; i < m_gizmos.size(); ++i) {
+            if (split_fit_known && i == size_t(SplitToFit))
+                continue;
             if (m_gizmos[i]->is_selectable())
                 out.push_back(i);
+            if (split_fit_known && i == size_t(Cut) && m_gizmos[SplitToFit]->is_selectable())
+                out.push_back(size_t(SplitToFit));
+        }
     }
     return out;
 }
@@ -195,6 +206,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::CadFillet):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg");
             break;
+        case (EType::SplitToFit):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_split_fit_dark.svg" : "toolbar_split_fit.svg");
+            break;
         }
 
     }
@@ -242,6 +256,7 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoSculpt(m_parent, m_is_dark ? "toolbar_sculpt_dark.svg" : "toolbar_sculpt.svg", EType::Sculpt));
     m_gizmos.emplace_back(new GLGizmoEdit(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::Edit));
     m_gizmos.emplace_back(new GLGizmoCadFillet(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::CadFillet));
+    m_gizmos.emplace_back(new GLGizmoSplitToFit(m_parent, m_is_dark ? "toolbar_split_fit_dark.svg" : "toolbar_split_fit.svg", EType::SplitToFit));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));
@@ -359,6 +374,18 @@ bool GLGizmosManager::init_icon_textures()
         else
             return false;
     }
+
+    // Edge: quick view options button, same 36 px round style as fit_camera. Not fatal when missing: the
+    // button just does not show, and the other icons keep working.
+    static const std::pair<int, const char*> view_options_icons[] = {
+        { IC_VIEW_OPTIONS,            "view_options" },
+        { IC_VIEW_OPTIONS_HOVER,      "view_options_hover" },
+        { IC_VIEW_OPTIONS_DARK,       "view_options_dark" },
+        { IC_VIEW_OPTIONS_DARK_HOVER, "view_options_dark_hover" },
+    };
+    for (const auto& [id, name] : view_options_icons)
+        if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/" + name + ".svg", 64, 64, texture_id))
+            icon_list.insert(std::make_pair(id, texture_id));
 
     return true;
 }
@@ -623,6 +650,14 @@ ClippingPlane GLGizmosManager::get_assemble_view_clipping_plane() const
         const ClippingPlane& clp = *m_assemble_view_data->model_objects_clipper()->get_clipping_plane();
         return ClippingPlane(-clp.get_normal(), clp.get_data()[3]);
     }
+}
+
+void GLGizmosManager::flush_pending_paint(bool commit)
+{
+    if (m_current != MmSegmentation)
+        return;
+    if (auto *mmu = dynamic_cast<GLGizmoMmuSegmentation *>(m_gizmos[m_current].get()))
+        mmu->airbrush_flush_pending(commit);
 }
 
 bool GLGizmosManager::wants_reslice_supports_on_undo() const
@@ -894,6 +929,16 @@ bool GLGizmosManager::on_char(wxKeyEvent& evt)
     // Move gizmo: Esc cancels "pick target surface" mode before it would close the gizmo.
     if (m_current == Move && keyCode == WXK_ESCAPE && !evt.HasModifiers()) {
         if (auto *move = dynamic_cast<GLGizmoMove3D *>(m_gizmos[Move].get()); move != nullptr && move->on_snap_escape()) {
+            m_parent.set_as_dirty();
+            return true;
+        }
+    }
+
+    // Edge (Spread paint): Esc while a spread is held cancels it and restores the paint, instead of
+    // closing the painting gizmo.
+    if (keyCode == WXK_ESCAPE && !evt.HasModifiers() && m_current != Undefined) {
+        if (auto *painter = dynamic_cast<GLGizmoPainterBase *>(m_gizmos[m_current].get());
+            painter != nullptr && painter->on_spread_escape()) {
             m_parent.set_as_dirty();
             return true;
         }
@@ -1607,6 +1652,8 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
         return "Edit";
     case GLGizmosManager::EType::CadFillet:
         return "CAD Fillet";
+    case GLGizmosManager::EType::SplitToFit:
+        return "Split to Fit";
     case GLGizmosManager::EType::TextureDisplacement:
         return "Texture Displacement";
     default:

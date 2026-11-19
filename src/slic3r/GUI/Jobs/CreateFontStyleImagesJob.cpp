@@ -9,11 +9,15 @@
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 
+#include "FontStyleImageSize.hpp"
+
 using namespace Slic3r;
 using namespace Slic3r::Emboss;
 using namespace Slic3r::GUI;
 using namespace Slic3r::GUI::Emboss;
 
+// margin around the text of a style preview for the anti-aliasing, in pixels (OrcaSlicer #14612)
+static constexpr int style_image_padding_px = 2;
 
 CreateFontStyleImagesJob::CreateFontStyleImagesJob(StyleManager::StyleImagesData &&input)
     : m_input(std::move(input)), m_width(0), m_height(0)
@@ -44,25 +48,22 @@ void CreateFontStyleImagesJob::process(Ctl &ctl)
         BoundingBox &bounding_box = image.bounding_box;
         for (const ExPolygon &shape : shapes)
             bounding_box.merge(BoundingBox(shape.contour.points));
-        for (ExPolygon &shape : shapes) shape.translate(-bounding_box.min);
-        
-        // calculate conversion from FontPoint to screen pixels by size of font
-        double scale = get_text_shape_scale(item.prop, *item.font.font_file) * m_input.ppm;
-        scales[index] = scale;
 
-        //double scale = font_prop.size_in_mm * SCALING_FACTOR;
-        BoundingBoxf bb2(bounding_box.min.cast<double>(),
-                         bounding_box.max.cast<double>());
-        bb2.scale(scale);
-        image.tex_size.x = std::ceil(bb2.max.x() - bb2.min.x());
-        image.tex_size.y = std::ceil(bb2.max.y() - bb2.min.y());
-
-        // crop image width
-        if (image.tex_size.x > m_input.max_size.x()) 
-            image.tex_size.x = m_input.max_size.x();
-        // crop image height
-        if (image.tex_size.y > m_input.max_size.y())
-            image.tex_size.y = m_input.max_size.y();
+        // OrcaSlicer #14612: fit the text to the row height (not the style's font size and the screen DPI,
+        // which made small styles unreadable and cropped large ones), then crop the width. See FontStyleImageSize.hpp.
+        const Vec2d bb_size = bounding_box.defined ? bounding_box.size().cast<double>() : Vec2d(0., 0.);
+        const StyleImageSize size = style_image_size(bb_size.x(), bb_size.y(), m_input.max_size.x(), m_input.max_size.y(),
+                                                     style_image_padding_px);
+        scales[index] = size.scale;
+        image.tex_size.x = float(size.width);
+        image.tex_size.y = float(size.height);
+        if (!size.valid) {
+            shapes.clear(); // nothing to draw (no glyphs)
+            continue;
+        }
+        // margin for the anti-aliasing on the left and the top as well
+        const coord_t padding = coord_t(std::round(style_image_padding_px / size.scale));
+        for (ExPolygon &shape : shapes) shape.translate(Point(padding, padding) - bounding_box.min);
     }
 
     // arrange bounding boxes
@@ -75,6 +76,8 @@ void CreateFontStyleImagesJob::process(Ctl &ctl)
             m_width = image.tex_size.x;
     }
     m_height = offset_y;
+    if (m_width < 1)
+        m_width = 1; // every style without glyphs: keep the texture and the uv valid
     for (StyleManager::StyleImage &image : m_images) {
         const Point &o = image.offset;
         const ImVec2 &s = image.tex_size;
@@ -89,8 +92,10 @@ void CreateFontStyleImagesJob::process(Ctl &ctl)
 
     // upload sub textures
     for (StyleManager::StyleImage &image : m_images) {
-        sla::Resolution resolution(image.tex_size.x, image.tex_size.y);
         size_t index = &image - &m_images.front();
+        if (name_shapes[index].empty() || image.tex_size.x < 1 || image.tex_size.y < 1)
+            continue;
+        sla::Resolution resolution(image.tex_size.x, image.tex_size.y);
         double pixel_dim = SCALING_FACTOR / scales[index];
         sla::PixelDim dim(pixel_dim, pixel_dim);
         double gamma = 1.;

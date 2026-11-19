@@ -17,6 +17,7 @@
 #include <tbb/global_control.h>
 
 #include "libslic3r/Config.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
@@ -182,7 +183,7 @@ TEST_CASE("A raft is still generated under tree support", "[TreeSupport]")
 // drop_nodes() decides the node merges and spawns the next layer's nodes in parallel. Every one of
 // those decisions has to be applied in a fixed order, or the same model gives different branches on
 // each slice.
-TEST_CASE("Tree support toolpaths do not depend on thread scheduling", "[TreeSupport][Regression]")
+TEST_CASE("Tree support toolpaths do not depend on thread scheduling", "[TreeSupport][Regression][slow]")
 {
     // Scaled up so that a layer holds enough nodes for the parallel range to be split. At stock
     // size it stays in one chunk and the order never varies.
@@ -352,4 +353,34 @@ TEST_CASE("Tree (manual) support grows only under the enforced overhang", "[Tree
         // ...and nowhere under the unpainted right arm.
         CHECK(points_right_of(manual, center_manual + scaled<coord_t>(6.)) == 0);
     }
+}
+
+// OrcaSlicer #17249: branches landing on the lower plate get the bottom gap and then every bottom interface layer
+// asked for. The contact search stops at the gap and interface height below each layer, so it must still reach the
+// plate from the highest interface layer, and the layers above must not get an interface.
+TEST_CASE("Tree support resting on the model gets every bottom interface layer above the gap", "[TreeSupport][Orca17249]")
+{
+    const int    interface_layers = 2;
+    const double lower_top = 3., upper_bottom = 16.; // two_tier_mesh()
+    Slic3r::Print print;
+    slice_with_tree_support(two_tier_mesh(), print, "tree_slim", 30, 0, 0, {
+        { "support_interface_top_layers",    interface_layers },
+        { "support_interface_bottom_layers", interface_layers },
+        { "support_bottom_z_distance",       0.2 },
+    });
+
+    int above_plate = 0, between_plates = 0;
+    for (const SupportLayer *layer : print.objects().front()->support_layers()) {
+        bool has_interface = false;
+        for (const ExtrusionEntity *entity : layer->support_fills.flatten().entities)
+            has_interface |= entity->role() == erSupportMaterialInterface;
+        if (! has_interface)
+            continue;
+        if (layer->print_z > lower_top && layer->print_z < lower_top + 1.5)
+            ++above_plate;
+        else if (layer->print_z < upper_bottom - 1.5)
+            ++between_plates;
+    }
+    CHECK(above_plate == interface_layers);
+    CHECK(between_plates == 0);
 }

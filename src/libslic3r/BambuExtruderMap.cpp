@@ -45,6 +45,26 @@ std::string tray_name(int ams_id, int slot_id)
     return "A1";
 }
 
+std::string rack_tray_name(int slot_id) { return std::to_string(slot_id + 1); }
+
+AmsListEntry ams_list_entry(const std::string &ams_id, const std::string &slot_id, bool rack_ams)
+{
+    AmsListEntry entry;
+    int          ams  = -1;
+    int          slot = -1;
+    try {
+        ams  = std::stoi(ams_id);
+        slot = std::stoi(slot_id);
+    } catch (...) {
+        return entry;
+    }
+    if (ams < 0 || slot < 0)
+        return entry;
+    entry.key       = ams * 4 + slot;
+    entry.tray_name = rack_ams ? rack_tray_name(slot) : tray_name(ams, slot);
+    return entry;
+}
+
 std::vector<int> filaments_on_wrong_extruder(const std::vector<int>        &filament_map,
                                              const std::vector<int>        &physical_extruder_map,
                                              const std::vector<MappedTray> &mapped)

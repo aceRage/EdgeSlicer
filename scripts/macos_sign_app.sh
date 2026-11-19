@@ -2,6 +2,8 @@
 # Sign a macOS .app bundle for Developer ID distribution with the hardened runtime, inside out.
 #
 #   scripts/macos_sign_app.sh <App.app> "<Developer ID Application: Name (TEAMID)>" <entitlements.plist>
+#   ... [<keychain>]  optional 4th argument: look the identity up only in that keychain file
+#                     (codesign --keychain), for runners whose search list cannot include it.
 #
 # Why not a single `codesign --deep`: --deep stamps the *main* entitlements onto every nested
 # executable and only visits code in the locations it knows about, so a dylib or helper that
@@ -23,6 +25,16 @@ set -euo pipefail
 APP=${1:?usage: macos_sign_app.sh <App.app> <identity> <entitlements.plist>}
 IDENTITY=${2:?usage: macos_sign_app.sh <App.app> <identity> <entitlements.plist>}
 ENTITLEMENTS=${3:?usage: macos_sign_app.sh <App.app> <identity> <entitlements.plist>}
+KEYCHAIN=${4:-}
+
+# The self-hosted Mac runner is a LaunchDaemon: codesign there searches the system-domain keychain
+# list, which cannot include the per-run build keychain, so the workflow names it here.
+# (`${arr[@]+...}` keeps an empty array safe under set -u in macOS's bash 3.2.)
+keychain_args=()
+if [ -n "$KEYCHAIN" ]; then
+    [ -f "$KEYCHAIN" ] || { echo "error: keychain $KEYCHAIN not found" >&2; exit 1; }
+    keychain_args=(--keychain "$KEYCHAIN")
+fi
 
 [ -d "$APP/Contents" ] || { echo "error: $APP is not an app bundle" >&2; exit 1; }
 [ -f "$ENTITLEMENTS" ] || { echo "error: entitlements file $ENTITLEMENTS not found" >&2; exit 1; }
@@ -47,7 +59,7 @@ while IFS= read -r -d '' f; do
         *) continue ;;
     esac
     echo "signing nested: ${f#"$APP"/}"
-    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$f"
+    codesign --force --options runtime --timestamp ${keychain_args[@]+"${keychain_args[@]}"} --sign "$IDENTITY" "$f"
     nested=$((nested + 1))
 done < <(find "$APP/Contents" -depth -type f -print0)
 
@@ -55,12 +67,12 @@ done < <(find "$APP/Contents" -depth -type f -print0)
 # contents above. None ship today, but a wx or OpenSSL framework would land here.
 while IFS= read -r -d '' fw; do
     echo "signing framework: ${fw#"$APP"/}"
-    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$fw"
+    codesign --force --options runtime --timestamp ${keychain_args[@]+"${keychain_args[@]}"} --sign "$IDENTITY" "$fw"
 done < <(find "$APP/Contents" -depth -type d -name '*.framework' -print0)
 
 # 2. The bundle itself: hardened runtime, secure timestamp and the app's entitlements.
 echo "signing bundle: $APP ($nested nested Mach-O files signed)"
-codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
+codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" ${keychain_args[@]+"${keychain_args[@]}"} --sign "$IDENTITY" "$APP"
 
 # 3. Verify the way Gatekeeper will, and show what was applied.
 codesign --verify --deep --strict --verbose=2 "$APP"

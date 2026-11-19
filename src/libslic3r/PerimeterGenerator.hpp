@@ -104,6 +104,9 @@ public:
     SurfaceCollection           *fill_surfaces;
     //BBS
     ExPolygons                  *fill_no_overlap;
+    // EdgeSlicer, thin feature notice: when set, the generator records the thin spots it skips or widens here
+    // (observation only, no extrusion depends on it). One layer's record, owned by the caller.
+    ThinFeatureLayer            *thin_features = nullptr;
 
     //BBS
     Flow                        smaller_ext_perimeter_flow;
@@ -162,6 +165,7 @@ public:
         const PrintObjectConfig*    object_config,
         const PrintConfig*          print_config,
         const bool                  spiral_mode,
+        const double                model_rotation_rad,
         // Output:
         // Loops with the external thin walls
         ExtrusionEntityCollection*  loops,
@@ -178,10 +182,17 @@ public:
             config(config), object_config(object_config), print_config(print_config),
             m_spiral_vase(spiral_mode),
             m_scaled_resolution(scaled<double>(print_config->resolution.value > EPSILON ? print_config->resolution.value : EPSILON)),
+            m_model_rotation_rad(model_rotation_rad),
             loops(loops), gap_fill(gap_fill), fill_surfaces(fill_surfaces), fill_no_overlap(fill_no_overlap),
             m_ext_mm3_per_mm(-1), m_mm3_per_mm(-1), m_mm3_per_mm_overhang(-1), m_ext_mm3_per_mm_smaller_width(-1),
             number_of_layers(layer_count)
         {}
+
+    // Observation for the thin feature notice: whether Fine text would print what was just found thinner (Arachne).
+    bool        fine_text_prints_thinner(coord_t bead_width_0, coord_t bead_width_x) const;
+    // Records the spots of `outline` against `limits` in thin_features. `hint` says what would print them thinner:
+    // 0 nothing, 1 Fine detail (Arachne), 2 Fine detail or Detect thin wall (Classic with thin walls off).
+    void        observe_thin_features(const ExPolygons &outline, const ThinFeatureLimits &limits, int hint, coord_t bead_width_0, coord_t bead_width_x) const;
 
     void        process_classic();
     void        process_arachne();
@@ -196,6 +207,8 @@ public:
     Polygons    lower_slices_polygons() const { return m_lower_slices_polygons; }
     // ORCA: the slices less the slivers the wall generator prints nothing for, so they never count as support.
     ExPolygons  printable_slices(const ExPolygons &slices) const;
+    // ORCA #16421: whether this layer prints its outer walls first for the brim, see brim_puts_outer_walls_first().
+    bool        outer_walls_first_for_brim() const;
 
 private:
     std::vector<Polygons>     generate_lower_polygons_series(float width);
@@ -206,6 +219,7 @@ private:
 private:
     bool        m_spiral_vase;
     double      m_scaled_resolution;
+    double      m_model_rotation_rad;
     double      m_ext_mm3_per_mm;
     double      m_mm3_per_mm;
     double      m_mm3_per_mm_overhang;
@@ -213,6 +227,17 @@ private:
     double      m_ext_mm3_per_mm_smaller_width;
     Polygons    m_lower_slices_polygons;
 };
+
+// ORCA #16421: a brim against the outer walls makes the first layer print them first, whatever the
+// wall sequence, so the brim runs straight on into the outer wall. Edge has no btLeadingEdgeOnly;
+// Auto, ear and painted brims may leave the outer walls bare and keep the wall sequence.
+bool brim_puts_outer_walls_first(BrimType brim_type, double brim_width);
+
+// Counterbore hole bridging, sacrificial layer: whether a counter-clockwise outline is convex. A corner counts as
+// turning the wrong way only where it lies more than SCALED_EPSILON (0.1 micron) inside the line through its two
+// neighbours: an outline that has been simplified can keep a point in the middle of a straight side, a nanometre off
+// it, which is no corner. Declared here for the unit tests.
+bool counterbore_outline_is_convex(const Polygon &outline);
 
 }
 

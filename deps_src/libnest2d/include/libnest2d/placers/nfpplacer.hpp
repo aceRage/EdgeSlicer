@@ -743,24 +743,32 @@ private:
         };
 
         if (first_object) {
+            // EdgeSlicer: the corner position is taken only when it is on the bed and clear of
+            // every exclusion zone. The overlap used to be added to the overfit as a 1, which a
+            // polygon bed's overfit of -1 for "inside" cancelled, and the best overfit then kept
+            // was the one without it; an item overlapping a zone now goes on to the NFP search.
             setInitialPosition(item);
             auto best_tr = item.translation();
             auto best_rot = item.rotation();
-            best_overfit = overfit(item.transformedShape(), bin_) + overlapWithVirtObject();
+            bool best_clear = overlapWithVirtObject() == 0;
+            best_overfit = best_clear ? overfit(item.transformedShape(), bin_) : std::numeric_limits<double>::max();
 
             for(auto rot : config_.rotations) {
                 item.translation(initial_tr);
                 item.rotation(initial_rot + rot);
                 setInitialPosition(item);
-                double of = 0.;
-                if ((of = overfit(item.transformedShape(), bin_)) + overlapWithVirtObject() < best_overfit) {
+                if (overlapWithVirtObject() != 0)
+                    continue;
+                double of = overfit(item.transformedShape(), bin_);
+                if (!best_clear || of < best_overfit) {
+                    best_clear = true;
                     best_overfit = of;
                     best_tr = item.translation();
                     best_rot = item.rotation();
                 }
             }
 
-            can_pack = best_overfit <= 0;
+            can_pack = best_clear && best_overfit <= 0;
             if (can_pack)
                 global_score = 0.2;
             item.rotation(best_rot);
@@ -1064,6 +1072,10 @@ private:
         auto c = boundingCircle(sl::convexHull(m));
 
         auto d = cbin.center() - c.center();
+        // EdgeSlicer: the circle is centred blind; keep the pile as packed if centring it would
+        // put an item on a fixed one (an exclusion zone).
+        if (shiftOverlapsFixed(d))
+            return;
         for(Item& item : items_) item.translate(d);
     }
 
@@ -1071,9 +1083,11 @@ private:
         if(items_.empty() ||
                 config_.alignment == Config::Alignment::DONT_ALIGN) return;
 
+        // The pile is what was arranged: fixed items stay where they are, so they neither count in its
+        // box nor move with it.
         Box bb;
         for (Item& item : items_)
-            if (!item.is_virt_object)
+            if (!item.is_virt_object && !item.isFixed())
                 bb = sl::boundingBox(item.boundingBox(), bb);
 
         Vertex ci, cb;
@@ -1167,9 +1181,59 @@ private:
                 d +=  (ref_projected - ref_aligned);
             }
         }
+        // EdgeSlicer: the test above is made on the convex hull of the whole pile, an
+        // approximation that has let a pile packed around a bed exclusion zone (a corner or a
+        // strip along an edge) be shifted onto it. Check the shift on the items themselves, and
+        // keep the pile where it was packed (clear of every fixed item) when the shift would
+        // put any of them on one.
+        if (shiftOverlapsFixed(d))
+            return;
         for(Item& item : items_)
-            if (!item.is_virt_object)
+            if (!item.is_virt_object && !item.isFixed())
                 item.translate(d);
+    }
+
+    // EdgeSlicer: whether moving the arranged (not fixed, not virtual) items by d makes any of them
+    // overlap a fixed item of this bed: an exclusion zone, a prime tower, an object that stays put.
+    // Touching is allowed (the packer places items against the fixed ones), so only an overlap of
+    // more than 0.01 mm2 counts, which is far above rounding and far below any real overlap.
+    bool shiftOverlapsFixed(const Vertex &d) const
+    {
+        const double min_overlap = double(Slic3r::scaled(0.1)) * double(Slic3r::scaled(0.1));
+        std::vector<std::pair<Slic3r::Polygon, Box>> fixed;
+        for (const Item &item : items_)
+            if (item.isFixed()) {
+                Slic3r::Polygon p = sl::contour(item.transformedShape());
+                if (p.size() < 3)
+                    continue;
+                p.make_counter_clockwise();
+                fixed.emplace_back(std::move(p), item.boundingBox());
+            }
+        if (fixed.empty())
+            return false;
+        for (const Item &item : items_) {
+            if (item.is_virt_object || item.isFixed())
+                continue;
+            Slic3r::Polygon p = sl::contour(item.transformedShape());
+            if (p.size() < 3)
+                continue;
+            p.make_counter_clockwise();
+            p.translate(d);
+            Box bb = item.boundingBox();
+            bb.minCorner() += d;
+            bb.maxCorner() += d;
+            for (const auto &[fp, fbb] : fixed) {
+                if (getX(bb.maxCorner()) <= getX(fbb.minCorner()) || getX(fbb.maxCorner()) <= getX(bb.minCorner()) ||
+                    getY(bb.maxCorner()) <= getY(fbb.minCorner()) || getY(fbb.maxCorner()) <= getY(bb.minCorner()))
+                    continue;
+                double area = 0.;
+                for (const Slic3r::Polygon &piece : Slic3r::intersection(p, fp))
+                    area += std::abs(piece.area());
+                if (area > min_overlap)
+                    return true;
+            }
+        }
+        return false;
     }
 
     void setInitialPosition(Item& item) {

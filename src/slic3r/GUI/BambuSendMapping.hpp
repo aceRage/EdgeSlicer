@@ -12,6 +12,7 @@
 
 #include "libslic3r/ProjectTask.hpp" // FilamentInfo
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,9 @@ struct ComposeInput
     // 1-based extruder per project filament, for "nozzleId"; empty on a one-nozzle printer, which
     // then gets no nozzleId at all (its payload stays exactly what it always was).
     std::vector<int>         nozzle_filament_map;
+    // Units no entry may name (MachineObject::mapping_blocked_ams_ids: a rack AMS such as the H3C's
+    // AMS 3H, and a nozzle rack's spool holders): such an entry goes out as "no tray".
+    std::set<std::string>    blocked_ams_ids;
 };
 
 // SelectMachineDialog::get_ams_mapping_result: the v0 tray list, the v1 [{ams_id, slot_id}] list and

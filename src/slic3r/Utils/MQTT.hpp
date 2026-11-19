@@ -105,9 +105,14 @@ public:
     // cached weak_ptr instead of calling shared_from_this() — which throws
     // bad_weak_ptr once the last owner has started destruction (and always
     // threw for raw `new`-ed clients).
+    //
+    // The deleter (destroy_client) never runs ~MqttClient on a Paho callback thread or on one of
+    // this client's own reconnect workers: ~MqttClient disconnects and waits, then calls
+    // MQTTAsync_destroy(), which stops the very threads such a callback runs on. When the last
+    // reference is dropped there, the destruction moves to a short-lived thread of its own.
     template<typename... Args>
     static std::shared_ptr<MqttClient> create(Args&&... args) {
-        std::shared_ptr<MqttClient> p(new MqttClient(std::forward<Args>(args)...));
+        std::shared_ptr<MqttClient> p(new MqttClient(std::forward<Args>(args)...), &MqttClient::destroy_client);
         p->self_ = p;
         register_live(p);
         return p;
@@ -115,6 +120,21 @@ public:
 
     // Destructor
     ~MqttClient();
+
+    // Marks the current thread as one that must not destroy a MqttClient (a Paho callback, a
+    // reconnect worker) for the lifetime of the scope. Nested scopes are fine.
+    class CallbackThreadScope
+    {
+    public:
+        CallbackThreadScope();
+        ~CallbackThreadScope();
+        CallbackThreadScope(const CallbackThreadScope&)            = delete;
+        CallbackThreadScope& operator=(const CallbackThreadScope&) = delete;
+    };
+    // True inside a CallbackThreadScope on this thread.
+    static bool on_callback_thread();
+    // How many clients destroy_client() handed to a thread of their own (diagnostics, tests).
+    static size_t deferred_destroy_count();
 
     // Connect to the MQTT broker
     bool Connect(std::string& msg);
@@ -195,6 +215,9 @@ public:
     // Run the message callbacks as if this client's session had received the message.
     void Deliver(const std::string& topic, const std::string& payload);
 private:
+    // create()'s deleter: see the comment on create().
+    static void destroy_client(MqttClient* client);
+
     void dispatch(const std::string& topic, const std::string& payload);
     mutable std::mutex         route_mtx_;
     std::shared_ptr<MqttRoute> route_;
@@ -258,6 +281,10 @@ private:
     // The owner's intent: set by Connect(), cleared by Disconnect(). A resume
     // only bounces clients whose owner still wants them up.
     std::atomic<bool> wants_connection_{false};
+    // Set by a successful Disconnect(), cleared by Connect(): a second Disconnect() (the owner's
+    // after a give-up, or ~MqttClient's after the owner's) is a no-op instead of a second
+    // teardown of the same Paho session.
+    std::atomic<bool> closed_{false};
     // True while a reconnect_now() worker owns the outage: connection_lost()
     // starts no watcher and a failed connect attempt fires no failure callback.
     std::atomic<bool> manual_reconnect_active_{false};

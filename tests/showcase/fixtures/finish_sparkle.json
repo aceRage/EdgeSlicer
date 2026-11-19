@@ -1,0 +1,15 @@
+{
+  "_fixture": { "settings": { "filament_colour": ["#22222E"] } },
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1", "name": "Golden: galaxy black sparkle", "plate_index": 0, "source": "model", "preset_base": "studio_white",
+      "background": { "type": "radial_gradient", "color1": "#5A5E66", "color2": "#1C1E22" },
+      "floor": { "type": "shadow_catcher", "color": "#F2F2F2", "shadow_strength": 0.5, "contact_shadow": 0.6 },
+      "lighting": { "azimuth": 225, "elevation": 45, "shadow_intensity": 0.4, "key_intensity": 1.1, "environment": "studio", "env_intensity": 0.8 },
+      "materials": { "layer_lines": "real", "filaments": [ { "slot": 1, "finish": "sparkle" } ] },
+      "export": { "width": 1920, "height": 1080, "quality": "high", "format": "png" }
+    }
+  ]
+}

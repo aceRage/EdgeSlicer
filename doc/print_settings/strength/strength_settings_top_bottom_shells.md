@@ -48,3 +48,45 @@ If [Shell Layers](#shell-layers) is greater than 1, the surface pattern will be 
 - **[Hilbert Curve](strength_settings_patterns#hilbert-curve)**
 - **[Archimedean Chords](strength_settings_patterns#archimedean-chords)**
 - **[Octagram Spiral](strength_settings_patterns#octagram-spiral)**
+
+## Fill order
+
+Direction in which top surfaces are filled when using a center-based pattern (Concentric, Spiral Inset, Archimedean Chords, Octagram Spiral).
+
+Outward starts at the center of the surface, so any excess material is pushed towards the edge where it is least visible. Inward starts at the edge and ends with the tight curves at the center.
+
+Default uses shortest-path ordering, which may run in either direction.
+
+## Surface expansion
+
+Expands the top surfaces by this distance to connect distinct top surfaces and fill gaps.
+
+Useful for cases where the top surface is interrupted by a raised feature, such as text on a plane.Expanding it removes the holes beneath these features and creates a continuous path with a better finish for printing on top.The expansion is applied to the original top surface, before any other processing such as bridging or overhang detection.
+
+## Surface expansion margin
+
+Using “Top surface expansion” may cause a surface that did not previously touch the model's outer walls to now do so.
+
+This can cause contraction marks (such as the hull line) on the outer walls.
+
+By adding a small margin, this contraction will not occur directly on the walls, thereby preventing a visible mark.
+
+## Surface expansion direction
+
+Direction in which the top surface expansion grows.
+
+- Inward grows into the holes and gaps left by features rising from the middle of a top surface.
+
+- Outward grows the outer edge of the surface, connecting surfaces separated by features that can divide a surface, such as a lattice pattern.
+
+- Inward and Outward does both.
+
+## Center surface pattern on
+
+Chooses where the centering point of centered top/bottom surface patterns (Archimedean Chords, Octagram Spiral) is placed.
+
+- Each Surface: centers the pattern on every individual surface region, so each island is symmetric on its own.
+
+- Each Model: centers the pattern on each connected body. Parts that touch or overlap share one center; parts detached from the rest each get their own.
+
+- Each Assembly: uses a single shared center for the whole object or assembly.

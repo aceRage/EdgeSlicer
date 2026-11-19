@@ -1,0 +1,11 @@
+{
+  "id": "klipper",
+  "personality": "moonraker",
+  "name": "EMU Klipper (generic Moonraker)",
+  "edgeslicer_preset": "any Klipper printer preset (Voron, RatRig ...)",
+  "bind": "127.0.0.14",
+  "port": 7125,
+  "lan": false,
+  "state": "standby",
+  "faults": {}
+}

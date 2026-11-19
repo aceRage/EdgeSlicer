@@ -29,6 +29,22 @@ std::vector<NozzleInfo> build_nozzle_list(std::vector<NozzleGroupInfo> nozzle_gr
     return ret;
 }
 
+std::vector<NozzleInfo> build_nozzle_list_from_extruder_nozzles(const std::vector<std::vector<SlotNozzle>>& extruder_nozzles)
+{
+    std::vector<NozzleInfo> ret;
+    for (size_t extruder_id = 0; extruder_id < extruder_nozzles.size(); ++extruder_id) {
+        for (const SlotNozzle& slot : extruder_nozzles[extruder_id]) {
+            NozzleInfo info;
+            info.diameter    = slot.diameter;
+            info.volume_type = slot.volume_type;
+            info.extruder_id = static_cast<int>(extruder_id);
+            info.group_id    = static_cast<int>(ret.size()); // the global physical slot
+            ret.emplace_back(std::move(info));
+        }
+    }
+    return ret;
+}
+
 std::vector<NozzleInfo> build_nozzle_list(double diameter, const std::vector<int>& filament_nozzle_map, const std::vector<int>& filament_volume_map, const std::vector<int>& filament_map)
 {
     std::string diameter_str = format_diameter_to_str(diameter);

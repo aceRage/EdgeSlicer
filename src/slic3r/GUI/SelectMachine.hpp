@@ -287,6 +287,9 @@ protected:
     Label*                              m_st_txt_extra_info{nullptr};
     Label*                              m_ams_backup_tip{nullptr};
     wxHyperlinkCtrl*                    m_link_network_state{ nullptr };
+    // EdgeSlicer: "Re-enter access code" under the printer combo, shown while the selected LAN
+    // printer's last dial was refused (DeviceManager::lan_access_code_refused).
+    wxHyperlinkCtrl*                    m_link_access_code{ nullptr };
     wxSimplebook*                       m_rename_switch_panel{nullptr};
     wxSimplebook*                       m_simplebook{nullptr};
     wxStaticText*                       m_rename_text{nullptr};
@@ -393,7 +396,6 @@ public:
     void update_print_status_msg(wxString msg, bool is_warning = false, bool is_printer = true);
     void update_print_error_info(int code, std::string msg, std::string extra);
     void set_flow_calibration_state(bool state, bool show_tips = true);
-    bool is_show_timelapse();
     bool has_timelapse_warning();
     void update_timelapse_enable_status();
     bool is_same_printer_model();

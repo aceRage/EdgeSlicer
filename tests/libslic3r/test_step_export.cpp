@@ -249,7 +249,7 @@ TEST_CASE("mesh_to_brep output takes an exact OCCT fillet (ModelingAlgorithms is
     CHECK(info.volume > 8000. - 12. * (4. - PI) * 4. * 20.);
 }
 
-TEST_CASE("mesh_to_brep on large meshes completes in reasonable time", "[MeshToBRep][timing]")
+TEST_CASE("mesh_to_brep on large meshes completes in reasonable time", "[MeshToBRep][timing][slow]")
 {
     SECTION("a 120k-triangle gridded cube merges back to six faces")
     {

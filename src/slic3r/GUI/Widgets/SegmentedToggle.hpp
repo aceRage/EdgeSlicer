@@ -35,6 +35,8 @@ public:
 
     void setSelected(int index);
     int  getSelected() const;
+    // The tooltip of one segment's button.
+    void setSegmentToolTip(int index, const wxString& tip);
 
     void bindSelectionCallback(SelectionCallback cb);
 

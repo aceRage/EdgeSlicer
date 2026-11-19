@@ -38,20 +38,74 @@ constexpr MixedFilamentAutoGradientAction mixed_filament_auto_gradient_action(bo
     return MixedFilamentAutoGradientAction::Confirm;
 }
 
-// Snap #1008: automatic mixed-color match keeps every participating component
-// at least 15%. With a 100% total the structural caps are 85% (two colors)
-// and 70% (three colors). Search uses the two-color cap so the triple bound
-// falls out of the remaining weight. Manual match uses the same search
-// bounds; the count-dependent cap is the post-match advisory so a valid 85%
-// two-color recipe is not reported as over range. Recipes land in
-// MixedFilamentManager (never filament_is_mixed).
-inline constexpr int kMixedColorMatchMinComponentPercent      = 15;
-inline constexpr int kMixedColorMatchMaxPairComponentPercent  = 85;
-inline constexpr int kMixedColorMatchMaxMultiComponentPercent = 70;
+// Snap #1008 (final): automatic mixed-color match keeps every participating
+// component at least 15%. With a 100% total the structural caps are 85% (two
+// colors) and 70% (three colors). Automatic search uses the two-color cap so
+// the triple bound falls out of the remaining weight. Manual search keeps the
+// legacy 0%–100% range; the same recommended bounds are the post-match
+// advisory so a valid 85% two-color recipe is not flagged, while 10% or an
+// 85% three-color recipe is. Zero weight is an excluded color, not below 15%.
+// Recipes land in MixedFilamentManager (never filament_is_mixed).
+inline constexpr int    kMixedColorMatchMinComponentPercent       = 15;
+inline constexpr int    kMixedColorMatchMaxPairComponentPercent   = 85;
+inline constexpr int    kMixedColorMatchMaxMultiComponentPercent  = 70;
+inline constexpr int    kMixedColorMatchManualMinComponentPercent = 0;
+inline constexpr int    kMixedColorMatchManualMaxComponentPercent = 100;
+inline constexpr size_t kMixedColorMatchMultiColorComponentCount  = 3;
+
+inline constexpr int mixed_color_match_search_min_percent(bool manual)
+{
+    return manual ? kMixedColorMatchManualMinComponentPercent : kMixedColorMatchMinComponentPercent;
+}
+
+inline constexpr int mixed_color_match_search_max_percent(bool manual)
+{
+    return manual ? kMixedColorMatchManualMaxComponentPercent : kMixedColorMatchMaxPairComponentPercent;
+}
 
 inline constexpr int mixed_color_match_max_component_percent(size_t active_components)
 {
-    return active_components >= 3 ? kMixedColorMatchMaxMultiComponentPercent : kMixedColorMatchMaxPairComponentPercent;
+    if (active_components >= kMixedColorMatchMultiColorComponentCount)
+        return kMixedColorMatchMaxMultiComponentPercent;
+    return kMixedColorMatchMaxPairComponentPercent;
+}
+
+// Manual post-match advisory. Zero means this physical filament is not part of
+// the recipe after project-wide ID remapping; it is not a participating color
+// below 15%.
+inline bool mixed_color_match_weight_outside_recommended(int weight, size_t active_components)
+{
+    if (weight == 0)
+        return false;
+    return weight < kMixedColorMatchMinComponentPercent || weight > mixed_color_match_max_component_percent(active_components);
+}
+
+inline bool mixed_color_match_weights_outside_recommended(const std::vector<int> &weights)
+{
+    size_t active_components = 0;
+    for (int weight : weights)
+        if (weight > 0)
+            ++active_components;
+    for (int weight : weights)
+        if (mixed_color_match_weight_outside_recommended(weight, active_components))
+            return true;
+    return false;
+}
+
+// Manual matching may remap recipe component IDs to project-wide filament IDs
+// that exceed the current physical-slot count. Size the advisory weight vector
+// by the largest referenced ID so remapped participants are not truncated.
+inline size_t mixed_color_match_advisory_weight_count(size_t                           num_physical,
+                                                      unsigned int                     component_a,
+                                                      unsigned int                     component_b,
+                                                      const std::vector<unsigned int> &gradient_ids = {})
+{
+    size_t weight_count = num_physical;
+    weight_count        = std::max(weight_count, static_cast<size_t>(component_a));
+    weight_count        = std::max(weight_count, static_cast<size_t>(component_b));
+    for (unsigned int id : gradient_ids)
+        weight_count = std::max(weight_count, static_cast<size_t>(id));
+    return weight_count;
 }
 
 // Represents a virtual "mixed" filament created from physical filaments
@@ -125,6 +179,16 @@ struct MixedFilament
     // Optional Local-Z cap for this mixed row. 0 disables the cap.
     int local_z_max_sublayers = 0;
 
+    // Mixed color sublayer (design_mixed_color_sublayer.md 3a, D1): how this row splits a layer.
+    // 0 = Auto (the process keys enable_mixed_color_sublayer / dithering_local_z_mode decide),
+    // 1 = Cadence (whole-layer alternation), 2 = Subdivide (Edge Local-Z), 3 = Ratio (Bambu Studio's
+    // mixed color sublayer: one pass per component, height = ratio x layer height). See
+    // MixedSublayer.hpp. Serialized as "sm<n>" only when not Auto, so older rows stay byte-identical.
+    int sublayer_method = 0;
+    // D4: false = alternate the start component every layer (fewer tool changes), true = Bambu Studio's
+    // fixed ascending physical-id order. Serialized as "so1" only when set.
+    bool sublayer_bs_order = false;
+
     static constexpr float k_default_gradient_dominant = 0.8f;  // Dominant component ratio
     static constexpr float k_default_gradient_minority = 0.2f;  // Minority component ratio
     static constexpr float k_min_gradient_difference   = 0.05f; // Minimum difference for valid gradient
@@ -176,6 +240,8 @@ struct MixedFilament
                distribution_mode == rhs.distribution_mode &&
                image_fill_ref == rhs.image_fill_ref &&
                local_z_max_sublayers == rhs.local_z_max_sublayers &&
+               sublayer_method == rhs.sublayer_method &&
+               sublayer_bs_order == rhs.sublayer_bs_order &&
                gradient_enabled == rhs.gradient_enabled &&
                std::abs(gradient_start - rhs.gradient_start) <= k_gradient_epsilon &&
                std::abs(gradient_end   - rhs.gradient_end)   <= k_gradient_epsilon &&
