@@ -13,13 +13,14 @@
 
 #include <catch2/catch.hpp>
 
+#include <libslic3r/TriangleMesh.hpp>
+#include <libslic3r/MeshBoolean.hpp>
+#include <libslic3r/Model.hpp>
+// After Model.hpp, as test_meshboolean.cpp has them: CSGMesh.hpp needs Transform3f declared.
 #include <libslic3r/CSGMesh/ModelToCSGMesh.hpp>
 #include <libslic3r/CSGMesh/PerformCSGMeshBooleans.hpp>
 #include <libslic3r/Geometry.hpp>
-#include <libslic3r/MeshBoolean.hpp>
-#include <libslic3r/Model.hpp>
 #include <libslic3r/PaintTransfer.hpp>
-#include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/TriangleSelector.hpp>
 
 #include <cereal/archives/binary.hpp>
@@ -126,7 +127,7 @@ struct Expected
 
 void pb_check(const ModelVolume &r, const Expected &e)
 {
-    auto near = [](double got, double want) { return std::abs(got - want) <= 3.0 + 0.01 * want; };
+    auto close_to = [](double got, double want) { return std::abs(got - want) <= 3.0 + 0.01 * want; };
     const double c2 = pb_painted(r, &ModelVolume::mmu_segmentation_facets, EnforcerBlockerType::Extruder2);
     const double c3 = pb_painted(r, &ModelVolume::mmu_segmentation_facets, EnforcerBlockerType::Extruder3);
     const double en = pb_painted(r, &ModelVolume::supported_facets, EnforcerBlockerType::ENFORCER);
@@ -134,12 +135,12 @@ void pb_check(const ModelVolume &r, const Expected &e)
     const double se = pb_painted(r, &ModelVolume::seam_facets, EnforcerBlockerType::ENFORCER);
     const double fz = pb_painted(r, &ModelVolume::fuzzy_skin_facets, EnforcerBlockerType::FUZZY_SKIN);
     INFO("colour 2 " << c2 << ", colour 3 " << c3 << ", enforcer " << en << ", blocker " << bl << ", seam " << se << ", fuzzy " << fz);
-    CHECK(near(c2, e.colour2));
-    CHECK(near(c3, e.colour3));
-    CHECK(near(en, e.enforcer));
-    CHECK(near(bl, e.blocker));
-    CHECK(near(se, e.seam));
-    CHECK(near(fz, e.fuzzy));
+    CHECK(close_to(c2, e.colour2));
+    CHECK(close_to(c3, e.colour3));
+    CHECK(close_to(en, e.enforcer));
+    CHECK(close_to(bl, e.blocker));
+    CHECK(close_to(se, e.seam));
+    CHECK(close_to(fz, e.fuzzy));
 }
 
 // The gizmo's apply path without the GUI: the boolean in object coordinates, then
@@ -409,9 +410,9 @@ TEST_CASE("Keep paint v2: an object of several parts split to objects keeps ever
     Model        model;
     ModelObject *mo = model.add_object();
     ModelVolume *a  = mo->add_volume(TriangleMesh(its_make_cube(10., 10., 10.)));
-    indexed_triangle_set far = its_make_cube(10., 10., 10.);
-    its_translate(far, Vec3f(30.f, 0.f, 0.f));
-    ModelVolume *b = mo->add_volume(TriangleMesh(far));
+    indexed_triangle_set away = its_make_cube(10., 10., 10.);
+    its_translate(away, Vec3f(30.f, 0.f, 0.f));
+    ModelVolume *b = mo->add_volume(TriangleMesh(away));
     mo->add_instance();
     pb_paint_all_kinds(*a);
     pb_paint_all_kinds(*b);
