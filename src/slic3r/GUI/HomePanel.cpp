@@ -7,6 +7,7 @@
 #include "HomeVendors.hpp"
 #ifdef EDGE_PYTHON_PLUGINS
 #include "HomePlugins.hpp"
+#include "slic3r/plugin/PluginPreferences.hpp"
 #endif
 #include "I18N.hpp"
 #include "MainFrame.hpp"
@@ -397,13 +398,18 @@ void HomePanel::handle(const json& msg)
         ensure_vaults();
         m_vaults->send_state();
 #ifdef EDGE_PYTHON_PLUGINS
-        ensure_plugins();
-        m_plugins->send_state();
+        if (plugin_prefs::enabled(plugin_prefs::k_enable_python_plugins)) {
+            ensure_plugins();
+            m_plugins->send_state();
+        }
 #endif
     } else if (command == "home_section") {
         std::string section = msg.value("section", std::string());
 #ifndef EDGE_PYTHON_PLUGINS
         if (section == "plugins")
+            section.clear();
+#else
+        if (section == "plugins" && !plugin_prefs::enabled(plugin_prefs::k_enable_python_plugins))
             section.clear();
 #endif
         if (HomeTab::valid_section(section))
@@ -739,11 +745,14 @@ void HomePanel::send_init()
 #ifndef EDGE_PYTHON_PLUGINS
     if (section == "plugins")
         section = "recent";
+#else
+    if (section == "plugins" && !plugin_prefs::enabled(plugin_prefs::k_enable_python_plugins))
+        section = "recent";
 #endif
     init["section"] = section;
     init["models"]  = model_browser_enabled();
 #ifdef EDGE_PYTHON_PLUGINS
-    init["plugins"] = true;
+    init["plugins"] = plugin_prefs::enabled(plugin_prefs::k_enable_python_plugins);
 #endif
     if (Theme::active())
         init["theme"] = ThemePack::home_css(Theme::spec()); // CSS variable -> #RRGGBB

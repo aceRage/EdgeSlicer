@@ -1263,6 +1263,8 @@ if (EDGE_PYTHON_PLUGINS)
         plugin/PluginAuditManager.hpp
         plugin/PluginTrust.cpp
         plugin/PluginTrust.hpp
+        plugin/PluginPreferences.cpp
+        plugin/PluginPreferences.hpp
         GUI/PluginPermissionValidation.cpp
         GUI/PluginPermissionValidation.hpp
         GUI/PluginsInspectorLogic.cpp

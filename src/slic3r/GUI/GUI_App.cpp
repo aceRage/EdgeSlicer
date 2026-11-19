@@ -121,6 +121,7 @@
 #ifdef EDGE_PYTHON_PLUGINS
 #include "slic3r/plugin/EdgePythonInclude.hpp"
 #include "slic3r/plugin/PluginManager.hpp"
+#include "slic3r/plugin/PluginPreferences.hpp"
 #include "slic3r/plugin/PythonInterpreter.hpp"
 #endif
 
@@ -4165,7 +4166,9 @@ bool GUI_App::on_init_inner()
         set_startup_splash_phase(_L("Loading current presets"), 85);
         load_current_presets();
 #ifdef EDGE_PYTHON_PLUGINS
-        {
+        // D10: the runtime stays off until the user enables "Python plugins" in Preferences
+        // (restart). Off: no Python, no plugin scan, no auto-load, no Home rail.
+        if (plugin_prefs::enabled(plugin_prefs::k_enable_python_plugins)) {
             PluginManager& plugin_mgr = PluginManager::instance();
             plugin_mgr.initialize();
             plugin_mgr.discover_plugins(false, true);
