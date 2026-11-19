@@ -1067,9 +1067,18 @@ if (NOT WIN32 AND NOT APPLE)
 endif()
 
 
+# Python plugin resources (trust keys, the Plugins inspector page) are of no use without the
+# plugin runtime: packages built with EDGE_PYTHON_PLUGINS OFF leave them out (review L10).
+set(_edge_plugin_resource_excludes)
+if (NOT EDGE_PYTHON_PLUGINS)
+    set(_edge_plugin_resource_excludes
+        REGEX "/resources/python_plugins(/.*)?$" EXCLUDE
+        REGEX "/resources/web/dialog/PluginsInspector(/.*)?$" EXCLUDE)
+endif ()
+
 # Resources install target, configure fhs.hpp on UNIX
 if (WIN32)
-    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "./resources")
+    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "./resources" ${_edge_plugin_resource_excludes})
     # EdgeSlicer: the bundled network plugin (UltraNet, a private clean-room component built in
     # the same toolchain). The host copies <exe dir>/ultranet/*.dll into <data dir>/plugins on
     # first run (GUI_App). Point ULTRANET_BIN_DIR at a folder holding bambu_networking.dll and
@@ -1203,6 +1212,7 @@ elseif (SLIC3R_FHS)
         PATTERN "*/udev" EXCLUDE
         # Windows tool binaries (go2rtc.exe, ffmpeg.exe, DLLs) are no use in a Linux package.
         REGEX "/resources/tools/.*[.](exe|dll)$" EXCLUDE
+        ${_edge_plugin_resource_excludes}
     )
     install(FILES src/dev-utils/platform/unix/Snapmaker_Orca.desktop DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
     foreach(SIZE 32 128 192)
@@ -1234,6 +1244,7 @@ else ()
     install(FILES src/dev-utils/platform/unix/Snapmaker_Orca.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/resources/applications)
     install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources"
         REGEX "/resources/tools/.*[.](exe|dll)$" EXCLUDE
+        ${_edge_plugin_resource_excludes}
     )
     if (EDGE_PYTHON_PLUGINS)
         install(DIRECTORY "${CMAKE_PREFIX_PATH}/libpython/" DESTINATION "${CMAKE_INSTALL_PREFIX}/python")

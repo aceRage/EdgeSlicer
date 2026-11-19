@@ -246,6 +246,12 @@ function build_slicer() {
         # bundled below as a Mach-O named go2rtc.
         find "./EdgeSlicer.app/Contents/Resources/tools" -type f \( -name '*.exe' -o -name '*.dll' \) -delete 2>/dev/null || true
 
+        # Python plugin resources ship only with the plugin runtime (EDGE_PYTHON_PLUGINS ON builds
+        # carry Contents/MacOS/edge-plugin-host).
+        if [ ! -f "./EdgeSlicer.app/Contents/MacOS/edge-plugin-host" ]; then
+            rm -rf "./EdgeSlicer.app/Contents/Resources/python_plugins" "./EdgeSlicer.app/Contents/Resources/web/dialog/PluginsInspector"
+        fi
+
         # EdgeSlicer: the bundled network plug-in (UltraNet, a private clean-room component that is
         # built separately - CI does it with a deploy key). Set ULTRANET_BIN_DIR to a folder holding
         # libbambu_networking.dylib (+ libBambuSource.dylib, ultranet.txt) to ship it; without it the
