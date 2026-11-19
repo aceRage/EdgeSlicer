@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -23,6 +24,7 @@
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
@@ -342,6 +344,67 @@ TEST_CASE("The Snapmaker U1 tower flushes with M400 and never a seconds dwell", 
     CHECK_THAT(tower, Catch::Matchers::Contains("CP TOOLCHANGE"));
     CHECK_THAT(tower, Catch::Matchers::Contains("M400"));
     CHECK_THAT(tower, !Catch::Matchers::Contains("G4 S"));
+}
+
+// OrcaSlicer #17662: Type 2 (WipeTower2) emitted no acceleration of its own, so on Klipper the
+// tower printed at the travel acceleration left by the move onto it. Edge already sets print
+// acceleration on the Type 1 ramming path; this checks the Type 2 path does the same.
+TEST_CASE("A Type 2 tower extrudes at the default or first layer acceleration", "[WipeTower]")
+{
+    // Every acceleration a tower move could inherit differs from the two it should print at: the
+    // travel to the tower (one ACCEL on Klipper) and the walls printed right before the toolchange
+    // (Marlin 2 keeps the print acceleration apart from the travel one). The machine limits sit
+    // above all of them, since Klipper also caps ACCEL at the X and Y limits.
+    const std::string flavor      = GENERATE(as<std::string>{}, "klipper", "marlin2");
+    // A toolchanger that doesn't ram changes tools in place, then travels into the tower through
+    // the opening the skip points leave in its wall (Edge: wipe_tower_wall_gap).
+    const bool        toolchanger = GENERATE(false, true);
+    DynamicPrintConfig config = two_filament_tower_config(flavor, false);
+    if (toolchanger) {
+        config.set_deserialize_strict({
+            { "single_extruder_multi_material", "0" },
+            { "wipe_tower_wall_gap",            "1" },
+            { "filament_multitool_ramming",     "0,0" },
+        });
+    }
+    config.set_deserialize_strict({ { "wipe_tower_type", "type2" },
+                                    { "default_acceleration", "3000" }, { "initial_layer_acceleration", "500" },
+                                    { "travel_acceleration", "8000" }, { "initial_layer_travel_acceleration", "6000" },
+                                    { "outer_wall_acceleration", "2000" }, { "inner_wall_acceleration", "2000" },
+                                    { "machine_max_acceleration_extruding", "20000,20000" },
+                                    { "machine_max_acceleration_x", "20000,20000" }, { "machine_max_acceleration_y", "20000,20000" },
+                                    { "machine_max_acceleration_travel", "20000,20000" } });
+    const std::string gcode = slice_two_filament_tower(config);
+
+    const std::string &layer_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change);
+    // By role rather than the toolchange tags, so the passes that only finish a tower layer count too.
+    const std::string  role_tag  = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+    const std::string  tower_tag = role_tag + ExtrusionEntity::role_to_string(erWipeTower);
+    std::set<unsigned int> first_layer, other_layers;
+    unsigned int acceleration = 0;
+    size_t       layers       = 0;
+    bool         in_tower     = false;
+    GCodeReader  parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string &raw = line.raw();
+        const std::string  klipper_accel = " ACCEL=";
+        const size_t       klipper_at    = raw.find(klipper_accel);
+        float value = 0.f;
+        if (raw == ";" + layer_tag)
+            ++layers;
+        else if (raw.rfind(role_tag, 0) == 0)
+            in_tower = raw == tower_tag;
+        else if (line.cmd_is("M204") && (line.has_value('P', value) || line.has_value('S', value)))
+            acceleration = (unsigned int) value;
+        else if (line.cmd_is("SET_VELOCITY_LIMIT") && klipper_at != std::string::npos)
+            acceleration = (unsigned int) std::stoul(raw.substr(klipper_at + klipper_accel.size()));
+        else if (in_tower && line.extruding(self) && line.dist_XY(self) > 0.f)
+            (layers == 1 ? first_layer : other_layers).insert(acceleration);
+    });
+
+    CAPTURE(flavor, toolchanger);
+    CHECK(first_layer == std::set<unsigned int>{ 500 });
+    CHECK(other_layers == std::set<unsigned int>{ 3000 });
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -855,6 +918,9 @@ TEST_CASE("Purge blocks of a non-ramming toolchanger tile the tower without blan
         { "outer_wall_filament", "2" },
         { "sparse_infill_filament", "3" },
         { "solid_infill_filament", "3" },
+        // Skins on the infill filament, as before the surface filaments followed the walls.
+        {"top_surface_filament", "3"},
+        {"bottom_surface_filament", "3"},
         { "gcode_comments", "1" },
     });
     Print print;
@@ -1007,6 +1073,9 @@ TEST_CASE("The tower entry crosses the wall only through its gap when the purge 
             { "outer_wall_filament", "2" },
             { "sparse_infill_filament", filaments == 2 ? "1" : "3" },
             { "solid_infill_filament", filaments == 2 ? "1" : "3" },
+            // Skins on the infill filament, as before the surface filaments followed the walls.
+            {"top_surface_filament", filaments == 2 ? "1" : "3"},
+            {"bottom_surface_filament", filaments == 2 ? "1" : "3"},
         });
         Print print;
         Model model;
@@ -1196,6 +1265,8 @@ static void set_object_filaments(ModelObject *object, int wall, int infill)
     object->config.set("outer_wall_filament", wall);
     object->config.set("sparse_infill_filament", infill);
     object->config.set("solid_infill_filament", infill);
+    object->config.set("top_surface_filament", infill);
+    object->config.set("bottom_surface_filament", infill);
     if (object->volumes.empty())
         return;
     ModelVolume *volume = object->volumes.front();
@@ -1204,6 +1275,8 @@ static void set_object_filaments(ModelObject *object, int wall, int infill)
     volume->config.set("outer_wall_filament", wall);
     volume->config.set("sparse_infill_filament", infill);
     volume->config.set("solid_infill_filament", infill);
+    volume->config.set("top_surface_filament", infill);
+    volume->config.set("bottom_surface_filament", infill);
 }
 
 static void set_both_filaments(Model &model)
@@ -1710,4 +1783,71 @@ TEST_CASE("The ram leaves a pressure advance the slicer does not set alone", "[W
     const std::string out = slice_ramming_pressure_advance({{"enable_pressure_advance", "0,0"}});
     REQUIRE(out.find("; CP TOOLCHANGE UNLOAD") != std::string::npos);
     CHECK(m900_values(out).empty());
+}
+
+// Orca #17439, adapted: Edge validates the tower against each nozzle's ExtruderAreas rather than
+// Orca's get_shared_poly. Areas that share nothing used to leave an inverted AABB / a crash; they
+// now refuse the tower instead of asking the user to move it.
+
+// Two nozzles over a 200 mm bed, nozzle 1 reaching x up to `left_max` and nozzle 2 x from `right_min`,
+// with a cube in each nozzle's area and, when `filaments` is 2, a prime tower at (30, 150).
+static StringObjectException validate_on_two_nozzle_areas(double left_max, double right_min, unsigned int filaments)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(filaments);
+    config.option<ConfigOptionFloats>("filament_diameter")->values.assign(filaments, 1.75);
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4 };
+    config.option<ConfigOptionStrings>("filament_colour")->values.assign(filaments, "#FF0000");
+    if (filaments > 1)
+        config.option<ConfigOptionStrings>("filament_colour")->values[1] = "#00FF00";
+    config.option<ConfigOptionInts>("printer_extruder_id", true)->values         = { 1, 2 };
+    config.option<ConfigOptionStrings>("printer_extruder_variant", true)->values = { "Direct Drive Standard", "Direct Drive Standard" };
+    config.option<ConfigOptionBool>("enable_prime_tower")->value                 = filaments > 1;
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value     = false;
+    config.option<ConfigOptionString>("layer_change_gcode")->value               = "G92 E0";
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values                    = { 30. };
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values                    = { 150. };
+    config.option<ConfigOptionPoints>("printable_area")->values = { { 0., 0. }, { 200., 0. }, { 200., 200. }, { 0., 200. } };
+    config.set_deserialize_strict({
+        { "filament_map_mode", "Manual" },
+        { "filament_map",      filaments == 2 ? "1,2" : "1" },
+        { "brim_type",         "no_brim" },
+        { "skirt_loops",       "0" },
+    });
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(std::vector<Vec2ds>{
+        { { 0., 0. }, { left_max, 0. }, { left_max, 200. }, { 0., 200. } },
+        { { right_min, 0. }, { 200., 0. }, { 200., 200. }, { right_min, 200. } } }));
+
+    Model model;
+    auto add_cube = [&](double x, int filament) {
+        ModelObject *object = model.add_object();
+        object->add_volume(mesh(TestMesh::cube_20x20x20));
+        object->add_instance()->set_offset(Vec3d(x, 20., 0.));
+        object->ensure_on_bed();
+        object->config.set("extruder", filament);
+    };
+    add_cube(20., 1);
+    if (filaments == 2)
+        add_cube(std::min(180., right_min + 20.), 2);
+
+    Print print;
+    print.apply(model, config);
+    REQUIRE(print.has_wipe_tower() == (filaments == 2));
+    return print.validate();
+}
+
+TEST_CASE("A prime tower is rejected when the extruders share no printable area", "[WipeTower]")
+{
+    SECTION("areas that overlap under the tower accept it") {
+        CHECK(validate_on_two_nozzle_areas(150., 10., 2).string.empty());
+    }
+    SECTION("areas that only touch leave the tower nowhere to go") {
+        const std::string error = validate_on_two_nozzle_areas(100., 100., 2).string;
+        CHECK_THAT(error, Catch::Matchers::Contains("share no common area"));
+        CHECK_THAT(error, !Catch::Matchers::Contains("Move the prime tower"));
+    }
+    SECTION("one filament inside its nozzle's area needs no tower and is accepted") {
+        CHECK(validate_on_two_nozzle_areas(100., 100., 1).string.empty());
+    }
 }

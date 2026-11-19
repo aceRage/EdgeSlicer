@@ -384,6 +384,9 @@ std::string slice_two_filaments_overhang_fan(const char *change_gcode)
         {"wall_filament", 1},
         {"sparse_infill_filament", 2},
         {"solid_infill_filament", 2},
+        // Skins on the infill filament, as before the surface filaments followed the walls.
+        {"top_surface_filament", 2},
+        {"bottom_surface_filament", 2},
         {"wall_loops", 2},
         {"wall_sequence", "outer wall/inner wall"},
         {"skirt_loops", 0},
@@ -693,6 +696,9 @@ TEST_CASE("The fan is set again after tool change G-code that switches it off", 
         {"wall_filament", 1},
         {"sparse_infill_filament", 2},
         {"solid_infill_filament", 2},
+        // Skins on the infill filament, as before the surface filaments followed the walls.
+        {"top_surface_filament", 2},
+        {"bottom_surface_filament", 2},
         {"wall_loops", 2},
         // The outer wall last, so its overhang fan region is open at the tool change.
         {"wall_sequence", "inner wall/outer wall"},
@@ -864,6 +870,9 @@ TEST_CASE("Tool change G-code stays intact with the fan speed-up and the overhan
         {"wall_filament", 1},
         {"sparse_infill_filament", 2},
         {"solid_infill_filament", 2},
+        // Skins on the infill filament, as before the surface filaments followed the walls.
+        {"top_surface_filament", 2},
+        {"bottom_surface_filament", 2},
         {"skirt_loops", 0},
         {"brim_type", "no_brim"},
         {"fan_speedup_time", "2"},
@@ -1155,6 +1164,9 @@ TEST_CASE("The PWM floor holds for the fan written again after a tool change", "
         {"wall_filament", 1},
         {"sparse_infill_filament", 2},
         {"solid_infill_filament", 2},
+        // Skins on the infill filament, as before the surface filaments followed the walls.
+        {"top_surface_filament", 2},
+        {"bottom_surface_filament", 2},
         {"wall_loops", 2},
         {"wall_sequence", "inner wall/outer wall"},
         {"skirt_loops", 0},

@@ -6,6 +6,7 @@
 #include "../NozzleOverride.hpp"
 #include "../MixedFilament.hpp"
 #include "../MixedFilamentConfigRemap.hpp"
+#include "../ProjectConfigFill.hpp"
 #include "../MixedSublayer.hpp"
 #include "../Preset.hpp"
 #include "../CostOverrides.hpp"
@@ -1359,6 +1360,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_load_model = false;
         bool m_load_aux = false;
         bool m_load_config = false;
+        // EdgeSlicer surface filaments: the project config names no top_surface_filament (see
+        // _extract_project_config_from_archive): its objects, parts and layer ranges keep the old look too.
+        bool m_legacy_surface_filaments = false;
         // backup & restore
         bool m_load_restore = false;
         std::string m_backup_path;
@@ -1691,6 +1695,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_load_model  = strategy & LoadStrategy::LoadModel;
         m_load_aux = strategy & LoadStrategy::LoadAuxiliary;
         m_load_restore = strategy & LoadStrategy::Restore;
+        m_legacy_surface_filaments = false;
         m_load_config = strategy & LoadStrategy::LoadConfig;
         m_model = &model;
         m_unit_factor = 1.0f;
@@ -2699,6 +2704,17 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
         }
 
+        // EdgeSlicer surface filaments: an object, part, modifier or layer range of an old project that sets its
+        // solid infill filament had its skins in that filament.
+        if (m_legacy_surface_filaments)
+            for (ModelObject *mo : m_model->objects) {
+                keep_legacy_surface_filaments(mo->config);
+                for (ModelVolume *mv : mo->volumes)
+                    keep_legacy_surface_filaments(mv->config);
+                for (auto &range : mo->layer_config_ranges)
+                    keep_legacy_surface_filaments(range.second);
+            }
+
         const int max_filament_id = max_supported_filament_id_from_project_config(config);
         for (ModelObject* mo : m_model->objects) {
             const ConfigOptionInt* extruder_opt = dynamic_cast<const ConfigOptionInt*>(mo->config.option("extruder"));
@@ -3695,6 +3711,30 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 }
             } catch (const std::exception &e) {
                 BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": reading Bambu Studio mixed filaments failed: " << e.what();
+            }
+            // EdgeSlicer surface filaments: a project that does not name top_surface_filament was written before
+            // the surface filaments existed (an older EdgeSlicer, Bambu Studio, OrcaSlicer...), when the skins
+            // followed the solid infill filament: it keeps that look (keep_legacy_surface_filaments(), PrintConfig.hpp).
+            // The file is read as written, as `config` may come in filled in. Its objects follow at the end of the load.
+            {
+                std::string json_text;
+                try {
+                    load_string_file(dest_file, json_text);
+                } catch (const std::exception &) {
+                }
+                if (! json_text.empty() && json_text.find("\"top_surface_filament\"") == std::string::npos) {
+                    m_legacy_surface_filaments = true;
+                    if (keep_legacy_surface_filaments(config, true)) {
+                        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": project from before the surface filaments; top/bottom surface filament = solid infill filament";
+                        // The GUI's project loader puts a process key the project's different_settings_to_system does not
+                        // name back to the system preset's value (0): name them, as for a CLI override.
+                        const std::vector<std::string> keys { "top_surface_filament", "bottom_surface_filament" };
+                        DynamicPrintConfig             set;
+                        for (const std::string &key : keys)
+                            set.set_key_value(key, config.option(key)->clone());
+                        record_cli_overrides_as_different(config, set, keys, {}, {});
+                    }
+                }
             }
             // Edge (Orca #11582): a Bambu Lab project from before the option keeps its M1003.
             if (upgrade_missing_power_loss_recovery(config))

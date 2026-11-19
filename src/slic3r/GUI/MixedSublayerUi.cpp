@@ -164,7 +164,8 @@ static void add_if_mixed(std::vector<unsigned int> &out, const MixedFilamentMana
 static void add_config_filaments(std::vector<unsigned int> &out, const MixedFilamentManager &mgr, size_t num_physical,
                                  const ModelConfig &config, bool with_extruder)
 {
-    static const char *const keys[] = { "wall_filament", "sparse_infill_filament", "solid_infill_filament" };
+    static const char *const keys[] = { "wall_filament", "sparse_infill_filament", "solid_infill_filament", "top_surface_filament",
+                                        "bottom_surface_filament", "ironing_filament" };
     if (with_extruder && config.has("extruder"))
         add_if_mixed(out, mgr, num_physical, config.option("extruder")->getInt());
     for (const char *key : keys)

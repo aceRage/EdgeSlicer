@@ -8080,6 +8080,42 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(1));
 
+    // EdgeSlicer surface filaments: the visible top and bottom skins. 0 (Default) follows the outer wall
+    // (outer_wall_filament, or wall_filament when that is 0 too), so the skins match the walls around them.
+    // The solid layers under the top skin and above the bottom skin keep solid_infill_filament.
+    def = this->add("top_surface_filament", coInt);
+    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
+    def->label = L("Top surface");
+    def->category = L("Extruders");
+    def->tooltip = L("Filament to print the top surface (the topmost skin; ironing on it follows it unless the Ironing filament is set). \"Same as walls\" uses the outer wall filament. "
+                     "The solid infill layers under the top surface keep the solid infill filament.");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("bottom_surface_filament", coInt);
+    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
+    def->label = L("Bottom surface");
+    def->category = L("Extruders");
+    def->tooltip = L("Filament to print the bottom surface (the bottommost skin, including bottom surfaces bridged over air or "
+                     "printed on support). \"Same as walls\" uses the outer wall filament. The solid infill layers above the bottom "
+                     "surface keep the solid infill filament.");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    // EdgeSlicer: 0 (Default) irons with the filament of the surface being ironed (top / bottom surface filament,
+    // solid infill filament for internal solid layers).
+    def = this->add("ironing_filament", coInt);
+    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
+    def->label = L("Ironing");
+    def->category = L("Extruders");
+    def->tooltip = L("Filament to iron with. \"Same as the ironed surface\" irons each surface with the filament that printed it: the top "
+                     "surface filament on top surfaces, the solid infill filament on other solid layers.");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
     def = this->add("internal_solid_infill_line_width", coFloatOrPercent);
     def->label = L("Internal solid infill");
     def->category = L("Quality");

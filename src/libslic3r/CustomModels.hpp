@@ -124,6 +124,48 @@ struct ImportReport
 // Everything else (settings overrides, modifiers, paint) is left as the file has it.
 ImportReport prepare_imported_objects(const std::vector<ModelObject *> &objects, std::size_t filament_count);
 
+// The three ways a project 3MF can be loaded into the plate (the "Drop project file" question, the
+// Load Behaviour preference). Only the third one is new; the first two keep their meaning.
+enum class ProjectImportMode {
+    OpenAsProject,              // the file's printer / filament / process settings and its objects
+    GeometryOnly,               // objects only: their object / part settings are reset (extruder kept)
+    GeometryWithObjectSettings, // objects with their object / part / modifier settings, scrubbed
+};
+
+// The value kept in the app config key "import_project_action". 1 and 2 are the two original
+// choices and keep their numbers (3 was LoadType::LoadConfig and is never stored by the dialog; an
+// older build reading 4 falls back to "geometry only"). An empty, unreadable or other value is
+// read as the dialog read it before: below 2 is "open as project", anything else "geometry only".
+ProjectImportMode project_import_mode_from_action(const std::string &stored);
+std::string       project_import_action_value(ProjectImportMode mode);
+
+// What happens to the objects of a project 3MF that is added to the current project in `mode`.
+// OpenAsProject leaves them as they are; GeometryOnly resets the object / part settings except
+// the extruder; GeometryWithObjectSettings keeps them and runs prepare_imported_objects. The
+// report is empty unless settings were kept.
+ImportReport apply_project_import_mode(const std::vector<ModelObject *> &objects, ProjectImportMode mode, std::size_t filament_count);
+
+// File > Import / Add of a project 3MF adds it to the current project, so "Open as project" is not on
+// offer there; what is asked is how its objects come in. The question is only worth asking when a
+// file actually carries per-object / per-part / modifier / height-range settings.
+// True when the 3MF at `path` holds any (a setting is a key of the print configuration set in the
+// object or part settings, or an entry in the height-range settings; the extruder alone does not count).
+// A file that cannot be read or is no 3MF gives false.
+bool project_3mf_has_object_settings(const boost::filesystem::path &path);
+
+struct ImportChoice
+{
+    bool              ask          = false;                         // show the question
+    ProjectImportMode mode         = ProjectImportMode::GeometryOnly; // used when not asking
+    ProjectImportMode default_mode = ProjectImportMode::GeometryOnly; // pre-selected when asking
+};
+// `load_behaviour` is the Preferences > Load Behaviour value, `last_action` the stored
+// "import_project_action". Not asked: no 3MF with settings in the batch (geometry only, as before);
+// a preference that fixes the behaviour ("load_geometry_only", "load_geometry_with_settings", and "load_all",
+// which cannot open a project here so adds the geometry as before). Asked once for the batch otherwise
+// ("ask_when_relevant", "always_ask", or an empty / unknown value).
+ImportChoice decide_import_project_choice(const std::string &load_behaviour, const std::string &last_action, bool any_3mf_has_object_settings);
+
 // The per-object / per-part keys that hold a filament number (extruder, wall_filament, ...).
 const std::vector<std::string> &filament_index_keys();
 

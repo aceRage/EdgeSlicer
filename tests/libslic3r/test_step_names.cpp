@@ -202,3 +202,15 @@ TEST_CASE("Reload from disk accepts a bare filename for the source of a STEP par
     CHECK(none_object == -1);
     CHECK(none_volume == -1);
 }
+
+// BambuStudio #13103: a default-constructed std::atomic<bool> is uninitialized in C++17, so the
+// STEP mesh-parameter dialog could start a count with the cancel flag already set.
+TEST_CASE("STEP mesh cancel flag starts false", "[STEP]")
+{
+    Step step(std::string("nonexistent.step"));
+    REQUIRE_FALSE(step.m_stop_mesh.load());
+    step.m_stop_mesh.store(true);
+    REQUIRE(step.m_stop_mesh.load());
+    step.m_stop_mesh.store(false);
+    REQUIRE_FALSE(step.m_stop_mesh.load());
+}

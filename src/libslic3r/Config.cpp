@@ -7,6 +7,7 @@
 #include <set>
 #include <algorithm>
 #include <assert.h>
+#include <atomic>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -43,6 +44,15 @@ using namespace nlohmann;
 namespace Slic3r {
 
 ConfigBase::ResolveCapabilityFn ConfigBase::resolve_capability_fn = nullptr;
+
+void log_get_at_on_empty_vector()
+{
+    // get_at() runs in slicing loops, so only the first read is logged.
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true))
+        BOOST_LOG_TRIVIAL(error) << "ConfigOptionVector::get_at() read an empty option vector and returned a default value. "
+                                    "Whatever left the option empty is a bug.";
+}
 
 //BBS: add json support
 //static const std::string CONFIG_VERSION_KEY = "version";

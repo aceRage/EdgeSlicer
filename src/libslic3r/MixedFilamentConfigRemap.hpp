@@ -16,6 +16,11 @@ inline const std::vector<std::string> &mixed_filament_feature_keys()
         "wall_filament",
         "sparse_infill_filament",
         "solid_infill_filament",
+        // EdgeSlicer surface filaments: 0 (= follow the outer wall) is never remapped; a deleted filament
+        // erases the key, so the skins follow the walls again.
+        "top_surface_filament",
+        "bottom_surface_filament",
+        "ironing_filament",
         "support_filament",
         "support_interface_filament",
     };
