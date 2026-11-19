@@ -556,6 +556,7 @@ static void collect_filament_slots_from_config(
         "solid_infill_filament",
         "top_surface_filament",
         "bottom_surface_filament",
+        "ironing_filament",
         "wipe_tower_filament"
     };
     for (const char* key : feature_keys)
@@ -592,6 +593,7 @@ static void collect_filament_slots_from_model_config(
         "solid_infill_filament",
         "top_surface_filament",
         "bottom_surface_filament",
+        "ironing_filament",
         "wipe_tower_filament"
     };
     for (const char* key : feature_keys)
@@ -674,7 +676,7 @@ static void collect_used_filament_slots_on_plate(
 
         if (uses_default_extruder) {
             static const std::vector<const char*> default_keys = {"wall_filament", "sparse_infill_filament", "solid_infill_filament",
-                                                                       "top_surface_filament", "bottom_surface_filament"};
+                                                                       "top_surface_filament", "bottom_surface_filament", "ironing_filament"};
             for (const char* key : default_keys) {
                 const ConfigOptionInt* option = plater_working_config->option<ConfigOptionInt>(key);
                 if (option != nullptr && option->value >= 1 && option->value <= num_filaments)
@@ -2296,6 +2298,7 @@ MixedColorMatchRecipeResult prompt_best_color_match_recipe(wxWindow*            
 static DynamicFilamentList dynamic_filament_list;
 static DynamicFilamentList1Based dynamic_filament_list_1_based;
 static DynamicFilamentList dynamic_filament_list_same_as_walls(L("Same as walls"));
+static DynamicFilamentList dynamic_filament_list_same_as_ironed(L("Same as the ironed surface"));
 
 static wxString nozzle_type_key_to_label(const std::string& key)
 {
@@ -2367,6 +2370,8 @@ Sidebar::Sidebar(Plater *parent)
     // EdgeSlicer surface filaments: index 0 is "Same as walls" (value 0 = follow the outer wall).
     Choice::register_dynamic_list("top_surface_filament", &dynamic_filament_list_same_as_walls);
     Choice::register_dynamic_list("bottom_surface_filament", &dynamic_filament_list_same_as_walls);
+    // EdgeSlicer: index 0 is "Same as the ironed surface" (value 0).
+    Choice::register_dynamic_list("ironing_filament", &dynamic_filament_list_same_as_ironed);
     Choice::register_dynamic_list("wipe_tower_filament", &dynamic_filament_list);
 
     p->scrolled = new wxPanel(this);
@@ -11687,6 +11692,7 @@ void Sidebar::update_dynamic_filament_list()
     dynamic_filament_list.update();
     dynamic_filament_list_1_based.update();
     dynamic_filament_list_same_as_walls.update();
+    dynamic_filament_list_same_as_ironed.update();
 }
 
 void Sidebar::sync_nozzle_flow_combos()
@@ -13276,7 +13282,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         "extruder_colour", "filament_colour", "material_colour", "printable_height", "printer_model", "printer_technology",
         // These values are necessary to construct SlicingParameters by the Canvas3D variable layer height editor.
         "layer_height", "initial_layer_print_height", "min_layer_height", "max_layer_height",
-        "brim_width", "wall_loops", "wall_filament", "sparse_infill_density", "sparse_infill_filament", "solid_infill_filament", "top_surface_filament", "bottom_surface_filament", "top_shell_layers",
+        "brim_width", "wall_loops", "wall_filament", "sparse_infill_density", "sparse_infill_filament", "solid_infill_filament", "top_surface_filament", "bottom_surface_filament", "ironing_filament", "top_shell_layers",
         "enable_support", "support_filament", "support_interface_filament",
         "support_top_z_distance", "support_bottom_z_distance", "raft_layers",
         "wipe_tower_rotation_angle", "wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_extra_flow", "local_z_wipe_tower_purge_lines", "wipe_tower_max_purge_speed",
@@ -28702,7 +28708,7 @@ bool Plater::check_filament_temp_mixing(int plate_index, FilamentTempMixingDetai
             if (uses_default_extruder)
             {
                 static const std::vector<const char*> default_keys = {"wall_filament", "sparse_infill_filament", "solid_infill_filament",
-                                                                       "top_surface_filament", "bottom_surface_filament"};
+                                                                       "top_surface_filament", "bottom_surface_filament", "ironing_filament"};
                 for (const char* key : default_keys)
                 {
                     const ConfigOptionInt* option = config()->option<ConfigOptionInt>(key);
@@ -29023,7 +29029,7 @@ bool Plater::check_flow_ratio_zero(int plate_index, FlowRatioZeroDetail& detail)
 
             if (uses_default_extruder) {
                 static const std::vector<const char*> default_keys = {"wall_filament", "sparse_infill_filament", "solid_infill_filament",
-                                                                       "top_surface_filament", "bottom_surface_filament"};
+                                                                       "top_surface_filament", "bottom_surface_filament", "ironing_filament"};
                 for (const char* key : default_keys) {
                     const ConfigOptionInt* option = config()->option<ConfigOptionInt>(key);
                     if (option != nullptr && option->value >= 1 && option->value <= num_filaments)
@@ -29600,7 +29606,7 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
         // Orca: update when *_filament changed
         else if (opt_key == "support_interface_filament" || opt_key == "support_filament" || opt_key == "wall_filament" ||
                  opt_key == "sparse_infill_filament" || opt_key == "solid_infill_filament" ||
-                 opt_key == "top_surface_filament" || opt_key == "bottom_surface_filament") {
+                 opt_key == "top_surface_filament" || opt_key == "bottom_surface_filament" || opt_key == "ironing_filament") {
             update_scheduled = true;
         }
         // Orca #16291: the center of mass markers weigh the parts by it.

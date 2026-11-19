@@ -332,11 +332,9 @@ SupportMergePlan make_support_merge_plan(const PrintObject &object)
                 // LayerTools::extruder(): 100 % sparse infill prints its internal solid with the sparse filament.
                 const bool sparse_for_solid = role == erSolidInfill &&
                     std::abs(region_config.sparse_infill_density.value - 100.) < EPSILON;
-                // EdgeSlicer surface filaments: the top / bottom skins print with their own filament.
-                if (is_top_surface_filament_role(role))
-                    extruded.emplace_back(top_surface_filament_1based(region_config));
-                else if (is_bottom_surface_filament_role(role))
-                    extruded.emplace_back(bottom_surface_filament_1based(region_config));
+                // EdgeSlicer surface filaments: the top / bottom skins and ironing print with their own filament.
+                if (is_top_surface_filament_role(role) || is_bottom_surface_filament_role(role) || role == erIroning)
+                    extruded.emplace_back(fill_filament_source_1based(region_config, fill_filament_source(region_config, *fill)));
                 else
                     extruded.emplace_back(is_solid_infill(role) && ! sparse_for_solid ?
                         region_config.solid_infill_filament.value : region_config.sparse_infill_filament.value);

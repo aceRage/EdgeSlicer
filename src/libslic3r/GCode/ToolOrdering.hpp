@@ -5,6 +5,7 @@
 
 #include "../libslic3r.h"
 #include "../MixedFilament.hpp"
+#include "../ExtrusionEntityCollection.hpp" // IronedSurface
 #include "../ParameterUtils.hpp" // LayerPrintSequence, used by make_cyclic_custom_seq
 #include "../MultiNozzleUtils.hpp" // Ultra (dual-nozzle): grouping result types
 
@@ -152,8 +153,11 @@ public:
     // 0 = the outer wall's filament, resolved exactly as outer_wall_filament() resolves it).
     unsigned int top_surface_filament(const PrintRegion &region) const;
     unsigned int bottom_surface_filament(const PrintRegion &region) const;
+    // EdgeSlicer: the ironing filament (ironing_filament > 0 only; 0 irons with the ironed surface's filament).
+    unsigned int ironing_filament(const PrintRegion &region) const;
     // Zero based extruder of a fill extrusion of `role` (fill_filament_source()), or extruder_override.
-    unsigned int fill_filament(const PrintRegion &region, ExtrusionRole role) const;
+    // `ironed`: the surface an ironing collection irons (ExtrusionEntityCollection::ironed_surface).
+    unsigned int fill_filament(const PrintRegion &region, ExtrusionRole role, IronedSurface ironed = IronedSurface::Top) const;
 	// Returns a zero based extruder this eec should be printed with, according to PrintRegion config or extruder_override if overriden.
 	unsigned int extruder(const ExtrusionEntityCollection &extrusions, const PrintRegion &region) const;
 

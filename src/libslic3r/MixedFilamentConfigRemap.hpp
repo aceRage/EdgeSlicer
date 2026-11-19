@@ -20,6 +20,7 @@ inline const std::vector<std::string> &mixed_filament_feature_keys()
         // erases the key, so the skins follow the walls again.
         "top_surface_filament",
         "bottom_surface_filament",
+        "ironing_filament",
         "support_filament",
         "support_interface_filament",
     };

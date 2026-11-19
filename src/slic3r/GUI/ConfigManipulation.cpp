@@ -1190,6 +1190,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_line(el, has_ironing);
     
     toggle_line("ironing_speed", has_ironing || has_support_ironing);
+    // EdgeSlicer: the ironing filament (Filament for Features) means nothing without ironing.
+    toggle_field("ironing_filament", has_ironing);
 
     // ZAA: the three detail settings only matter once Z contouring is on.
     bool has_zaa = config->opt_bool("zaa_enabled");
@@ -1250,7 +1252,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     // A user may also be designing for another printer, so single-nozzle printers show it too.
     const bool have_multiple_filaments = preset_bundle->filament_presets.size() > 1;
     for (auto el : {"wall_filament", "outer_wall_filament", "sparse_infill_filament", "solid_infill_filament", "top_surface_filament",
-                    "bottom_surface_filament", "wipe_tower_filament"})
+                    "bottom_surface_filament", "ironing_filament", "wipe_tower_filament"})
         toggle_line(el, have_multiple_filaments);
 
     bool purge_in_primetower = preset_bundle->printers.get_edited_preset().config.opt_bool("purge_in_prime_tower");

@@ -1617,7 +1617,7 @@ namespace {
 bool is_region_routing_key(const std::string &key)
 {
     return key == "wall_filament" || key == "outer_wall_filament" || key == "sparse_infill_filament" || key == "solid_infill_filament" ||
-           key == "top_surface_filament" || key == "bottom_surface_filament";
+           key == "top_surface_filament" || key == "bottom_surface_filament" || key == "ironing_filament";
 }
 
 // Process keys that describe a profile rather than set a value: neither shown as Plate nor taken per tool.
@@ -1630,7 +1630,7 @@ bool is_process_meta_key(const std::string &key)
     return keys.count(key) > 0;
 }
 
-enum class RegionRole { Wall, Sparse, Solid, TopSurface, BottomSurface };
+enum class RegionRole { Wall, Sparse, Solid, TopSurface, BottomSurface, Ironing };
 
 // The role whose filament a region key is taken from (stamp_nozzle_region_values): top / bottom / solid / bridge /
 // ironing settings from the solid infill filament, other infill settings from the sparse infill filament, the rest
@@ -1641,7 +1641,9 @@ RegionRole region_key_role(const std::string &key)
         return RegionRole::Wall;
     // EdgeSlicer surface filaments: the settings of the top / bottom skin itself (and of the ironing over the
     // top skin) come from the filament that prints that skin. The shell layer counts stay with the solid infill.
-    if (boost::starts_with(key, "top_surface_") || boost::starts_with(key, "ironing"))
+    if (boost::starts_with(key, "ironing"))
+        return RegionRole::Ironing;
+    if (boost::starts_with(key, "top_surface_"))
         return RegionRole::TopSurface;
     if (boost::starts_with(key, "bottom_surface_"))
         return RegionRole::BottomSurface;
@@ -1956,6 +1958,8 @@ void stamp_nozzle_region_values(PrintRegionConfig &c)
     const int outer  = c.outer_wall_filament.value > 0 ? c.outer_wall_filament.value : wall;
     const int top    = c.top_surface_filament.value > 0 ? c.top_surface_filament.value : outer;
     const int bottom = c.bottom_surface_filament.value > 0 ? c.bottom_surface_filament.value : outer;
+    // Ironing: its own filament, else the top surface's (the surface it irons in every mode but "All solid layers").
+    const int ironing = c.ironing_filament.value > 0 ? c.ironing_filament.value : top;
     std::map<int, DynamicPrintConfig> parsed;
     auto values_of = [&](int filament) -> const DynamicPrintConfig * {
         if (filament < 1 || size_t(filament) > entries.size())
@@ -1969,7 +1973,7 @@ void stamp_nozzle_region_values(PrintRegionConfig &c)
         return &it->second;
     };
     std::set<std::string> keys;
-    for (int f : { wall, sparse, solid, top, bottom })
+    for (int f : { wall, sparse, solid, top, bottom, ironing })
         if (const DynamicPrintConfig *values = values_of(f))
             for (const std::string &key : values->keys())
                 keys.insert(key);
@@ -1979,6 +1983,7 @@ void stamp_nozzle_region_values(PrintRegionConfig &c)
                                                      role == RegionRole::Sparse        ? sparse :
                                                      role == RegionRole::TopSurface    ? top :
                                                      role == RegionRole::BottomSurface ? bottom :
+                                                     role == RegionRole::Ironing       ? ironing :
                                                                                          solid);
         ConfigOption             *dst    = c.option(key);
         if (values == nullptr || dst == nullptr)

@@ -3047,6 +3047,7 @@ static std::vector<unsigned int> used_mixed_filament_ids(const Print &print)
             add(rc.outer_wall_filament.value);
             add(rc.top_surface_filament.value);
             add(rc.bottom_surface_filament.value);
+            add(rc.ironing_filament.value);
         }
     }
     sort_remove_duplicates(ids);
