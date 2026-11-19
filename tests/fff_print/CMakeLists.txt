@@ -18,6 +18,7 @@ add_executable(${_TEST_NAME}_tests
 	test_cost_overrides_slice.cpp
 	test_multicolour_visual_only.cpp
 	test_height_colour_pattern_slice.cpp
+	test_layer_range_slice.cpp
 	test_cost_pricing_slice.cpp
 	test_gcodeprocessor.cpp
 	test_gcode_timing.cpp
@@ -90,6 +91,7 @@ add_executable(${_TEST_NAME}_tests
 	test_modifier_effect.cpp
 	test_tree_support_determinism.cpp
 	test_tree_support.cpp
+	test_organic_foot_gap.cpp
 	test_support_interface.cpp
 	test_support_patterns.cpp
 	test_stabilizers.cpp
