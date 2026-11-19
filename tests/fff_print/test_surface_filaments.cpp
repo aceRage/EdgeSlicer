@@ -487,7 +487,7 @@ struct LoadedProject
     DynamicPrintConfig config;
 };
 
-LoadedProject save_and_load(Model &model, const DynamicPrintConfig &config, const std::string &name)
+LoadedProject save_and_load(Model &model, DynamicPrintConfig config, const std::string &name)
 {
     const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() /
         ("snorca_tests_surffil_" + std::to_string(get_current_pid()));
