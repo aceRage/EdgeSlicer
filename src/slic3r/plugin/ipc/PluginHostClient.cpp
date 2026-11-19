@@ -75,6 +75,10 @@ void attach_plugin_identity(nlohmann::json& msg, const std::string& plugin_key)
     msg["required_orca_api"] = descriptor.required_orca_api;
     msg["author"]            = descriptor.author;
     msg["description"]       = descriptor.description;
+    // H5: the helper cannot read trust.json; send the tree hash this side verified instead.
+    const plugin_trust::TrustState trust = plugin_trust::evaluate(descriptor);
+    if (trust.allowed())
+        msg["verified_sha256"] = trust.sha256;
 }
 
 struct Job

@@ -142,6 +142,12 @@ bool plugin_key_has_different_pin(const TrustStore& store, const std::string& pl
 bool local_install_needs_prompt(const std::string& plugin_key, const std::string& sha256);
 
 TrustState evaluate(const PluginDescriptor& descriptor);
+
+// H5, helper only: the plugin tree hash EdgeSlicer verified (signature or pin) before it sent the
+// load. The helper cannot read trust.json (it is a secret store), so evaluate() in the helper
+// accepts a plugin whose tree still hashes to this value, and otherwise only a valid signature
+// from a shipped publisher key.
+void set_parent_verified_hash(const std::string& plugin_key, const std::string& sha256);
 TrustState evaluate_package(const boost::filesystem::path& package, const PluginDescriptor& descriptor);
 
 std::string refuse_untrusted_message();

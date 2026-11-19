@@ -532,13 +532,9 @@ bool apply_linux_sandbox(const SandboxSpec& spec, SandboxReport& report, std::st
         return add_req(path, write);
     };
 
-    // trust.json must stay readable so a child-side pin check can run. Grant the sidecar
-    // file, not all of data_dir. Skip if the path is gone (fork fixtures, empty hello).
-    if (!add_req_if_exists(plugin_trust::trust_sidecar_path().string(), false)) {
-        ::close(ruleset);
-        report.detail = error;
-        return false;
-    }
+    // H5: trust.json is not granted; the child checks the plugin tree against the hash Edge
+    // sent with the load (plugin_trust::set_parent_verified_hash).
+    (void) add_req_if_exists;
 
     if (!spec.python_home.empty() && !add_req(spec.python_home, false)) {
         ::close(ruleset);

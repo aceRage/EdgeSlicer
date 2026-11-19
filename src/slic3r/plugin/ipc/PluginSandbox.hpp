@@ -114,6 +114,11 @@ bool running_inside_flatpak();
 SandboxSpec make_sandbox_spec(const std::string& plugin_key, const std::string& write_root = {});
 SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPermissions& permissions, const std::string& write_root);
 
+// H5: drops grants that are or lie inside an EdgeSlicer secret store and narrows directory
+// grants that contain one to their direct entries (PluginAuditManager::secret_store_paths()).
+// make_sandbox_spec() calls it last; public for tests.
+void narrow_grants_around_secret_stores(SandboxSpec& spec);
+
 // Writable directory for the helper diagnostic log: write_root if set, else <data_dir>/plugin_host.
 std::string host_child_log_dir(const SandboxSpec& spec);
 std::string host_child_log_path(const SandboxSpec& spec);

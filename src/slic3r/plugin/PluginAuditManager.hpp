@@ -138,9 +138,30 @@ public:
     bool is_denied_path_keyword(const boost::filesystem::path& candidate) const;
 
     // is_denied_filename(candidate) || is_denied_path_keyword(candidate) ||
-    // is_ultranet_plugins_path(candidate). Convenience for call sites that only need to know
-    // whether a path is categorically off-limits, not which specific rule fired.
+    // is_ultranet_plugins_path(candidate) || is_secret_store_path(candidate). Convenience for call
+    // sites that only need to know whether a path is categorically off-limits, not which specific
+    // rule fired.
     bool is_denied_path(const boost::filesystem::path& candidate) const;
+
+    // H5: EdgeSlicer's own secret stores, found by reading the code that writes them:
+    //   {data_dir}/hub              phone hub: hub.json and settings.json (hub and relay tokens,
+    //                               the relay identity), printers.json, print_host_devices.json,
+    //                               snapmaker_keys.json, u1_lan_auth.json (LAN access), go2rtc.yaml
+    //   {data_dir}/plugins          UltraNet / Bambu network plug-in and its cloud session
+    //   {data_dir}/<app>.conf/.ini  app config (LAN access codes, cloud user, preferences)
+    //   {data_dir}/orca_plugins/trust.json   the plugin trust list
+    //   {data_dir}/plugin_host_acl  the Windows sandbox ACL journal
+    //   {data_dir}/go2rtc.yaml, simplyprint_oauth.json, FlashNetwork, cameratools
+    //   the crash-report folder (Windows %LOCALAPPDATA%/<app>, macOS .../<app>/SentryData)
+    // (Vendor and vault connector secrets are in the OS keychain via wxSecretStore.) No plugin may
+    // read or write them under any grant, Full access included: the audit hook denies them, and
+    // OS grants that would reach them are narrowed or dropped (make_sandbox_spec).
+    static std::vector<boost::filesystem::path> secret_store_paths();
+    bool                                        is_secret_store_path(const boost::filesystem::path& candidate) const;
+    // True when a grant root is a secret store, lies inside one, or contains one.
+    static bool grant_reaches_secret_store(const boost::filesystem::path& root);
+    // True when `root` contains one but is not itself inside one (it can be narrowed to its children).
+    static bool grant_contains_secret_store(const boost::filesystem::path& root);
 
     // UltraNet's native network plug-ins live in {data_dir}/plugins. Python plugin grants and
     // audited filesystem events must never reach that folder, even under full access or a

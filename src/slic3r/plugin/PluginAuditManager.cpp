@@ -13,6 +13,7 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/cstdlib.hpp>
 #include <boost/system/error_code.hpp>
 
 #include <algorithm>
@@ -1033,7 +1034,68 @@ bool PluginAuditManager::is_ultranet_plugins_path(const boost::filesystem::path&
 
 bool PluginAuditManager::is_denied_path(const boost::filesystem::path& candidate) const
 {
-    return is_denied_filename(candidate) || is_denied_path_keyword(candidate) || is_ultranet_plugins_path(candidate);
+    return is_denied_filename(candidate) || is_denied_path_keyword(candidate) || is_ultranet_plugins_path(candidate) ||
+           is_secret_store_path(candidate);
+}
+
+std::vector<boost::filesystem::path> PluginAuditManager::secret_store_paths()
+{
+    namespace fs = boost::filesystem;
+    std::vector<fs::path> out;
+    const std::string     data = data_dir();
+    if (!data.empty()) {
+        const fs::path d(data);
+        for (const char* name : {"hub", "plugins", "plugin_host_acl", "go2rtc.yaml", "simplyprint_oauth.json", "FlashNetwork", "cameratools"})
+            out.push_back(d / name);
+        out.push_back(d / "orca_plugins" / "trust.json");
+        for (const std::string& name : default_denied_filenames())
+            if (!name.empty() && name.front() != '.' && name != "trust.json")
+                out.push_back(d / name); // <app>.conf / .ini (and the G-code viewer's)
+    }
+    // Crash reports (sentry-native database), outside data_dir: SentryWrapper.cpp.
+#ifdef _WIN32
+    if (const char* local = boost::nowide::getenv("LOCALAPPDATA"); local != nullptr && *local != '\0')
+        out.push_back(fs::path(local) / SLIC3R_APP_KEY);
+#elif defined(__APPLE__)
+    if (const char* home = boost::nowide::getenv("HOME"); home != nullptr && *home != '\0')
+        out.push_back(fs::path(home) / "Library" / "Application Support" / SLIC3R_APP_KEY / "SentryData");
+#endif
+    return out;
+}
+
+bool PluginAuditManager::is_secret_store_path(const boost::filesystem::path& candidate) const
+{
+    if (candidate.empty())
+        return false;
+    boost::filesystem::path path = candidate;
+    if (path.filename() == "*" || path.filename().empty())
+        path = path.parent_path();
+    if (path.empty())
+        return false;
+    for (const boost::filesystem::path& secret : secret_store_paths())
+        if (is_ultranet_plugins_target(path, secret)) // "inside or equal", with the UltraNet rules
+            return true;
+    return false;
+}
+
+bool PluginAuditManager::grant_contains_secret_store(const boost::filesystem::path& root)
+{
+    if (root.empty())
+        return false;
+    boost::filesystem::path path = root;
+    if (path.filename() == "*" || path.filename().empty())
+        path = path.parent_path();
+    if (path.empty())
+        return false;
+    for (const boost::filesystem::path& secret : secret_store_paths())
+        if (is_ultranet_plugins_target(secret, path))
+            return true;
+    return false;
+}
+
+bool PluginAuditManager::grant_reaches_secret_store(const boost::filesystem::path& root)
+{
+    return PluginAuditManager::instance().is_secret_store_path(root) || grant_contains_secret_store(root);
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,6 +1129,11 @@ AuditDecision PluginAuditManager::check_path_access(const boost::filesystem::pat
         BOOST_LOG_TRIVIAL(warning) << "[AUDIT] block path=" << path.string() << " is_write=" << is_write << " plugin=" << plugin_key
                                    << " reason=denied ultranet path";
         return {false, "denied ultranet path"};
+    }
+    if (is_secret_store_path(path)) {
+        BOOST_LOG_TRIVIAL(warning) << "[AUDIT] block path=" << path.string() << " is_write=" << is_write << " plugin=" << plugin_key
+                                   << " reason=EdgeSlicer secret store";
+        return {false, "denied secret store"};
     }
 
     namespace fs       = boost::filesystem;

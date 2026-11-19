@@ -8,6 +8,7 @@
 #include <libslic3r/Utils.hpp>
 #include <slic3r/plugin/PluginAuditManager.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
+#include <slic3r/plugin/PluginTrust.hpp>
 #include <slic3r/plugin/PyPluginTrampoline.hpp>
 #include <slic3r/plugin/PythonInterpreter.hpp>
 #include <slic3r/plugin/pluginTypes/script/ScriptPluginCapability.hpp>
@@ -96,6 +97,12 @@ bool load_plugin(const nlohmann::json& msg, std::string& error)
         return false;
     }
     PluginManager& manager = PluginManager::instance();
+    // H5: trust.json is not readable here. Edge sends the tree hash it verified; trust
+    // evaluation in this process accepts the plugin only while its files still hash to it.
+    if (msg.contains("verified_sha256") && msg["verified_sha256"].is_string())
+        plugin_trust::set_parent_verified_hash(plugin_key, msg["verified_sha256"].get<std::string>());
+    else
+        plugin_trust::set_parent_verified_hash(plugin_key, std::string());
     // Edge already resolved the entry. Do not scan the plugin directory: a helper .whl sitting
     // next to the .py entry is a hashed dependency, and find_installed_plugin_entry would treat
     // it as a second plugin and mark the package invalid.

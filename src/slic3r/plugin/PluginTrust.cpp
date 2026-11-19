@@ -3,6 +3,7 @@
 #include "PluginAuditManager.hpp"
 #include "PluginFsUtils.hpp"
 #include "PluginManager.hpp"
+#include "ipc/PluginIpcProtocol.hpp"
 
 #include "libslic3r/Utils.hpp"
 #include "slic3r/GUI/I18N.hpp"
@@ -27,6 +28,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <system_error>
@@ -1068,6 +1070,36 @@ std::string trust_label(const TrustState& state)
     }
 }
 
+namespace {
+std::mutex& parent_verified_mutex()
+{
+    static std::mutex m;
+    return m;
+}
+std::map<std::string, std::string>& parent_verified_map()
+{
+    static std::map<std::string, std::string> m;
+    return m;
+}
+std::string parent_verified_hash(const std::string& plugin_key)
+{
+    std::lock_guard<std::mutex> lock(parent_verified_mutex());
+    const auto                  it = parent_verified_map().find(plugin_key);
+    return it == parent_verified_map().end() ? std::string() : it->second;
+}
+TrustStore shipped_only_trust_store()
+{
+    TrustStore store;
+    bool       shipped_corrupt = false;
+    store.shipped_publishers   = publishers_from_json(load_json_object_file(shipped_keys_path(), shipped_corrupt), "shipped");
+    if (shipped_corrupt)
+        store.shipped_publishers.clear();
+    for (Publisher& pub : store.shipped_publishers)
+        pub.source = "shipped";
+    return store;
+}
+} // namespace
+
 TrustState evaluate_package(const boost::filesystem::path& package, const PluginDescriptor& descriptor)
 {
     TrustState state;
@@ -1086,7 +1118,17 @@ TrustState evaluate_package(const boost::filesystem::path& package, const Plugin
         return state;
     }
 
-    const TrustStore store = load_trust_store();
+    if (plugin_ipc::in_child_process()) {
+        const std::string expected = parent_verified_hash(descriptor.plugin_key);
+        if (!expected.empty() && expected == state.sha256) {
+            state.kind  = TrustKind::ApprovedLocally;
+            state.label = trust_label(state);
+            return state;
+        }
+    }
+
+    // In the helper trust.json is not readable: only the shipped publisher keys apply there.
+    const TrustStore store = plugin_ipc::in_child_process() ? shipped_only_trust_store() : load_trust_store();
 
     Signature   sig;
     std::string sig_error;
@@ -1111,6 +1153,15 @@ TrustState evaluate_package(const boost::filesystem::path& package, const Plugin
     state.error = refuse_untrusted_message();
     state.label = trust_label(state);
     return state;
+}
+
+void set_parent_verified_hash(const std::string& plugin_key, const std::string& sha256)
+{
+    std::lock_guard<std::mutex> lock(parent_verified_mutex());
+    if (sha256.empty())
+        parent_verified_map().erase(plugin_key);
+    else
+        parent_verified_map()[plugin_key] = sha256;
 }
 
 TrustState evaluate(const PluginDescriptor& descriptor)

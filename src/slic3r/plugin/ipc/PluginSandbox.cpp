@@ -11,6 +11,7 @@
 #include <slic3r/plugin/PluginDescriptor.hpp>
 #include <slic3r/plugin/PluginFsUtils.hpp>
 #include "slic3r/plugin/EdgePythonInclude.hpp"
+#include <slic3r/plugin/PluginAuditManager.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
 #include <slic3r/plugin/PluginTrust.hpp>
 #include <slic3r/plugin/PythonInterpreter.hpp>
@@ -338,12 +339,8 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
     if (path_exists(resources))
         add_unique_path(spec.extra_paths, resources, false);
 
-    // Grant the trust sidecar file, not all of data_dir (presets, printer state).
-    // Skip when the file is not there yet (fresh data dir); Linux already uses
-    // add_req_if_exists. Creating an empty sidecar would change trust semantics.
-    const boost::filesystem::path sidecar = plugin_trust::trust_sidecar_path();
-    if (path_exists(sidecar.string()))
-        add_unique_path(spec.extra_paths, sidecar.string(), false);
+    // H5: trust.json is NOT granted. The helper checks the plugin tree against the hash Edge
+    // verified (sent with every load), so it never needs the trust list.
 
     if (!descriptor.plugin_key.empty()) {
         try {
@@ -373,7 +370,66 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
             add_unique_path(spec.extra_paths, path, true, true, true);
         }
     }
+    narrow_grants_around_secret_stores(spec);
     return spec;
+}
+
+void narrow_grants_around_secret_stores(SandboxSpec& spec)
+{
+    namespace fs = boost::filesystem;
+    // A grant that is (or is inside) a secret store is dropped. A directory grant that contains
+    // one (%USERPROFILE%/*, ~/.config/*, a portable install's folder that holds data_dir) is
+    // replaced by grants on its direct entries that do not reach a secret store; an entry that
+    // still contains one is dropped. Landlock cannot deny below a granted tree, and on Windows
+    // an inherited allow would reach the secrets, so narrowing is the one rule for every OS.
+    constexpr size_t         k_max_entries = 512;
+    std::vector<SandboxPath> narrowed;
+    for (const SandboxPath& grant : spec.extra_paths) {
+        if (!PluginAuditManager::grant_reaches_secret_store(grant.path)) {
+            narrowed.push_back(grant);
+            continue;
+        }
+        if (PluginAuditManager::instance().is_secret_store_path(grant.path)) {
+            BOOST_LOG_TRIVIAL(warning) << "Plugin sandbox: grant dropped, it is an EdgeSlicer secret store: " << grant.path;
+            continue;
+        }
+        boost::system::error_code ec;
+        if (!fs::is_directory(grant.path, ec)) {
+            BOOST_LOG_TRIVIAL(warning) << "Plugin sandbox: grant dropped, it reaches an EdgeSlicer secret store: " << grant.path;
+            continue;
+        }
+        std::vector<SandboxPath> children;
+        bool                     too_many = false;
+        for (fs::directory_iterator it(grant.path, ec), end; !ec && it != end; it.increment(ec)) {
+            if (children.size() >= k_max_entries) {
+                too_many = true;
+                break;
+            }
+            const std::string child = it->path().string();
+            if (PluginAuditManager::grant_reaches_secret_store(child)) {
+                BOOST_LOG_TRIVIAL(warning) << "Plugin sandbox: left out of a grant, it reaches an EdgeSlicer secret store: " << child;
+                continue;
+            }
+            SandboxPath narrowed_child = grant;
+            narrowed_child.path        = child;
+            children.push_back(std::move(narrowed_child));
+        }
+        if (ec || too_many) {
+            BOOST_LOG_TRIVIAL(warning) << "Plugin sandbox: grant dropped, it reaches an EdgeSlicer secret store and cannot be narrowed: "
+                                       << grant.path;
+            continue;
+        }
+        BOOST_LOG_TRIVIAL(info) << "Plugin sandbox: grant narrowed around EdgeSlicer secret stores: " << grant.path << " -> "
+                                << children.size() << " entries";
+        for (SandboxPath& c : children)
+            add_unique_path(narrowed, c.path, c.write, c.low_label, c.fail_closed_low);
+    }
+    spec.extra_paths = std::move(narrowed);
+    for (std::string* root : {&spec.plugin_root, &spec.write_root})
+        if (!root->empty() && PluginAuditManager::grant_reaches_secret_store(*root)) {
+            BOOST_LOG_TRIVIAL(warning) << "Plugin sandbox: root dropped, it reaches an EdgeSlicer secret store: " << *root;
+            root->clear();
+        }
 }
 
 bool apply_os_sandbox(const SandboxSpec& spec, SandboxReport& report, std::string& error)
