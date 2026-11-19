@@ -328,7 +328,7 @@ static double get_distance_raw(const Vec3f &p, const Interior &interior)
 
     if (!interior.accessor) interior.reset_accessor();
 
-    auto v       = (p * interior.voxel_scale).cast<double>();
+    Vec3d v      = (p * interior.voxel_scale).cast<double>();
     auto grididx = interior.gridptr->transform().worldToIndexCellCentered(
         {v.x(), v.y(), v.z()});
 
