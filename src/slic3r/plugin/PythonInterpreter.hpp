@@ -56,6 +56,17 @@ public:
     // Shared user-writable package directory added to sys.path for plugins.
     static std::string shared_packages_dir();
 
+    // Interpreter start-up hook files at the top level of `dir`: sitecustomize / usercustomize
+    // (module or package, any extension) and *.pth, as file names, sorted. Python runs with site
+    // imports off (H1), so such files are inert here; a dependency that ships one is refused anyway.
+    static std::vector<std::string> find_startup_hook_files(const std::string& dir);
+
+    // Appends shared_packages_dir() to the end of sys.path (once). The app does it at the end of
+    // initialize(), after the audit hook; the sandboxed helper only after its OS sandbox is in
+    // place, so nothing a dependency installed is importable before then (H1).
+    bool add_shared_packages_to_sys_path(std::string& error);
+    bool shared_packages_on_sys_path() const { return m_shared_packages_added.load(std::memory_order_acquire); }
+
     // Bundled Python executable path, or empty when no executable is found.
     static std::string bundled_python_executable();
 
@@ -144,6 +155,8 @@ private:
     void abandon();
 
     std::atomic<bool> m_initialized{false};
+    std::atomic<bool> m_shared_packages_added{false};
+    bool              add_shared_packages_with_gil(std::string& error);
     mutable std::shared_timed_mutex m_runtime_mutex;
     PyThreadState* m_main_thread_state = nullptr; // thread state saved after releasing GIL post-initialize
     std::unique_ptr<pybind11::scoped_interpreter> m_interpreter;

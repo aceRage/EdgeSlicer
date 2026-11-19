@@ -31,6 +31,7 @@ add_executable(${_TEST_NAME}_tests
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_slicing_pipeline_phase6.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_ipc.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_sandbox.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_h1.cpp>
     camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp

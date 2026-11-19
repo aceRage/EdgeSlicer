@@ -382,6 +382,14 @@ int run_child(Channel& channel)
     }
     child_diag("apply_os_sandbox end kind=" + report.kind + " applied=" + (report.applied ? "1" : "0"));
 
+    // H1: dependencies installed for plugins become importable only now, after the sandbox. The
+    // interpreter started with site imports off, so nothing from that folder ran before this.
+    {
+        std::string packages_error;
+        if (!PythonInterpreter::instance().add_shared_packages_to_sys_path(packages_error))
+            child_diag("shared packages not on sys.path: " + packages_error);
+    }
+
     nlohmann::json hello_ok = {{"type", k_type_hello_ok},
                                {"protocol_version", k_protocol_version},
                                {"sandbox", sandbox_report_to_json(report)}};

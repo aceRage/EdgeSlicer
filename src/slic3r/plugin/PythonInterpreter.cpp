@@ -5,6 +5,7 @@
 #include "PythonPluginBridge.hpp"
 #include "slic3r/Utils/Http.hpp"
 #include <algorithm>
+#include <cctype>
 #include <atomic>
 #include <chrono>
 #include <boost/filesystem/operations.hpp>
@@ -528,6 +529,62 @@ std::string PythonInterpreter::shared_packages_dir()
     return (boost::filesystem::path(data_dir()) / "python" / "packages" / PythonInterpreter::python_abi_tag()).string();
 }
 
+std::vector<std::string> PythonInterpreter::find_startup_hook_files(const std::string& dir)
+{
+    namespace fs = boost::filesystem;
+    std::vector<std::string> found;
+    boost::system::error_code ec;
+    if (dir.empty() || !fs::is_directory(dir, ec))
+        return found;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name  = it->path().filename().string();
+        std::string       lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        const std::string stem = lower.substr(0, lower.find('.'));
+        const bool        pth  = lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".pth") == 0;
+        if (pth || stem == "sitecustomize" || stem == "usercustomize")
+            found.push_back(name);
+    }
+    std::sort(found.begin(), found.end());
+    return found;
+}
+
+bool PythonInterpreter::add_shared_packages_with_gil(std::string& error)
+{
+    namespace fs = boost::filesystem;
+    if (m_shared_packages_added.load(std::memory_order_acquire))
+        return true;
+    const fs::path shared_packages = shared_packages_dir();
+    boost::system::error_code ec;
+    fs::create_directories(shared_packages, ec);
+    if (ec) {
+        error = "Failed to create Python shared package directory: " + shared_packages.string() + ": " + ec.message();
+        return false;
+    }
+    for (const std::string& name : find_startup_hook_files(shared_packages.string()))
+        BOOST_LOG_TRIVIAL(warning) << "Python shared packages hold a start-up hook file that is never run: " << name;
+    if (!add_sys_path_entry(shared_packages, error, nullptr, /*append=*/true))
+        return false;
+    m_shared_packages_added.store(true, std::memory_order_release);
+    BOOST_LOG_TRIVIAL(info) << "Added Python shared package directory to sys.path: " << shared_packages.string();
+    return true;
+}
+
+bool PythonInterpreter::add_shared_packages_to_sys_path(std::string& error)
+{
+    if (m_shared_packages_added.load(std::memory_order_acquire))
+        return true;
+    if (!is_initialized()) {
+        error = "Python interpreter not initialized";
+        return false;
+    }
+    std::shared_lock<std::shared_timed_mutex> runtime_lock(m_runtime_mutex);
+    const PyGILState_STATE gil = PyGILState_Ensure();
+    const bool             ok  = add_shared_packages_with_gil(error);
+    PyGILState_Release(gil);
+    return ok;
+}
+
 std::string PythonInterpreter::bundled_python_home()
 {
     return find_bundled_python_home().string();
@@ -668,6 +725,10 @@ bool PythonInterpreter::initialize()
         config.use_environment     = 0;
         config.user_site_directory = 0;
         config.write_bytecode      = 0;
+        // H1: no `site` at start-up, in the app and in the helper. site imports sitecustomize /
+        // usercustomize and reads *.pth from the path, which would run code a dependency planted
+        // before the audit hook (and, in the helper, before the OS sandbox).
+        config.site_import         = 0;
         if (in_helper) {
             config.safe_path    = 1;
             config.faulthandler = 1;
@@ -704,9 +765,8 @@ bool PythonInterpreter::initialize()
             search.push_back((python_lib / "lib-dynload").string());
             search.push_back(python_home);
 #endif
-            const std::string packages = shared_packages_dir();
-            if (!packages.empty())
-                search.push_back(packages);
+            // The shared packages are NOT a start-up search path (H1): they are appended to sys.path
+            // later, after the audit hook (app) or the OS sandbox (helper).
             bool paths_ok = true;
             for (const std::string& p : search) {
                 boost::system::error_code ec;
@@ -808,17 +868,12 @@ bool PythonInterpreter::initialize()
             BOOST_LOG_TRIVIAL(warning) << "Failed to capture asyncio event loop class at interpreter init";
         }
 
-        const fs::path shared_packages = shared_packages_dir();
-        boost::system::error_code ec;
-        fs::create_directories(shared_packages, ec);
-        if (ec) {
-            BOOST_LOG_TRIVIAL(warning) << "Failed to create Python shared package directory: " << shared_packages.string() << ": "
-                                       << ec.message();
-        } else {
+        // The app adds the shared packages now (after the audit hook). The helper waits until
+        // run_child() has applied the OS sandbox (H1).
+        m_shared_packages_added.store(false, std::memory_order_release);
+        if (!in_helper) {
             std::string path_error;
-            if (add_sys_path_entry(shared_packages, path_error, nullptr, /*append=*/true))
-                BOOST_LOG_TRIVIAL(info) << "Added Python shared package directory to sys.path: " << shared_packages.string();
-            else
+            if (!add_shared_packages_with_gil(path_error))
                 BOOST_LOG_TRIVIAL(warning) << path_error;
         }
 
