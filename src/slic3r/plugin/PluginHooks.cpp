@@ -12,6 +12,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/GCode/PostProcessor.hpp"
+#include "PluginPreferences.hpp"
 #include "libslic3r/LifecycleEvents.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/format.hpp"
@@ -186,7 +187,13 @@ void install_gcode_post_process_hook()
 void install()
 {
     install_capability_resolver();
-    install_slicing_pipeline_hook();
+    // H7 / D4: the early slicing steps run plugin code inside EdgeSlicer, unsandboxed, with a
+    // live Print. Off by default (Preferences > Python plugins); read once, at start-up.
+    // Without it a slicing-pipeline plugin only runs at psGCodePostProcess, in the helper.
+    if (plugin_prefs::enabled(plugin_prefs::k_in_process_steps))
+        install_slicing_pipeline_hook();
+    else
+        Print::set_slicing_pipeline_hook_fn(nullptr);
     install_gcode_post_process_hook();
     install_lifecycle_event_hook();
 }

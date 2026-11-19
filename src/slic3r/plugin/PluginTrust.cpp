@@ -4,6 +4,8 @@
 #include "PluginFsUtils.hpp"
 #include "PluginManager.hpp"
 #include "ipc/PluginIpcProtocol.hpp"
+#include "ipc/PluginHostProcess.hpp"
+#include "PluginPreferences.hpp"
 
 #include "libslic3r/Utils.hpp"
 #include "slic3r/GUI/I18N.hpp"
@@ -1087,6 +1089,12 @@ std::string parent_verified_hash(const std::string& plugin_key)
     const auto                  it = parent_verified_map().find(plugin_key);
     return it == parent_verified_map().end() ? std::string() : it->second;
 }
+std::string unsigned_refused_message()
+{
+    return _u8L("This plugin is not signed by a known publisher. This EdgeSlicer release runs only signed plugins "
+                "unless \"Allow plugins that are not signed by a known publisher\" is on in Preferences.");
+}
+
 TrustStore shipped_only_trust_store()
 {
     TrustStore store;
@@ -1145,6 +1153,13 @@ TrustState evaluate_package(const boost::filesystem::path& package, const Plugin
     }
 
     if (is_hash_pinned(store, descriptor.plugin_key, state.sha256)) {
+        // H7 / D2: a signed release build runs only signed plugins unless the user allows
+        // unsigned ones (Preferences > Python plugins). Developer builds keep local pins.
+        if (plugin_ipc::app_is_signed_release() && !plugin_prefs::enabled(plugin_prefs::k_allow_unsigned_plugins)) {
+            state.error = unsigned_refused_message();
+            state.label = trust_label(state);
+            return state;
+        }
         state.kind  = TrustKind::ApprovedLocally;
         state.label = trust_label(state);
         return state;

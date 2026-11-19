@@ -432,6 +432,16 @@ bool win_file_has_valid_signature(const std::wstring& path)
 } // namespace
 #endif
 
+bool app_is_signed_release()
+{
+#ifdef _WIN32
+    static const bool signed_release = win_file_has_valid_signature(boost::dll::program_location().wstring());
+    return signed_release;
+#else
+    return false;
+#endif
+}
+
 bool helper_runnable(std::string& reason)
 {
     const boost::filesystem::path path = helper_path();

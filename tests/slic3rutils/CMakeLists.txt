@@ -36,6 +36,7 @@ add_executable(${_TEST_NAME}_tests
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_h3.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_h4.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_h5.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_h7.cpp>
     camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp

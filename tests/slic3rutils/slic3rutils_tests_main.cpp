@@ -42,9 +42,24 @@ CATCH_REGISTER_LISTENER(TemporaryDirListener)
 
 #ifdef EDGE_PYTHON_PLUGINS
 #include <slic3r/plugin/PluginManager.hpp>
+#include <slic3r/plugin/PluginPreferences.hpp>
 #include <slic3r/plugin/PythonInterpreter.hpp>
 
 namespace {
+
+// The plugin tests exercise the early slicing-step hooks, which ship off by default (H7, a user
+// preference read when the hooks are installed). Turn them on for the run; the H7 test turns
+// them off again around its own check.
+struct PluginInProcessStepsOn : Catch::TestEventListenerBase
+{
+    using TestEventListenerBase::TestEventListenerBase;
+
+    void testRunStarting(Catch::TestRunInfo const &info) override
+    {
+        TestEventListenerBase::testRunStarting(info);
+        Slic3r::plugin_prefs::set_override_for_testing(Slic3r::plugin_prefs::k_in_process_steps, 1);
+    }
+};
 
 // Finalizes the embedded interpreter once, after the last test case, and never between cases.
 // CPython cannot be reinitialized after Py_Finalize.
@@ -65,6 +80,7 @@ struct PythonInterpreterRunEnd : Catch::TestEventListenerBase
 } // namespace
 
 CATCH_REGISTER_LISTENER(PythonInterpreterRunEnd)
+CATCH_REGISTER_LISTENER(PluginInProcessStepsOn)
 #endif
 
 // These three cases talk to real hosts on the internet (github.com, jigsaw.w3.org), so their

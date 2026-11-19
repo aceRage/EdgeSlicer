@@ -44,6 +44,9 @@ bool                    helper_exists();
 bool helper_runnable(std::string& reason);
 // The signature rule on its own, for tests: app signed => helper must be signed.
 bool helper_signature_policy_allows(bool app_signed, bool helper_signed);
+// True when this EdgeSlicer executable carries a valid Authenticode signature (Windows release
+// builds). Always false on macOS and Linux for now. Checked once per process.
+bool app_is_signed_release();
 
 // EDGE_PLUGIN_HOST / EDGE_PLUGIN_HOST_IN_PROCESS are ignored unless this is true.
 // Production never enables it; slic3rutils tests may. Hidden so a release DSO does not
