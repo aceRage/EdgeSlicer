@@ -50,8 +50,20 @@ struct Silhouette
     // Non fatal issues, translatable english text
     std::vector<std::string> warnings;
 
+    // How the traced shapes were moved into the frame of the silhouette:
+    // flipped (Y, and X when mirrored), scaled by the factor, moved by -center
+    double factor   = 1.;
+    Point  center   = Point(0, 0);
+    bool   mirrored = false;
+
     bool empty() const { return shape.empty(); }
 };
+
+/// <summary>
+/// Move a traced shape (e.g. one colour level) into the frame of the silhouette made from the
+/// same trace, so it lies on the silhouette as it does in the image.
+/// </summary>
+ExPolygons to_silhouette_frame(const ExPolygons &traced, const Silhouette &silhouette);
 
 /// <summary>
 /// Create the silhouette from traced shapes.
@@ -129,6 +141,84 @@ CookieCutterSections cookie_cutter_sections(const ExPolygons &silhouette, const 
 /// </summary>
 /// <param name="silhouette">Silhouette::shape</param>
 OutlineObjectResult make_cookie_cutter(const ExPolygons &silhouette, const CookieCutterParams &params);
+
+// ---- box with a lid ----------------------------------------------------------------------------
+
+// One printable object made of parts. Every part is a closed mesh in millimetres; the parts of
+// an object share one frame and the object lies on z = 0 in its print orientation.
+struct OutlinePart
+{
+    std::string          name;
+    indexed_triangle_set mesh;
+    // -1 .. body of the object, otherwise index of the colour level the part shows
+    int level = -1;
+};
+
+struct OutlineObject
+{
+    std::string              name;
+    std::vector<OutlinePart> parts;
+};
+
+struct OutlineBoxParams
+{
+    // Outer height of the base, the floor included [in mm]
+    double height = 25.;
+    double wall   = 1.6; // four lines of a 0.4 mm nozzle
+    double floor  = 1.2;
+    // Chamfer of the bottom edge of the base [in mm], it hides elephant foot. 0 = off
+    double chamfer = 0.6;
+
+    double lid_thickness = 2.;
+    // The lid is larger than the base by this distance on every side [in mm], 0 = flush
+    double lid_overhang = 1.5;
+    // The lip under the lid goes into the base
+    double lip_height    = 4.;
+    double lip_thickness = 1.6;
+    // Gap between the lip and the wall on every side [in mm]
+    double clearance = 0.2;
+
+    // The colour levels of the image are inlaid into the top face of the lid. The lid is printed
+    // with its top face on the bed, so the picture is in the first layers.
+    bool   decoration       = true;
+    double decoration_depth = 0.6;
+    // The picture keeps this distance from the edge of the base outline [in mm]
+    double decoration_margin = 0.8;
+};
+
+// Cross-sections of the box in the frame of the silhouette (as the closed box is seen from above)
+struct OutlineBoxSections
+{
+    ExPolygons wall;   // wall of the base
+    ExPolygons cavity; // inside of the base, empty when the shape is too thin for one
+    ExPolygons lid;    // plate of the lid
+    ExPolygons lip;    // lip under the lid
+    // Picture on the lid, one shape per colour level (can be empty), levels do not overlap
+    std::vector<ExPolygons> decoration;
+};
+
+struct OutlineBoxResult
+{
+    OutlineObject base;
+    // Print orientation: the top face lies on the bed and the lip points up, so the lid is
+    // mirrored against the base
+    OutlineObject lid;
+    // Empty on success, translatable english text
+    std::string              error;
+    std::vector<std::string> warnings;
+
+    bool is_valid() const { return error.empty() && !base.parts.empty() && !lid.parts.empty(); }
+};
+
+OutlineBoxParams sanitize(const OutlineBoxParams &params);
+
+/// <param name="detail">Colour levels in the frame of the silhouette (to_silhouette_frame)</param>
+OutlineBoxSections outline_box_sections(const ExPolygons &silhouette, const std::vector<ExPolygons> &detail, const OutlineBoxParams &params);
+
+/// <summary>
+/// Create a box in the shape of the silhouette and a lid for it.
+/// </summary>
+OutlineBoxResult make_outline_box(const ExPolygons &silhouette, const std::vector<ExPolygons> &detail, const OutlineBoxParams &params);
 
 // ---- building blocks (also used by tests) ------------------------------------------------------
 
