@@ -1,5 +1,6 @@
 #include "ImageToObjectDialog.hpp"
 
+#include "GLCanvas3D.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "GUI_ObjectList.hpp"
@@ -12,7 +13,9 @@
 
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/LocalesUtils.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/NSVGUtils.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
@@ -33,6 +36,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <sstream>
 
 namespace Slic3r { namespace GUI {
@@ -44,6 +48,16 @@ const int   I2O_PREVIEW_PX   = 240;
 // Longest side of the image traced for the live preview / for the object
 const int   I2O_PREVIEW_SIDE = 480;
 const int   I2O_FINAL_SIDE   = 1536;
+// Gap between objects added to the plate together [in mm]
+const double I2O_OBJECT_GAP  = 8.;
+
+// One filled shape of the preview picture
+struct I2OLayer
+{
+    ExPolygons  shape;
+    std::string fill; // "#RRGGBB"
+    double      opacity = 1.;
+};
 
 unsigned char i2o_checker(int x, int y) { return ((x / 8 + y / 8) % 2) ? 205 : 235; }
 
@@ -76,24 +90,26 @@ wxBitmap i2o_bitmap(const unsigned char *rgba, int w, int h, int px)
     return wxBitmap(image);
 }
 
-// Cross-sections of the cutter seen from above: handle, blade and what the clean-up removed
-wxBitmap i2o_render(const Silhouette &silhouette, const CookieCutterSections &sections, int max_px)
+// The layers seen from above, painted in the given order. Shapes have Y up.
+wxBitmap i2o_render(const std::vector<I2OLayer> &layers, int max_px)
 {
-    if (sections.handle.empty())
+    BoundingBox bb;
+    for (const I2OLayer &layer : layers)
+        if (!layer.shape.empty())
+            bb.merge(get_extents(layer.shape));
+    if (!bb.defined)
         return wxBitmap(i2o_blank(max_px));
-    BoundingBox bb = get_extents(sections.handle);
-    if (!silhouette.removed.empty())
-        bb.merge(get_extents(silhouette.removed));
     auto to_um = [](coord_t c) { return std::llround(double(c) * SCALING_FACTOR * 1000.); };
     long long w = std::max(1ll, (long long) to_um(bb.size().x()));
     long long h = std::max(1ll, (long long) to_um(bb.size().y()));
 
     std::stringstream svg;
     svg << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << w << "\" height=\"" << h << "\" viewBox=\"0 0 " << w << " " << h << "\">";
-    auto write = [&svg, &bb, &to_um](const ExPolygons &shape, const char *fill) {
-        if (shape.empty())
-            return;
-        svg << "<path fill=\"" << fill << "\" fill-rule=\"evenodd\" d=\"";
+    for (const I2OLayer &layer : layers) {
+        if (layer.shape.empty())
+            continue;
+        svg << "<path fill=\"" << layer.fill << "\" fill-opacity=\"" << float_to_string_decimal_point(layer.opacity)
+            << "\" fill-rule=\"evenodd\" d=\"";
         auto write_polygon = [&svg, &bb, &to_um](const Slic3r::Polygon &polygon) {
             for (size_t k = 0; k < polygon.points.size(); ++k)
                 // the shape has Y up, the picture has Y down
@@ -101,16 +117,13 @@ wxBitmap i2o_render(const Silhouette &silhouette, const CookieCutterSections &se
                     << to_um(bb.max.y() - polygon.points[k].y());
             svg << "Z";
         };
-        for (const ExPolygon &e : shape) {
+        for (const ExPolygon &e : layer.shape) {
             write_polygon(e.contour);
             for (const Slic3r::Polygon &hole : e.holes)
                 write_polygon(hole);
         }
         svg << "\"/>";
-    };
-    write(sections.handle, "#8FB3E8");
-    write(sections.blade, "#1F3F7A");
-    write(silhouette.removed, "#E03030");
+    }
     svg << "</svg>";
 
     NSVGimage_ptr nsvg = Slic3r::nsvgParse(svg.str(), "px");
@@ -136,6 +149,63 @@ wxString i2o_messages(const std::vector<std::string> &messages)
     return out;
 }
 
+wxString i2o_filament_label(int index) { return index == 0 ? _L("Default") : wxString::Format(_L("Filament %d"), index); }
+
+// Add the objects to the plate, side by side, as one undo step
+void i2o_add_objects(Plater *plater, const std::vector<OutlineObject> &objects, const ImageToObjectDialog &dialog)
+{
+    Plater::TakeSnapshot snapshot(plater, "Image to object");
+    Model               &model = plater->model();
+    std::vector<size_t>  object_idxs;
+
+    // The first object goes to an empty place of the plate, the next ones beside it
+    auto   start  = plater->build_volume().bounding_volume2d().center();
+    auto   cell   = plater->canvas3D()->get_nearest_empty_cell({start(0), start(1)});
+    double next_x = double(cell(0));
+    double y      = double(cell(1));
+    bool   first  = true;
+
+    for (const OutlineObject &source : objects) {
+        if (source.parts.empty())
+            continue;
+        ModelObject *object = model.add_object();
+        object->name        = source.name;
+        object->add_instance(); // each object should have at least one instance
+        BoundingBoxf3 bb;
+        for (const OutlinePart &part : source.parts) {
+            TriangleMesh mesh{indexed_triangle_set(part.mesh)};
+            bb.merge(mesh.bounding_box());
+            // the copying overload keeps the mesh where it is, so the parts stay aligned
+            ModelVolume *volume = object->add_volume(mesh);
+            volume->name        = part.name;
+            // the body follows the filament of the object
+            if (int extruder = dialog.extruder(part); extruder > 0 && part.level >= 0)
+                volume->config.set_key_value("extruder", new ConfigOptionInt(extruder));
+        }
+        int body = 0;
+        for (const OutlinePart &part : source.parts)
+            if (part.level < 0)
+                body = dialog.extruder(part);
+        object->config.set_key_value("extruder", new ConfigOptionInt(body));
+        object->invalidate_bounding_box();
+        object->translate(-bb.center());
+
+        double half = bb.size().x() / 2.;
+        double x    = first ? next_x : next_x + half;
+        object->instances[0]->set_offset(Vec3d(x, y, -object->origin_translation.z()));
+        object->ensure_on_bed();
+        next_x = x + half + I2O_OBJECT_GAP;
+        first  = false;
+
+        model.InitializeAssemblyPositions({object});
+        Slic3r::save_object_mesh(*object);
+        object_idxs.push_back(model.objects.size() - 1);
+    }
+    if (!object_idxs.empty())
+        wxGetApp().obj_list()->paste_objects_into_list(object_idxs);
+    wxGetApp().mainframe->update_title();
+}
+
 } // namespace
 
 ImageToObjectSettings ImageToObjectDialog::load_from_config()
@@ -151,25 +221,42 @@ ImageToObjectSettings ImageToObjectDialog::load_from_config()
             out = std::clamp(std::stod(cfg->get(I2O_CFG_SECTION, key)), min, max);
         } catch (...) {}
     };
+    auto read_int = [cfg](const char *key, int &out, int min, int max) {
+        if (!cfg->has(I2O_CFG_SECTION, key))
+            return;
+        try {
+            out = std::clamp(std::stoi(cfg->get(I2O_CFG_SECTION, key)), min, max);
+        } catch (...) {}
+    };
     auto read_bool = [cfg](const char *key, bool &out) {
         if (cfg->has(I2O_CFG_SECTION, key))
             out = cfg->get(I2O_CFG_SECTION, key) == "1";
     };
+    int type = int(s.type);
+    read_int("type", type, 0, 1);
+    s.type = ImageObjectType(type);
     read_double("blur", s.blur, 0., 5.);
     read_double("size", s.silhouette.longest_side, 10., 1000.);
     read_double("close_gaps", s.silhouette.close_gaps, 0., 5.);
     read_double("min_feature", s.silhouette.min_feature, 0., 10.);
     read_bool("fill_holes", s.silhouette.fill_holes);
     read_bool("largest_only", s.silhouette.largest_only);
-    read_bool("mirror", s.silhouette.mirror);
+    read_bool("mirror", s.cutter_mirror);
     read_double("blade_height", s.cutter.blade_height, 3., 100.);
     read_double("blade_thickness", s.cutter.blade_thickness, 0.3, 5.);
     read_double("handle_width", s.cutter.handle_width, 0.3, 30.);
     read_double("handle_height", s.cutter.handle_height, 0.4, 20.);
     read_bool("sharp_edge", s.cutter.sharp_edge);
-    double braces = double(int(s.cutter.braces));
-    read_double("braces", braces, 0., 2.);
-    s.cutter.braces = CutterBraces(int(braces));
+    int braces = int(s.cutter.braces);
+    read_int("braces", braces, 0, 2);
+    s.cutter.braces = CutterBraces(braces);
+    read_double("box_height", s.box.height, 3., 300.);
+    read_double("box_wall", s.box.wall, 0.4, 10.);
+    read_double("lid_overhang", s.box.lid_overhang, 0., 10.);
+    read_double("lid_clearance", s.box.clearance, 0., 1.);
+    read_int("picture_colors", s.picture_colors, 0, IMAGE_OBJECT_MAX_COLORS);
+    if (s.picture_colors == 1)
+        s.picture_colors = 0;
     return s;
 }
 
@@ -181,19 +268,26 @@ void ImageToObjectDialog::save_to_config() const
     const ImageToObjectSettings &s = m_settings;
     auto set_double = [cfg](const char *key, double v) { cfg->set(I2O_CFG_SECTION, key, float_to_string_decimal_point(v)); };
     auto set_bool   = [cfg](const char *key, bool v) { cfg->set(I2O_CFG_SECTION, key, v ? "1" : "0"); };
+    auto set_int    = [cfg](const char *key, int v) { cfg->set(I2O_CFG_SECTION, key, std::to_string(v)); };
+    set_int("type", int(s.type));
     set_double("blur", s.blur);
     set_double("size", s.silhouette.longest_side);
     set_double("close_gaps", s.silhouette.close_gaps);
     set_double("min_feature", s.silhouette.min_feature);
     set_bool("fill_holes", s.silhouette.fill_holes);
     set_bool("largest_only", s.silhouette.largest_only);
-    set_bool("mirror", s.silhouette.mirror);
+    set_bool("mirror", s.cutter_mirror);
     set_double("blade_height", s.cutter.blade_height);
     set_double("blade_thickness", s.cutter.blade_thickness);
     set_double("handle_width", s.cutter.handle_width);
     set_double("handle_height", s.cutter.handle_height);
     set_bool("sharp_edge", s.cutter.sharp_edge);
-    cfg->set(I2O_CFG_SECTION, "braces", std::to_string(int(s.cutter.braces)));
+    set_int("braces", int(s.cutter.braces));
+    set_double("box_height", s.box.height);
+    set_double("box_wall", s.box.wall);
+    set_double("lid_overhang", s.box.lid_overhang);
+    set_double("lid_clearance", s.box.clearance);
+    set_int("picture_colors", s.picture_colors);
 }
 
 ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &image, const std::string &image_name,
@@ -210,6 +304,10 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
     , m_settings(settings)
     , m_timer(this)
 {
+    if (Plater *plater = wxGetApp().plater(); plater != nullptr)
+        m_filament_colors = plater->get_extruder_colors_from_plater_config(nullptr, false);
+    const int filaments = std::max<int>(1, int(m_filament_colors.size()));
+
     wxBoxSizer      *root = new wxBoxSizer(wxVERTICAL);
     wxBoxSizer      *cols = new wxBoxSizer(wxHORIZONTAL);
     wxFlexGridSizer *grid = new wxFlexGridSizer(2, FromDIP(6), FromDIP(10));
@@ -225,21 +323,38 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
             group->push_back(ctrl);
         }
     };
-    auto check_row = [this, &grid](wxCheckBox *check) {
-        grid->Add(new wxStaticText(this, wxID_ANY, wxEmptyString));
+    auto check_row = [this, &grid](wxCheckBox *check, std::vector<wxWindow *> *group = nullptr) {
+        wxStaticText *empty = new wxStaticText(this, wxID_ANY, wxEmptyString);
+        grid->Add(empty);
         grid->Add(check, 0, wxALIGN_CENTER_VERTICAL);
+        if (group != nullptr) {
+            group->push_back(empty);
+            group->push_back(check);
+        }
     };
-    auto heading = [this, &grid](const wxString &text) {
+    auto heading = [this, &grid](const wxString &text, std::vector<wxWindow *> *group = nullptr) {
         wxStaticText *h = new wxStaticText(this, wxID_ANY, text);
         h->SetFont(h->GetFont().Bold());
+        wxStaticText *empty = new wxStaticText(this, wxID_ANY, wxEmptyString);
         grid->Add(h, 0, wxALIGN_CENTER_VERTICAL | wxTOP, FromDIP(6));
-        grid->Add(new wxStaticText(this, wxID_ANY, wxEmptyString));
+        grid->Add(empty);
+        if (group != nullptr) {
+            group->push_back(h);
+            group->push_back(empty);
+        }
     };
     auto spin_double = [this](double value, double min, double max, double inc, int digits = 2) {
         auto *s = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(110), -1), wxSP_ARROW_KEYS, min, max,
                                        value, inc);
         s->SetDigits(digits);
         return s;
+    };
+    auto filament_choice = [this, filaments](int selected) {
+        auto *c = new wxChoice(this, wxID_ANY);
+        for (int f = 0; f <= filaments; ++f)
+            c->Append(i2o_filament_label(f));
+        c->SetSelection(std::clamp(selected, 0, filaments));
+        return c;
     };
 
     const ImageToObjectSettings &s = m_settings;
@@ -255,8 +370,9 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
 
     wxArrayString types;
     types.Add(_L("Cookie cutter"));
+    types.Add(_L("Box with lid"));
     m_type = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, types);
-    m_type->SetSelection(0);
+    m_type->SetSelection(std::clamp(int(s.type), 0, 1));
     m_type->SetToolTip(_L("What is made from the outline of the image."));
     row(_L("Object") + ":", m_type);
 
@@ -270,7 +386,7 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
     m_shape_from->SetSelection(int(s.shape_from));
     m_shape_from->SetToolTip(_L("Automatic uses the transparency of an image with transparent background, "
                                 "otherwise the brightness."));
-    row(_L("Shape from") + ":", m_shape_from);
+    row(_L("Shape from") + ":", m_shape_from, &m_one_color);
 
     wxBoxSizer *threshold_row = new wxBoxSizer(wxHORIZONTAL);
     m_threshold = new wxSlider(this, wxID_ANY, s.threshold, 0, 255, wxDefaultPosition, wxSize(FromDIP(160), -1), wxSL_HORIZONTAL | wxSL_LABELS);
@@ -287,14 +403,14 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
 
     m_invert = new wxCheckBox(this, wxID_ANY, _L("Invert (use the light part)"));
     m_invert->SetValue(s.invert);
-    check_row(m_invert);
+    check_row(m_invert, &m_one_color);
 
     m_blur = spin_double(s.blur, 0., 5., 0.25);
     m_blur->SetToolTip(_L("Blur the image before the outline is traced. Smooths jagged and noisy edges."));
     row(_L("Smoothing") + " (px):", m_blur);
 
     m_size = spin_double(s.silhouette.longest_side, 10., 1000., 5., 1);
-    m_size->SetToolTip(_L("Longest side of the shape. For a cookie cutter it is the size of the cookie."));
+    m_size->SetToolTip(_L("Longest side of the shape: the size of the cookie, or of the box without the overhang of its lid."));
     row(_L("Size") + " (mm):", m_size);
 
     m_close_gaps = spin_double(s.silhouette.close_gaps, 0., 5., 0.1);
@@ -302,13 +418,14 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
     row(_L("Close gaps") + " (mm):", m_close_gaps);
 
     m_min_feature = spin_double(s.silhouette.min_feature, 0., 10., 0.1);
-    m_min_feature->SetToolTip(_L("Parts of the shape narrower than this are removed: dough does not come out of thin slots. "
-                                 "Removed parts are red in the preview. 0 = off."));
+    m_min_feature->SetToolTip(_L("Parts of the shape narrower than this are removed: dough does not come out of thin slots, "
+                                 "and a thin arm of a box has no room inside. Removed parts are red in the preview. 0 = off."));
     row(_L("Remove thin parts") + " (mm):", m_min_feature);
 
     m_fill_holes = new wxCheckBox(this, wxID_ANY, _L("Fill holes"));
     m_fill_holes->SetValue(s.silhouette.fill_holes);
-    m_fill_holes->SetToolTip(_L("Use only the outer outline. Untick to get a blade around every hole of the shape too."));
+    m_fill_holes->SetToolTip(_L("Use only the outer outline. Untick to keep the holes of the shape: "
+                                "a blade around every hole of a cutter, a pillar in a box."));
     check_row(m_fill_holes);
 
     m_largest_only = new wxCheckBox(this, wxID_ANY, _L("Largest part only"));
@@ -316,32 +433,32 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
     m_largest_only->SetToolTip(_L("An image with separate parts: use only the largest one. Untick to keep all of them."));
     check_row(m_largest_only);
 
-    m_mirror = new wxCheckBox(this, wxID_ANY, _L("Mirror"));
-    m_mirror->SetValue(s.silhouette.mirror);
-    m_mirror->SetToolTip(_L("A cookie cutter is turned over when it is used. Mirrored, the cookie looks like the image."));
-    check_row(m_mirror);
-
     // ---- cookie cutter -----------------------------------------------------------------------
-    heading(_L("Cookie cutter"));
+    heading(_L("Cookie cutter"), &m_cutter_controls);
+    m_mirror = new wxCheckBox(this, wxID_ANY, _L("Mirror"));
+    m_mirror->SetValue(s.cutter_mirror);
+    m_mirror->SetToolTip(_L("A cookie cutter is turned over when it is used. Mirrored, the cookie looks like the image."));
+    check_row(m_mirror, &m_cutter_controls);
+
     m_blade_height = spin_double(s.cutter.blade_height, 3., 100., 0.5, 1);
     m_blade_height->SetToolTip(_L("Height of the whole cutter, from the bed to the cutting edge."));
-    row(_L("Height") + " (mm):", m_blade_height);
+    row(_L("Height") + " (mm):", m_blade_height, &m_cutter_controls);
 
     m_blade_thickness = spin_double(s.cutter.blade_thickness, 0.3, 5., 0.1);
     m_blade_thickness->SetToolTip(_L("Thickness of the blade. Two lines of the nozzle (0.8 mm for a 0.4 mm nozzle) print well."));
-    row(_L("Blade thickness") + " (mm):", m_blade_thickness);
+    row(_L("Blade thickness") + " (mm):", m_blade_thickness, &m_cutter_controls);
 
     m_handle_width = spin_double(s.cutter.handle_width, 0.3, 30., 0.5, 1);
     m_handle_width->SetToolTip(_L("Width of the flange around the blade, which is pressed by hand. It lies on the bed."));
-    row(_L("Handle width") + " (mm):", m_handle_width);
+    row(_L("Handle width") + " (mm):", m_handle_width, &m_cutter_controls);
 
     m_handle_height = spin_double(s.cutter.handle_height, 0.4, 20., 0.5, 1);
-    row(_L("Handle height") + " (mm):", m_handle_height);
+    row(_L("Handle height") + " (mm):", m_handle_height, &m_cutter_controls);
 
     m_sharp_edge = new wxCheckBox(this, wxID_ANY, _L("Sharp cutting edge"));
     m_sharp_edge->SetValue(s.cutter.sharp_edge);
     m_sharp_edge->SetToolTip(_L("The last 2 mm of the blade get thinner, down to one line of the nozzle (0.4 mm)."));
-    check_row(m_sharp_edge);
+    check_row(m_sharp_edge, &m_cutter_controls);
 
     wxArrayString braces;
     braces.Add(_L("Automatic"));
@@ -351,7 +468,54 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
     m_braces->SetSelection(std::clamp(int(s.cutter.braces), 0, 2));
     m_braces->SetToolTip(_L("Bars across the opening, at the handle, keep a large cutter in shape. "
                             "Automatic adds them to cutters over 90 mm."));
-    row(_L("Braces") + ":", m_braces);
+    row(_L("Braces") + ":", m_braces, &m_cutter_controls);
+
+    // ---- box ---------------------------------------------------------------------------------
+    heading(_L("Box with lid"), &m_box_controls);
+    m_box_height = spin_double(s.box.height, 3., 300., 1., 1);
+    m_box_height->SetToolTip(_L("Outer height of the base, without the lid."));
+    row(_L("Height") + " (mm):", m_box_height, &m_box_controls);
+
+    m_box_wall = spin_double(s.box.wall, 0.4, 10., 0.2);
+    m_box_wall->SetToolTip(_L("Thickness of the wall. Four lines of the nozzle (1.6 mm for a 0.4 mm nozzle) make a stiff box."));
+    row(_L("Wall") + " (mm):", m_box_wall, &m_box_controls);
+
+    m_lid_overhang = spin_double(s.box.lid_overhang, 0., 10., 0.5, 1);
+    m_lid_overhang->SetToolTip(_L("The lid is larger than the base by this distance on every side. 0 = flush with the base."));
+    row(_L("Lid overhang") + " (mm):", m_lid_overhang, &m_box_controls);
+
+    m_lid_clearance = spin_double(s.box.clearance, 0., 1., 0.05);
+    m_lid_clearance->SetToolTip(_L("Gap between the lip of the lid and the wall, on every side. "
+                                   "Raise it when the lid is too tight, lower it when it is loose."));
+    row(_L("Lid fit gap") + " (mm):", m_lid_clearance, &m_box_controls);
+
+    wxArrayString pictures;
+    pictures.Add(_L("None"));
+    for (int c = 2; c <= IMAGE_OBJECT_MAX_COLORS; ++c)
+        pictures.Add(wxString::Format(_L("%d colours"), c));
+    m_picture = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, pictures);
+    m_picture->SetSelection(s.picture_colors < 2 ? 0 : std::min(s.picture_colors, IMAGE_OBJECT_MAX_COLORS) - 1);
+    m_picture->SetToolTip(_L("The image is inlaid into the top face of the lid, one filament per colour. "
+                             "The lid is printed with its top face on the bed, so the picture is in the first layers."));
+    row(_L("Picture on the lid") + ":", m_picture, &m_box_controls);
+
+    m_body_filament = filament_choice(s.body_extruder);
+    m_body_filament->SetToolTip(_L("Filament of the base and of the lid."));
+    row(_L("Box filament") + ":", m_body_filament, &m_box_controls);
+
+    for (int i = 0; i < IMAGE_OBJECT_MAX_COLORS; ++i) {
+        wxImage swatch(FromDIP(22), FromDIP(14));
+        swatch.SetRGB(wxRect(0, 0, swatch.GetWidth(), swatch.GetHeight()), 128, 128, 128);
+        wxBoxSizer *level = new wxBoxSizer(wxHORIZONTAL);
+        m_level_swatch[size_t(i)] = new wxStaticBitmap(this, wxID_ANY, wxBitmap(swatch));
+        m_level_label[size_t(i)]  = new wxStaticText(this, wxID_ANY, wxString::Format(_L("Colour %d"), i + 1) + ":");
+        level->Add(m_level_swatch[size_t(i)], 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+        level->Add(m_level_label[size_t(i)], 0, wxALIGN_CENTER_VERTICAL);
+        grid->Add(level, 0, wxALIGN_CENTER_VERTICAL);
+        m_level_filament[size_t(i)] = filament_choice(s.level_extruders[size_t(i)]);
+        m_level_filament[size_t(i)]->SetToolTip(_L("Filament of this colour of the picture. By default the loaded filament with the nearest colour."));
+        grid->Add(m_level_filament[size_t(i)], 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
+    }
 
     cols->Add(grid, 1, wxEXPAND | wxALL, FromDIP(10));
 
@@ -389,11 +553,12 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
         schedule_preview();
         evt.Skip();
     };
-    for (wxChoice *c : {m_shape_from, m_braces})
+    for (wxChoice *c : {m_type, m_shape_from, m_braces, m_picture, m_body_filament})
         c->Bind(wxEVT_CHOICE, changed);
     for (wxCheckBox *c : {m_auto_threshold, m_invert, m_fill_holes, m_largest_only, m_mirror, m_sharp_edge})
         c->Bind(wxEVT_CHECKBOX, changed);
-    for (wxSpinCtrlDouble *sp : {m_blur, m_size, m_close_gaps, m_min_feature, m_blade_height, m_blade_thickness, m_handle_width, m_handle_height})
+    for (wxSpinCtrlDouble *sp : {m_blur, m_size, m_close_gaps, m_min_feature, m_blade_height, m_blade_thickness, m_handle_width,
+                                 m_handle_height, m_box_height, m_box_wall, m_lid_overhang, m_lid_clearance})
         sp->Bind(wxEVT_SPINCTRLDOUBLE, changed_double);
     m_threshold->Bind(wxEVT_SLIDER, [this](wxCommandEvent &evt) {
         // moving the slider means a manual threshold
@@ -401,6 +566,12 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
         schedule_preview();
         evt.Skip();
     });
+    for (int i = 0; i < IMAGE_OBJECT_MAX_COLORS; ++i)
+        m_level_filament[size_t(i)]->Bind(wxEVT_CHOICE, [this, i](wxCommandEvent &evt) {
+            m_user_filament[size_t(i)] = true;
+            schedule_preview();
+            evt.Skip();
+        });
     m_change_image->Bind(wxEVT_BUTTON, [this](wxCommandEvent &evt) {
         change_image();
         evt.Skip();
@@ -411,11 +582,11 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
             EndModal(wxID_OK);
     });
 
+    SetSizer(root);
     refresh_source_preview();
     update_enabled();
     refresh_preview();
 
-    SetSizer(root);
     Layout();
     root->Fit(this);
     CenterOnParent();
@@ -424,15 +595,36 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
 
 ImageToObjectDialog::~ImageToObjectDialog() { m_timer.Stop(); }
 
-std::string ImageToObjectDialog::object_name() const
+std::string ImageToObjectDialog::name_of(const std::string &what) const
 {
-    std::string base = m_image_name.empty() ? _u8L("Image") : m_image_name;
-    return base + " - " + _u8L("Cookie cutter");
+    return (m_image_name.empty() ? _u8L("Image") : m_image_name) + " - " + what;
+}
+
+std::string ImageToObjectDialog::filament_color(int extruder) const
+{
+    if (extruder >= 1 && size_t(extruder) <= m_filament_colors.size())
+        return m_filament_colors[size_t(extruder - 1)];
+    return {};
+}
+
+int ImageToObjectDialog::extruder(const OutlinePart &part) const
+{
+    if (m_settings.type != ImageObjectType::Box)
+        return 0;
+    if (part.level < 0)
+        return m_settings.body_extruder;
+    return part.level < IMAGE_OBJECT_MAX_COLORS ? m_settings.level_extruders[size_t(part.level)] : 0;
+}
+
+bool ImageToObjectDialog::with_picture(const ImageToObjectSettings &settings) const
+{
+    return settings.type == ImageObjectType::Box && settings.picture_colors >= 2;
 }
 
 ImageToObjectSettings ImageToObjectDialog::collect() const
 {
     ImageToObjectSettings s = m_settings;
+    s.type                    = ImageObjectType(std::clamp(m_type->GetSelection(), 0, 1));
     s.shape_from              = TraceShapeFrom(std::max(0, m_shape_from->GetSelection()));
     s.threshold               = m_threshold->GetValue();
     s.auto_threshold          = m_auto_threshold->GetValue();
@@ -443,25 +635,76 @@ ImageToObjectSettings ImageToObjectDialog::collect() const
     s.silhouette.min_feature  = m_min_feature->GetValue();
     s.silhouette.fill_holes   = m_fill_holes->GetValue();
     s.silhouette.largest_only = m_largest_only->GetValue();
-    s.silhouette.mirror       = m_mirror->GetValue();
+    s.cutter_mirror           = m_mirror->GetValue();
+    // The box is seen from above as the image is; only the cutter is turned over
+    s.silhouette.mirror       = s.type == ImageObjectType::CookieCutter && s.cutter_mirror;
     s.cutter.blade_height     = m_blade_height->GetValue();
     s.cutter.blade_thickness  = m_blade_thickness->GetValue();
     s.cutter.handle_width     = m_handle_width->GetValue();
     s.cutter.handle_height    = m_handle_height->GetValue();
     s.cutter.sharp_edge       = m_sharp_edge->GetValue();
     s.cutter.braces           = CutterBraces(std::clamp(m_braces->GetSelection(), 0, 2));
+    s.box.height              = m_box_height->GetValue();
+    s.box.wall                = m_box_wall->GetValue();
+    s.box.lid_overhang        = m_lid_overhang->GetValue();
+    s.box.clearance           = m_lid_clearance->GetValue();
+    int picture               = m_picture->GetSelection();
+    s.picture_colors          = picture <= 0 ? 0 : picture + 1;
+    s.box.decoration          = s.picture_colors >= 2;
+    s.body_extruder           = std::max(0, m_body_filament->GetSelection());
+    for (int i = 0; i < IMAGE_OBJECT_MAX_COLORS; ++i)
+        s.level_extruders[size_t(i)] = std::max(0, m_level_filament[size_t(i)]->GetSelection());
     return s;
 }
 
 void ImageToObjectDialog::update_enabled()
 {
+    const ImageToObjectSettings s = collect();
+    bool box        = s.type == ImageObjectType::Box;
+    bool one        = !with_picture(s);
     int  from       = m_shape_from->GetSelection();
-    bool brightness = from == int(TraceShapeFrom::Brightness) || (from == int(TraceShapeFrom::Auto) && !m_image.has_alpha());
+    bool brightness = one && (from == int(TraceShapeFrom::Brightness) || (from == int(TraceShapeFrom::Auto) && !m_image.has_alpha()));
+    for (wxWindow *w : m_one_color)
+        w->Show(one);
     for (wxWindow *w : m_brightness)
         w->Show(brightness);
+    for (wxWindow *w : m_cutter_controls)
+        w->Show(!box);
+    for (wxWindow *w : m_box_controls)
+        w->Show(box);
+    if (!box || one)
+        for (int i = 0; i < IMAGE_OBJECT_MAX_COLORS; ++i)
+            for (wxWindow *w : {static_cast<wxWindow *>(m_level_swatch[size_t(i)]), static_cast<wxWindow *>(m_level_label[size_t(i)]),
+                                static_cast<wxWindow *>(m_level_filament[size_t(i)])})
+                w->Show(false);
     Layout();
     if (GetSizer() != nullptr)
         GetSizer()->Fit(this);
+}
+
+void ImageToObjectDialog::update_level_rows(const Shape &shape)
+{
+    const ImageToObjectSettings s    = collect();
+    size_t                      count = with_picture(s) ? shape.colors.size() : 0;
+
+    // Levels the user did not touch get the loaded filament with the nearest colour
+    if (count > 0 && !m_filament_colors.empty()) {
+        TraceFilamentPlan plan = plan_trace_filaments(shape.colors, m_filament_colors, TraceFilamentMatch::Nearest);
+        for (size_t i = 0; i < count && i < size_t(IMAGE_OBJECT_MAX_COLORS) && i < plan.filaments.size(); ++i)
+            if (!m_user_filament[i])
+                m_level_filament[i]->SetSelection(std::clamp(plan.filaments[i], 0, int(m_level_filament[i]->GetCount()) - 1));
+    }
+    for (size_t i = 0; i < size_t(IMAGE_OBJECT_MAX_COLORS); ++i) {
+        bool show = i < count;
+        m_level_swatch[i]->Show(show);
+        m_level_label[i]->Show(show);
+        m_level_filament[i]->Show(show);
+        if (!show)
+            continue;
+        wxImage swatch(FromDIP(22), FromDIP(14));
+        swatch.SetRGB(wxRect(0, 0, swatch.GetWidth(), swatch.GetHeight()), shape.colors[i][0], shape.colors[i][1], shape.colors[i][2]);
+        m_level_swatch[i]->SetBitmap(wxBitmap(swatch));
+    }
 }
 
 void ImageToObjectDialog::schedule_preview()
@@ -482,11 +725,12 @@ void ImageToObjectDialog::refresh_source_preview()
         m_source_preview->SetBitmap(i2o_bitmap(thumb.rgba.data(), thumb.width, thumb.height, px));
 }
 
-Silhouette ImageToObjectDialog::make_shape(const TraceImage &image, const ImageToObjectSettings &settings, int max_side, std::string &error,
-                                           int *threshold) const
+ImageToObjectDialog::Shape ImageToObjectDialog::make_shape(const TraceImage &image, const ImageToObjectSettings &settings, int max_side) const
 {
+    Shape            out;
+    const bool       picture = with_picture(settings);
     ImageTraceParams tp;
-    tp.colors         = 1;
+    tp.colors         = picture ? std::clamp(settings.picture_colors, 2, IMAGE_OBJECT_MAX_COLORS) : 1;
     tp.shape_from     = settings.shape_from;
     tp.threshold      = settings.threshold;
     tp.auto_threshold = settings.auto_threshold;
@@ -500,46 +744,80 @@ Silhouette ImageToObjectDialog::make_shape(const TraceImage &image, const ImageT
     tp.width    = image.width >= image.height ? side : side * double(image.width) / double(std::max(1, image.height));
 
     ImageTraceResult trace = trace_image(image, tp, {}, false);
-    if (threshold != nullptr)
-        *threshold = trace.threshold;
+    out.threshold          = trace.threshold;
     if (!trace.is_valid()) {
-        error = trace.error.empty() ? _u8L("No shape was found in the image.") : trace.error;
-        return {};
+        out.error = trace.error.empty() ? std::string("No shape was found in the image.") : trace.error;
+        return out;
     }
     std::vector<ExPolygons> levels;
     for (const ImageTraceLayer &layer : trace.layers)
         levels.push_back(layer.shape);
-    return make_silhouette(levels, settings.silhouette);
+    out.silhouette = make_silhouette(levels, settings.silhouette);
+    if (picture && !out.silhouette.empty())
+        for (size_t i = 0; i < trace.layers.size() && i < size_t(IMAGE_OBJECT_MAX_COLORS); ++i) {
+            out.detail.push_back(to_silhouette_frame(trace.layers[i].shape, out.silhouette));
+            out.colors.push_back(trace.layers[i].color);
+        }
+    return out;
 }
 
 void ImageToObjectDialog::refresh_preview()
 {
     m_timer.Stop();
-    const ImageToObjectSettings s  = collect();
-    int                         px = FromDIP(I2O_PREVIEW_PX);
-    std::string                 error;
-    int                         threshold = -1;
-    Silhouette                  shape     = make_shape(m_preview_image, s, I2O_PREVIEW_SIDE, error, &threshold);
-    if (s.auto_threshold && threshold >= 0)
-        m_threshold->SetValue(threshold);
+    ImageToObjectSettings s  = collect();
+    int                   px = FromDIP(I2O_PREVIEW_PX);
+    Shape                 shape = make_shape(m_preview_image, s, I2O_PREVIEW_SIDE);
+    if (s.auto_threshold && shape.threshold >= 0)
+        m_threshold->SetValue(shape.threshold);
+    update_level_rows(shape);
+    s = collect(); // filaments of the levels
 
-    if (!shape.empty()) {
-        const CookieCutterParams   cutter   = sanitize(s.cutter);
-        const CookieCutterSections sections = cookie_cutter_sections(shape.shape, cutter);
-        m_preview_bitmap->SetBitmap(i2o_render(shape, sections, px));
-        wxString info = wxString::Format(_L("Cookie: %.1f x %.1f mm"), shape.width, shape.height);
-        info += "\n" + wxString::Format(_L("Cutter: %.1f x %.1f x %.1f mm"), shape.width + 2. * cutter.handle_width,
-                                        shape.height + 2. * cutter.handle_width, cutter.blade_height);
-        if (sections.braces)
-            info += "\n" + _L("With braces across the opening.");
-        info += "\n" + _L("Print it as it is: handle on the bed, no supports.");
+    const Silhouette &sil = shape.silhouette;
+    if (!sil.empty()) {
+        std::vector<I2OLayer> layers;
+        wxString              info;
+        if (s.type == ImageObjectType::CookieCutter) {
+            const CookieCutterParams   cutter   = sanitize(s.cutter);
+            const CookieCutterSections sections = cookie_cutter_sections(sil.shape, cutter);
+            layers.push_back({sections.handle, "#8FB3E8"});
+            layers.push_back({sections.blade, "#1F3F7A"});
+            info = wxString::Format(_L("Cookie: %.1f x %.1f mm"), sil.width, sil.height);
+            info += "\n" + wxString::Format(_L("Cutter: %.1f x %.1f x %.1f mm"), sil.width + 2. * cutter.handle_width,
+                                            sil.height + 2. * cutter.handle_width, cutter.blade_height);
+            if (sections.braces)
+                info += "\n" + _L("With braces across the opening.");
+            info += "\n" + _L("Print it as it is: handle on the bed, no supports.");
+        } else {
+            const OutlineBoxParams   box      = sanitize(s.box);
+            const OutlineBoxSections sections = outline_box_sections(sil.shape, shape.detail, box);
+            std::string              body     = filament_color(s.body_extruder);
+            layers.push_back({sections.lid, body.empty() ? std::string("#B8C4D6") : body});
+            for (size_t i = 0; i < sections.decoration.size(); ++i) {
+                std::string color = filament_color(i < size_t(IMAGE_OBJECT_MAX_COLORS) ? s.level_extruders[i] : 0);
+                if (color.empty() && i < shape.colors.size())
+                    color = image_trace_color_to_hex(shape.colors[i]);
+                layers.push_back({sections.decoration[i], color.empty() ? std::string("#808080") : color});
+            }
+            // the wall of the base under the lid
+            layers.push_back({sections.wall, "#000000", 0.3});
+            info = wxString::Format(_L("Base: %.1f x %.1f x %.1f mm"), sil.width, sil.height, box.height);
+            info += "\n" + wxString::Format(_L("Lid: %.1f x %.1f x %.1f mm"), sil.width + 2. * box.lid_overhang,
+                                            sil.height + 2. * box.lid_overhang, box.lid_thickness + box.lip_height);
+            if (sections.cavity.empty())
+                info += "\n" + _L("The shape is too thin for a cavity at this wall thickness.");
+            if (!sections.decoration.empty())
+                info += "\n" + _L("The lid is printed with the picture on the bed.");
+            info += "\n" + _L("Two objects are added: base and lid. No supports.");
+        }
+        layers.push_back({sil.removed, "#E03030"});
+        m_preview_bitmap->SetBitmap(i2o_render(layers, px));
         m_info->SetLabel(info);
-        m_warning->SetLabel(i2o_messages(shape.warnings));
+        m_warning->SetLabel(i2o_messages(sil.warnings));
         m_ok->Enable(true);
     } else {
         m_preview_bitmap->SetBitmap(wxBitmap(i2o_blank(px)));
         m_info->SetLabel(wxEmptyString);
-        m_warning->SetLabel(error.empty() ? i2o_messages(shape.warnings) : _(from_u8(error)));
+        m_warning->SetLabel(shape.error.empty() ? i2o_messages(sil.warnings) : _(from_u8(shape.error)));
         m_ok->Enable(false);
     }
     m_info->Wrap(px);
@@ -561,6 +839,7 @@ void ImageToObjectDialog::change_image()
     m_image         = std::move(image);
     m_preview_image = downscale_trace_image(m_image, I2O_PREVIEW_SIDE);
     m_image_name    = name;
+    m_user_filament.fill(false);
     refresh_source_preview();
     update_enabled();
     refresh_preview();
@@ -570,19 +849,42 @@ bool ImageToObjectDialog::finish()
 {
     m_timer.Stop();
     m_settings = collect();
+    m_objects.clear();
+    m_warnings.clear();
     std::string error;
     {
         wxBusyCursor busy;
-        Silhouette   shape = make_shape(m_image, m_settings, I2O_FINAL_SIDE, error);
-        if (shape.empty()) {
-            if (error.empty() && !shape.warnings.empty())
-                error = shape.warnings.front();
+        Shape        shape = make_shape(m_image, m_settings, I2O_FINAL_SIDE);
+        error              = shape.error;
+        if (shape.silhouette.empty()) {
+            if (error.empty() && !shape.silhouette.warnings.empty())
+                error = shape.silhouette.warnings.front();
+        } else if (m_settings.type == ImageObjectType::CookieCutter) {
+            OutlineObjectResult cutter = make_cookie_cutter(shape.silhouette.shape, m_settings.cutter);
+            error                      = cutter.error;
+            if (cutter.is_valid()) {
+                OutlineObject object;
+                object.name = name_of(_u8L("Cookie cutter"));
+                object.parts.push_back({object.name, std::move(cutter.mesh), -1});
+                m_objects.push_back(std::move(object));
+                m_warnings = cutter.warnings;
+            }
         } else {
-            m_result = make_cookie_cutter(shape.shape, m_settings.cutter);
-            error    = m_result.error;
+            OutlineBoxResult box = make_outline_box(shape.silhouette.shape, shape.detail, m_settings.box);
+            error                = box.error;
+            if (box.is_valid()) {
+                box.base.name = name_of(_u8L("Box"));
+                box.lid.name  = name_of(_u8L("Lid"));
+                for (OutlineObject *object : {&box.base, &box.lid})
+                    for (OutlinePart &part : object->parts)
+                        part.name = part.level < 0 ? object->name : GUI::format(_u8L("Colour %1%"), part.level + 1);
+                m_objects.push_back(std::move(box.base));
+                m_objects.push_back(std::move(box.lid));
+                m_warnings = box.warnings;
+            }
         }
     }
-    if (!m_result.is_valid()) {
+    if (m_objects.empty()) {
         m_warning->SetLabel(_(from_u8(error.empty() ? std::string("The object could not be created.") : error)));
         m_warning->Wrap(FromDIP(I2O_PREVIEW_PX));
         Layout();
@@ -619,17 +921,12 @@ bool create_object_from_image(const wxString &image_path)
         return false;
 
     ImageToObjectDialog dialog(nullptr, image, name, ImageToObjectDialog::load_from_config());
-    if (dialog.ShowModal() != wxID_OK)
-        return false;
-    const OutlineObjectResult &result = dialog.result();
-    if (!result.is_valid())
+    if (dialog.ShowModal() != wxID_OK || dialog.objects().empty())
         return false;
 
-    Plater::TakeSnapshot snapshot(plater, "Image to object");
-    wxGetApp().obj_list()->load_mesh_object(TriangleMesh(indexed_triangle_set(result.mesh)), from_u8(dialog.object_name()));
-    wxGetApp().mainframe->update_title();
-    if (!result.warnings.empty())
-        show_info(plater, i2o_messages(result.warnings), _L("Image to object"));
+    i2o_add_objects(plater, dialog.objects(), dialog);
+    if (!dialog.warnings().empty())
+        show_info(plater, i2o_messages(dialog.warnings()), _L("Image to object"));
     return true;
 }
 

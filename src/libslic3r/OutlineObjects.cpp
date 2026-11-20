@@ -159,9 +159,11 @@ Silhouette make_silhouette(const std::vector<ExPolygons> &levels, const Silhouet
 
     double target = std::clamp(params.longest_side, 5., 2000.);
     double factor = target / longest;
+    double used   = factor; // the factor the silhouette was built with
     // Removed islands and thin parts change the size, so the scale is refined
     for (int pass = 0; pass < 4; ++pass) {
         out            = build_silhouette(source, params, factor);
+        used           = factor;
         double current = longest_side_mm(out.shape);
         if (current <= 0.)
             break;
@@ -188,12 +190,25 @@ Silhouette make_silhouette(const std::vector<ExPolygons> &levels, const Silhouet
     for (ExPolygon &e : out.removed)
         e.translate(-center);
     longest_side_mm(out.shape, &out.width, &out.height);
+    out.factor   = used * fix;
+    out.center   = center;
+    out.mirrored = params.mirror;
 
     if (params.largest_only && out.islands > 1)
         out.warnings.emplace_back("The image has " + std::to_string(out.islands) +
                                   " separate parts, only the largest one is used. Untick \"Largest part only\" to keep all.");
     if (area_mm2(out.removed) > 0.01 * area_mm2(out.shape))
         out.warnings.emplace_back("Thin parts of the shape were removed (red in the preview).");
+    return out;
+}
+
+ExPolygons to_silhouette_frame(const ExPolygons &traced, const Silhouette &silhouette)
+{
+    ExPolygons out = flip(traced, silhouette.mirrored);
+    for (ExPolygon &e : out) {
+        e.scale(silhouette.factor);
+        e.translate(-silhouette.center);
+    }
     return out;
 }
 
@@ -321,6 +336,192 @@ OutlineObjectResult make_cookie_cutter(const ExPolygons &silhouette, const Cooki
     }
     if (!out.joined)
         out.warnings.emplace_back("The parts of the cutter could not be joined into one mesh; they overlap, which still prints correctly.");
+    return out;
+}
+
+// ---- box with a lid ----------------------------------------------------------------------------
+
+namespace {
+
+// Slivers of the picture thinner than this are not printable and are dropped [in mm]
+const double DECORATION_MIN_WIDTH = 0.4;
+// Height of one step of a chamfer [in mm]
+const double CHAMFER_STEP = 0.2;
+
+ExPolygons mirror_x(const ExPolygons &shape)
+{
+    Polygons polygons;
+    auto     add = [&polygons](const Polygon &src) {
+        Polygon p;
+        p.points.reserve(src.points.size());
+        for (const Point &pt : src.points)
+            p.points.emplace_back(-pt.x(), pt.y());
+        polygons.push_back(std::move(p));
+    };
+    for (const ExPolygon &e : shape) {
+        add(e.contour);
+        for (const Polygon &h : e.holes)
+            add(h);
+    }
+    return union_ex(polygons, ClipperLib::pftEvenOdd);
+}
+
+ExPolygons inset(const ExPolygons &shape, double distance)
+{
+    if (distance <= 0.)
+        return shape;
+    // Miter join: the inner corners of the wall follow the outline
+    return offset_ex(shape, -scaled_f(distance), ClipperLib::jtMiter, 3.);
+}
+
+} // namespace
+
+OutlineBoxParams sanitize(const OutlineBoxParams &params)
+{
+    OutlineBoxParams p  = params;
+    p.wall              = std::clamp(p.wall, 0.4, 10.);
+    p.floor             = std::clamp(p.floor, 0.2, 10.);
+    p.height            = std::clamp(p.height, p.floor + 2., 300.);
+    p.chamfer           = std::clamp(p.chamfer, 0., std::min(p.floor, p.wall));
+    p.lid_overhang      = std::clamp(p.lid_overhang, 0., 10.);
+    p.lip_height        = std::clamp(p.lip_height, 1., std::min(20., p.height - p.floor));
+    p.lip_thickness     = std::clamp(p.lip_thickness, 0.8, 5.);
+    p.clearance         = std::clamp(p.clearance, 0., 1.);
+    p.lid_thickness     = std::clamp(p.lid_thickness, 0.6, 10.);
+    p.decoration_depth  = std::clamp(p.decoration_depth, 0.2, 2.);
+    // the picture never goes through the lid
+    p.lid_thickness     = std::max(p.lid_thickness, p.decoration_depth + 0.4);
+    p.decoration_margin = std::clamp(p.decoration_margin, 0., 10.);
+    return p;
+}
+
+OutlineBoxSections outline_box_sections(const ExPolygons &silhouette, const std::vector<ExPolygons> &detail, const OutlineBoxParams &params)
+{
+    OutlineBoxSections out;
+    if (silhouette.empty())
+        return out;
+    const OutlineBoxParams p = sanitize(params);
+    out.cavity = inset(silhouette, p.wall);
+    out.wall   = diff_ex(silhouette, out.cavity);
+    out.lid    = p.lid_overhang > 0. ? offset_ex(silhouette, scaled_f(p.lid_overhang), ClipperLib::jtRound) : silhouette;
+    ExPolygons lip_outer = inset(silhouette, p.wall + p.clearance);
+    out.lip              = diff_ex(lip_outer, inset(lip_outer, p.lip_thickness));
+
+    if (p.decoration && !detail.empty()) {
+        ExPolygons area = inset(silhouette, p.decoration_margin);
+        ExPolygons used;
+        for (const ExPolygons &level : detail) {
+            ExPolygons shape = intersection_ex(level, area);
+            // every point of the lid belongs to one level at most
+            if (!used.empty())
+                shape = diff_ex(shape, used);
+            if (!shape.empty())
+                shape = opening_ex(shape, scaled_f(DECORATION_MIN_WIDTH / 2.), ClipperLib::jtMiter, 3.);
+            if (!shape.empty())
+                used = union_ex(used, shape);
+            out.decoration.push_back(std::move(shape));
+        }
+        if (used.empty())
+            out.decoration.clear();
+    }
+    return out;
+}
+
+OutlineBoxResult make_outline_box(const ExPolygons &silhouette, const std::vector<ExPolygons> &detail, const OutlineBoxParams &params)
+{
+    OutlineBoxResult out;
+    if (silhouette.empty()) {
+        out.error = "There is no shape to make a box from.";
+        return out;
+    }
+    const OutlineBoxParams   p        = sanitize(params);
+    const OutlineBoxSections sections = outline_box_sections(silhouette, detail, p);
+    bool                     joined   = true;
+
+    // ---- base: floor (with chamfered bottom edge) and wall -----------------------------------
+    {
+        std::vector<OutlineBand> bands;
+        double                   z     = 0.;
+        int                      steps = p.chamfer > 0. ? std::max(1, int(std::ceil(p.chamfer / CHAMFER_STEP - 1e-6))) : 0;
+        for (int i = 0; i < steps; ++i) {
+            double     t     = (double(i) + 0.5) / double(steps);
+            ExPolygons shape = inset(silhouette, p.chamfer * (1. - t));
+            double     z1    = p.chamfer * double(i + 1) / double(steps);
+            if (!shape.empty())
+                bands.push_back({std::move(shape), z, z1});
+            z = z1;
+        }
+        if (p.floor > z + EPSILON)
+            bands.push_back({silhouette, z, p.floor});
+        if (sections.cavity.empty()) {
+            out.warnings.emplace_back("The shape is too thin for a cavity, the base is solid. Make the box larger or the wall thinner.");
+            bands.push_back({silhouette, p.floor, p.height});
+        } else {
+            if (area_mm2(sections.cavity) < 0.25 * area_mm2(silhouette))
+                out.warnings.emplace_back("Most of the shape is too thin for a cavity; the thin parts of the base are solid.");
+            bands.push_back({sections.wall, p.floor, p.height});
+        }
+        bool         ok = false;
+        OutlinePart  part;
+        part.name = "Base";
+        part.mesh = join_outline_bands(bands, &ok);
+        joined    = joined && ok;
+        if (part.mesh.indices.empty()) {
+            out.error = "The base of the box could not be created.";
+            return out;
+        }
+        out.base.name = "Base";
+        out.base.parts.push_back(std::move(part));
+    }
+
+    // ---- lid: printed with the top face on the bed, so everything is mirrored ----------------
+    {
+        std::vector<ExPolygons> pictures;
+        ExPolygons              picture_all;
+        for (const ExPolygons &level : sections.decoration) {
+            pictures.push_back(mirror_x(level));
+            append(picture_all, pictures.back());
+        }
+        picture_all = union_ex(picture_all);
+        const ExPolygons plate = mirror_x(sections.lid);
+        const ExPolygons lip   = mirror_x(sections.lip);
+
+        std::vector<OutlineBand> bands;
+        if (picture_all.empty()) {
+            bands.push_back({plate, 0., p.lid_thickness});
+        } else {
+            bands.push_back({diff_ex(plate, picture_all), 0., p.decoration_depth});
+            bands.push_back({plate, p.decoration_depth, p.lid_thickness});
+        }
+        if (lip.empty())
+            out.warnings.emplace_back("The shape is too thin for a lip under the lid, the lid only lies on the base.");
+        else
+            bands.push_back({lip, p.lid_thickness, p.lid_thickness + p.lip_height});
+
+        bool        ok = false;
+        OutlinePart body;
+        body.name = "Lid";
+        body.mesh = join_outline_bands(bands, &ok);
+        joined    = joined && ok;
+        if (body.mesh.indices.empty()) {
+            out.error = "The lid of the box could not be created.";
+            return out;
+        }
+        out.lid.name = "Lid";
+        out.lid.parts.push_back(std::move(body));
+        for (size_t i = 0; i < pictures.size(); ++i) {
+            OutlinePart part;
+            part.mesh = outline_prism(pictures[i], 0., p.decoration_depth);
+            if (part.mesh.indices.empty())
+                continue;
+            part.name  = "Colour " + std::to_string(i + 1);
+            part.level = int(i);
+            out.lid.parts.push_back(std::move(part));
+        }
+    }
+
+    if (!joined)
+        out.warnings.emplace_back("Some parts of the box could not be joined into one mesh; they overlap, which still prints correctly.");
     return out;
 }
 
