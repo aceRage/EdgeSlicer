@@ -904,7 +904,7 @@ void ImageTraceDialog::on_dpi_changed(const wxRect &suggested_rect)
     Refresh();
 }
 
-ImageDropAction ask_image_drop_action(wxWindow *parent, const wxString &file_name, bool can_color_fill)
+ImageDropAction ask_image_drop_action(wxWindow *parent, const wxString &file_name, bool can_color_fill, bool can_make_object)
 {
     wxDialog dialog(parent ? parent : static_cast<wxWindow *>(wxGetApp().mainframe), wxID_ANY, _L("Image dropped"), wxDefaultPosition,
                     wxDefaultSize, wxDEFAULT_DIALOG_STYLE);
@@ -922,6 +922,8 @@ ImageDropAction ask_image_drop_action(wxWindow *parent, const wxString &file_nam
     const Choice choices[] = {
         {ImageDropAction::Trace, _L("Trace to shapes") + dots,
          _L("Trace the image into shapes (one part per colour) which are embossed like an SVG."), true},
+        {ImageDropAction::Object, _L("Make an object") + dots,
+         _L("Make a printable object from the outline of the image: a cookie cutter."), can_make_object},
         {ImageDropAction::Relief, _L("Relief (coming soon)"), _L("Height map relief of the image is not available yet."), false},
         {ImageDropAction::ColorFill, _L("Colour fill (Image Fill)") + dots,
          can_color_fill ? _L("Paint the image onto the object with the loaded filaments.") :

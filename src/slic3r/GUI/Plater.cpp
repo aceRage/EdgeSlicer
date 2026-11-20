@@ -268,6 +268,7 @@
 #include "ImageFillDialog.hpp"
 #include <wx/filename.h>
 #include "ImageTraceDialog.hpp"
+#include "ImageToObjectDialog.hpp"
 #include "CloneDialog.hpp"
 #include "WebPreprintDialog.hpp"
 #include "SSWCP.hpp" // Ultra: the U1 send leaves its end-of-print unload choice for sw_SendGCodes
@@ -12537,7 +12538,9 @@ bool drop_image(Plater &plater, const wxString &image_file, const Vec2d &mouse_d
         hovered_object = -1;
 
     bool can_color_fill = hovered_object >= 0 || plater.can_apply_image_fill();
-    switch (ask_image_drop_action(nullptr, wxFileName(image_file).GetFullName(), can_color_fill)) {
+    switch (ask_image_drop_action(nullptr, wxFileName(image_file).GetFullName(), can_color_fill, plater.can_add_model())) {
+    case ImageDropAction::Object:
+        return create_object_from_image(image_file);
     case ImageDropAction::Trace:
         // the question took the mouse out of the canvas
         refresh_hover();
