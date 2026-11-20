@@ -301,6 +301,27 @@ int auto_refill_choice(const std::map<std::string, std::string>& extended_info)
     return it->second == "1" ? 1 : 0;
 }
 
+std::string stable_client_id(int role)
+{
+    // Two ranges, so the roles cannot collide; random once per process so two EdgeSlicers on one PC differ.
+    static const int one_shot = random_in(1000, 4999);
+    static const int monitor  = random_in(5000, 9999);
+    return make_client_id(role == 1 ? monitor : one_shot);
+}
+
+int too_many_clients_delay_ms(int attempt)
+{
+    static const int delays[] = { 2000, 4000 };
+    return attempt >= 0 && attempt < 2 ? delays[attempt] : -1;
+}
+
+std::string too_many_clients_text()
+{
+    return "the printer has too many connections open, so it would not take the start command. The file is on the printer: "
+           "start it from the printer's screen, or close the other programs connected to it (the Elegoo app, ElegooSlicer, "
+           "the printer's web page, SimplyPrint) and send again";
+}
+
 std::string register_payload(const std::string& client_id, const std::string& request_id)
 {
     ojson j;
@@ -319,7 +340,7 @@ RegisterResult parse_register_response(const std::string& payload, const std::st
     if (str_at(j, "client_id") != client_id)
         return RegisterResult::NotForUs;
     const std::string e = j.contains("error") && j["error"].is_string() ? j["error"].get<std::string>() : std::string("fail");
-    if (e == "ok")
+    if (e == "ok" || e == "already registered")
         return RegisterResult::Ok;
     if (boost::icontains(e, "too many clients")) {
         error = "the printer has too many connections open";
@@ -497,6 +518,7 @@ bool Session::open(std::string& error)
         const RegisterResult r = parse_register_response(payload, m_client_id, why);
         if (r == RegisterResult::NotForUs)
             continue;
+        m_register_result = r;
         if (r == RegisterResult::Ok)
             return true;
         error = why;

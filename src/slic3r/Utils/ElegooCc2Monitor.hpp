@@ -59,6 +59,11 @@ struct CallResult
 // within timeout_ms for both.
 CallResult call(const std::string& host, const std::string& token, int method, const std::string& params_json, int timeout_ms);
 
+// Drops this process's connection to the printer at `host` (if any) and waits for it to close, so the
+// printer's client slot is free for a print start that was refused with "too many clients". The next
+// demand() opens it again. Any thread; may wait up to two seconds.
+void release(const std::string& host);
+
 // Whether this process holds a live connection to the printer right now.
 bool connected(const std::string& host);
 

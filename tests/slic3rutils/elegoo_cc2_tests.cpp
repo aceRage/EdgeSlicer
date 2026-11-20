@@ -246,6 +246,28 @@ TEST_CASE("CC2 MQTT topics and registration", "[ElegooCc2]")
     CHECK(ElegooCc2::parse_register_response(R"({"client_id":"1_PC_1","error":"denied"})", "1_PC_1", error) == RR::Refused);
     CHECK(error == "denied");
     CHECK(ElegooCc2::parse_register_response("nope", "1_PC_1", error) == RR::Invalid);
+    CHECK(ElegooCc2::parse_register_response(R"({"client_id":"1_PC_1","error":"already registered"})", "1_PC_1", error) == RR::Ok);
+}
+
+TEST_CASE("CC2 client ids are kept and too-many-clients retries are bounded", "[ElegooCc2]")
+{
+    const std::string a = ElegooCc2::stable_client_id(0);
+    const std::string b = ElegooCc2::stable_client_id(1);
+    CHECK(a == ElegooCc2::stable_client_id(0)); // the same id for every probe and start
+    CHECK(b == ElegooCc2::stable_client_id(1)); // and for every monitor connection
+    CHECK(a != b);                              // one id on two connections would push one off
+    CHECK(a.rfind("1_PC_", 0) == 0);
+    CHECK(b.rfind("1_PC_", 0) == 0);
+
+    CHECK(ElegooCc2::too_many_clients_delay_ms(0) == 2000);
+    CHECK(ElegooCc2::too_many_clients_delay_ms(1) == 4000);
+    CHECK(ElegooCc2::too_many_clients_delay_ms(2) == -1);
+    CHECK(ElegooCc2::too_many_clients_delay_ms(-1) == -1);
+
+    const std::string text = ElegooCc2::too_many_clients_text();
+    CHECK(text.find("too many connections") != std::string::npos);
+    CHECK(text.find("file is on the printer") != std::string::npos);
+    CHECK(text.find("screen") != std::string::npos);
 }
 
 TEST_CASE("CC2 request and reply envelopes", "[ElegooCc2]")
@@ -332,6 +354,15 @@ TEST_CASE("CC2 session: registration", "[ElegooCc2]")
         CHECK_FALSE(s.open(error));
         CHECK(error == "the printer has too many connections open");
         CHECK(printer.closed);
+        CHECK(s.register_result() == ElegooCc2::RegisterResult::TooManyClients);
+    }
+    SECTION("already registered is a success (the printer still knows our id)")
+    {
+        printer.register_error = "already registered";
+        ElegooCc2::Session s(printer, SN, quick());
+        std::string        error;
+        CHECK(s.open(error));
+        CHECK(s.register_result() == ElegooCc2::RegisterResult::Ok);
     }
     SECTION("no MQTT")
     {

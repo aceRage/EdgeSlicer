@@ -134,7 +134,22 @@ std::string register_payload(const std::string& client_id, const std::string& re
 
 enum class RegisterResult { Ok, NotForUs, TooManyClients, Refused, Invalid };
 // error: the printer's own words for Refused, a short English reason otherwise.
+// "already registered" counts as Ok: the printer still knows this client id from an earlier connection,
+// which is what a client that keeps its id gets (ElegooSlicer's bundled web client accepts it the same way).
 RegisterResult parse_register_response(const std::string& payload, const std::string& client_id, std::string& error);
+
+// The client ids this process registers with: one per role, picked once per process and then kept, so a
+// printer sees the same few clients again instead of a new one for every probe, start and check-in (the
+// printer has no unregister message and limits its clients). Role 0 is the short-lived sessions (CANVAS
+// read, print start; never two at once), role 1 the hub monitor's. The two never share an id: a second
+// connection under an id the broker already has would push the first one off.
+std::string stable_client_id(int role);
+
+// What to do when registration answers "too many clients": how long to wait before registering again
+// (attempt counts from 0), or -1 when the tries are used up.
+int too_many_clients_delay_ms(int attempt);
+// The sentence a send shows when the printer still refuses: says the file is on the printer.
+std::string too_many_clients_text();
 
 // {"id":id,"method":method,"params":params_json} - params_json must be a JSON object text.
 std::string request_payload(int id, int method, const std::string& params_json = "{}");
@@ -225,6 +240,8 @@ public:
     bool send(int method, const std::string& params_json, int& id, std::string& error);
     void close();
     bool is_open() const { return m_open; }
+    // How the last open() ended (Invalid before any registration answer).
+    RegisterResult register_result() const { return m_register_result; }
     const std::string& client_id() const { return m_client_id; }
     const std::string& sn() const { return m_sn; }
 
@@ -236,6 +253,7 @@ private:
     std::string    m_request_id;
     int            m_next_id = 1;
     bool           m_open    = false;
+    RegisterResult m_register_result = RegisterResult::Invalid;
 };
 
 // 1002 then 2005 over an already-opened session. Fills the same CanvasQueryResult the CC1 path
@@ -250,6 +268,8 @@ struct StartResult
     std::string error;              // English, for the log and the dialog
     std::string payload;            // the last start command sent, for the log and the tests
     int         auto_refill_set = -1; // what 2004 set before the start (1 on, 0 off), -1 when not sent
+    bool        too_many_clients = false; // the printer refused to register us (its client table is full)
+    int         register_attempts = 0;    // sessions opened for this start (more than 1 after "too many clients")
 };
 // Status check (up to busy_checks answers, busy_interval_ms apart, while the printer is busy), then
 // - with a CANVAS and an auto-refill choice from the dialog - 2004, as ElegooSlicer sets it before every
