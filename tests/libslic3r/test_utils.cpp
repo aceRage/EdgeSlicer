@@ -1172,6 +1172,28 @@ TEST_CASE("copy_file reports the OS error when the destination cannot be written
 #endif // _WIN32
 }
 
+TEST_CASE("set_data_dir_tolerant creates a path whose parents do not exist", "[utils]")
+{
+    const boost::filesystem::path scratch = boost::filesystem::temp_directory_path() /
+                                            boost::filesystem::unique_path("edgeslicer_set_data_dir_%%%%%%%%");
+    const boost::filesystem::path nested = scratch / "missing_parent" / "data";
+    REQUIRE_FALSE(boost::filesystem::exists(scratch));
+
+    struct RestoreDataDir
+    {
+        std::string prev;
+        RestoreDataDir() : prev(data_dir()) {}
+        ~RestoreDataDir() { set_data_dir(prev); }
+    } restore;
+
+    set_data_dir_tolerant(nested.string());
+    CHECK(data_dir() == nested.string());
+    CHECK(boost::filesystem::is_directory(nested));
+
+    boost::system::error_code ec;
+    boost::filesystem::remove_all(scratch, ec);
+}
+
 TEST_CASE("extended_path turns a Windows path into its long-path form", "[Utils]")
 {
 #ifdef _WIN32

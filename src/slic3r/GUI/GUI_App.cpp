@@ -118,6 +118,13 @@
 #include "GLCanvas3D.hpp"
 #include "GeneratedConfig.hpp"
 
+#ifdef EDGE_PYTHON_PLUGINS
+#include "slic3r/plugin/EdgePythonInclude.hpp"
+#include "slic3r/plugin/PluginManager.hpp"
+#include "slic3r/plugin/PluginPreferences.hpp"
+#include "slic3r/plugin/PythonInterpreter.hpp"
+#endif
+
 #include "../Utils/PresetUpdater.hpp"
 #include "../Utils/AppUpdateCheck.hpp"
 #include "../Utils/StartupWizardLogic.hpp"
@@ -137,6 +144,9 @@
 #include "slic3r/Utils/PluginLoadDiagnostics.hpp"
 #include "slic3r/Utils/VendorConnector.hpp"
 #include "HomePanel.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "PluginsInspectorDialog.hpp"
+#endif
 #include "PresetMirror.hpp"
 #include "PresetMirrorCore.hpp"
 #include "Tab.hpp"
@@ -2827,6 +2837,10 @@ GUI_App::~GUI_App()
     GUI_App::m_app_alive.store(false);
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": enter");
+#ifdef EDGE_PYTHON_PLUGINS
+    Slic3r::PluginManager::instance().shutdown();
+    Slic3r::PythonInterpreter::instance().shutdown();
+#endif
     if (app_config != nullptr) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": destroy app_config");
         delete app_config;
@@ -2846,6 +2860,17 @@ GUI_App::~GUI_App()
 
     stop_page_http_server();
     stop_http_server();
+}
+
+void GUI_App::notify_plugin_permissions_changed(const std::string& plugin_key)
+{
+#ifdef EDGE_PYTHON_PLUGINS
+    if (mainframe != nullptr && mainframe->m_home != nullptr)
+        mainframe->m_home->refresh_plugins();
+    PluginsInspectorDialog::notify_permissions_changed(plugin_key);
+#else
+    (void) plugin_key;
+#endif
 }
 
 // If formatted for github, plaintext with OpenGL extensions enclosed into <details>.
@@ -3461,6 +3486,12 @@ bool GUI_App::on_init_inner()
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "received wxEVT_END_SESSION";
         stop_sync_user_preset();
         Slic3r::NetworkAgent::unload_network_module();
+#ifdef EDGE_PYTHON_PLUGINS
+        // Orca #16136: AppKit calls exit() after wxEVT_END_SESSION, so OnExit()/~GUI_App()
+        // never run. Tear Python down here or PluginManager's static destructor aborts.
+        Slic3r::PluginManager::instance().shutdown();
+        Slic3r::PythonInterpreter::instance().shutdown();
+#endif
         e.Skip();
     });
 #endif
@@ -4129,10 +4160,30 @@ bool GUI_App::on_init_inner()
         if (plater_ != nullptr)
             // ensure the selected technology is ptFFF
             plater_->set_printer_technology(ptFFF);
+        // G-code viewer skips PluginManager::initialize. CLI::setup already swept leftover
+        // AppContainer ACEs after set_data_dir.
     }
     else {
         set_startup_splash_phase(_L("Loading current presets"), 85);
         load_current_presets();
+#ifdef EDGE_PYTHON_PLUGINS
+        // D10: the runtime stays off until the user enables "Python plugins" in Preferences
+        // (restart). Off: no Python, no plugin scan, no auto-load, no Home rail.
+        if (plugin_prefs::enabled(plugin_prefs::k_enable_python_plugins)) {
+            PluginManager& plugin_mgr = PluginManager::instance();
+            plugin_mgr.initialize();
+            plugin_mgr.discover_plugins(false, true);
+            // Sidecar enabled=true is the startup auto-load list. Discovery alone leaves the
+            // module unloaded, so Enable from Home would be the only way a restart restored it.
+            try {
+                plugin_mgr.load_enabled_plugins();
+            } catch (const std::exception& ex) {
+                BOOST_LOG_TRIVIAL(error) << "Plugin auto-load failed: " << ex.what();
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "Plugin auto-load failed";
+            }
+        }
+#endif
     }
     profiler.mark("load_current_presets");
 

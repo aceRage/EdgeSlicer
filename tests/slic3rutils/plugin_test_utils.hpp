@@ -1,0 +1,266 @@
+#pragma once
+
+#include <boost/filesystem/path.hpp>
+#include <libslic3r/Utils.hpp>
+
+#include <boost/filesystem.hpp>
+#include <boost/nowide/cstdlib.hpp>
+#include <boost/system/error_code.hpp>
+
+#include <chrono>
+#include <functional>
+#include <optional>
+#include <string>
+#include <thread>
+
+#include "test_utils.hpp"
+
+#ifdef EDGE_PYTHON_PLUGINS
+#include <slic3r/plugin/PluginDescriptor.hpp>
+#include <slic3r/plugin/PluginManager.hpp>
+#include <slic3r/plugin/PluginTrust.hpp>
+#include <slic3r/plugin/ipc/PluginHostProcess.hpp>
+#include <slic3r/plugin/ipc/PluginSandbox.hpp>
+#endif
+
+// Catch2 v2 has no SKIP(); keep the Orca tests' SKIP("...") calls compiling.
+#ifndef SKIP
+#define SKIP(msg) \
+    do { \
+        WARN(msg); \
+        return; \
+    } while (0)
+#endif
+
+namespace Slic3r {
+
+// Owns a unique temp directory (create + recursive remove). Edge's test_utils.hpp
+// does not provide Orca's ScopedTemporaryDir, so the plugin tests keep one here.
+struct ScopedTemporaryDir
+{
+    boost::filesystem::path m_path;
+
+    explicit ScopedTemporaryDir(const std::string& tag)
+    {
+        boost::system::error_code ec;
+        m_path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("orca-" + tag + "-%%%%-%%%%");
+        boost::filesystem::create_directories(m_path, ec);
+    }
+
+    ~ScopedTemporaryDir()
+    {
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(m_path, ec);
+    }
+
+    const boost::filesystem::path& path() const { return m_path; }
+
+    ScopedTemporaryDir(const ScopedTemporaryDir&)            = delete;
+    ScopedTemporaryDir& operator=(const ScopedTemporaryDir&) = delete;
+};
+
+// Temp file path reserved for the caller to write; removed on scope exit.
+// Orca keeps this in tests/test_utils.hpp; Edge's copy does not, so plugin tests own it.
+struct ScopedTemporaryFile
+{
+    boost::filesystem::path m_path;
+
+    explicit ScopedTemporaryFile(const std::string& extension = ".tmp")
+        : m_path(boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("orca-%%%%-%%%%-%%%%" + extension))
+    {}
+
+    ~ScopedTemporaryFile()
+    {
+        boost::system::error_code ec;
+        boost::filesystem::remove(m_path, ec);
+    }
+
+    const boost::filesystem::path& path() const { return m_path; }
+    std::string                    string() const { return m_path.string(); }
+
+    ScopedTemporaryFile(const ScopedTemporaryFile&)            = delete;
+    ScopedTemporaryFile& operator=(const ScopedTemporaryFile&) = delete;
+};
+
+// Sets an environment variable for the lifetime of the guard and restores the previous value.
+struct ScopedEnvVar
+{
+    std::string                m_name;
+    std::optional<std::string> m_previous;
+
+    ScopedEnvVar(std::string name, const std::string& value) : m_name(std::move(name))
+    {
+        if (const char* old = boost::nowide::getenv(m_name.c_str()))
+            m_previous = old;
+        boost::nowide::setenv(m_name.c_str(), value.c_str(), 1);
+    }
+
+    ~ScopedEnvVar()
+    {
+        if (m_previous)
+            boost::nowide::setenv(m_name.c_str(), m_previous->c_str(), 1);
+        else
+            boost::nowide::unsetenv(m_name.c_str());
+    }
+
+    ScopedEnvVar(const ScopedEnvVar&)            = delete;
+    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+};
+
+// Unsets an environment variable for the lifetime of the guard and restores the previous value.
+struct ScopedUnsetEnv
+{
+    std::string                m_name;
+    std::optional<std::string> m_previous;
+
+    explicit ScopedUnsetEnv(std::string name) : m_name(std::move(name))
+    {
+        if (const char* old = boost::nowide::getenv(m_name.c_str()))
+            m_previous = old;
+        boost::nowide::unsetenv(m_name.c_str());
+    }
+
+    ~ScopedUnsetEnv()
+    {
+        if (m_previous)
+            boost::nowide::setenv(m_name.c_str(), m_previous->c_str(), 1);
+        else
+            boost::nowide::unsetenv(m_name.c_str());
+    }
+
+    ScopedUnsetEnv(const ScopedUnsetEnv&)            = delete;
+    ScopedUnsetEnv& operator=(const ScopedUnsetEnv&) = delete;
+};
+
+// Point data_dir() at a throwaway directory for the lifetime of a test and
+// restore the previous value afterwards, so code under test writes into a
+// disposable tree and tests don't leak state into each other.
+struct ScopedDataDir
+{
+    ScopedTemporaryDir      tmp; // owns the temp dir (create + recursive remove)
+    boost::filesystem::path dir; // = tmp.path(); kept as a member for callers
+    std::string             previous;
+
+    explicit ScopedDataDir(const std::string& tag) : tmp("orca-" + tag), dir(tmp.path()), previous(data_dir())
+    {
+        set_data_dir(dir.string());
+    }
+
+    ~ScopedDataDir() { set_data_dir(previous); } // tmp removes the directory
+
+    // The plugin manager scans {data_dir}/orca_plugins.
+    boost::filesystem::path plugins_dir() const { return dir / "orca_plugins"; }
+    // Writable scratch granted to the sandbox (plugin_root is read-only).
+    boost::filesystem::path plugin_scratch_dir(const std::string& plugin_key) const
+    {
+        const boost::filesystem::path scratch = plugins_dir() / "plugin_data" / plugin_key;
+        boost::filesystem::create_directories(scratch);
+        return scratch;
+    }
+
+    ScopedDataDir(const ScopedDataDir&)            = delete;
+    ScopedDataDir& operator=(const ScopedDataDir&) = delete;
+};
+
+// Point resources_dir() at a throwaway directory for the lifetime of a test and restore the
+// previous value afterwards, mirroring ScopedDataDir.
+struct ScopedResourcesDir
+{
+    ScopedTemporaryDir      tmp;
+    boost::filesystem::path dir;
+    std::string             previous;
+
+    explicit ScopedResourcesDir(const std::string& tag) : tmp("orca-" + tag), dir(tmp.path()), previous(resources_dir())
+    {
+        set_resources_dir(dir.string());
+    }
+
+    ~ScopedResourcesDir() { set_resources_dir(previous); }
+
+    ScopedResourcesDir(const ScopedResourcesDir&)            = delete;
+    ScopedResourcesDir& operator=(const ScopedResourcesDir&) = delete;
+};
+
+#ifdef EDGE_PYTHON_PLUGINS
+// Always kill+reap a spawned helper, including when Catch2 REQUIRE aborts the case.
+// A leaked child becomes a zombie that hub_platform_tests waitpid(-1) can reap.
+struct ScopedSpawnedHost
+{
+    plugin_ipc::SpawnedHost host;
+    std::string             sandbox_plugin_key;
+
+    ~ScopedSpawnedHost()
+    {
+        plugin_ipc::kill_host(host);
+        plugin_ipc::close_host(host);
+        if (!sandbox_plugin_key.empty())
+            plugin_ipc::delete_test_created_parent_sandbox_profile(sandbox_plugin_key);
+    }
+
+    ScopedSpawnedHost()                                    = default;
+    ScopedSpawnedHost(const ScopedSpawnedHost&)            = delete;
+    ScopedSpawnedHost& operator=(const ScopedSpawnedHost&) = delete;
+};
+
+// Unsigned macOS helpers and missing AppContainer report kind=none. Isolation tests skip;
+// execute tests still need IPC/trust/script coverage via the stored Run anyway override.
+inline bool test_os_sandbox_will_apply() { return plugin_ipc::os_sandbox_available() && !plugin_ipc::sandbox_env_force_unavailable(); }
+
+// Writes trust.json unsandboxed[] when this environment cannot apply the shipping OS sandbox.
+// FORCE_UNAVAILABLE tests leave the override off so they still hit the fail-closed prompt.
+// Production never calls this; env overrides stay behind helper_env_overrides_allowed().
+inline bool allow_unsandboxed_for_test_if_needed(const std::string& plugin_key, std::string& error)
+{
+    if (test_os_sandbox_will_apply() || plugin_ipc::sandbox_env_force_unavailable())
+        return true;
+    PluginDescriptor descriptor;
+    if (!PluginManager::instance().try_get_plugin_descriptor(plugin_key, descriptor)) {
+        error = "plugin not discovered: " + plugin_key;
+        return false;
+    }
+    const boost::filesystem::path root = descriptor.plugin_root.empty() ? boost::filesystem::path(descriptor.entry_path) :
+                                                                          boost::filesystem::path(descriptor.plugin_root);
+    const std::string             hash = plugin_trust::sha256_plugin_tree(root, error);
+    if (hash.empty())
+        return false;
+    return plugin_trust::allow_unsandboxed(plugin_key, hash, error);
+}
+
+// Phase 5: enable/run refuse an unpinned local package. Existing Catch2 loads pin the discovered
+// entry so they still exercise Python, not the trust prompt. On unsigned macOS / no AppContainer
+// this also stores Run anyway so execute tests are not fail-closed out of the suite.
+inline bool approve_plugin_for_test(const std::string& plugin_key, std::string& error)
+{
+    PluginDescriptor descriptor;
+    if (!PluginManager::instance().try_get_plugin_descriptor(plugin_key, descriptor)) {
+        error = "plugin not discovered: " + plugin_key;
+        return false;
+    }
+    const boost::filesystem::path root = descriptor.plugin_root.empty() ? boost::filesystem::path(descriptor.entry_path) :
+                                                                          boost::filesystem::path(descriptor.plugin_root);
+    const std::string             hash = plugin_trust::sha256_plugin_tree(root, error);
+    if (hash.empty())
+        return false;
+    if (!plugin_trust::pin_hash(descriptor.plugin_key, hash, error))
+        return false;
+    return allow_unsandboxed_for_test_if_needed(descriptor.plugin_key, error);
+}
+
+// Abort early when `aborted` becomes true (execute already refused) instead of waiting out timeout.
+inline bool wait_for_path(const boost::filesystem::path& path, std::chrono::milliseconds timeout, const std::function<bool()>& aborted = {})
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        boost::system::error_code ec;
+        if (boost::filesystem::exists(path, ec) && !ec)
+            return true;
+        if (aborted && aborted())
+            return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    boost::system::error_code ec;
+    return boost::filesystem::exists(path, ec) && !ec;
+}
+#endif
+
+} // namespace Slic3r

@@ -2198,6 +2198,27 @@ wxWindow* PreferencesDialog::create_general_page()
                                                50, "show_layerling_tab");
     }
 
+#ifdef EDGE_PYTHON_PLUGINS
+    // D10 / H7: Python plugins stay off until the user turns them on here (restart).
+    wxBoxSizer* title_python_plugins = create_item_title(_L("Python plugins (experimental)"), page, _L("Python plugins"));
+    wxBoxSizer* item_python_plugins  = create_item_checkbox(
+        _L("Enable Python plugins (takes effect after restarting EdgeSlicer)"), page,
+        _L("Runs Python plugins you install from Home > Plugins. Plugin code runs in a separate, sandboxed helper; "
+           "installing or enabling a plugin still loads it into EdgeSlicer, so only install plugins you trust."),
+        50, "enable_python_plugins");
+    wxBoxSizer* item_python_plugin_steps = create_item_checkbox(
+        _L("Allow plugins on the early slicing steps (unsandboxed)"), page,
+        _L("Lets slicing-pipeline plugins run on the slicing steps before G-code export. Those steps run inside "
+           "EdgeSlicer with full access to your files, not in the sandbox. Off: such plugins only post-process "
+           "the G-code, in the sandbox."),
+        50, "python_plugins_in_process_steps");
+    wxBoxSizer* item_python_plugin_unsigned = create_item_checkbox(
+        _L("Allow plugins that are not signed by a known publisher"), page,
+        _L("A plugin you approved on this computer but that no shipped publisher key signs. Only applies to signed "
+           "release builds; developer builds always allow them."),
+        50, "python_plugins_allow_unsigned");
+#endif
+
     // auto title_modelmall = create_item_title(_L("Online Models"), page, _L("Online Models"));
     // auto item_backup = create_item_switch(_L("Backup switch"), page, _L("Backup switch"), "units");
     // auto item_modelmall = create_item_checkbox(_L("Show online staff-picked models on the home page"), page, _L("Show online staff-picked models on the home page"), 50, "staff_pick_switch");
@@ -2427,6 +2448,12 @@ wxWindow* PreferencesDialog::create_general_page()
     // wxCommandEvent eee(wxEVT_COMBOBOX);
     // update_modelmall(eee);
     // item_region->GetItem(size_t(2))->GetWindow()->Bind(wxEVT_COMBOBOX, update_modelmall);
+#ifdef EDGE_PYTHON_PLUGINS
+    sizer_page->Add(title_python_plugins, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_python_plugins, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_python_plugin_steps, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_python_plugin_unsigned, 0, wxTOP, FromDIP(3));
+#endif
     sizer_page->Add(title_project, 0, wxTOP| wxEXPAND, FromDIP(20));
     sizer_page->Add(item_project_load_behaviour, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_shell_open, 0, wxTOP, FromDIP(3));
