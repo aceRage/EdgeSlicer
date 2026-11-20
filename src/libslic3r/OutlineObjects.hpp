@@ -220,6 +220,116 @@ OutlineBoxSections outline_box_sections(const ExPolygons &silhouette, const std:
 /// </summary>
 OutlineBoxResult make_outline_box(const ExPolygons &silhouette, const std::vector<ExPolygons> &detail, const OutlineBoxParams &params);
 
+// ---- clicker -----------------------------------------------------------------------------------
+//
+// A solid body in the shape of the silhouette with a socket for one mechanical keyboard switch
+// (Cherry MX compatible), and a cap in the same shape which is pushed onto the stem of the switch.
+
+// Dimensions of the switch [in mm]. The opening and the plate are from the datasheet of the
+// switch; the depth under the plate and the cross of the stem are measured values, which is why
+// the fit of both is adjustable and there is a fit test piece.
+constexpr double MX_OPENING        = 14.;  // square opening the switch snaps into
+constexpr double MX_PLATE          = 1.5;  // thickness of the lip the clips of the switch hold on
+constexpr double MX_POCKET         = 16.;  // room for the housing and its clips under the lip
+constexpr double MX_DEPTH          = 7.;   // housing and pins under the lip
+constexpr double MX_POST_DIAMETER  = 5.6;  // post under the cap which takes the stem
+constexpr double MX_POST_HEIGHT    = 4.;
+constexpr double MX_CROSS_LENGTH   = 4.1;  // arms of the cross of the stem
+constexpr double MX_CROSS_WIDTH    = 1.3;
+// Material kept around the pocket of the switch [in mm]
+constexpr double CLICKER_MIN_WALL  = 1.2;
+// Tab for a key ring: hole, width of the ring around it and its height [in mm]
+constexpr double KEYRING_HOLE      = 5.;
+constexpr double KEYRING_WIDTH     = 2.5;
+constexpr double KEYRING_HEIGHT    = 3.;
+
+struct ClickerParams
+{
+    // Height of the body [in mm], at least floor + MX_DEPTH + MX_PLATE
+    double body_height = 11.;
+    double floor       = 1.2;
+    // Chamfer of the bottom edge of the body [in mm], 0 = off
+    double chamfer = 0.6;
+    // Added to every side of the opening of the switch [in mm]: larger = looser
+    double socket_fit = 0.1;
+    // Added to every side of the cross in the cap [in mm]: larger = looser
+    double stem_fit = 0.05;
+    // The switch sits in the middle of the largest circle which fits into the shape, moved by
+    // this offset [in mm]
+    Vec2d switch_offset = Vec2d::Zero();
+
+    double cap_thickness = 2.;
+    // The cap is larger than the body by this distance on every side [in mm], 0 = flush
+    double cap_overhang = 1.5;
+
+    // The colour levels of the image are inlaid into the top face of the cap, which is printed
+    // with its top face on the bed
+    bool   decoration        = true;
+    double decoration_depth  = 0.6;
+    double decoration_margin = 0.8;
+
+    // Tab with a hole for a key ring at the bottom of the body
+    bool   keyring       = false;
+    // Direction of the tab from the middle of the shape [in degrees], 0 = right, 90 = up
+    double keyring_angle = 90.;
+};
+
+// Cross-sections of the clicker in the frame of the silhouette (seen from above)
+struct ClickerSections
+{
+    ExPolygons body;    // footprint of the body, the key ring tab included
+    ExPolygons pocket;  // room for the switch inside of the body
+    ExPolygons opening; // opening of the switch in the top of the body
+    ExPolygons cap;     // plate of the cap
+    ExPolygons post;    // post under the cap with the cross for the stem
+    std::vector<ExPolygons> decoration; // picture on the cap, as OutlineBoxSections::decoration
+
+    // Middle of the switch [in mm]
+    Vec2d switch_position = Vec2d::Zero();
+    // The pocket with CLICKER_MIN_WALL around it is inside of the shape
+    bool fits = false;
+    // Radius of the largest circle which fits into the shape, and the radius the switch needs
+    double inscribed_radius = 0.;
+    double needed_radius    = 0.;
+};
+
+struct ClickerResult
+{
+    OutlineObject body;
+    // Print orientation: the top face lies on the bed and the post points up (mirrored)
+    OutlineObject cap;
+    // Empty on success, translatable english text
+    std::string              error;
+    std::vector<std::string> warnings;
+
+    bool is_valid() const { return error.empty() && !body.parts.empty() && !cap.parts.empty(); }
+};
+
+ClickerParams sanitize(const ClickerParams &params);
+
+ClickerSections clicker_sections(const ExPolygons &silhouette, const std::vector<ExPolygons> &detail, const ClickerParams &params);
+
+ClickerResult make_clicker(const ExPolygons &silhouette, const std::vector<ExPolygons> &detail, const ClickerParams &params);
+
+// Fits of the three sockets / crosses of the fit test piece, marked by 1, 2 and 3 notches
+constexpr double CLICKER_FIT_TEST_SOCKET[3] = {0., 0.1, 0.2};
+constexpr double CLICKER_FIT_TEST_STEM[3]   = {0., 0.05, 0.1};
+
+/// <summary>
+/// Small test print: a tile with three switch sockets and three cap stubs, each with another
+/// fit. The number of notches at the edge says which one it is.
+/// </summary>
+/// <returns>Two objects: the tile and the stubs</returns>
+std::vector<OutlineObject> make_clicker_fit_test(const ClickerParams &params);
+
+/// <summary>
+/// Middle of the largest circle which fits into the shape (approximate, good to about 0.5 %
+/// of the size of the shape).
+/// </summary>
+/// <param name="radius">Radius of the circle [in mm], 0 for an empty shape</param>
+/// <returns>Position [in mm]</returns>
+Vec2d largest_inscribed_circle(const ExPolygons &shape, double *radius = nullptr);
+
 // ---- building blocks (also used by tests) ------------------------------------------------------
 
 struct OutlineBand

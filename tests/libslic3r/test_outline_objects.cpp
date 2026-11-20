@@ -538,3 +538,155 @@ TEST_CASE("Box of difficult shapes", "[OutlineObjects]")
         REQUIRE(its_volume(res.base.parts.front().mesh) > 0.f);
     }
 }
+
+TEST_CASE("Largest inscribed circle", "[OutlineObjects]")
+{
+    double radius = 0.;
+    Vec2d  c      = largest_inscribed_circle({circle(5., -3., 20.)}, &radius);
+    REQUIRE_THAT(c.x(), WithinAbs(5., 0.3));
+    REQUIRE_THAT(c.y(), WithinAbs(-3., 0.3));
+    REQUIRE_THAT(radius, WithinAbs(20., 0.2));
+
+    // an "L": a 40 x 40 square with a 10 mm wide arm to the right
+    ExPolygons l = union_ex(ExPolygons{rect(0., 0., 40., 40.), rect(40., 0., 90., 10.)});
+    c            = largest_inscribed_circle(l, &radius);
+    REQUIRE_THAT(radius, WithinAbs(20., 0.5));
+    REQUIRE_THAT(c.x(), WithinAbs(20., 1.5));
+    REQUIRE_THAT(c.y(), WithinAbs(20., 1.5));
+
+    REQUIRE_THAT(largest_inscribed_circle({}, &radius).x(), WithinAbs(0., 1e-9));
+    REQUIRE_THAT(radius, WithinAbs(0., 1e-9));
+}
+
+TEST_CASE("Clicker parameters are limited to printable values", "[OutlineObjects]")
+{
+    ClickerParams p;
+    p.body_height   = 2.;
+    p.chamfer       = 9.;
+    p.cap_thickness = 0.1;
+    ClickerParams s = sanitize(p);
+    REQUIRE(s.body_height >= s.floor + MX_DEPTH + MX_PLATE);
+    REQUIRE(s.chamfer <= s.floor);
+    REQUIRE(s.cap_thickness >= s.decoration_depth + 0.4);
+}
+
+TEST_CASE("Clicker of a square", "[OutlineObjects]")
+{
+    Silhouette s = make_silhouette({{rect(0., 0., 10., 10.)}}, plain_params(40.));
+    ClickerParams p;
+    p.chamfer = 0.;
+
+    SECTION("sections")
+    {
+        ClickerSections sec = clicker_sections(s.shape, {}, p);
+        REQUIRE(sec.fits);
+        REQUIRE_THAT(sec.switch_position.x(), WithinAbs(0., 0.5));
+        REQUIRE_THAT(sec.switch_position.y(), WithinAbs(0., 0.5));
+        REQUIRE_THAT(sec.inscribed_radius, WithinAbs(20., 0.3));
+        REQUIRE_THAT(area_mm2(sec.pocket), WithinRel(MX_POCKET * MX_POCKET, 1e-6));
+        // the opening is 14 mm plus the fit on every side
+        REQUIRE_THAT(area_mm2(sec.opening), WithinRel(14.2 * 14.2, 1e-6));
+        REQUIRE_THAT(area_mm2(sec.cap), WithinRel(1600. + 4. * 40. * 1.5 + PI * 1.5 * 1.5, 2e-3));
+        // post: a cylinder without the cross of the stem
+        double cross = 2. * 4.2 * 1.4 - 1.4 * 1.4;
+        REQUIRE_THAT(area_mm2(sec.post), WithinRel(PI * 2.8 * 2.8 - cross, 0.01));
+
+        p.switch_offset = Vec2d(5., 0.);
+        REQUIRE_THAT(clicker_sections(s.shape, {}, p).switch_position.x() - sec.switch_position.x(), WithinAbs(5., 1e-6));
+        REQUIRE(clicker_sections(s.shape, {}, p).fits);
+        // too close to the edge
+        p.switch_offset = Vec2d(12., 0.);
+        REQUIRE_FALSE(clicker_sections(s.shape, {}, p).fits);
+        REQUIRE_FALSE(make_clicker(s.shape, {}, p).is_valid());
+    }
+
+    SECTION("meshes")
+    {
+        ClickerResult res = make_clicker(s.shape, {}, p);
+        REQUIRE(res.is_valid());
+        REQUIRE(res.warnings.empty());
+        REQUIRE(res.body.parts.size() == 1);
+        REQUIRE(res.cap.parts.size() == 1);
+
+        const indexed_triangle_set &body = res.body.parts.front().mesh;
+        REQUIRE(its_num_open_edges(body) == 0);
+        // solid but for the room of the switch
+        double expected = 1600. * 11. - MX_POCKET * MX_POCKET * (11. - 1.2 - MX_PLATE) - 14.2 * 14.2 * MX_PLATE;
+        REQUIRE_THAT(double(its_volume(body)), WithinRel(expected, 1e-3));
+        REQUIRE_THAT(bounding_box(body).max.z(), WithinAbs(11., 1e-4));
+
+        const indexed_triangle_set &cap = res.cap.parts.front().mesh;
+        REQUIRE(its_num_open_edges(cap) == 0);
+        double plate = 1600. + 4. * 40. * 1.5 + PI * 1.5 * 1.5;
+        double cross = 2. * 4.2 * 1.4 - 1.4 * 1.4;
+        REQUIRE_THAT(double(its_volume(cap)), WithinRel(plate * 2. + (PI * 2.8 * 2.8 - cross) * MX_POST_HEIGHT, 3e-3));
+        REQUIRE_THAT(bounding_box(cap).max.z(), WithinAbs(2. + MX_POST_HEIGHT, 1e-4));
+    }
+
+    SECTION("too small for a switch")
+    {
+        Silhouette    small = make_silhouette({{rect(0., 0., 10., 10.)}}, plain_params(16.));
+        ClickerResult res   = make_clicker(small.shape, {}, p);
+        REQUIRE_FALSE(res.is_valid());
+        REQUIRE_FALSE(res.error.empty());
+        ClickerSections sec = clicker_sections(small.shape, {}, p);
+        REQUIRE(sec.needed_radius > sec.inscribed_radius);
+    }
+
+    SECTION("chamfer and key ring")
+    {
+        p.chamfer       = 0.6;
+        p.keyring       = true;
+        p.keyring_angle = 0.;
+        ClickerSections sec = clicker_sections(s.shape, {}, p);
+        // the tab sticks out to the right and has a hole
+        REQUIRE(unscale<double>(get_extents(sec.body).max.x()) > 24.);
+        REQUIRE_THAT(unscale<double>(get_extents(sec.body).min.x()), WithinAbs(-20., 0.01));
+        size_t holes = 0;
+        for (const ExPolygon &e : sec.body)
+            holes += e.holes.size();
+        REQUIRE(holes == 1);
+
+        ClickerResult res = make_clicker(s.shape, {}, p);
+        REQUIRE(res.is_valid());
+        const indexed_triangle_set &body = res.body.parts.front().mesh;
+        REQUIRE(its_num_open_edges(body) == 0);
+        REQUIRE(bounding_box(body).max.x() > 24.);
+        REQUIRE_THAT(bounding_box(body).max.z(), WithinAbs(11., 1e-4));
+    }
+}
+
+TEST_CASE("Clicker cap with a picture", "[OutlineObjects]")
+{
+    ExPolygons level_a = {rect(10., 0., 20., 20.)};
+    Silhouette s       = make_silhouette({{rect(0., 0., 20., 20.)}}, plain_params(40.));
+    std::vector<ExPolygons> detail = {to_silhouette_frame(level_a, s)};
+
+    ClickerResult res = make_clicker(s.shape, detail, ClickerParams());
+    REQUIRE(res.is_valid());
+    REQUIRE(res.cap.parts.size() == 2);
+    REQUIRE(res.cap.parts[1].level == 0);
+    for (const OutlinePart &part : res.cap.parts)
+        REQUIRE(its_num_open_edges(part.mesh) == 0);
+    // printed top face down: the right half of the image is on the left of the bed
+    REQUIRE(bounding_box(res.cap.parts[1].mesh).max.x() < 0.01);
+    REQUIRE_THAT(bounding_box(res.cap.parts[1].mesh).max.z(), WithinAbs(0.6, 1e-5));
+    // the body has no picture
+    REQUIRE(res.body.parts.size() == 1);
+}
+
+TEST_CASE("Clicker fit test", "[OutlineObjects]")
+{
+    std::vector<OutlineObject> objects = make_clicker_fit_test(ClickerParams());
+    REQUIRE(objects.size() == 2);
+    for (const OutlineObject &object : objects) {
+        REQUIRE(object.parts.size() == 1);
+        REQUIRE(its_num_open_edges(object.parts.front().mesh) == 0);
+        REQUIRE(its_volume(object.parts.front().mesh) > 0.f);
+        REQUIRE_THAT(bounding_box(object.parts.front().mesh).min.z(), WithinAbs(0., 1e-6));
+    }
+    // three sockets side by side
+    REQUIRE_THAT(bounding_box(objects[0].parts.front().mesh).size().x(), WithinAbs(66., 0.01));
+    // three separate stubs
+    REQUIRE(its_split(objects[1].parts.front().mesh).size() == 3);
+}

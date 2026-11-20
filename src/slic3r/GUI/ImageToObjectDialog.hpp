@@ -3,7 +3,8 @@
 
 // "Image to object": a printable object from the outline of a PNG / JPG image.
 // Design: tests/design_image_to_objects.md. A cookie cutter, or a box with a lid in the shape
-// of the image. The geometry is created in libslic3r/OutlineObjects.
+// of the image, or a clicker around a keyboard switch. The geometry is created in
+// libslic3r/OutlineObjects.
 
 #include "GUI_Utils.hpp"
 
@@ -26,7 +27,7 @@ class wxStaticText;
 
 namespace Slic3r { namespace GUI {
 
-enum class ImageObjectType : int { CookieCutter = 0, Box };
+enum class ImageObjectType : int { CookieCutter = 0, Box, Clicker };
 
 // The picture on the lid has at most this many colours
 constexpr int IMAGE_OBJECT_MAX_COLORS = 4;
@@ -49,7 +50,8 @@ struct ImageToObjectSettings
     CookieCutterParams cutter;
 
     OutlineBoxParams box;
-    // Colours of the picture on the lid: 0 = no picture, otherwise 2 .. IMAGE_OBJECT_MAX_COLORS
+    ClickerParams    clicker;
+    // Colours of the picture on the lid / cap: 0 = no picture, otherwise 2 .. IMAGE_OBJECT_MAX_COLORS
     int picture_colors = 3;
     // 0 .. default, otherwise 1 based filament
     int                                      body_extruder = 0;
@@ -96,6 +98,8 @@ private:
     void                  refresh_source_preview();
     void                  change_image();
     bool                  finish();
+    // Replace the result by the fit test piece of the clicker
+    bool                  finish_fit_test();
     void                  save_to_config() const;
     Shape                 make_shape(const TraceImage &image, const ImageToObjectSettings &settings, int max_side) const;
     bool                  with_picture(const ImageToObjectSettings &settings) const;
@@ -140,6 +144,17 @@ private:
     wxSpinCtrlDouble *m_box_wall      = nullptr;
     wxSpinCtrlDouble *m_lid_overhang  = nullptr;
     wxSpinCtrlDouble *m_lid_clearance = nullptr;
+    // clicker
+    wxSpinCtrlDouble *m_body_height   = nullptr;
+    wxSpinCtrlDouble *m_socket_fit    = nullptr;
+    wxSpinCtrlDouble *m_stem_fit      = nullptr;
+    wxSpinCtrlDouble *m_switch_x      = nullptr;
+    wxSpinCtrlDouble *m_switch_y      = nullptr;
+    wxSpinCtrlDouble *m_cap_overhang  = nullptr;
+    wxCheckBox       *m_keyring       = nullptr;
+    wxSpinCtrlDouble *m_keyring_angle = nullptr;
+    wxButton         *m_fit_test      = nullptr;
+    // picture on the lid of the box / on the cap of the clicker
     wxChoice         *m_picture       = nullptr;
     wxChoice         *m_body_filament = nullptr;
     std::array<wxStaticBitmap *, IMAGE_OBJECT_MAX_COLORS> m_level_swatch{};
@@ -156,6 +171,10 @@ private:
     std::vector<wxWindow *> m_brightness; // only for brightness threshold
     std::vector<wxWindow *> m_cutter_controls;
     std::vector<wxWindow *> m_box_controls;
+    std::vector<wxWindow *> m_clicker_controls;
+    std::vector<wxWindow *> m_picture_controls; // box and clicker
+    // the result is the fit test piece, not the object of the image
+    bool m_is_fit_test = false;
 };
 
 // Ask for an image when the path is empty, show the dialog and add the objects to the plate.
