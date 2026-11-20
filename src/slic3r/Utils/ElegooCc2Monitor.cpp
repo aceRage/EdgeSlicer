@@ -347,6 +347,7 @@ private:
         SessionOptions so;
         so.register_timeout_ms = 3000;
         so.reply_timeout_ms    = 5000;
+        so.client_id           = stable_client_id(1); // the same id for every connection and check-in of this process
         m_session              = std::make_unique<Session>(*m_transport, sn, so);
         if (!m_session->open(error)) {
             fail(error.empty() ? std::string("the printer refused the connection") : error);
@@ -772,6 +773,25 @@ CallResult call(const std::string& host, const std::string& token, int method, c
     }
     l->forget(w);
     return r;
+}
+
+void release(const std::string& host)
+{
+    const std::string                  want = ElegooCc2::host_of(host);
+    if (want.empty()) return;
+    Manager&                           M = mgr();
+    std::vector<std::shared_ptr<Link>> gone;
+    {
+        std::lock_guard<std::mutex> lock(M.m);
+        for (auto it = M.links.begin(); it != M.links.end();) {
+            if (ElegooCc2::host_of(it->first) == want) {
+                gone.push_back(it->second);
+                it = M.links.erase(it);
+            } else
+                ++it;
+        }
+    }
+    for (auto& l : gone) l->stop(2000);
 }
 
 void shutdown() { stop_all(2000, true); }

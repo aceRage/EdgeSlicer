@@ -10,6 +10,8 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
+#include <thread>
 
 #include <boost/log/trivial.hpp>
 #include <curl/curl.h>
@@ -19,6 +21,14 @@ namespace Slic3r {
 namespace ElegooCc2 {
 
 namespace {
+
+// One short-lived session at a time, all under the same client id (stable_client_id(0)): a second
+// connection under that id would push the first off the broker.
+std::mutex& one_shot_mutex()
+{
+    static std::mutex m;
+    return m;
+}
 
 std::string url_escape(const std::string& s)
 {
@@ -182,9 +192,11 @@ CanvasQueryResult canvas_query(const std::string& address, const std::string& to
         BOOST_LOG_TRIVIAL(info) << "CANVAS (CC2): no serial from the printer: " << out.error;
         return out;
     }
+    std::lock_guard<std::mutex> one_shot(one_shot_mutex());
     PahoTransport  transport(host_of(address), token, timeout_s);
     SessionOptions so;
     so.reply_timeout_ms = std::max(1000, opts.step_timeout_ms);
+    so.client_id        = stable_client_id(0);
     Session session(transport, sn, so);
     if (!session.open(out.error)) {
         out.reached = true; // HTTP answered; only the MQTT side did not
@@ -230,13 +242,61 @@ StartResult start_print(const std::string&                        address,
         out.error = "could not read the printer's serial number (" + out.error + ")";
         return out;
     }
-    PahoTransport transport(host_of(address), token, 5);
-    Session       session(transport, sn);
-    if (!session.open(out.error))
-        return out;
-    out = start_print_over(session, extended_info, pc_bed_type, filename);
-    session.close();
-    return out;
+    // First choice: the hub's live session to this printer, as elegoo-link keeps one session per printer for
+    // everything. It takes no new slot in the printer's client table.
+    {
+        bool             sent_any = false;
+        const std::string host    = host_of(address);
+        const CallFn      via_hub = [&](int method, const std::string& params, Reply& reply, std::string& error) {
+            const ElegooCc2Monitor::CallResult c = ElegooCc2Monitor::call(host, token, method, params, 10000);
+            sent_any = sent_any || c.sent;
+            if (!c.sent || !c.answered) {
+                error = c.error.empty() ? std::string("the printer did not answer") : c.error;
+                return false;
+            }
+            reply            = Reply();
+            reply.valid      = true;
+            reply.method     = method;
+            reply.error_code = c.error_code;
+            reply.result     = c.result;
+            return true;
+        };
+        StartResult shared = start_print_over(via_hub, extended_info, pc_bed_type, filename);
+        if (sent_any) {
+            BOOST_LOG_TRIVIAL(info) << "CC2 start: sent over the hub's session";
+            return shared;
+        }
+        BOOST_LOG_TRIVIAL(info) << "CC2 start: the hub's session was not available (" << shared.error << "), opening its own";
+    }
+    std::lock_guard<std::mutex> one_shot(one_shot_mutex());
+    for (int attempt = 0;; ++attempt) {
+        PahoTransport  transport(host_of(address), token, 5);
+        SessionOptions so;
+        so.client_id = stable_client_id(0);
+        Session session(transport, sn, so);
+        if (session.open(out.error)) {
+            out = start_print_over(session, extended_info, pc_bed_type, filename);
+            out.register_attempts = attempt + 1;
+            session.close();
+            BOOST_LOG_TRIVIAL(info) << "CC2 start: registered on try " << (attempt + 1);
+            return out;
+        }
+        out.register_attempts = attempt + 1;
+        if (session.register_result() != RegisterResult::TooManyClients)
+            return out;
+        out.too_many_clients = true;
+        const int wait_ms = too_many_clients_delay_ms(attempt);
+        BOOST_LOG_TRIVIAL(warning) << "CC2 start: the printer's client table is full (try " << (attempt + 1) << ")"
+                                   << (wait_ms < 0 ? std::string(", giving up") : ", closing our own hub connection and trying again");
+        if (wait_ms < 0) {
+            out.error = too_many_clients_text();
+            return out;
+        }
+        // Our own hub connection to this printer is one of the clients: close it, give the printer a moment
+        // to notice, and register again.
+        ElegooCc2Monitor::release(address);
+        std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+    }
 }
 
 } // namespace ElegooCc2
