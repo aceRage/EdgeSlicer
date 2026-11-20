@@ -29,6 +29,7 @@
 // Everything in this header except the functions marked "networking" is pure and is exercised by
 // tests/slic3rutils/elegoo_cc2_tests.cpp with a scripted MQTT transport.
 
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -275,6 +276,17 @@ struct StartResult
 // - with a CANVAS and an auto-refill choice from the dialog - 2004, as ElegooSlicer sets it before every
 // start (a refusal stops the start, as there), then 1020; one retry with bedlevel_force when the printer asks for leveling data and the person asked
 // for leveling (ElegooSlicer does the same).
+// The same flow over any way of sending one request and reading its answer: false with error set when
+// the request was not sent or not answered. elegoo-link keeps one session per printer for status, commands
+// and the print start; start_print() uses the hub's live session (ElegooCc2Monitor) this way and falls back
+// to its own short-lived one only when that session cannot be had.
+using CallFn = std::function<bool(int method, const std::string& params_json, Reply& reply, std::string& error)>;
+StartResult start_print_over(const CallFn&                             call,
+                             const std::map<std::string, std::string>& extended_info,
+                             int                                       pc_bed_type,
+                             const std::string&                        filename,
+                             int                                       busy_checks      = 10,
+                             int                                       busy_interval_ms = 1000);
 StartResult start_print_over(Session&                                  session,
                              const std::map<std::string, std::string>& extended_info,
                              int                                       pc_bed_type,

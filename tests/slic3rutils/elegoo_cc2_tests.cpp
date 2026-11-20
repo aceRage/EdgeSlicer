@@ -457,6 +457,38 @@ TEST_CASE("CC2 CANVAS read: a Combo and a plain CC2", "[ElegooCc2]")
     }
 }
 
+TEST_CASE("CC2 start print over a shared call function", "[ElegooCc2]")
+{
+    // The print start can run over any way of sending one request (the hub's live session).
+    std::vector<int> methods;
+    int              start_code = 0;
+    const ElegooCc2::CallFn call = [&](int method, const std::string&, ElegooCc2::Reply& reply, std::string&) {
+        methods.push_back(method);
+        reply            = ElegooCc2::Reply();
+        reply.valid      = true;
+        reply.error_code = method == ElegooCc2::METHOD_START_PRINT ? start_code : 0;
+        reply.result     = method == ElegooCc2::METHOD_GET_STATUS ? status_result(ElegooCc2::STATUS_IDLE, 0) : std::string("{}");
+        return true;
+    };
+    SECTION("idle: one status, then the start")
+    {
+        const auto r = ElegooCc2::start_print_over(call, {}, 0, "a.gcode", 3, 0);
+        CHECK(r.ok);
+        CHECK(methods == std::vector<int> { ElegooCc2::METHOD_GET_STATUS, ElegooCc2::METHOD_START_PRINT });
+    }
+    SECTION("an unanswered request is an error, not a second start")
+    {
+        const ElegooCc2::CallFn silent = [&](int method, const std::string&, ElegooCc2::Reply&, std::string& error) {
+            methods.push_back(method);
+            error = "the printer did not answer";
+            return false;
+        };
+        const auto r = ElegooCc2::start_print_over(silent, {}, 0, "a.gcode", 3, 0);
+        CHECK_FALSE(r.ok);
+        CHECK(std::count(methods.begin(), methods.end(), ElegooCc2::METHOD_START_PRINT) == 1);
+    }
+}
+
 TEST_CASE("CC2 start print", "[ElegooCc2]")
 {
     MockCc2          printer;

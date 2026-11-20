@@ -627,6 +627,19 @@ StartResult start_print_over(Session&                                  session,
                              int                                       busy_checks,
                              int                                       busy_interval_ms)
 {
+    const CallFn call = [&session](int method, const std::string& params, Reply& reply, std::string& error) {
+        return session.call(method, params, reply, error);
+    };
+    return start_print_over(call, extended_info, pc_bed_type, filename, busy_checks, busy_interval_ms);
+}
+
+StartResult start_print_over(const CallFn&                             session,
+                             const std::map<std::string, std::string>& extended_info,
+                             int                                       pc_bed_type,
+                             const std::string&                        filename,
+                             int                                       busy_checks,
+                             int                                       busy_interval_ms)
+{
     StartResult out;
     std::string error;
     // The printer may still be taking in the file it was just sent: ask again for a while, as
@@ -636,7 +649,7 @@ StartResult start_print_over(Session&                                  session,
         if (i > 0 && busy_interval_ms > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(busy_interval_ms));
         Reply status;
-        if (!session.call(METHOD_GET_STATUS, "{}", status, error) || status.error_code != 0) {
+        if (!session(METHOD_GET_STATUS, "{}", status, error) || status.error_code != 0) {
             out.busy = false;
             break;
         }
@@ -655,7 +668,7 @@ StartResult start_print_over(Session&                                  session,
     const int refill = auto_refill_choice(extended_info);
     if (refill >= 0) {
         Reply r;
-        if (!session.call(METHOD_SET_AUTO_REFILL, auto_refill_params(refill == 1), r, error)) {
+        if (!session(METHOD_SET_AUTO_REFILL, auto_refill_params(refill == 1), r, error)) {
             out.error = "the CANVAS auto-refill setting was not answered (" + error + "), so the print was not started";
             return out;
         }
@@ -670,7 +683,7 @@ StartResult start_print_over(Session&                                  session,
     for (int attempt = 0; attempt < 2; ++attempt) {
         out.payload = start_print_params(extended_info, pc_bed_type, filename, force);
         Reply r;
-        if (!session.call(METHOD_START_PRINT, out.payload, r, error)) {
+        if (!session(METHOD_START_PRINT, out.payload, r, error)) {
             out.error = error;
             return out;
         }

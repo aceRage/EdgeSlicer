@@ -242,6 +242,32 @@ StartResult start_print(const std::string&                        address,
         out.error = "could not read the printer's serial number (" + out.error + ")";
         return out;
     }
+    // First choice: the hub's live session to this printer, as elegoo-link keeps one session per printer for
+    // everything. It takes no new slot in the printer's client table.
+    {
+        bool             sent_any = false;
+        const std::string host    = host_of(address);
+        const CallFn      via_hub = [&](int method, const std::string& params, Reply& reply, std::string& error) {
+            const ElegooCc2Monitor::CallResult c = ElegooCc2Monitor::call(host, token, method, params, 10000);
+            sent_any = sent_any || c.sent;
+            if (!c.sent || !c.answered) {
+                error = c.error.empty() ? std::string("the printer did not answer") : c.error;
+                return false;
+            }
+            reply            = Reply();
+            reply.valid      = true;
+            reply.method     = method;
+            reply.error_code = c.error_code;
+            reply.result     = c.result;
+            return true;
+        };
+        StartResult shared = start_print_over(via_hub, extended_info, pc_bed_type, filename);
+        if (sent_any) {
+            BOOST_LOG_TRIVIAL(info) << "CC2 start: sent over the hub's session";
+            return shared;
+        }
+        BOOST_LOG_TRIVIAL(info) << "CC2 start: the hub's session was not available (" << shared.error << "), opening its own";
+    }
     std::lock_guard<std::mutex> one_shot(one_shot_mutex());
     for (int attempt = 0;; ++attempt) {
         PahoTransport  transport(host_of(address), token, 5);
