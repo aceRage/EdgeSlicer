@@ -28,6 +28,8 @@
 #include <array>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <set>
@@ -36,6 +38,14 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <winioctl.h>
+#endif
 
 using namespace Slic3r;
 using namespace Slic3r::untrusted;
@@ -793,6 +803,24 @@ TEST_CASE("archive entry names may not leave the extraction folder", "[Untrusted
         CHECK_FALSE(is_safe_archive_relative_path(p));
 }
 
+TEST_CASE("archive entry names keep device names and trailing dots for the extractor to rename", "[Untrusted][ZipSlip]")
+{
+    // Not a confinement question: "nul.txt" / "foo." stay inside the folder. ZIP extraction renames
+    // them (sanitize_zip_extract_segment) and 3MF entries such as Auxiliaries/aux.png must load, so
+    // the validator accepts them on every platform, as before the long-path port.
+    for (const char *p : {"Auxiliaries/aux.png", "con.jpg", "foo.", "foo ", "nul.txt", "CON", "COM1.stl", "..a/b..",
+                          "COM\xC2\xB9.txt", "console.stl", "a..b", "..a"})
+        CHECK(is_safe_archive_relative_path(p));
+    // All-dot / all-space segments stay refused on every platform.
+    for (const char *p : {"a/.../b", "a/.. /b", "a/. /b", "...", ". ."})
+        CHECK_FALSE(is_safe_archive_relative_path(p));
+    std::string out;
+    CHECK(normalize_archive_entry_path("Auxiliaries/aux.png", out) == ArchiveEntryName::Ok);
+    CHECK(out == "Auxiliaries/aux.png");
+    CHECK(normalize_archive_entry_path("con.jpg", out) == ArchiveEntryName::Ok);
+    CHECK(out == "con.jpg");
+}
+
 // The Windows ANSI code page maps these look-alikes to '.', '/', '\\' and ':' when a UTF-8 name is
 // narrowed (WideCharToMultiByte best-fit), so a name made of them is "../x" to a narrow fopen.
 // The validator refuses them on every platform; ordinary non-ASCII names stay fine.
@@ -832,6 +860,7 @@ TEST_CASE("archive entry names are normalised before they are judged", "[Untrust
     CHECK(normalized("dir/") == "dir");
     CHECK(normalized("dir\\") == "dir");
     CHECK(normalized(".//a/") == "a");
+    CHECK(normalized("..a/b") == "..a/b");
     CHECK(normalized("..a/b..") == "..a/b..");
     CHECK(normalized("caf\xC3\xA9\\\xE6\xB5\x8B.json") == "caf\xC3\xA9/\xE6\xB5\x8B.json");
 
@@ -2083,7 +2112,11 @@ void write_zip_entries(const fs::path &zip_file, const std::vector<std::pair<std
 {
     mz_zip_archive zip;
     mz_zip_zero_struct(&zip);
+#ifdef _WIN32
+    REQUIRE(open_zip_writer(&zip, boost::nowide::narrow(zip_file.wstring())));
+#else
     REQUIRE(open_zip_writer(&zip, zip_file.string()));
+#endif
     for (const auto &entry : entries)
         REQUIRE(mz_zip_writer_add_mem(&zip, entry.first.c_str(), entry.second.data(), entry.second.size(), MZ_DEFAULT_COMPRESSION));
     REQUIRE(mz_zip_writer_finalize_archive(&zip));
@@ -2178,6 +2211,400 @@ TEST_CASE("is_path_within_root confines a candidate to the extraction root", "[U
     fs::remove_all(dir, ec);
 }
 
+TEST_CASE("is_path_within_root canonicalizes a dest path longer than MAX_PATH", "[Untrusted][ZipSlip]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_within_root_long_%%%%%%%%");
+    fs::create_directories(dir);
+    const fs::path root = dir / std::string(240, 'r');
+    REQUIRE(root.string().size() > 260);
+    fs::create_directories(extended_path(root));
+
+    CHECK(is_path_within_root(root, root / "a"));
+    CHECK(is_path_within_root(root, root / "a" / "b.json"));
+    CHECK(is_path_within_root(root, root));
+    CHECK_FALSE(is_path_within_root(root, root / ".." / "x"));
+    CHECK_FALSE(is_path_within_root(root, dir / "x"));
+
+    // A junction (or directory symlink) under that long root must be followed the same way
+    // prefixed I/O follows it, so a hop that lands outside is rejected.
+    const fs::path outside  = dir / "outside";
+    const fs::path junction = root / "escape";
+    fs::create_directories(outside);
+    bool linked = false;
+#ifdef _WIN32
+    {
+        const std::string cmd = "cmd /c mklink /J \"" + junction.string() + "\" \"" + outside.string() + "\" >nul 2>&1";
+        linked                = (std::system(cmd.c_str()) == 0);
+        if (!linked) {
+            const std::wstring link_w   = extended_path(junction).wstring();
+            const std::wstring target_w = extended_path(outside).wstring();
+            DWORD              flags    = SYMBOLIC_LINK_FLAG_DIRECTORY;
+#ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+            flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+#endif
+            linked = CreateSymbolicLinkW(link_w.c_str(), target_w.c_str(), flags) != 0;
+        }
+    }
+#else
+    {
+        boost::system::error_code lec;
+        fs::create_directory_symlink(outside, junction, lec);
+        linked = !lec;
+    }
+#endif
+    if (linked) {
+        CHECK_FALSE(is_path_within_root(root, junction / "secret.txt"));
+        CHECK(is_path_within_root(root, root / "safe.txt"));
+        boost::system::error_code rec;
+        fs::remove(extended_path(junction), rec);
+    } else {
+        WARN("junction/symlink unavailable; escape-via-junction case skipped");
+    }
+
+    boost::system::error_code ec;
+    fs::remove_all(extended_path(root), ec);
+    fs::remove_all(dir, ec);
+}
+
+namespace {
+
+// is_path_within_root exactly as it was on main before the long-path change (104ee3adb3). It is
+// the reference for the corpus below: the new check must refuse everything this one refused.
+fs::path legacy_strip_trailing_separators(const fs::path &p)
+{
+    std::string s = p.generic_string();
+    while (s.size() > 1 && (s.back() == '/' || s.back() == '\\'))
+        s.pop_back();
+    return fs::path(s);
+}
+
+bool legacy_has_nul(const fs::path &p)
+{
+    return p.string().find('\0') != std::string::npos || p.generic_string().find('\0') != std::string::npos;
+}
+
+fs::path legacy_weakly_canonical_for_confine(const fs::path &p)
+{
+    const fs::path            stripped = legacy_strip_trailing_separators(p);
+    boost::system::error_code ec;
+    if (fs::is_symlink(fs::symlink_status(stripped, ec))) {
+        const fs::path parent = stripped.parent_path();
+        if (parent.empty())
+            return stripped;
+        return fs::weakly_canonical(parent) / stripped.filename();
+    }
+    return fs::weakly_canonical(stripped);
+}
+
+bool legacy_is_path_within_root(const fs::path &root, const fs::path &candidate)
+{
+    try {
+        if (legacy_has_nul(root) || legacy_has_nul(candidate))
+            return false;
+        const fs::path root_c = fs::weakly_canonical(legacy_strip_trailing_separators(root));
+        const fs::path cand_c = legacy_weakly_canonical_for_confine(candidate);
+        if (legacy_has_nul(root_c) || legacy_has_nul(cand_c))
+            return false;
+        auto skip = [](const fs::path &e) { return e.empty() || e == "."; };
+        auto r    = root_c.begin();
+        auto c    = cand_c.begin();
+        while (r != root_c.end()) {
+            if (skip(*r)) {
+                ++r;
+                continue;
+            }
+            while (c != cand_c.end() && skip(*c))
+                ++c;
+            if (c == cand_c.end() || *r != *c)
+                return false;
+            ++r;
+            ++c;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+#ifdef _WIN32
+// A directory junction made with FSCTL_SET_REPARSE_POINT: no privilege, no shell, and it works
+// for a link path past MAX_PATH. `target` must be an absolute, unprefixed drive path.
+bool make_test_junction(const fs::path &target, const fs::path &link)
+{
+    const std::wstring link_io = extended_path(link).wstring();
+    if (!CreateDirectoryW(link_io.c_str(), nullptr))
+        return false;
+    HANDLE h = CreateFileW(link_io.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        RemoveDirectoryW(link_io.c_str());
+        return false;
+    }
+    const std::wstring print = fs::path(target).make_preferred().wstring();
+    const std::wstring subst = L"\\??\\" + print;
+    // REPARSE_DATA_BUFFER (MountPointReparseBuffer) laid out by hand; the struct is in the DDK only.
+    const size_t          subst_bytes = subst.size() * sizeof(wchar_t);
+    const size_t          print_bytes = print.size() * sizeof(wchar_t);
+    const size_t          path_bytes  = subst_bytes + sizeof(wchar_t) + print_bytes + sizeof(wchar_t);
+    std::vector<unsigned char> buf(8 + 8 + path_bytes, 0);
+    auto put16 = [&buf](size_t at, size_t v) { buf[at] = (unsigned char) (v & 0xff); buf[at + 1] = (unsigned char) ((v >> 8) & 0xff); };
+    const DWORD tag = IO_REPARSE_TAG_MOUNT_POINT;
+    std::memcpy(buf.data(), &tag, 4);
+    put16(4, 8 + path_bytes);                      // ReparseDataLength
+    put16(8, 0);                                   // SubstituteNameOffset
+    put16(10, subst_bytes);                        // SubstituteNameLength
+    put16(12, subst_bytes + sizeof(wchar_t));      // PrintNameOffset
+    put16(14, print_bytes);                        // PrintNameLength
+    std::memcpy(buf.data() + 16, subst.data(), subst_bytes);
+    std::memcpy(buf.data() + 16 + subst_bytes + sizeof(wchar_t), print.data(), print_bytes);
+    DWORD      returned = 0;
+    const BOOL ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, buf.data(), DWORD(buf.size()), nullptr, 0, &returned, nullptr);
+    CloseHandle(h);
+    if (!ok)
+        RemoveDirectoryW(link_io.c_str());
+    return ok != FALSE;
+}
+
+// Removes only the link (RemoveDirectoryW on the reparse point), never the target's contents.
+void remove_test_junction(const fs::path &link) { RemoveDirectoryW(extended_path(link).wstring().c_str()); }
+#else
+bool make_test_junction(const fs::path &target, const fs::path &link)
+{
+    boost::system::error_code ec;
+    fs::create_directory_symlink(target, link, ec);
+    return !ec;
+}
+
+void remove_test_junction(const fs::path &link)
+{
+    boost::system::error_code ec;
+    fs::remove(link, ec);
+}
+#endif
+
+enum class Confine { Inside, Outside, Either };
+
+struct ConfineCase
+{
+    fs::path    candidate;
+    Confine     expect;
+    std::string label;
+};
+
+void check_confine_corpus(const fs::path &root, const std::vector<ConfineCase> &cases)
+{
+    for (const ConfineCase &c : cases) {
+        const bool before = legacy_is_path_within_root(root, c.candidate);
+        const bool now    = is_path_within_root(root, c.candidate);
+        INFO(c.label << " | candidate " << c.candidate.string() << " | before " << before << " now " << now);
+        // Nothing refused before is accepted now, except a case listed as Inside: a spelling of a
+        // path that really is inside the root (the \\?\ form of a child, which main refused only
+        // because its canonical prefix differed from the root's).
+        if (!before && c.expect != Confine::Inside)
+            CHECK_FALSE(now);
+        if (c.expect == Confine::Outside)
+            CHECK_FALSE(now);
+        else if (c.expect == Confine::Inside)
+            CHECK(now);
+    }
+}
+
+} // namespace
+
+TEST_CASE("is_path_within_root refuses every path the pre-long-path check refused", "[Untrusted][ZipSlip]")
+{
+    const fs::path dir  = fs::temp_directory_path() / fs::unique_path("edgeslicer_confine_corpus_%%%%%%%%");
+    const fs::path root = dir / "root";
+    fs::create_directories(root / "sub");
+    fs::create_directories(dir / "root2");
+    fs::create_directories(dir / "outside_folder_with_a_long_name");
+    const fs::path outside = dir / "outside_folder_with_a_long_name";
+    {
+        boost::nowide::ofstream f(root.string() + "/file.txt");
+        f << "x";
+    }
+    const bool jout = make_test_junction(outside, root / "jout");
+    const bool jin  = make_test_junction(root / "sub", root / "jin");
+    if (!jout || !jin)
+        WARN("junction unavailable; link cases skipped");
+
+    std::vector<ConfineCase> cases = {
+        {root / "a", Confine::Inside, "plain child"},
+        {root / "sub" / "x.json", Confine::Inside, "nested child"},
+        {root, Confine::Inside, "root itself"},
+        {root / "sub" / ".." / "a", Confine::Inside, "dot-dot that stays inside"},
+        {root / ".." / "x", Confine::Outside, "dot-dot traversal"},
+        {root / "sub" / ".." / ".." / "x", Confine::Outside, "nested dot-dot traversal"},
+        {root / ".." / "root2" / "a", Confine::Outside, "sibling with a shared prefix"},
+        {dir / "root2" / "a", Confine::Outside, "sibling, absolute"},
+        {dir / "x", Confine::Outside, "parent, absolute"},
+        {outside / "x", Confine::Outside, "other folder, absolute"},
+        {root / "CON", Confine::Either, "reserved name CON"},
+        {root / "nul.txt", Confine::Either, "reserved name nul.txt"},
+        {root / "COM1" / "x", Confine::Either, "reserved name COM1 as a folder"},
+        {root / "sub" / "aux", Confine::Either, "reserved name aux"},
+        {root / "sub." / "x", Confine::Either, "folder with a trailing dot"},
+        {root / "a " / "x", Confine::Either, "folder with a trailing space"},
+    };
+    if (jout) {
+        cases.push_back({root / "jout" / "x", Confine::Outside, "junction to outside, then a child"});
+        cases.push_back({root / "jout" / "sub" / "x", Confine::Outside, "junction to outside, deeper"});
+        cases.push_back({root / "jout", Confine::Either, "junction itself (last hop is replaced, not followed)"});
+    }
+    if (jin)
+        cases.push_back({root / "jin" / "x", Confine::Inside, "junction to a folder inside the root"});
+#ifdef _WIN32
+    const std::wstring rw = root.wstring();
+    const std::wstring dw = dir.wstring();
+    const std::wstring drive = root.root_name().wstring(); // "C:"
+    const std::vector<ConfineCase> win = {
+        // absolute and drive-relative
+        {fs::path(L"Z:\\x"), Confine::Outside, "other drive"},
+        {fs::path(drive + L"\\Windows\\x"), Confine::Outside, "same drive, other folder"},
+        {fs::path(drive + L"x"), Confine::Outside, "drive-relative"},
+        {fs::path(drive + L"..\\x"), Confine::Outside, "drive-relative dot-dot"},
+        {fs::path(L"\\x"), Confine::Outside, "root-relative"},
+        {fs::path(L"\\" + root.relative_path().wstring() + L"\\a"), Confine::Either, "root-relative spelling of a child"},
+        {fs::path(L"\\" + root.relative_path().wstring() + L"\\..\\x"), Confine::Outside, "root-relative dot-dot"},
+        // UNC (an .invalid host never resolves)
+        {fs::path(L"\\\\edgeslicer-nohost.invalid\\share\\x"), Confine::Outside, "UNC"},
+        {fs::path(L"//edgeslicer-nohost.invalid/share/x"), Confine::Outside, "UNC, forward slashes"},
+        {fs::path(L"\\\\?\\UNC\\edgeslicer-nohost.invalid\\share\\x"), Confine::Outside, "extended UNC"},
+        // \\?\ and \\.\ spellings
+        {fs::path(L"\\\\?\\" + rw + L"\\a"), Confine::Inside, "extended child (same file; main refused it only for the prefix)"},
+        {fs::path(L"\\\\?\\" + rw + L"\\..\\x"), Confine::Outside, "extended dot-dot"},
+        {fs::path(L"\\\\?\\" + dw + L"\\x"), Confine::Outside, "extended parent"},
+        {fs::path(L"\\\\.\\" + rw + L"\\a"), Confine::Either, "device-path child"},
+        {fs::path(L"\\\\.\\" + rw + L"\\..\\x"), Confine::Outside, "device-path dot-dot"},
+        {fs::path(L"\\\\.\\" + dw + L"\\x"), Confine::Outside, "device-path parent"},
+        {fs::path(L"\\\\.\\CON"), Confine::Outside, "console device"},
+        {fs::path(L"\\\\.\\PhysicalDrive0"), Confine::Outside, "raw disk"},
+        // alternate data streams
+        {fs::path(rw + L"\\file.txt:evil"), Confine::Either, "stream of a file inside"},
+        {fs::path(rw + L"\\a:b"), Confine::Either, "stream of a new file inside"},
+        {fs::path(rw + L"\\..:x"), Confine::Outside, "stream on dot-dot"},
+        {fs::path(rw + L"\\...:x"), Confine::Outside, "stream on all-dots"},
+        {fs::path(rw + L"\\..\\x:y"), Confine::Outside, "stream after traversal"},
+        // mixed separators
+        {fs::path(rw + L"/sub\\..\\..\\x"), Confine::Outside, "mixed separators, traversal"},
+        {fs::path(root.generic_wstring() + L"\\a/b"), Confine::Inside, "mixed separators, child"},
+        {fs::path(rw + L"\\sub/../a"), Confine::Inside, "mixed separators, dot-dot inside"},
+        // names Win32 trims
+        {fs::path(rw + L"\\.. \\x"), Confine::Outside, "dot-dot-space"},
+        {fs::path(rw + L"\\...\\x"), Confine::Outside, "three dots"},
+        {fs::path(rw + L"\\. \\x"), Confine::Outside, "dot-space"},
+        {fs::path(rw + L"\\.. "), Confine::Outside, "trailing dot-dot-space"},
+        {fs::path(rw + L"\\..."), Confine::Outside, "trailing three dots"},
+        {fs::path(rw + L"\\..  .\\x"), Confine::Outside, "dots and spaces"},
+        {fs::path(rw + L"\\sub\\.. \\.. \\x"), Confine::Outside, "nested dot-dot-space"},
+        {fs::path(rw + L"\\...\\CON"), Confine::Outside, "three dots then a device"},
+    };
+    cases.insert(cases.end(), win.begin(), win.end());
+
+    // 8.3 short names, when the volume makes them.
+    wchar_t short_buf[MAX_PATH * 2] = {};
+    const DWORD n = GetShortPathNameW(dw.c_str(), short_buf, DWORD(std::size(short_buf)));
+    const fs::path short_dir = (n > 0 && n < std::size(short_buf)) ? fs::path(std::wstring(short_buf, n)) : fs::path();
+    wchar_t out_buf[MAX_PATH * 2] = {};
+    const DWORD n2 = GetShortPathNameW(outside.wstring().c_str(), out_buf, DWORD(std::size(out_buf)));
+    const fs::path short_outside = (n2 > 0 && n2 < std::size(out_buf)) ? fs::path(std::wstring(out_buf, n2)) : fs::path();
+    if (!short_dir.empty() && short_dir != dir) {
+        cases.push_back({short_dir / "root" / "a", Confine::Either, "8.3 spelling of a child"});
+        cases.push_back({short_dir / "root" / ".." / "x", Confine::Outside, "8.3 spelling, traversal"});
+        cases.push_back({short_dir / "x", Confine::Outside, "8.3 spelling of the parent"});
+        CHECK_FALSE(is_path_within_root(short_dir / "root", outside / "x"));
+        CHECK_FALSE(is_path_within_root(short_dir / "root", dir / "x"));
+        if (legacy_is_path_within_root(short_dir / "root", root / "a"))
+            CHECK(is_path_within_root(short_dir / "root", root / "a"));
+    } else {
+        WARN("no 8.3 name for the temp folder; short-name spelling of the root skipped");
+    }
+    if (!short_outside.empty() && short_outside != outside) {
+        cases.push_back({short_outside / "x", Confine::Outside, "8.3 name of the outside folder"});
+        cases.push_back({root / ".." / short_outside.filename() / "x", Confine::Outside, "traversal to an 8.3 name"});
+    }
+#endif
+
+    check_confine_corpus(root, cases);
+
+    // Preset names go through is_relative_name_within_root (PresetBundle import).
+    for (const char *name : {"..", "../x", "..\\x", "/x", "\\x", "C:x", "C:\\x"}) {
+        INFO(name);
+        CHECK_FALSE(is_relative_name_within_root(name, root));
+    }
+#ifdef _WIN32
+    for (const char *name : {".. ", "...", ". ", "a/.. /b", "..:x", "...\\x"}) {
+        INFO(name);
+        CHECK_FALSE(is_relative_name_within_root(name, root));
+    }
+    // Ordinary preset names, including one ending in a space or a dot, still pass.
+    for (const char *name : {"Generic PLA", "My PLA ", "PLA v2.", "a..b"}) {
+        INFO(name);
+        CHECK(is_relative_name_within_root(name, root));
+    }
+#endif
+
+    CHECK(fs::exists(outside)); // the junctions were never followed for writing
+    boost::system::error_code ec;
+    remove_test_junction(root / "jout");
+    remove_test_junction(root / "jin");
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("is_path_within_root keeps refusing escapes under a root longer than MAX_PATH", "[Untrusted][ZipSlip]")
+{
+    const fs::path dir     = fs::temp_directory_path() / fs::unique_path("edgeslicer_confine_long_%%%%%%%%");
+    const fs::path outside = dir / "outside";
+    const fs::path root    = dir / std::string(240, 'r');
+    fs::create_directories(outside);
+    fs::create_directories(extended_path(root / "sub"));
+    REQUIRE(root.string().size() > 260);
+    const bool jout = make_test_junction(outside, root / "jout");
+    const fs::path outside2 = dir / "outside2";
+    fs::create_directories(outside2);
+    const bool jin  = make_test_junction(outside2, root / "sub" / "jup"); // a deeper hop that leaves the root
+    if (!jout || !jin)
+        WARN("junction unavailable under the long root; link cases skipped");
+
+    std::vector<ConfineCase> cases = {
+        {root / "a", Confine::Inside, "long: plain child"},
+        {root / "sub" / "b.json", Confine::Inside, "long: nested child"},
+        {root / ".." / "x", Confine::Outside, "long: dot-dot"},
+        {root / "sub" / ".." / ".." / "x", Confine::Outside, "long: nested dot-dot"},
+        {dir / "x", Confine::Outside, "long: parent"},
+        {outside / "x", Confine::Outside, "long: other folder"},
+    };
+    std::vector<ConfineCase> link_cases;
+    if (jout)
+        link_cases.push_back({root / "jout" / "x", Confine::Outside, "long: junction to outside"});
+    if (jin)
+        link_cases.push_back({root / "sub" / "jup" / "x", Confine::Outside, "long: nested junction to outside"});
+#ifdef _WIN32
+    const std::wstring rw = root.wstring();
+    cases.push_back({fs::path(L"\\\\?\\" + rw + L"\\..\\x"), Confine::Outside, "long: extended dot-dot"});
+    cases.push_back({fs::path(L"\\\\.\\" + rw + L"\\..\\x"), Confine::Outside, "long: device-path dot-dot"});
+    cases.push_back({fs::path(rw + L"\\.. \\x"), Confine::Outside, "long: dot-dot-space"});
+    cases.push_back({fs::path(rw + L"\\...\\x"), Confine::Outside, "long: three dots"});
+    cases.push_back({fs::path(rw + L"\\..:x"), Confine::Outside, "long: stream on dot-dot"});
+    cases.push_back({fs::path(rw + L"/sub\\..\\..\\x"), Confine::Outside, "long: mixed separators"});
+#endif
+    // The legacy check could not see a junction past MAX_PATH: these cases are judged on the new
+    // check alone (that blind spot is what the change fixes). Everything else also keeps the
+    // "nothing refused before is accepted now" rule.
+    check_confine_corpus(root, cases);
+    for (const ConfineCase &c : link_cases) {
+        INFO(c.label << " | before " << legacy_is_path_within_root(root, c.candidate));
+        CHECK_FALSE(is_path_within_root(root, c.candidate));
+    }
+
+    CHECK(fs::exists(outside));
+    boost::system::error_code ec;
+    remove_test_junction(root / "jout");
+    remove_test_junction(root / "sub" / "jup");
+    fs::remove_all(extended_path(root), ec);
+    fs::remove_all(dir, ec);
+}
+
 TEST_CASE("extract_archive_confined writes a well-formed nested archive under the target", "[Untrusted][ZipSlip]")
 {
     const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_confined_ok_%%%%%%%%");
@@ -2198,6 +2625,75 @@ TEST_CASE("extract_archive_confined writes a well-formed nested archive under th
     CHECK(read_text_file(target / "vendor" / "machine" / "printer.json") == "{\"b\":2}");
 
     boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+namespace {
+
+std::string read_text_file_io(const fs::path &file)
+{
+    const fs::path io = extended_path(file);
+#ifdef _WIN32
+    boost::nowide::ifstream in(boost::nowide::narrow(io.wstring()), std::ios::binary);
+#else
+    boost::nowide::ifstream in(io.string(), std::ios::binary);
+#endif
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
+TEST_CASE("extract_archive_confined writes files under a target path longer than MAX_PATH", "[Untrusted][ZipSlip][MinizExtension]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_long_dest_%%%%%%%%");
+    fs::create_directories(dir);
+    const fs::path zip_file = dir / "bundle.zip";
+    // Directory entries are explicit: extract_archive_confined recreates directories only for them.
+    write_zip_entries(zip_file, {{"vendor/", ""}, {"vendor/machine/", ""}, {"vendor.json", "{\"a\":1}"},
+                                 {"vendor/machine/printer.json", "{\"b\":2}"}});
+
+    // One 240-char component keeps every name below the NTFS 255 limit while pushing the full
+    // target path past the 260-char MAX_PATH the Win32 APIs enforce when LongPathsEnabled is off.
+    const fs::path target = dir / std::string(240, 'd');
+    REQUIRE(target.string().size() > 260);
+    fs::create_directories(extended_path(target));
+
+    std::string err;
+    REQUIRE(extract_archive_confined(zip_file, target, err));
+    CHECK(err.empty());
+    // Verify through extended-length paths, otherwise the checks themselves are bounded by MAX_PATH.
+    CHECK(fs::is_directory(extended_path(target / "vendor")));
+    CHECK(read_text_file_io(target / "vendor.json") == "{\"a\":1}");
+    CHECK(read_text_file_io(target / "vendor" / "machine" / "printer.json") == "{\"b\":2}");
+
+    boost::system::error_code ec;
+    fs::remove_all(extended_path(target), ec);
+    CHECK_FALSE(ec);
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("A zip archive under a path longer than MAX_PATH can be written and read", "[Untrusted][ZipSlip][MinizExtension]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_long_zip_%%%%%%%%");
+    fs::create_directories(dir);
+
+    const fs::path long_dir = dir / std::string(240, 'z');
+    fs::create_directories(extended_path(long_dir));
+    const fs::path zip_file = long_dir / "bundle.zip";
+    REQUIRE(zip_file.string().size() > 260);
+
+    write_zip_entries(zip_file, {{"vendor.json", "{\"a\":1}"}});
+
+    const fs::path target = dir / "out";
+    fs::create_directories(target);
+    std::string err;
+    REQUIRE(extract_archive_confined(zip_file, target, err));
+    CHECK(err.empty());
+    CHECK(read_text_file(target / "vendor.json") == "{\"a\":1}");
+
+    boost::system::error_code ec;
+    fs::remove_all(extended_path(long_dir), ec);
+    CHECK_FALSE(ec);
     fs::remove_all(dir, ec);
 }
 

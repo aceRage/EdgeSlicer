@@ -4727,6 +4727,11 @@ DynamicPrintConfig PresetBundle::full_fff_config(const std::vector<int> *filamen
         opt->value = boost::algorithm::clamp<int>(opt->value, 0, int(num_filaments));
     }
 
+    // EdgeSlicer surface filaments: 0 = follow the outer wall; a filament that is gone falls back to 0 too.
+    for (const char *key : {"top_surface_filament", "bottom_surface_filament", "ironing_filament"})
+        if (auto *opt = dynamic_cast<ConfigOptionInt*>(out.option(key, false)); opt != nullptr && (opt->value < 0 || opt->value > int(num_filaments)))
+            opt->value = 0;
+
     static const char* keys_1based[] = {"wall_filament", "sparse_infill_filament", "solid_infill_filament"};
     for (size_t i = 0; i < sizeof(keys_1based) / sizeof(keys_1based[0]); ++ i) {
         std::string key = std::string(keys_1based[i]);

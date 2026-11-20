@@ -398,12 +398,16 @@ std::vector<RoleWidth> role_widths(PrintRegionConfig &c)
     const int outer  = c.outer_wall_filament.value > 0 ? c.outer_wall_filament.value : wall;
     const int sparse = c.sparse_infill_filament.value;
     const int solid  = std::abs(c.sparse_infill_density.value - 100.) < EPSILON ? sparse : c.solid_infill_filament.value;
+    // EdgeSlicer surface filaments: the top skin prints with top_surface_filament, 0 = the outer wall's
+    // (top_surface_filament_1based(), Print.hpp). The bottom skin keeps internal_solid_infill_line_width's
+    // stamp; LayerRegion::flow() re-reads it for the bottom surface filament's nozzle.
+    const int top    = c.top_surface_filament.value > 0 ? c.top_surface_filament.value : outer;
     return {
         { &c.outer_wall_line_width, &c.nozzle_outer_wall_line_width, outer },
         { &c.inner_wall_line_width, &c.nozzle_inner_wall_line_width, wall },
         { &c.sparse_infill_line_width, &c.nozzle_sparse_infill_line_width, sparse },
         { &c.internal_solid_infill_line_width, &c.nozzle_internal_solid_infill_line_width, solid },
-        { &c.top_surface_line_width, &c.nozzle_top_surface_line_width, c.solid_infill_filament.value },
+        { &c.top_surface_line_width, &c.nozzle_top_surface_line_width, top },
         // P5: the locked-zag skin and skeleton are sparse infill.
         { &c.skin_infill_line_width, &c.nozzle_skin_infill_line_width, sparse },
         { &c.skeleton_infill_line_width, &c.nozzle_skeleton_infill_line_width, sparse },
@@ -1612,7 +1616,8 @@ namespace {
 // The keys that route a region's roles to filaments: plate-wide, they decide which tool prints what.
 bool is_region_routing_key(const std::string &key)
 {
-    return key == "wall_filament" || key == "outer_wall_filament" || key == "sparse_infill_filament" || key == "solid_infill_filament";
+    return key == "wall_filament" || key == "outer_wall_filament" || key == "sparse_infill_filament" || key == "solid_infill_filament" ||
+           key == "top_surface_filament" || key == "bottom_surface_filament" || key == "ironing_filament";
 }
 
 // Process keys that describe a profile rather than set a value: neither shown as Plate nor taken per tool.
@@ -1625,7 +1630,7 @@ bool is_process_meta_key(const std::string &key)
     return keys.count(key) > 0;
 }
 
-enum class RegionRole { Wall, Sparse, Solid };
+enum class RegionRole { Wall, Sparse, Solid, TopSurface, BottomSurface, Ironing };
 
 // The role whose filament a region key is taken from (stamp_nozzle_region_values): top / bottom / solid / bridge /
 // ironing settings from the solid infill filament, other infill settings from the sparse infill filament, the rest
@@ -1634,6 +1639,14 @@ RegionRole region_key_role(const std::string &key)
 {
     if (key == "only_one_wall_top" || key == "min_width_top_surface" || key == "top_bottom_infill_wall_overlap")
         return RegionRole::Wall;
+    // EdgeSlicer surface filaments: the settings of the top / bottom skin itself (and of the ironing over the
+    // top skin) come from the filament that prints that skin. The shell layer counts stay with the solid infill.
+    if (boost::starts_with(key, "ironing"))
+        return RegionRole::Ironing;
+    if (boost::starts_with(key, "top_surface_"))
+        return RegionRole::TopSurface;
+    if (boost::starts_with(key, "bottom_surface_"))
+        return RegionRole::BottomSurface;
     if (boost::starts_with(key, "top_") || boost::starts_with(key, "bottom_") || key.find("solid") != std::string::npos ||
         key.find("bridge") != std::string::npos || boost::starts_with(key, "ironing") || key == "infill_complete_top")
         return RegionRole::Solid;
@@ -1941,6 +1954,12 @@ void stamp_nozzle_region_values(PrintRegionConfig &c)
     const int wall   = c.wall_filament.value;
     const int sparse = c.sparse_infill_filament.value;
     const int solid  = std::abs(c.sparse_infill_density.value - 100.) < EPSILON ? sparse : c.solid_infill_filament.value;
+    // EdgeSlicer surface filaments (0 = the outer wall's), as top_surface_filament_1based() resolves them.
+    const int outer  = c.outer_wall_filament.value > 0 ? c.outer_wall_filament.value : wall;
+    const int top    = c.top_surface_filament.value > 0 ? c.top_surface_filament.value : outer;
+    const int bottom = c.bottom_surface_filament.value > 0 ? c.bottom_surface_filament.value : outer;
+    // Ironing: its own filament, else the top surface's (the surface it irons in every mode but "All solid layers").
+    const int ironing = c.ironing_filament.value > 0 ? c.ironing_filament.value : top;
     std::map<int, DynamicPrintConfig> parsed;
     auto values_of = [&](int filament) -> const DynamicPrintConfig * {
         if (filament < 1 || size_t(filament) > entries.size())
@@ -1954,13 +1973,18 @@ void stamp_nozzle_region_values(PrintRegionConfig &c)
         return &it->second;
     };
     std::set<std::string> keys;
-    for (int f : { wall, sparse, solid })
+    for (int f : { wall, sparse, solid, top, bottom, ironing })
         if (const DynamicPrintConfig *values = values_of(f))
             for (const std::string &key : values->keys())
                 keys.insert(key);
     for (const std::string &key : keys) {
         const RegionRole          role   = region_key_role(key);
-        const DynamicPrintConfig *values = values_of(role == RegionRole::Wall ? wall : role == RegionRole::Sparse ? sparse : solid);
+        const DynamicPrintConfig *values = values_of(role == RegionRole::Wall          ? wall :
+                                                     role == RegionRole::Sparse        ? sparse :
+                                                     role == RegionRole::TopSurface    ? top :
+                                                     role == RegionRole::BottomSurface ? bottom :
+                                                     role == RegionRole::Ironing       ? ironing :
+                                                                                         solid);
         ConfigOption             *dst    = c.option(key);
         if (values == nullptr || dst == nullptr)
             continue;

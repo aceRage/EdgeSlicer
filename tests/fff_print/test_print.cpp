@@ -1088,6 +1088,9 @@ TEST_CASE("total_toolchanges counts tool changes without a wipe tower", "[Print]
             {"sparse_infill_density",  "20%"},
             {"sparse_infill_filament", "2"},
             {"solid_infill_filament",  "2"},
+            // Skins on the infill filament, as before the surface filaments followed the walls.
+            {"top_surface_filament",  "2"},
+            {"bottom_surface_filament",  "2"},
             {"machine_start_gcode",    "; TT=[total_toolchanges] TT2={total_toolchanges}\n"},
         });
         Print print;
@@ -1341,6 +1344,9 @@ TEST_CASE("Every printing tool is heated when the start G-code sets no nozzle te
             {"wall_filament",                    "1"},
             {"sparse_infill_filament",           "2"},
             {"solid_infill_filament",            "2"},
+            // Skins on the infill filament, as before the surface filaments followed the walls.
+            {"top_surface_filament",            "2"},
+            {"bottom_surface_filament",            "2"},
         });
         Print print;
         Model model;
@@ -3394,4 +3400,16 @@ TEST_CASE("No sparse layers still refuses an object that rises past the lid clea
     CHECK(print.validate().string.empty());
     print.set_status_silent();
     REQUIRE_THROWS_WITH(print.process(), Catch::Contains("No sparse layers"));
+}
+
+TEST_CASE("Print validation rejects a zero layer height", "[Print]")
+{
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "layer_height", 0. } });
+    Slic3r::Test::init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    const StringObjectException result = print.validate();
+    CHECK_FALSE(result.string.empty());
+    CHECK(result.opt_key == "layer_height");
 }

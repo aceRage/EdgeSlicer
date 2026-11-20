@@ -832,6 +832,27 @@ void resolve_printer_extruder_variants(DynamicPrintConfig &config);
 // Returns true when it set the value.
 bool upgrade_missing_power_loss_recovery(DynamicPrintConfig &config);
 
+// EdgeSlicer surface filaments: before top_surface_filament / bottom_surface_filament existed, the top and bottom
+// skins printed with the solid infill filament - in EdgeSlicer projects saved before them and in every slicer whose
+// projects we import (Bambu Studio, OrcaSlicer, Snapmaker Orca, PrusaSlicer). A project config that does not name
+// top_surface_filament is such a project (a project saved now always writes it, 0 included). For it, this sets both
+// keys to the config's solid infill filament wherever solid_infill_filament is set, so the project keeps its look;
+// ironing then follows those skins as it did. `overwrite`: set them even when present (a project config read on top
+// of a filled-in config). Works on DynamicPrintConfig and ModelConfig. Returns true when it set anything.
+template<class ConfigT> bool keep_legacy_surface_filaments(ConfigT &config, bool overwrite = false)
+{
+    const ConfigOption *solid = config.option("solid_infill_filament");
+    if (solid == nullptr || solid->getInt() <= 0)
+        return false;
+    bool changed = false;
+    for (const char *key : { "top_surface_filament", "bottom_surface_filament" })
+        if (overwrite || config.option(key) == nullptr) {
+            config.set_key_value(key, new ConfigOptionInt(solid->getInt()));
+            changed = true;
+        }
+    return changed;
+}
+
 // The slot resolve_printer_extruder_variants reads for each extruder, or empty when it leaves the config alone.
 std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config);
 
@@ -2053,6 +2074,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool, alternate_extra_wall))
     ((ConfigOptionFloat, minimum_sparse_infill_area))
     ((ConfigOptionInt, solid_infill_filament))
+    // EdgeSlicer: 0 = same as the outer wall (see top_surface_filament_1based() in Print.hpp)
+    ((ConfigOptionInt, top_surface_filament))
+    ((ConfigOptionInt, bottom_surface_filament))
+    // EdgeSlicer: 0 = the filament of the ironed surface (see ironing_filament_1based() in Print.hpp)
+    ((ConfigOptionInt, ironing_filament))
     ((ConfigOptionFloatOrPercent, internal_solid_infill_line_width))
     ((ConfigOptionFloats, internal_solid_infill_speed))
     // Detect thin walls.

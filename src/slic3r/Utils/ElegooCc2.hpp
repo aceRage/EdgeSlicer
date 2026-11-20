@@ -29,6 +29,7 @@
 // Everything in this header except the functions marked "networking" is pure and is exercised by
 // tests/slic3rutils/elegoo_cc2_tests.cpp with a scripted MQTT transport.
 
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -63,6 +64,11 @@ constexpr int ERR_INVALID_PARAMETER2    = 1003;
 constexpr int ERR_BUSY                  = 1009;
 constexpr int ERR_FILE_NOT_FOUND        = 1021;
 constexpr int ERR_MISSING_BED_LEVELING  = 1026;
+// Upload errors, named as ElegooSlicer's bundled LAN web client names them.
+constexpr int ERR_UPLOAD_OFFSET_MISMATCH = 9000;
+constexpr int ERR_UPLOAD_MD5_FAILED      = 9004; // MD5CheckFailed: the printer's checksum of the stored file differs from X-File-MD5
+constexpr int ERR_UPLOAD_PATH_MISSING    = 9007;
+constexpr int ERR_UPLOAD_SAME_NAME       = 9010; // UploadDeleteSameNameFileFailed
 
 // "Elegoo Centauri Carbon 2" and "Elegoo Centauri 2" (any case, surrounding blanks ignored), the two
 // models that speak this protocol. Not the Centauri Carbon 1, not anything else.
@@ -87,6 +93,27 @@ std::string host_of(const std::string& address);
 bool parse_system_info(const std::string& body, std::string& serial, std::string& error);
 // One /upload chunk: true when error_code is 0.
 bool parse_upload_reply(const std::string& body, std::string& error);
+// A failed /upload answer as one line for the user: the error text plus whatever the printer reported
+// (offset, checksum compared with ours, message). Empty when the answer is not a JSON error.
+std::string describe_upload_failure(const std::string& body, const std::string& our_md5, size_t total);
+// X-File-Name as ElegooSlicer's web client sends it: JavaScript encodeURIComponent of the UTF-8 name
+// (everything but A-Z a-z 0-9 - _ . ! ~ * ' ( ) becomes %XX, so a space is %20 and "+" is %2B).
+std::string encode_file_name_header(const std::string& name);
+// Extra tries of one chunk after a failed answer, and the wait between them (the web client: 3 and 200 ms).
+constexpr int    UPLOAD_CHUNK_RETRIES  = 3;
+constexpr int    UPLOAD_CHUNK_RETRY_MS = 200;
+// HTTP 429 (the printer's web server limiting requests; its answer is an HTML page): how many times a
+// chunk is sent again, how long to wait before the next try (Retry-After when the printer sends one,
+// else 1, 2, 4, 8, 8 s; capped at 30 s), and the sentence for the user. No reference client handles
+// 429, so this is ours; the other failures keep the web client's 3 tries 200 ms apart.
+constexpr int UPLOAD_429_RETRIES = 5;
+int         upload_retries_for(int http_status);
+int         upload_retry_delay_ms(int attempt, int http_status, int retry_after_s);
+// Retry-After (seconds) from the headers of the LAST response in the accumulated header text; 0 if none.
+int         retry_after_seconds(const std::string& headers);
+std::string too_many_requests_text();
+// Whether a failed chunk is worth sending again: not when the printer refused the access code.
+bool upload_error_retryable(int http_status, const std::string& body);
 // "bytes <first>-<last>/<total>" for one chunk.
 std::string content_range(size_t offset, size_t length, size_t total);
 
@@ -108,7 +135,22 @@ std::string register_payload(const std::string& client_id, const std::string& re
 
 enum class RegisterResult { Ok, NotForUs, TooManyClients, Refused, Invalid };
 // error: the printer's own words for Refused, a short English reason otherwise.
+// "already registered" counts as Ok: the printer still knows this client id from an earlier connection,
+// which is what a client that keeps its id gets (ElegooSlicer's bundled web client accepts it the same way).
 RegisterResult parse_register_response(const std::string& payload, const std::string& client_id, std::string& error);
+
+// The client ids this process registers with: one per role, picked once per process and then kept, so a
+// printer sees the same few clients again instead of a new one for every probe, start and check-in (the
+// printer has no unregister message and limits its clients). Role 0 is the short-lived sessions (CANVAS
+// read, print start; never two at once), role 1 the hub monitor's. The two never share an id: a second
+// connection under an id the broker already has would push the first one off.
+std::string stable_client_id(int role);
+
+// What to do when registration answers "too many clients": how long to wait before registering again
+// (attempt counts from 0), or -1 when the tries are used up.
+int too_many_clients_delay_ms(int attempt);
+// The sentence a send shows when the printer still refuses: says the file is on the printer.
+std::string too_many_clients_text();
 
 // {"id":id,"method":method,"params":params_json} - params_json must be a JSON object text.
 std::string request_payload(int id, int method, const std::string& params_json = "{}");
@@ -199,6 +241,8 @@ public:
     bool send(int method, const std::string& params_json, int& id, std::string& error);
     void close();
     bool is_open() const { return m_open; }
+    // How the last open() ended (Invalid before any registration answer).
+    RegisterResult register_result() const { return m_register_result; }
     const std::string& client_id() const { return m_client_id; }
     const std::string& sn() const { return m_sn; }
 
@@ -210,6 +254,7 @@ private:
     std::string    m_request_id;
     int            m_next_id = 1;
     bool           m_open    = false;
+    RegisterResult m_register_result = RegisterResult::Invalid;
 };
 
 // 1002 then 2005 over an already-opened session. Fills the same CanvasQueryResult the CC1 path
@@ -224,11 +269,24 @@ struct StartResult
     std::string error;              // English, for the log and the dialog
     std::string payload;            // the last start command sent, for the log and the tests
     int         auto_refill_set = -1; // what 2004 set before the start (1 on, 0 off), -1 when not sent
+    bool        too_many_clients = false; // the printer refused to register us (its client table is full)
+    int         register_attempts = 0;    // sessions opened for this start (more than 1 after "too many clients")
 };
 // Status check (up to busy_checks answers, busy_interval_ms apart, while the printer is busy), then
 // - with a CANVAS and an auto-refill choice from the dialog - 2004, as ElegooSlicer sets it before every
 // start (a refusal stops the start, as there), then 1020; one retry with bedlevel_force when the printer asks for leveling data and the person asked
 // for leveling (ElegooSlicer does the same).
+// The same flow over any way of sending one request and reading its answer: false with error set when
+// the request was not sent or not answered. elegoo-link keeps one session per printer for status, commands
+// and the print start; start_print() uses the hub's live session (ElegooCc2Monitor) this way and falls back
+// to its own short-lived one only when that session cannot be had.
+using CallFn = std::function<bool(int method, const std::string& params_json, Reply& reply, std::string& error)>;
+StartResult start_print_over(const CallFn&                             call,
+                             const std::map<std::string, std::string>& extended_info,
+                             int                                       pc_bed_type,
+                             const std::string&                        filename,
+                             int                                       busy_checks      = 10,
+                             int                                       busy_interval_ms = 1000);
 StartResult start_print_over(Session&                                  session,
                              const std::map<std::string, std::string>& extended_info,
                              int                                       pc_bed_type,

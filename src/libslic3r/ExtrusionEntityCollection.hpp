@@ -22,6 +22,14 @@ inline ExtrusionEntitiesPtr filter_by_extrusion_role(const ExtrusionEntitiesPtr 
 	return out;
 }
 
+// EdgeSlicer surface filaments: which surface an ironing collection irons (Layer::make_ironing). Ironing follows
+// the filament of that surface (fill_filament_source(), Print.hpp) unless ironing_filament names one.
+enum class IronedSurface : uint8_t {
+    Top = 0, // the default: every collection that is not ironing, and ironing over top surfaces
+    Bottom,  // ironing over bottom surfaces ("All solid layers")
+    Solid,   // ironing over internal solid infill ("All solid layers")
+};
+
 class ExtrusionEntityCollection : public ExtrusionEntity
 {
 public:
@@ -47,13 +55,16 @@ public:
     // soluble check asks about the right filament too). See
     // docs/superpowers/specs/2026-09-07-imagemap-phase3-imagerow.md, step 4.
     unsigned int image_row_extruder_1based = 0;
+    // EdgeSlicer: the surface an ironing collection irons; Top for every other collection.
+    IronedSurface ironed_surface = IronedSurface::Top;
     ExtrusionEntityCollection(): no_sort(false) {}
     ExtrusionEntityCollection(const ExtrusionEntityCollection &other)
-        : no_sort(other.no_sort), is_reverse(other.is_reverse), image_row_extruder_1based(other.image_row_extruder_1based)
+        : no_sort(other.no_sort), is_reverse(other.is_reverse), image_row_extruder_1based(other.image_row_extruder_1based),
+          ironed_surface(other.ironed_surface)
         { this->append(other.entities); }
     ExtrusionEntityCollection(ExtrusionEntityCollection &&other)
         : entities(std::move(other.entities)), no_sort(other.no_sort), is_reverse(other.is_reverse),
-          image_row_extruder_1based(other.image_row_extruder_1based) {}
+          image_row_extruder_1based(other.image_row_extruder_1based), ironed_surface(other.ironed_surface) {}
     explicit ExtrusionEntityCollection(const ExtrusionPaths &paths);
     ExtrusionEntityCollection& operator=(const ExtrusionEntityCollection &other);
     ExtrusionEntityCollection& operator=(ExtrusionEntityCollection &&other)
@@ -62,6 +73,7 @@ public:
         this->no_sort  = other.no_sort;
         is_reverse     = other.is_reverse;
         image_row_extruder_1based = other.image_row_extruder_1based;
+        ironed_surface            = other.ironed_surface;
         return *this;
     }
     ~ExtrusionEntityCollection() { clear(); }

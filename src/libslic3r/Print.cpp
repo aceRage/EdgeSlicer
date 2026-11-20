@@ -2608,6 +2608,9 @@ static std::string prime_tower_reach_error(const Print &print, bool grouping_don
     const Polygons tower = grown_by(estimated_prime_tower_outline(print), side_scrape_ring_beyond_brim(print));
     if (tower.empty())
         return {};
+    // Moving the tower does not help when no area is reached by every nozzle (Orca #17439).
+    if (areas.shared.empty())
+        return L("The extruder printable areas share no common area, so the prime tower cannot be printed.");
 
     // Filaments (0-based) per nozzle (0-based) that print on the tower.
     std::vector<std::vector<unsigned int>> filaments_of(areas.count());
@@ -2749,7 +2752,11 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
         const ExtruderAreas areas = print.get_extruder_areas();
         if (areas.multi() && areas.has_exclusive_regions()) {
             const ExtruderAreas world = translate_extruder_areas(areas, Vec2d(plate_origin(0), plate_origin(1)));
-            if (!footprint_within(convex_hulls_temp, world.shared)) {
+            if (world.shared.empty()) {
+                if (!warning->string.empty() && warning->string.back() != '\n')
+                    warning->string += "\n";
+                warning->string += L("The extruder printable areas share no common area, so the prime tower cannot be printed.\n");
+            } else if (!footprint_within(convex_hulls_temp, world.shared)) {
                 if (!warning->string.empty() && warning->string.back() != '\n')
                     warning->string += "\n";
                 warning->string += L("Prime Tower") + L(" is outside the area both nozzles can reach, so the nozzle that cannot reach it cannot purge into it. Move it into the middle of the plate.\n");
@@ -3065,6 +3072,11 @@ static std::vector<unsigned int> used_mixed_filament_ids(const Print &print)
             add(rc.wall_filament.value);
             add(rc.sparse_infill_filament.value);
             add(rc.solid_infill_filament.value);
+            // EdgeSlicer surface filaments (0 = the outer wall's).
+            add(rc.outer_wall_filament.value);
+            add(rc.top_surface_filament.value);
+            add(rc.bottom_surface_filament.value);
+            add(rc.ironing_filament.value);
         }
     }
     sort_remove_duplicates(ids);
@@ -3372,6 +3384,12 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             }
         }
     }
+
+    // Must run before the checks below that generate the layers: a zero layer height never reaches the top.
+    // Orca #17313 / Bambu #12969.
+    for (const PrintObject *object : m_objects)
+        if (object->config().layer_height.value < EPSILON)
+            return {L("Layer height must be greater than zero."), object, "layer_height"};
 
     // Cache of layer height profiles for checking:
     // 1) Whether all layers are synchronized if printing with wipe tower and / or unsynchronized supports.
@@ -3897,6 +3915,26 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                     if (!validate_feature_width_vs_nozzle(width_role.first, filament_id, width, nozzle_diameter, err_msg))
                         return {err_msg, object, tool_opt_key(width_role.first, filament_id)};
                 }
+
+            // EdgeSlicer surface filaments: a bottom skin on another filament than the solid infill prints the
+            // internal solid infill width on that filament's nozzle (LayerRegion::flow()), so check it there too.
+            for (const PrintRegion &region : object->all_regions()) {
+                const PrintRegionConfig &rc     = region.config();
+                const int                bottom = bottom_surface_filament_1based(rc);
+                if (rc.bottom_shell_layers.value <= 0 || bottom <= 0 || bottom == int(region.extruder(frSolidInfill)))
+                    continue;
+                const char  *key             = "internal_solid_infill_line_width";
+                const double nozzle_diameter = nozzle_dmr_of_filament0(unsigned(bottom - 1));
+                double       width = bottom_surface_role_width(rc, rc.internal_solid_infill_line_width, rc.nozzle_internal_solid_infill_line_width)
+                                   .get_abs_value(nozzle_diameter);
+                if (width == 0.)
+                    width = object->config().get_abs_value("line_width", nozzle_diameter);
+                if (!validate_extrusion_width(width, nozzle_diameter, layer_height, err_msg))
+                    return {width_error(err_msg, key, unsigned(bottom), width, nozzle_diameter, layer_height), object,
+                            tool_opt_key(key, unsigned(bottom))};
+                if (!validate_feature_width_vs_nozzle(key, unsigned(bottom), width, nozzle_diameter, err_msg))
+                    return {err_msg, object, tool_opt_key(key, unsigned(bottom))};
+            }
 
             // ORCA: Bridge line width. It sizes the bridges and overhang walls of every role that
             // uses bridging_flow(), each against the nozzle of its own filament. 0 (the default)
@@ -4768,7 +4806,12 @@ static unsigned chameleon_projection_region_extruder(const PrintRegion &region)
     // sparse_infill_filament both have config min=1 (well-formed configs never reach 0
     // here), but chameleon reads the raw `- 1` directly as a bucket key/extruder id with
     // no get_at()-style clamp downstream to catch a hand-edited/legacy profile's 0.
-    return std::max(1u, region.extruder(frSolidInfill)) - 1;
+    // EdgeSlicer surface filaments: the projected surface is the bottom skin of the part above the
+    // support, which prints with bottom_surface_filament (0 = the outer wall's filament) now. Where
+    // that is the solid infill filament (the bottom keys at 0 and wall == solid infill) this is the
+    // same id as before, apart from the 100% sparse density quirk described above, which applies to
+    // internal solid infill only and never to the bottom skin.
+    return unsigned(std::max(1, bottom_surface_filament_1based(region.config()))) - 1;
 }
 
 // v2.2 Task 2 (spec C5, root cause 4): mirrors Support/SupportMaterial.cpp:57's

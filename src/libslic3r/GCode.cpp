@@ -1640,7 +1640,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             gcodegen.writer().set_current_position_clear(false);
             // BBS: check whether custom gcode changes the z position. Update if changed
             double temp_z_after_tool_change;
-            if (GCodeProcessor::get_last_z_from_gcode(toolchange_gcode_str, temp_z_after_tool_change)) {
+            if (GCodeProcessor::get_last_z_from_gcode(toolchange_gcode_str, temp_z_after_tool_change, gcodegen.writer().get_position()(2))) {
                 Vec3d pos = gcodegen.writer().get_position();
                 pos(2)    = temp_z_after_tool_change;
                 gcodegen.writer().set_position(pos);
@@ -1955,11 +1955,42 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     // "Force restore layer Z" below takes the nozzle down once it is there.
     const bool changes_in_place = !travel_to_tower_now && !tcr.priming && new_extruder_id >= 0 && needs_toolchange &&
                                   gcodegen.config().enable_prime_tower;
-    if (will_go_down && !changes_in_place) {
+    // Edge: a tool change with no ram lays nothing at the tower before the change: the unload is only
+    // a planner sync, and "Restore layer Z before toolchange" below would lift the nozzle straight
+    // back up for the change. Stay at the layer's height; "Force restore layer Z" takes the nozzle
+    // down to the tower after the change, as for an in-place change.
+    const bool no_ram_before_change = !tcr.priming && new_extruder_id >= 0 && needs_toolchange && !is_ramming &&
+                                      gcodegen.config().enable_prime_tower;
+    const bool goes_down_before_change = will_go_down && !changes_in_place && !no_ram_before_change;
+    if (goes_down_before_change) {
         gcode += gcodegen.writer().retract();
         gcode += gcodegen.writer().travel_to_z(z, "Travel down to the last wipe tower layer.");
         gcode += gcodegen.writer().unretract();
     }
+
+    // WipeTower2 emits no acceleration, so the tower would print at whatever the travel to it or
+    // the last object extrusion left (on Klipper one ACCEL serves travel too). Use what _extrude()
+    // picks for a role without an acceleration of its own, matching Type 1 ramming in append_tcr:
+    // first layer / priming at initial_layer_acceleration, later layers at prime_tower_acceleration
+    // when set (Type 1's tower writer emits that; Type 2 does not) else default_acceleration.
+    // Call again after any later travel into the tower so the writer's last acceleration follows
+    // the G-code order, then restore the previous print acceleration after the tower G-code.
+    auto tower_acceleration = [&gcodegen, &tcr]() -> std::string {
+        if (gcodegen.writer().extruder() == nullptr)
+            return {};
+        const double default_acc = gcodegen.process_flow_value(gcodegen.m_config.default_acceleration);
+        if (default_acc <= 0.)
+            return {};
+        double       acc       = default_acc;
+        const double first_acc = gcodegen.process_flow_value(gcodegen.m_config.initial_layer_acceleration);
+        if ((tcr.priming || gcodegen.on_first_layer()) && first_acc > 0.)
+            acc = first_acc;
+        else if (gcodegen.m_config.prime_tower_acceleration.value > 0.)
+            acc = gcodegen.m_config.prime_tower_acceleration.value;
+        return gcodegen.writer().set_print_acceleration((unsigned int) std::floor(acc + 0.5));
+    };
+    const unsigned int prev_print_accel = gcodegen.writer().last_print_acceleration();
+    gcode += tower_acceleration();
 
     std::string toolchange_gcode_str;
     std::string deretraction_str;
@@ -1973,7 +2004,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         // docking a tool, etc.), so restore Z to the real layer height before running it,
         // otherwise that travel can collide with already-printed parts taller than the tower.
         // deretraction_str (below) brings Z back down to resume printing the wipe tower.
-        if (will_go_down && !changes_in_place && gcodegen.config().enable_prime_tower) {
+        if (goes_down_before_change && gcodegen.config().enable_prime_tower) {
             restore_layer_z_str += gcodegen.writer().retract();
             restore_layer_z_str += gcodegen.writer().travel_to_z(current_z,
                 "Restore layer Z before toolchange to avoid collision with printed parts");
@@ -2015,6 +2046,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
                 gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
                 std::string travel = travel_to_tower_gap(gcodegen, route_start, start_wipe_pos, gap_entry_pos);
                 travel += gcodegen.travel_to(start_wipe_pos, erMixed, "Travel to a Wipe Tower");
+                travel += tower_acceleration();
                 check_add_eol(travel);
                 toolchange_gcode_str += travel;
                 gcodegen.set_last_pos(start_wipe_pos);
@@ -2047,6 +2079,11 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);
     gcode += tower_height_tag(gcodegen, tcr, tcr_gcode);
     gcode += tcr_gcode;
+    // Restore the print acceleration that was in effect before the tower, so later object
+    // features re-state their own. Type 1 invalidates after the tower when prime_tower_acceleration
+    // wrote M204 behind the writer's back; Type 2 went through GCodeWriter, so restore the value.
+    if (prev_print_accel > 0)
+        gcode += gcodegen.writer().set_print_acceleration(prev_print_accel);
     check_add_eol(toolchange_gcode_str);
 
     // SoftFever: set new PA for new filament (flow-variant column, not raw filament id)
@@ -4926,6 +4963,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                 auto to_physical = [&](const std::vector<int> &logical) {
                     std::vector<int> physical(num_nozzles, -1);
                     for (size_t e = 0; e < num_nozzles; ++e) {
+                        // Orca #17476: the map value is a firmware tool number, so it may fall
+                        // outside this table. An out-of-range entry is skipped; a short map still
+                        // falls back to the logical index (the one-entry {0} default).
                         const size_t p = (e < pem.size() && pem[e] >= 0 && size_t(pem[e]) < num_nozzles) ? size_t(pem[e]) : e;
                         physical[p] = logical[e];
                     }
@@ -5857,7 +5897,7 @@ GCode::TimelapseGCodeResult GCode::generate_timelapse_gcode(const Print &print, 
         m_writer.set_current_position_clear(false);
 
     double z_after_timelapse;
-    if (GCodeProcessor::get_last_z_from_gcode(timelapse_gcode, z_after_timelapse)) {
+    if (GCodeProcessor::get_last_z_from_gcode(timelapse_gcode, z_after_timelapse, z_before_timelapse)) {
         if (std::abs(z_after_timelapse - z_before_timelapse) > EPSILON) {
             // The template moved Z (the park branch lifts to max_layer_z + 3): go back down, as
             // BambuStudio does, so the following lift / travel logic starts from the known Z.
@@ -5968,8 +6008,10 @@ void GCode::compute_farthest_point(const std::vector<LayerToPrint> &layers, cons
                         for_each_path(entity, [&](const ExtrusionPath &path) {
                             if (!is_fallback_role(path.role()))
                                 return;
-                            const unsigned int filament = path.role() == erInternalInfill ? layer_tools.sparse_infill_filament(print_region)
-                                                                                          : layer_tools.solid_infill_filament(print_region);
+                            // EdgeSlicer surface filaments: the top skin prints with its own filament.
+                            const unsigned int filament = path.role() == erInternalInfill ? layer_tools.sparse_infill_filament(print_region) :
+                                                          path.role() == erTopSolidInfill ? layer_tools.top_surface_filament(print_region) :
+                                                                                            layer_tools.solid_infill_filament(print_region);
                             collect_from_path(max_dist_sq_fallback, farthest_point_fallback, farthest_extruder_fallback, path, shift,
                                               extruder_of(filament));
                         }, for_each_path);
@@ -8136,7 +8178,7 @@ LayerResult GCode::process_layer(const Print& print,
                 m_writer.set_current_position_clear(false);
                 // BBS: check whether custom gcode changes the z position. Update if changed
                 double temp_z_after_timepals_gcode;
-                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                     Vec3d pos = m_writer.get_position();
                     pos(2)    = temp_z_after_timepals_gcode;
                     m_writer.set_position(pos);
@@ -8153,7 +8195,7 @@ LayerResult GCode::process_layer(const Print& print,
                 gcode += timepals_gcode;
                 m_writer.set_current_position_clear(false);
                 double temp_z_after_timepals_gcode;
-                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                     Vec3d pos = m_writer.get_position();
                     pos(2)    = temp_z_after_timepals_gcode;
                     m_writer.set_position(pos);
@@ -8475,12 +8517,8 @@ LayerResult GCode::process_layer(const Print& print,
             if (entities.image_row_extruder_1based != 0)
                 return entities.image_row_extruder_1based;
             const ExtrusionRole role = entities.entities.empty() ? erNone : entities.entities.front()->role();
-            switch (fill_filament_source(region.config(), role)) {
-            case FillFilamentSource::Wall:        return unsigned(region.config().wall_filament.value);
-            case FillFilamentSource::SolidInfill: return unsigned(region.config().solid_infill_filament.value);
-            case FillFilamentSource::SparseInfill:
-            default:                              return unsigned(region.config().sparse_infill_filament.value);
-            }
+            // EdgeSlicer surface filaments: fill_filament_source_1based() covers the top / bottom skins too.
+            return unsigned(fill_filament_source_1based(region.config(), fill_filament_source(region.config(), role, entities.ironed_surface)));
         }
         return layer_tools.extruder_override == 0 ? unsigned(region.config().wall_filament.value) : layer_tools.extruder_override;
     };
@@ -8501,12 +8539,8 @@ LayerResult GCode::process_layer(const Print& print,
             if (entities.image_row_extruder_1based != 0 && layer_tools.extruder_override == 0)
                 return int(entities.image_row_extruder_1based) - 1;
             const ExtrusionRole role = entities.entities.empty() ? erNone : entities.entities.front()->role();
-            switch (fill_filament_source(region.config(), role)) {
-            case FillFilamentSource::Wall:        return int(layer_tools.wall_filament(region));
-            case FillFilamentSource::SolidInfill: return int(layer_tools.solid_infill_filament(region));
-            case FillFilamentSource::SparseInfill:
-            default:                              return int(layer_tools.sparse_infill_filament(region));
-            }
+            // EdgeSlicer surface filaments: LayerTools::fill_filament() covers the top / bottom skins too.
+            return int(layer_tools.fill_filament(region, role, entities.ironed_surface));
         }
         return int(layer_tools.wall_filament(region));
     };
@@ -10277,7 +10311,7 @@ LayerResult GCode::process_layer(const Print& print,
                         m_writer.set_current_position_clear(false);
                         // BBS: check whether custom gcode changes the z position. Update if changed
                         double temp_z_after_timepals_gcode;
-                        if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                        if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                             Vec3d pos = m_writer.get_position();
                             pos(2)    = temp_z_after_timepals_gcode;
                             m_writer.set_position(pos);
@@ -10297,7 +10331,7 @@ LayerResult GCode::process_layer(const Print& print,
                     gcode += timepals_gcode;
                     m_writer.set_current_position_clear(false);
                     double temp_z_after_timepals_gcode;
-                    if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                    if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                         Vec3d pos = m_writer.get_position();
                         pos(2)    = temp_z_after_timepals_gcode;
                         m_writer.set_position(pos);
@@ -10664,7 +10698,7 @@ LayerResult GCode::process_layer(const Print& print,
                                 m_writer.set_current_position_clear(false);
                                 // BBS: check whether custom gcode changes the z position. Update if changed
                                 double temp_z_after_timepals_gcode;
-                                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                                     Vec3d pos = m_writer.get_position();
                                     pos(2)    = temp_z_after_timepals_gcode;
                                     m_writer.set_position(pos);
@@ -10780,7 +10814,7 @@ LayerResult GCode::process_layer(const Print& print,
             m_writer.set_current_position_clear(false);
             // BBS: check whether custom gcode changes the z position. Update if changed
             double temp_z_after_timepals_gcode;
-            if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+            if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                 Vec3d pos = m_writer.get_position();
                 pos(2)    = temp_z_after_timepals_gcode;
                 m_writer.set_position(pos);
@@ -14267,7 +14301,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
             m_writer.set_current_position_clear(false);
             // BBS: check whether custom gcode changes the z position. Update if changed
             double temp_z_after_tool_change;
-            if (GCodeProcessor::get_last_z_from_gcode(toolchange_gcode_parsed, temp_z_after_tool_change)) {
+            if (GCodeProcessor::get_last_z_from_gcode(toolchange_gcode_parsed, temp_z_after_tool_change, m_writer.get_position()(2))) {
                 Vec3d pos = m_writer.get_position();
                 pos(2)    = temp_z_after_tool_change;
                 m_writer.set_position(pos);

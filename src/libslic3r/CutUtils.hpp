@@ -233,7 +233,10 @@ enum class ModelObjectCutAttribute : int {
     CreateDowels,
     InvalidateCutInfo,
     // OrcaSlicer #13472: carry the support / seam / colour / fuzzy-skin painting of every model part
-    // onto the halves (spatial remap, ModelVolume::restore_painting()). The gizmo always sets it
+    // onto the halves (spatial remap, ModelVolume::restore_painting()). A plane cut paints a part by
+    // exact facet provenance instead (keep paint v2, NeotkoCM 8f5eae374 via PR #776: PaintTransfer
+    // copies the uncut facets, resamples the split ones, leaves the cap plain) unless the part is
+    // airbrushed or mirrored or TAC joints are applied. The gizmo always sets it
     // (owner, 2026-10-24: no preference); the contour / groove preview cuts leave it off.
     KeepPaint,
     ApplyTacJoints
@@ -281,7 +284,8 @@ class Cut {
     using SavedPaintings = std::vector<std::optional<TriangleSelector::SavedPainting>>;
     // The painting of every model part of `object`, its mesh taken into the frame the halves' meshes
     // are built in (instance without offset, times the volume matrix). Empty without KeepPaint.
-    SavedPaintings save_paintings(const ModelObject* object) const;
+    // `skip`: parts a plane cut paints by exact facet provenance instead (keep paint v2).
+    SavedPaintings save_paintings(const ModelObject* object, const std::vector<const ModelVolume*>& skip = {}) const;
     void finalize(const ModelObjectPtrs& objects, const SavedPaintings& saved_paintings = {});
 
 public:

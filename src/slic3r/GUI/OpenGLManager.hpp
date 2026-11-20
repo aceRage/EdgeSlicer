@@ -86,6 +86,7 @@ private:
     };
 
     bool m_gl_initialized{ false };
+    bool m_make_current_failure_reported{ false };
     wxGLContext* m_context{ nullptr };
     GLShadersManager m_shaders_manager;
     static GLInfo s_gl_info;
@@ -116,6 +117,10 @@ public:
     // platform default. EDGESLICER_OPENGL_PROFILE=core|compatibility|default (environment) or
     // "opengl_profile" in the app config picks one by hand; the environment wins.
     wxGLContext* init_glcontext(wxGLCanvas& canvas);
+    // Called when the context cannot be made current on a shown canvas, which then stays empty.
+    // On Windows, logs why once per session and, if OpenGL never came up, tells the user. Elsewhere
+    // this does nothing: a GTK canvas can fail transiently until its surface is mapped.
+    void report_make_current_failure(const wxGLCanvas& canvas, const wxGLContext* context);
 
     // EDGE (core profile): no draw or vertex-attribute call is valid without a bound vertex array
     // object. One VAO is created with the context and stays bound; code with its own VAO (GLModel,
