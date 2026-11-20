@@ -2938,6 +2938,10 @@ void MenuFactory::create_plate_menu()
     append_menu_item(menu, wxID_ANY, _L("Add Models"), "", // ORCA: Add Models
         [](wxCommandEvent&) { plater()->add_file(); }, "menu_add_part", menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
+    append_menu_item(menu, wxID_ANY, _L("Image to object") + dots,
+        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter"),
+        [](wxCommandEvent&) { create_object_from_image(); }, "menu_add_part", menu,
+        []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
 #else
     append_submenu(menu, sub_menu_primitives, wxID_ANY, _L("Add Primitive"), "", "",
         []() {return true; }, m_parent);
@@ -2947,6 +2951,10 @@ void MenuFactory::create_plate_menu()
         []() {return true; }, m_parent);
     append_menu_item(menu, wxID_ANY, _L("Add Models"), "", // ORCA: Add Models
         [](wxCommandEvent&) { plater()->add_file(); }, "", menu,
+        []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
+    append_menu_item(menu, wxID_ANY, _L("Image to object") + dots,
+        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter"),
+        [](wxCommandEvent&) { create_object_from_image(); }, "", menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
 #endif
 
