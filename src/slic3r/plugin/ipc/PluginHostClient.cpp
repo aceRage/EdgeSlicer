@@ -41,6 +41,10 @@ std::atomic<std::uint64_t> g_spawn_count{0};
 std::atomic<bool>          g_logged_fallback{false};
 std::function<void()>      g_job_hook_for_testing;
 std::mutex                 g_job_hook_mutex;
+// Test seam (D3): rewrites every message read from the helper before it is validated, to play a
+// hostile or broken helper against the real parent code.
+std::function<void(nlohmann::json&)> g_reply_filter_for_testing;
+std::mutex                           g_reply_filter_mutex;
 
 void log_host_fallback_once(const char* reason)
 {
@@ -81,9 +85,11 @@ void attach_plugin_identity(nlohmann::json& msg, const std::string& plugin_key)
         msg["verified_sha256"] = trust.sha256;
 }
 
+using HostedLoadOutcome = std::pair<std::vector<HostedCapabilityInfo>, std::string>;
+
 struct Job
 {
-    enum class Kind { Script, PostProcess, Unload };
+    enum class Kind { Script, PostProcess, Unload, Load };
     Kind                                                                   kind{Kind::Script};
     std::string                                                            plugin_key;
     std::string                                                            capability_name;
@@ -94,6 +100,7 @@ struct Job
     std::uint64_t                                                          request_id{0};
     std::function<void(const ScriptCompletion&)>                           on_done;
     std::shared_ptr<std::promise<std::pair<ExecutionResult, std::string>>> post_promise;
+    std::shared_ptr<std::promise<HostedLoadOutcome>>                       load_promise;
     // Set once the caller has been told the outcome, so an error path never reports twice.
     bool                                                                   finished{false};
 };
@@ -212,6 +219,9 @@ struct PluginHostClient::Impl
             completion.error     = error;
             completion.cancelled = cancelled;
             deliver_completion(job.on_done, completion);
+        } else if (job.kind == Job::Kind::Load) {
+            if (job.load_promise)
+                job.load_promise->set_value({{}, error.empty() ? std::string("plugin host load failed") : error});
         } else if (job.post_promise) {
             job.post_promise->set_value({ExecutionResult::failure(PluginResult::FatalError, error), error});
         }
@@ -223,6 +233,15 @@ struct PluginHostClient::Impl
     {
         if (!host.channel.read_json(msg, timeout_ms, error))
             return false;
+        {
+            std::function<void(nlohmann::json&)> filter;
+            {
+                std::lock_guard<std::mutex> lock(g_reply_filter_mutex);
+                filter = g_reply_filter_for_testing;
+            }
+            if (filter)
+                filter(msg);
+        }
         std::string why;
         if (!validate_child_message(msg, why)) {
             error = "plugin host protocol violation: " + why;
@@ -359,38 +378,44 @@ struct PluginHostClient::Impl
         loaded.clear();
     }
 
-    bool load_plugin_locked(const std::string& plugin_key, std::string& error)
+    // Imports plugin_key in the helper (once per helper process). With `capabilities`, the import
+    // is always asked for again (the helper answers from its already-loaded copy) and the
+    // capability list the helper returns is parsed strictly into it (D3). The helper may relay
+    // the plugin's load-time permission request and audit checks while EdgeSlicer waits.
+    bool load_plugin_locked(const std::string& plugin_key, std::string& error, std::vector<HostedCapabilityInfo>* capabilities = nullptr)
     {
-        if (loaded.count(plugin_key))
+        if (capabilities == nullptr && loaded.count(plugin_key))
             return true;
         nlohmann::json msg = {
             {"type", k_type_load},
             {"id", next_id.fetch_add(1, std::memory_order_relaxed)},
         };
         attach_plugin_identity(msg, plugin_key);
-        const std::uint64_t id = msg["id"].get<std::uint64_t>();
-        if (!host.channel.write_json(msg, g_execute_timeout_ms.load(), error)) {
+        const std::uint64_t id         = msg["id"].get<std::uint64_t>();
+        const int           timeout_ms = g_execute_timeout_ms.load();
+        if (!host.channel.write_json(msg, timeout_ms, error)) {
             reset_child_locked();
             return false;
         }
         nlohmann::json reply;
-        if (!read_child(reply, g_execute_timeout_ms.load(), error)) {
+        if (!pump_until_result(plugin_key, std::string(), id, timeout_ms, reply, error, k_type_load_ok, /*during_load=*/true)) {
+            if (error.empty())
+                error = "plugin host load failed";
             reset_child_locked();
             return false;
         }
-        const auto got = reply.value("id", static_cast<std::uint64_t>(0));
-        if (got != id) {
-            error = "plugin host request id mismatch";
-            reset_child_locked();
-            return false;
+        if (capabilities != nullptr) {
+            std::string why;
+            if (!parse_hosted_capabilities(reply, *capabilities, why)) {
+                error = "plugin host protocol violation: " + why;
+                BOOST_LOG_TRIVIAL(error) << error;
+                capabilities->clear();
+                reset_child_locked();
+                return false;
+            }
         }
-        if (reply["type"].get<std::string>() == k_type_load_ok) {
-            loaded.insert(plugin_key);
-            return true;
-        }
-        error = reply.value("message", std::string("plugin host load failed"));
-        reset_child_locked();
-        return false;
+        loaded.insert(plugin_key);
+        return true;
     }
 
     bool pump_until_result(const std::string& plugin_key,
@@ -398,7 +423,9 @@ struct PluginHostClient::Impl
                            std::uint64_t      expected_id,
                            int                timeout_ms,
                            nlohmann::json&    result,
-                           std::string&       error)
+                           std::string&       error,
+                           const char*        ok_type     = k_type_result,
+                           bool               during_load = false)
     {
         const auto deadline = timeout_ms < 0 ? (std::chrono::steady_clock::time_point::max)() :
                                                std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -452,6 +479,7 @@ struct PluginHostClient::Impl
                 call.capability        = msg.value("capability", capability);
                 call.method            = msg.value("method", std::string());
                 call.args              = msg.value("args", nlohmann::json::object());
+                call.during_load       = during_load;
                 const HostResult hr    = handle_host_call(call);
                 nlohmann::json   reply = {
                     {"type", k_type_host_result},
@@ -505,13 +533,13 @@ struct PluginHostClient::Impl
                     return false;
                 continue;
             }
-            if (type == k_type_result || type == k_type_error) {
+            if (type == ok_type || type == k_type_error) {
                 const auto got = msg.value("id", static_cast<std::uint64_t>(0));
                 if (expected_id != 0 && got != expected_id) {
                     error = "plugin host request id mismatch";
                     return false;
                 }
-                if (type == k_type_result) {
+                if (type == ok_type) {
                     result = std::move(msg);
                     return true;
                 }
@@ -568,8 +596,32 @@ struct PluginHostClient::Impl
             fail_job(job, "cancelled", true);
             return;
         }
+        // The helper's host calls and audit checks (during the import too) are answered for this
+        // plugin only: set its audit context before anything is sent.
+        ScopedPluginAuditContext     audit(job.plugin_key, job.capability_name);
         std::unique_lock<std::mutex> io(io_mutex);
         const SandboxSpec            spec = make_sandbox_spec(job.plugin_key, job.write_root);
+        if (job.kind == Job::Kind::Load) {
+            std::vector<HostedCapabilityInfo> capabilities;
+            if (!ensure_started_locked(io, spec, error) || !load_plugin_locked(job.plugin_key, error, &capabilities)) {
+                io.unlock();
+                fail_job(job, error, false);
+                return;
+            }
+            io.unlock();
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                active.erase(job.plugin_key);
+                if (running_request_id == job.request_id) {
+                    running_plugin_key.clear();
+                    running_request_id = 0;
+                }
+            }
+            job.finished = true;
+            if (job.load_promise)
+                job.load_promise->set_value({std::move(capabilities), std::string()});
+            return;
+        }
         if (!ensure_started_locked(io, spec, error) || !load_plugin_locked(job.plugin_key, error)) {
             io.unlock();
             fail_job(job, error, false);
@@ -586,7 +638,6 @@ struct PluginHostClient::Impl
             return;
         }
 
-        ScopedPluginAuditContext audit(job.plugin_key, job.capability_name);
         // Post-process G-code is inlined over IPC. The helper stages a scratch copy under
         // plugin_data; grant that folder to the parent audit (the RPC check runs here) and
         // pin writes there so a write outside plugin_data names ctx.gcode_path.
@@ -919,6 +970,56 @@ ExecutionResult PluginHostClient::execute_post_process(const std::string&       
         error = ex.what();
         return ExecutionResult::failure(PluginResult::FatalError, error);
     }
+}
+
+bool PluginHostClient::load_in_helper(const std::string& plugin_key, std::vector<HostedCapabilityInfo>& capabilities, std::string& error)
+{
+    capabilities.clear();
+    error.clear();
+    if (plugin_key.empty()) {
+        error = "plugin_key missing";
+        return false;
+    }
+    Impl& i         = impl();
+    auto  job       = std::make_shared<Job>();
+    job->kind       = Job::Kind::Load;
+    job->plugin_key = plugin_key;
+    job->timeout_ms = execute_timeout_ms(false, {});
+    job->request_id = i.next_id.fetch_add(1, std::memory_order_relaxed);
+    job->load_promise = std::make_shared<std::promise<HostedLoadOutcome>>();
+    auto future       = job->load_promise->get_future();
+    {
+        std::lock_guard<std::mutex> lock(i.state_mutex);
+        if (i.stopping.load(std::memory_order_acquire)) {
+            error = "plugin host is shutting down";
+            return false;
+        }
+        i.queue.push_back(job);
+        i.ensure_worker_locked();
+        i.cv.notify_one();
+    }
+    try {
+        HostedLoadOutcome outcome = future.get();
+        if (!outcome.second.empty()) {
+            error = std::move(outcome.second);
+            return false;
+        }
+        capabilities = std::move(outcome.first);
+        if (capabilities.empty()) {
+            error = "the plugin registered no capabilities";
+            return false;
+        }
+        return true;
+    } catch (const std::exception& ex) {
+        error = ex.what();
+        return false;
+    }
+}
+
+void PluginHostClient::set_reply_filter_for_testing(std::function<void(nlohmann::json&)> filter)
+{
+    std::lock_guard<std::mutex> lock(g_reply_filter_mutex);
+    g_reply_filter_for_testing = std::move(filter);
 }
 
 void PluginHostClient::unload(const std::string& plugin_key)

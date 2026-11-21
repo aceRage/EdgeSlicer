@@ -1,8 +1,12 @@
 #include "PluginIpcProtocol.hpp"
 
+#include <slic3r/plugin/PluginFsUtils.hpp>
+
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <set>
+#include <utility>
 
 namespace Slic3r::plugin_ipc {
 namespace {
@@ -220,7 +224,17 @@ bool validate_child_message(const nlohmann::json& msg, std::string& error)
                 }
             return true;
         }
-        if (type == k_type_load_ok || type == k_type_unload_ok)
+        if (type == k_type_load_ok) {
+            if (!check_id(msg, true, error))
+                return false;
+            // D3: a load the parent asked for metadata carries the capability list; an older
+            // execute-time load_ok may omit it. When present it must parse.
+            if (!msg.contains("capabilities"))
+                return true;
+            std::vector<HostedCapabilityInfo> ignored;
+            return parse_hosted_capabilities(msg, ignored, error);
+        }
+        if (type == k_type_unload_ok)
             return check_id(msg, true, error);
         if (type == k_type_shutdown_ok)
             return check_id(msg, false, error);
@@ -253,6 +267,179 @@ bool validate_child_message(const nlohmann::json& msg, std::string& error)
         return false;
     } catch (const std::exception& ex) {
         error = std::string("malformed message: ") + ex.what();
+        return false;
+    }
+}
+
+namespace {
+
+bool capability_name_ok(const std::string& name)
+{
+    if (name.empty() || name.size() > k_max_capability_name_bytes)
+        return false;
+    for (const unsigned char ch : name)
+        if (ch < 0x20 || ch == 0x7f || ch == ';')
+            return false;
+    return true;
+}
+
+} // namespace
+
+bool parse_hosted_capabilities(const nlohmann::json& load_ok, std::vector<HostedCapabilityInfo>& out, std::string& error)
+{
+    out.clear();
+    try {
+        if (!load_ok.is_object()) {
+            error = "load reply is not an object";
+            return false;
+        }
+        const auto caps = load_ok.find("capabilities");
+        if (caps == load_ok.end() || !caps->is_array()) {
+            error = "field 'capabilities' must be a list";
+            return false;
+        }
+        if (caps->empty()) {
+            error = "the plugin registered no capabilities";
+            return false;
+        }
+        if (caps->size() > k_max_capabilities) {
+            error = "field 'capabilities' lists more than " + std::to_string(k_max_capabilities) + " capabilities";
+            return false;
+        }
+        std::set<std::pair<int, std::string>> seen;
+        std::vector<HostedCapabilityInfo>     parsed;
+        parsed.reserve(caps->size());
+        for (const json& entry : *caps) {
+            if (!entry.is_object()) {
+                error = "a capability entry is not an object";
+                return false;
+            }
+            HostedCapabilityInfo info;
+            const auto           name = entry.find("name");
+            if (name == entry.end() || !name->is_string() || !capability_name_ok(name->get_ref<const std::string&>())) {
+                error = "a capability has a missing or invalid name";
+                return false;
+            }
+            info.name       = name->get_ref<const std::string&>();
+            const auto type = entry.find("type");
+            if (type == entry.end() || !type->is_string() || type->get_ref<const std::string&>().size() > 64) {
+                error = "capability '" + info.name + "' has a missing or invalid type";
+                return false;
+            }
+            info.type = plugin_capability_type_from_string(type->get_ref<const std::string&>());
+            if (info.type == PluginCapabilityType::Unknown) {
+                error = "capability '" + info.name + "' has an unknown type";
+                return false;
+            }
+            if (!check_bool(entry, "has_config_ui", error) || !check_bool(entry, "lifecycle_events", error) ||
+                !check_string(entry, "config_ui", false, k_max_config_ui_bytes, error))
+                return false;
+            info.has_config_ui    = entry.value("has_config_ui", false);
+            info.lifecycle_events = entry.value("lifecycle_events", false);
+            if (info.has_config_ui && entry.contains("config_ui"))
+                info.config_ui = entry["config_ui"].get<std::string>();
+            const auto defaults = entry.find("default_config");
+            if (defaults != entry.end()) {
+                if (!defaults->is_object()) {
+                    error = "capability '" + info.name + "' default_config must be an object";
+                    return false;
+                }
+                info.default_config = *defaults;
+            }
+            if (!seen.emplace(static_cast<int>(info.type), info.name).second) {
+                error = "capability '" + info.name + "' is listed twice";
+                return false;
+            }
+            parsed.push_back(std::move(info));
+        }
+        out = std::move(parsed);
+        return true;
+    } catch (const std::exception& ex) {
+        out.clear();
+        error = std::string("malformed capability list: ") + ex.what();
+        return false;
+    }
+}
+
+nlohmann::json hosted_capabilities_to_json(const std::vector<HostedCapabilityInfo>& capabilities)
+{
+    json list = json::array();
+    for (const HostedCapabilityInfo& info : capabilities) {
+        json entry = {
+            {"name", info.name},
+            {"type", plugin_capability_type_to_string(info.type)},
+            {"has_config_ui", info.has_config_ui},
+            {"lifecycle_events", info.lifecycle_events},
+            {"default_config", info.default_config.is_object() ? info.default_config : json::object()},
+        };
+        if (info.has_config_ui && !info.config_ui.empty() && info.config_ui.size() <= k_max_config_ui_bytes)
+            entry["config_ui"] = info.config_ui;
+        list.push_back(std::move(entry));
+    }
+    return list;
+}
+
+nlohmann::json permissions_to_json(const PluginPermissions& permissions)
+{
+    return json{
+        {"fs_read", permissions.fs_read},
+        {"fs_readwrite", permissions.fs_readwrite},
+        {"network_http", permissions.network_http},
+        {"network_socket", permissions.network_socket},
+        {"process", permissions.process},
+        {"events", permissions.events},
+        {"threading", permissions.threading},
+        {"full_access", permissions.full_access},
+    };
+}
+
+bool permissions_from_json(const nlohmann::json& value, PluginPermissions& out, std::string& error)
+{
+    out = PluginPermissions{};
+    try {
+        if (!value.is_object()) {
+            error = "permissions must be an object";
+            return false;
+        }
+        static const std::set<std::string> known = {"fs_read", "fs_readwrite", "network_http", "network_socket",
+                                                    "process", "events",  "threading",     "full_access"};
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            if (known.count(it.key()) == 0) {
+                error = "unknown permission '" + it.key().substr(0, 64) + "'";
+                return false;
+            }
+        }
+        PluginPermissions parsed;
+        const auto        read_list = [&value, &error](const char* key, std::vector<std::string>& dst) {
+            const auto it = value.find(key);
+            if (it == value.end())
+                return true;
+            if (!it->is_array() || it->size() > k_max_permission_entries) {
+                error = std::string("permission '") + key + "' must be a list of at most " + std::to_string(k_max_permission_entries) +
+                        " entries";
+                return false;
+            }
+            for (const json& v : *it) {
+                if (!v.is_string() || v.get_ref<const std::string&>().size() > k_max_short_string_bytes) {
+                    error = std::string("permission '") + key + "' must hold short strings";
+                    return false;
+                }
+                dst.push_back(v.get<std::string>());
+            }
+            return true;
+        };
+        if (!read_list("fs_read", parsed.fs_read) || !read_list("fs_readwrite", parsed.fs_readwrite) ||
+            !read_list("network_http", parsed.network_http) || !read_list("network_socket", parsed.network_socket) ||
+            !read_list("process", parsed.process) || !read_list("events", parsed.events))
+            return false;
+        if (!check_bool(value, "threading", error) || !check_bool(value, "full_access", error))
+            return false;
+        parsed.threading   = value.value("threading", false);
+        parsed.full_access = value.value("full_access", false);
+        out                = std::move(parsed);
+        return true;
+    } catch (const std::exception& ex) {
+        error = std::string("malformed permissions: ") + ex.what();
         return false;
     }
 }

@@ -3,6 +3,7 @@
 #include <slic3r/plugin/PythonPluginInterface.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
 
+#include "PluginIpcProtocol.hpp"
 #include "PluginSandbox.hpp"
 
 #include <nlohmann/json.hpp>
@@ -43,6 +44,8 @@ public:
     static void          reset_spawn_count_for_testing();
     // Runs at the start of every worker job; a test throws from it to check containment (H2).
     static void          set_job_hook_for_testing(std::function<void()> hook);
+    // D3 tests: rewrites every message read from the helper before validation (a hostile helper).
+    static void          set_reply_filter_for_testing(std::function<void(nlohmann::json&)> filter);
     static std::uint64_t spawn_count();
 
     // Snapshot of print config for a post-process execute. Omits the same banned keys
@@ -60,6 +63,12 @@ public:
                                          const std::string&            capability_name,
                                          const SlicingPipelineContext& ctx,
                                          std::string&                  error);
+
+    // D3: imports plugin_key in edge-plugin-host (sandboxed) and returns the capabilities it
+    // registered, strictly validated. Blocks the caller (never the UI thread: PluginManager calls
+    // it from its load worker), bounded by the execute timeout. No plugin code runs in this
+    // process. A malformed, hostile or dead helper fails the load and is reset; it never throws.
+    bool load_in_helper(const std::string& plugin_key, std::vector<HostedCapabilityInfo>& capabilities, std::string& error);
 
     // Cancels the in-flight request for plugin_key. Bound to that request id so a
     // later job with the same key is not cancelled.

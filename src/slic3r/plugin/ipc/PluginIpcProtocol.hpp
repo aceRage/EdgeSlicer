@@ -2,17 +2,22 @@
 
 #include <nlohmann/json.hpp>
 
+#include <slic3r/plugin/PythonPluginInterface.hpp>
+
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace Slic3r {
 struct AuditDecision;
+struct PluginPermissions;
 }
 
 namespace Slic3r::plugin_ipc {
 
-inline constexpr int         k_protocol_version     = 1;
+// 2 (D3, 2026-11-20): load_ok carries the capabilities the helper imported, and the helper may
+// forward a load-time permission request ("plugin.request_permissions") to EdgeSlicer.
+inline constexpr int         k_protocol_version     = 2;
 inline constexpr uint32_t    k_max_payload_bytes    = 16u * 1024u * 1024u;
 inline constexpr const char* k_helper_name          = "edge-plugin-host";
 inline constexpr int         k_default_timeout_ms   = 120000;
@@ -70,6 +75,40 @@ inline constexpr std::size_t k_max_audit_targets       = 64;
 // then kills the helper and fails the run. Never throws.
 bool validate_child_message(const nlohmann::json& msg, std::string& error);
 
+// D3: plugin import runs in the helper. Its load_ok reply lists what the plugin registered, so
+// EdgeSlicer can show and dispatch the capabilities without importing the plugin itself.
+inline constexpr std::size_t k_max_capabilities           = 64;
+inline constexpr std::size_t k_max_capability_name_bytes  = 256;
+inline constexpr std::size_t k_max_config_ui_bytes        = 1024u * 1024u;
+inline constexpr std::size_t k_max_permission_entries     = 256;
+
+struct HostedCapabilityInfo
+{
+    std::string          name;
+    PluginCapabilityType type{PluginCapabilityType::Unknown};
+    bool                 has_config_ui{false};
+    std::string          config_ui;      // the plugin's custom config HTML, empty without one
+    nlohmann::json       default_config = nlohmann::json::object();
+    bool                 lifecycle_events{false}; // the capability overrides on_lifecycle_event
+};
+
+// Strict parse of load_ok's "capabilities" list, the helper being untrusted input. At least one
+// and at most k_max_capabilities entries; each an object with a non-empty "name" (at most
+// k_max_capability_name_bytes, no ';' and no control characters), a known "type" string, and
+// optional "has_config_ui" (bool), "config_ui" (string, at most k_max_config_ui_bytes),
+// "default_config" (object) and "lifecycle_events" (bool). A (type, name) pair may appear once.
+// Anything else refuses the whole reply. Never throws.
+bool parse_hosted_capabilities(const nlohmann::json& load_ok, std::vector<HostedCapabilityInfo>& out, std::string& error);
+// The helper side of the same list.
+nlohmann::json hosted_capabilities_to_json(const std::vector<HostedCapabilityInfo>& capabilities);
+
+// Load-time permission requests forwarded from the helper. Strict: only the known buckets, lists
+// of at most k_max_permission_entries strings of at most k_max_short_string_bytes. Never throws.
+nlohmann::json permissions_to_json(const PluginPermissions& permissions);
+bool           permissions_from_json(const nlohmann::json& value, PluginPermissions& out, std::string& error);
+
+inline constexpr const char* k_method_request_permissions = "plugin.request_permissions";
+
 bool in_child_process();
 void set_in_child_process();
 
@@ -81,5 +120,10 @@ AuditDecision rpc_audit_check(const std::string& event_name,
                               const std::vector<std::string>& targets,
                               bool is_write,
                               const std::string& event_type);
+
+// Child-only (D3): a permission request a plugin made while the helper imported it. EdgeSlicer
+// asks the user (it owns the install-state sidecar and the UI) and answers. False on denial or
+// any transport failure. Safe with or without the GIL held.
+bool rpc_request_permissions(const std::string& plugin_key, const PluginPermissions& requested);
 
 } // namespace Slic3r::plugin_ipc

@@ -60,6 +60,9 @@ struct Plugin
 
     // Materialized capability instances. Empty unless loaded.
     std::vector<std::shared_ptr<PluginCapabilityInterface>> capabilities;
+    // D3: imported in edge-plugin-host, not here. module stays null; the capabilities are
+    // HostedCapability proxies that run the plugin through the helper.
+    bool hosted = false;
 
     Plugin()                         = default;
     Plugin(const Plugin&)            = delete;
@@ -73,9 +76,11 @@ struct Plugin
           module_name(std::move(other.module_name)),
           plugin_sys_paths(std::move(other.plugin_sys_paths)),
           plugin_modules(std::move(other.plugin_modules)),
-          capabilities(std::move(other.capabilities))
+          capabilities(std::move(other.capabilities)),
+          hosted(other.hosted)
     {
         other.module = nullptr;
+        other.hosted = false;
     }
 
     Plugin& operator=(Plugin&& other) noexcept
@@ -88,14 +93,16 @@ struct Plugin
             plugin_sys_paths  = std::move(other.plugin_sys_paths);
             plugin_modules    = std::move(other.plugin_modules);
             capabilities      = std::move(other.capabilities);
+            hosted            = other.hosted;
             other.module      = nullptr;
+            other.hosted      = false;
         }
         return *this;
     }
 
     ~Plugin() { release_module(); }
 
-    bool is_loaded() const { return module != nullptr; }
+    bool is_loaded() const { return module != nullptr || hosted; }
 
     // Removes the module namespace and plugin-owned sys.path entries before dropping the module
     // reference. If the interpreter is already finalized, PythonInterpreter deliberately leaves

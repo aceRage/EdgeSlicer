@@ -62,13 +62,21 @@ nlohmann::json rpc_roundtrip(nlohmann::json request)
     request["id"]          = id;
     std::string    error;
     nlohmann::json reply;
-    {
-        pybind11::gil_scoped_release          release;
+    const auto     exchange = [&]() {
         std::lock_guard<std::recursive_mutex> lock(*g_io_mutex);
         if (!g_channel->write_json(request, k_default_timeout_ms, error))
             throw std::runtime_error(error.empty() ? "host RPC write failed" : error);
         if (!g_channel->read_json(reply, k_default_timeout_ms, error))
             throw std::runtime_error(error.empty() ? "host RPC read failed" : error);
+    };
+    // Release the GIL only when this thread holds it (a Python binding calling in). A forwarded
+    // permission request arrives with the GIL already released, and releasing it again would be
+    // a fatal error in CPython 3.12.
+    if (Py_IsInitialized() && PyGILState_Check()) {
+        pybind11::gil_scoped_release release;
+        exchange();
+    } else {
+        exchange();
     }
     return reply;
 }
@@ -131,6 +139,43 @@ bool load_plugin(const nlohmann::json& msg, std::string& error)
         return true;
     manager.load_plugin(plugin_key, /*skip_deps=*/true);
     return manager.wait_for_plugin_load(plugin_key, std::chrono::seconds(120), error);
+}
+
+// D3: what EdgeSlicer needs to know about a plugin this helper imported. Every capability the
+// plugin registered (enabled or not), its custom config HTML and its default config. Calls into
+// the plugin (get_config_ui / get_default_config) are contained: a raising one costs only that
+// field, as in-process.
+std::vector<HostedCapabilityInfo> describe_loaded_capabilities(const std::string& plugin_key)
+{
+    std::vector<HostedCapabilityInfo> out;
+    for (const auto& cap : PluginManager::instance().get_plugin_capabilities(plugin_key, PluginCapabilityType::Unknown, false)) {
+        if (!cap)
+            continue;
+        HostedCapabilityInfo info;
+        info.name          = cap->name();
+        info.type          = cap->type();
+        info.has_config_ui = cap->config_ui_available();
+        if (info.has_config_ui) {
+            try {
+                info.config_ui = cap->get_config_ui();
+            } catch (...) {
+                info.config_ui.clear();
+            }
+            if (info.config_ui.empty() || info.config_ui.size() > k_max_config_ui_bytes) {
+                info.has_config_ui = false;
+                info.config_ui.clear();
+            }
+        }
+        try {
+            nlohmann::json defaults = cap->get_default_config();
+            if (defaults.is_object())
+                info.default_config = std::move(defaults);
+        } catch (...) {}
+        out.push_back(std::move(info));
+        if (out.size() >= k_max_capabilities)
+            break;
+    }
+    return out;
 }
 
 ScriptCompletion run_script(const std::string& plugin_key, const std::string& capability_name)
@@ -275,6 +320,30 @@ AuditDecision rpc_audit_check(const std::string&              event_name,
         return d;
     } catch (const std::exception& ex) {
         return {false, ex.what()};
+    }
+}
+
+bool rpc_request_permissions(const std::string& plugin_key, const PluginPermissions& requested)
+{
+    nlohmann::json request = {
+        {"type", k_type_host_call},
+        {"method", k_method_request_permissions},
+        {"plugin_key", plugin_key},
+        {"capability", std::string()},
+        {"args", permissions_to_json(requested)},
+    };
+    try {
+        const nlohmann::json reply = rpc_roundtrip(std::move(request));
+        if (!reply.is_object() || reply.value("type", std::string()) != k_type_host_result || !reply.value("ok", false))
+            return false;
+        const auto value = reply.find("value");
+        if (value == reply.end() || !value->is_object())
+            return false;
+        const auto granted = value->find("granted");
+        return granted != value->end() && granted->is_boolean() && granted->get<bool>();
+    } catch (const std::exception& ex) {
+        child_diag(std::string("permission request failed: ") + ex.what());
+        return false;
     }
 }
 
@@ -426,9 +495,14 @@ int run_child(Channel& channel)
         if (type == k_type_load) {
             std::string    load_error;
             nlohmann::json reply;
-            if (load_plugin(msg, load_error))
+            if (load_plugin(msg, load_error)) {
                 reply = {{"type", k_type_load_ok}};
-            else
+                try {
+                    reply["capabilities"] = hosted_capabilities_to_json(describe_loaded_capabilities(msg.value("plugin_key", std::string())));
+                } catch (const std::exception& ex) {
+                    reply = {{"type", k_type_error}, {"message", std::string("could not describe the plugin: ") + ex.what()}};
+                }
+            } else
                 reply = {{"type", k_type_error}, {"message", load_error}};
             stamp_request_id(reply, msg);
             if (!channel.write_json(reply, k_default_timeout_ms, error))
