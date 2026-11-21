@@ -35,6 +35,7 @@ add_executable(${_TEST_NAME}_tests
 	test_model.cpp
 	test_print.cpp
 	test_slicing_pipeline_hook.cpp
+	$<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_lifecycle_fire_sites.cpp>
 	test_custom_gcode_placeholders.cpp
 	test_exclude_object_tolerance.cpp
 	test_gcode_file_header.cpp
