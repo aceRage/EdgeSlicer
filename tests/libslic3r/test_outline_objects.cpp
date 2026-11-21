@@ -764,6 +764,8 @@ TEST_CASE("Objects from a traced image", "[OutlineObjects]")
             REQUIRE(clicker.cap.parts.size() > 1);
         }
     }
+}
+
 namespace {
 
 bool indices_in_range(const indexed_triangle_set &its)
