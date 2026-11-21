@@ -1621,3 +1621,10 @@ TEST_CASE("The layer count leaves out layers that print nothing", "[GCode][Regre
     CHECK(placeholder == layer_changes);
     CHECK(trailer == layer_changes);
 }
+
+// Orca #17681: nothing reads the marker that Bambu Studio's cooling buffer took out again.
+TEST_CASE("Layer changes leave no fan speed marker in the G-code", "[GCode][Regression]")
+{
+    const std::string gcode = Test::slice({TestMesh::cube_20x20x20}, DynamicPrintConfig::full_print_config());
+    CHECK(gcode.find("_SET_FAN_SPEED_CHANGING_LAYER") == std::string::npos);
+}

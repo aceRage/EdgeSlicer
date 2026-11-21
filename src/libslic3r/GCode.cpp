@@ -8253,8 +8253,6 @@ LayerResult GCode::process_layer(const Print& print,
                                                   &config) +
                  "\n";
     }
-    // BBS: set layer time fan speed after layer change gcode
-    gcode += ";_SET_FAN_SPEED_CHANGING_LAYER\n";
 
     // Calibration Layer-specific GCode
     switch (print.calib_mode()) {
