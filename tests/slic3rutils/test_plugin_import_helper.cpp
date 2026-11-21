@@ -21,6 +21,7 @@
 #include <slic3r/plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.hpp>
 
 #include <libslic3r/GCode/PostProcessor.hpp>
+#include <libslic3r/LifecycleEvents.hpp>
 #include <libslic3r/PrintConfig.hpp>
 
 #include "slic3r/plugin/EdgePythonInclude.hpp"
@@ -28,6 +29,7 @@
 
 #include <boost/filesystem.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -35,6 +37,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Slic3r;
@@ -792,4 +795,562 @@ TEST_CASE("D2: the live placement keeps a pinned plugin in the helper with every
     plugin_trust::TrustState shipped = user_signed;
     shipped.shipped_publisher        = true;
     CHECK(plugin_import::placement_for(shipped) == plugin_import::ImportPlacement::InProcess);
+}
+
+// ---- Lifecycle events for hosted plugins ---------------------------------------------------
+
+namespace {
+
+const char* const D3_EVENTS_SOURCE = R"PY(# /// script
+# requires-python = ">=3.12"
+# requires-orca-api = "1.0.0"
+#
+# [tool.orcaslicer.plugin]
+# name = "D3 Events"
+# description = "Lifecycle listener fixture"
+# author = "tests"
+# version = "1.0"
+# type = "script"
+# ///
+import os, time, orca
+
+def _record(line):
+    folder = orca.host.plugin.storage()
+    with open(os.path.join(folder, "events.log"), "a", encoding="utf-8", newline="") as f:
+        f.write(line + "\n")
+
+class Listener(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "Listener"
+    def execute(self):
+        return orca.ExecutionResult.success("ok")
+    def on_lifecycle_event(self, event, ctx):
+        if ctx.name == "hang":
+            time.sleep(600)
+        if ctx.name == "raise":
+            raise RuntimeError("listener raised")
+        _record("|".join([event.name, ctx.name, ctx.code.name, ctx.msg, ctx.id, ctx.previous_name,
+                          ctx.device_id, ctx.job_id, ctx.source, str(ctx.index), str(ctx.dirty)]))
+
+class Quiet(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "Quiet"
+    def execute(self):
+        return orca.ExecutionResult.success("ok")
+
+@orca.plugin
+class Pkg(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(Listener)
+        orca.register_capability(Quiet)
+)PY";
+
+const char* const k_events_key = "D3_Events";
+
+std::vector<std::string> read_lines(const fs::path& path)
+{
+    std::vector<std::string> lines;
+    std::ifstream            in(path.string(), std::ios::binary);
+    std::string              line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        lines.push_back(line);
+    }
+    return lines;
+}
+
+// The ctx.name of every recorded event, in order (second field of each line).
+std::vector<std::string> recorded_names(const fs::path& log)
+{
+    std::vector<std::string> names;
+    for (const std::string& line : read_lines(log)) {
+        const auto first = line.find('|');
+        if (first == std::string::npos)
+            continue;
+        const auto second = line.find('|', first + 1);
+        names.push_back(line.substr(first + 1, second == std::string::npos ? std::string::npos : second - first - 1));
+    }
+    return names;
+}
+
+bool recorded(const fs::path& log, const std::string& name)
+{
+    const auto names = recorded_names(log);
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+std::chrono::milliseconds fire_named(LifecycleEvent event, const std::string& name)
+{
+    LifecycleEventContext ctx;
+    ctx.name          = name;
+    const auto start  = std::chrono::steady_clock::now();
+    fire_lifecycle_event(event, ctx);
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+}
+
+bool wait_events_idle() { return PluginHostClient::instance().wait_lifecycle_events_idle_for_testing(std::chrono::seconds(90)); }
+
+// Waits until the worker has taken plugin_key's queue (the batch is in flight).
+bool wait_queue_taken(const std::string& plugin_key)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (PluginHostClient::instance().pending_lifecycle_events(plugin_key) == 0)
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+struct EventTimeoutReset
+{
+    ~EventTimeoutReset() { PluginHostClient::set_event_timeout_for_testing(0); }
+};
+
+// Loads the listener fixture in the helper and returns its log file.
+struct EventsFixture
+{
+    HelperImport  helper_import;
+    ScopedDataDir data_dir_guard;
+    fs::path      log;
+    bool          ready = false;
+
+    explicit EventsFixture(const std::string& tag) : data_dir_guard(tag)
+    {
+        write_plugin(data_dir_guard, k_events_key, D3_EVENTS_SOURCE);
+        PluginManager& manager = PluginManager::instance();
+        manager.discover_plugins(/*async=*/false, /*clear=*/true);
+        std::string error;
+        ready = load_and_wait(manager, k_events_key, error);
+        if (ready)
+            log = fs::path(manager.get_storage_dir(k_events_key)) / "events.log";
+    }
+    ~EventsFixture()
+    {
+        PluginManager::instance().unload_plugin(k_events_key);
+        PluginHostClient::instance().wait_lifecycle_events_idle_for_testing(std::chrono::seconds(30));
+    }
+};
+
+} // namespace
+
+TEST_CASE("Events: a snapshot is plain, bounded, valid UTF-8 and free of credentials", "[PluginEvents][protocol]")
+{
+    LifecycleEventContext ctx;
+    ctx.name               = std::string(10000, 'a');
+    ctx.msg                = std::string("bad \xff\xfe bytes");
+    ctx.device_id          = "01P00A123456789";
+    ctx.index              = 4;
+    ctx.dirty              = true;
+    ctx.code               = LifecycleEvtCode::Error;
+    ctx.cancellation_check = [] { return false; };
+    const auto snapshot    = plugin_ipc::snapshot_lifecycle_event(LifecycleEvent::UploadFinished, ctx);
+    CHECK(snapshot.name.size() == plugin_ipc::k_max_event_field_bytes);
+    CHECK(snapshot.msg == "bad ?? bytes");
+    CHECK(snapshot.device_id == "01P00A123456789");
+    const LifecycleEventContext back = plugin_ipc::context_from_snapshot(snapshot);
+    CHECK_FALSE(static_cast<bool>(back.cancellation_check)); // never a live callable
+    CHECK(back.index == 4);
+    CHECK(back.dirty);
+    CHECK(back.code == LifecycleEvtCode::Error);
+    std::string dumped;
+    REQUIRE_NOTHROW(dumped = plugin_ipc::lifecycle_event_to_json(snapshot).dump());
+
+    const std::vector<std::pair<std::string, std::string>> redacted = {
+        {"http://user:hunter2@printer.local/api", "http://***@printer.local/api"},
+        {"upload failed: access_code=12345678&x=1", "upload failed: access_code=***&x=1"},
+        {"Authorization: Bearer abc.def", "Authorization: ***"},
+        {"{\"token\": \"s3cr3t\", \"name\": \"Benchy\"}", "{\"token\": \"***\", \"name\": \"Benchy\"}"},
+        {"password: hunter2", "password: ***"},
+        {"apikey=ABC123", "apikey=***"},
+        {"sent with bearer xyz", "sent with bearer ***"},
+        {"secret_key=abc", "secret_key=***"},
+        {"accessCode:87654321", "accessCode:***"},
+    };
+    for (const auto& [in, out] : redacted) {
+        INFO(in);
+        CHECK(plugin_ipc::redact_secrets(in) == out);
+    }
+    for (const std::string plain : {"Printer online", "C:\\Users\\me\\Benchy.3mf", "https://example.com/a?b=c", "Error: code 5",
+                                    "dev_id: 01P00A", ""}) {
+        INFO(plain);
+        CHECK(plugin_ipc::redact_secrets(plain) == plain);
+    }
+    // A credential in any field is gone from the snapshot.
+    LifecycleEventContext secret;
+    secret.msg = "printhost_apikey=topsecret";
+    secret.source = "ftp://admin:pw@10.0.0.5/";
+    const auto clean = plugin_ipc::snapshot_lifecycle_event(LifecycleEvent::UploadStarted, secret);
+    CHECK(clean.msg.find("topsecret") == std::string::npos);
+    CHECK(clean.source.find("pw") == std::string::npos);
+}
+
+TEST_CASE("Events: the wire format is strict and covers every Orca event name", "[PluginEvents][protocol]")
+{
+    for (int i = static_cast<int>(LifecycleEvent::NewProject); i <= static_cast<int>(LifecycleEvent::SendJobFinished); ++i) {
+        const auto     event = static_cast<LifecycleEvent>(i);
+        LifecycleEvent back  = LifecycleEvent::NewProject;
+        CHECK(plugin_ipc::lifecycle_event_from_name(lifecycle_event_to_string(event), back));
+        CHECK(back == event);
+    }
+
+    plugin_ipc::LifecycleEventSnapshot s;
+    s.event         = LifecycleEvent::ObjectRenamed;
+    s.code          = LifecycleEvtCode::Warn;
+    s.name          = "new";
+    s.previous_name = "old";
+    s.msg           = "m";
+    s.id            = "7";
+    s.device_id     = "dev";
+    s.job_id        = "job";
+    s.source        = "list";
+    s.index         = 2;
+    s.dirty         = true;
+    plugin_ipc::LifecycleEventSnapshot parsed;
+    std::string                        why;
+    REQUIRE(plugin_ipc::lifecycle_event_from_json(plugin_ipc::lifecycle_event_to_json(s), parsed, why));
+    CHECK(parsed.event == s.event);
+    CHECK(parsed.code == s.code);
+    CHECK(parsed.name == "new");
+    CHECK(parsed.previous_name == "old");
+    CHECK(parsed.job_id == "job");
+    CHECK(parsed.index == 2);
+    CHECK(parsed.dirty);
+
+    json good = plugin_ipc::lifecycle_event_to_json(s);
+    const std::vector<std::pair<const char*, std::function<void(json&)>>> bad = {
+        {"unknown event", [](json& v) { v["event"] = "Teleport"; }},
+        {"event is a number", [](json& v) { v["event"] = 3; }},
+        {"unknown code", [](json& v) { v["code"] = "Fine"; }},
+        {"name is a number", [](json& v) { v["name"] = 5; }},
+        {"name too long", [](json& v) { v["name"] = std::string(plugin_ipc::k_max_event_field_bytes + 1, 'n'); }},
+        {"index is a string", [](json& v) { v["index"] = "1"; }},
+        {"index out of range", [](json& v) { v["index"] = 1e12; }},
+        {"huge index", [](json& v) { v["index"] = 9000000000LL; }},
+        {"dirty is a string", [](json& v) { v["dirty"] = "true"; }},
+        {"not an object", [](json& v) { v = json::array({1}); }},
+    };
+    for (const auto& [label, mutate] : bad) {
+        DYNAMIC_SECTION(label)
+        {
+            json value = good;
+            mutate(value);
+            bool ok = true;
+            REQUIRE_NOTHROW(ok = plugin_ipc::lifecycle_event_from_json(value, parsed, why));
+            CHECK_FALSE(ok);
+        }
+    }
+
+    for (const std::string path : {"C:\\a\\b.3mf", "C:/a/b.3mf", "/home/a/b.3mf", "\\\\server\\share\\b.3mf", "~/b.3mf", "file:///tmp/x"})
+        CHECK(plugin_ipc::looks_like_local_path(path));
+    for (const std::string text : {"Benchy", "01P00A", "online", "", "a/b", "http://host/x"})
+        CHECK_FALSE(plugin_ipc::looks_like_local_path(text));
+
+    CHECK(plugin_ipc::validate_child_message(json{{"type", "lifecycle_event_ok"}, {"id", 3}, {"delivered", 2}, {"failed", 0}}, why));
+    for (const json& reply : {json{{"type", "lifecycle_event_ok"}},
+                              json{{"type", "lifecycle_event_ok"}, {"id", "3"}},
+                              json{{"type", "lifecycle_event_ok"}, {"id", 3}, {"delivered", -1}},
+                              json{{"type", "lifecycle_event_ok"}, {"id", 3}, {"delivered", "2"}},
+                              json{{"type", "lifecycle_event_ok"}, {"id", 3}, {"failed", 1.5}}}) {
+        INFO(reply.dump());
+        bool ok = true;
+        REQUIRE_NOTHROW(ok = plugin_ipc::validate_child_message(reply, why));
+        CHECK_FALSE(ok);
+    }
+}
+
+TEST_CASE("Events: a full queue drops the oldest and posting never waits", "[PluginEvents]")
+{
+    const std::string key = "Events_DropPolicy_NotLoaded";
+    std::mutex              mutex;
+    std::condition_variable cv;
+    bool                    release = false;
+    std::atomic<bool>       entered{false};
+    struct HookReset
+    {
+        ~HookReset() { PluginHostClient::set_job_hook_for_testing({}); }
+    } hook_reset;
+    // Hold the worker inside the first job, so everything posted afterwards waits in the queue.
+    PluginHostClient::set_job_hook_for_testing([&] {
+        entered = true;
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait_for(lock, std::chrono::seconds(30), [&] { return release; });
+    });
+    const auto release_worker = [&] {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            release = true;
+        }
+        cv.notify_all();
+    };
+
+    PluginHostClient& client = PluginHostClient::instance();
+    PluginHostClient::reset_spawn_count_for_testing();
+    plugin_ipc::LifecycleEventSnapshot snapshot;
+    snapshot.event = LifecycleEvent::ObjectTransformed;
+    snapshot.name  = "warm";
+    client.post_lifecycle_event(key, snapshot);
+    for (int i = 0; i < 1000 && !entered.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!entered.load()) {
+        release_worker();
+        FAIL("the worker never started the first job");
+    }
+
+    std::chrono::milliseconds slowest{0};
+    for (int i = 0; i < 100; ++i) {
+        snapshot.name    = "e" + std::to_string(i);
+        const auto start = std::chrono::steady_clock::now();
+        client.post_lifecycle_event(key, snapshot);
+        slowest = (std::max)(slowest, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start));
+    }
+    const std::vector<std::string> pending = client.pending_lifecycle_event_names_for_testing(key);
+    const std::uint64_t            dropped = client.lifecycle_events_dropped(key);
+    release_worker();
+
+    CHECK(slowest < std::chrono::milliseconds(250));
+    REQUIRE(pending.size() == plugin_ipc::k_max_event_queue);
+    CHECK(dropped == 101 - plugin_ipc::k_max_event_queue);
+    CHECK(pending.front() == "e" + std::to_string(100 - plugin_ipc::k_max_event_queue)); // the oldest went
+    CHECK(pending.back() == "e99");
+
+    // The plugin is not loaded: the batch is dropped, nothing is spawned.
+    CHECK(client.wait_lifecycle_events_idle_for_testing(std::chrono::seconds(30)));
+    CHECK(client.pending_lifecycle_events(key) == 0);
+    CHECK(PluginHostClient::spawn_count() == 0);
+}
+
+TEST_CASE("Events: a hosted listener gets the events in order with the in-process payload", "[PluginEvents][PluginIpc][Python]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    EventsFixture fixture("plugin-events-order");
+    REQUIRE(fixture.ready);
+    PluginManager& manager = PluginManager::instance();
+
+    // load_ok flagged only the capability that overrides on_lifecycle_event.
+    auto listener = manager.get_plugin_capability({PluginCapabilityType::Script, "Listener", k_events_key}, false);
+    auto quiet    = manager.get_plugin_capability({PluginCapabilityType::Script, "Quiet", k_events_key}, false);
+    REQUIRE(listener);
+    REQUIRE(quiet);
+    REQUIRE(plugin_import::as_hosted(listener.get()) != nullptr);
+    CHECK(plugin_import::as_hosted(listener.get())->hosted_info().lifecycle_events);
+    CHECK_FALSE(plugin_import::as_hosted(quiet.get())->hosted_info().lifecycle_events);
+    CHECK(PluginHostClient::lifecycle_listeners(k_events_key) == std::vector<std::string>{"Listener"});
+
+    LifecycleEventContext ctx;
+    ctx.name          = "0.20mm Standard";
+    ctx.code          = LifecycleEvtCode::Warn;
+    ctx.msg           = "m";
+    ctx.id            = "id1";
+    ctx.previous_name = "prev";
+    ctx.device_id     = "dev1";
+    ctx.job_id        = "job1";
+    ctx.source        = "tab";
+    ctx.index         = 3;
+    ctx.dirty         = true;
+    const auto start  = std::chrono::steady_clock::now();
+    fire_lifecycle_event(LifecycleEvent::PresetSelected, ctx);
+    std::chrono::milliseconds slowest =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    for (int i = 0; i < 20; ++i)
+        slowest = (std::max)(slowest, fire_named(LifecycleEvent::ObjectRenamed, "o" + std::to_string(i)));
+    CHECK(slowest < std::chrono::milliseconds(1000));
+    REQUIRE(wait_events_idle());
+
+    const std::vector<std::string> lines = read_lines(fixture.log);
+    REQUIRE(lines.size() == 21);
+    CHECK(lines[0] == "PresetSelected|0.20mm Standard|Warn|m|id1|prev|dev1|job1|tab|3|True");
+    for (int i = 0; i < 20; ++i)
+        CHECK(lines[i + 1] == "ObjectRenamed|o" + std::to_string(i) + "|Ok|||||||-1|False");
+    CHECK_FALSE(parent_imported_fixture());
+
+    // A disabled listener gets nothing; enabled again, it does.
+    manager.set_capability_enabled({PluginCapabilityType::Script, "Listener", k_events_key}, false);
+    fire_named(LifecycleEvent::PlateSelected, "while-disabled");
+    REQUIRE(wait_events_idle());
+    CHECK_FALSE(recorded(fixture.log, "while-disabled"));
+    manager.set_capability_enabled({PluginCapabilityType::Script, "Listener", k_events_key}, true);
+    fire_named(LifecycleEvent::PlateSelected, "enabled-again");
+    REQUIRE(wait_events_idle());
+    CHECK(recorded(fixture.log, "enabled-again"));
+
+    // Not loaded: nothing reaches it, even posted directly.
+    manager.unload_plugin(k_events_key);
+    plugin_ipc::LifecycleEventSnapshot direct;
+    direct.name = "after-unload";
+    PluginHostClient::instance().post_lifecycle_event(k_events_key, direct);
+    fire_named(LifecycleEvent::PlateSelected, "after-unload-fired");
+    REQUIRE(wait_events_idle());
+    CHECK_FALSE(recorded(fixture.log, "after-unload"));
+    CHECK_FALSE(recorded(fixture.log, "after-unload-fired"));
+}
+
+TEST_CASE("Events: a dead, hung or raising listener never blocks EdgeSlicer", "[PluginEvents][PluginIpc][Python][slow]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    EventsFixture fixture("plugin-events-dead");
+    REQUIRE(fixture.ready);
+    EventTimeoutReset timeout_reset;
+    PluginHostClient& client = PluginHostClient::instance();
+
+    fire_named(LifecycleEvent::ProjectDirtyChanged, "first");
+    REQUIRE(wait_events_idle());
+    CHECK(recorded(fixture.log, "first"));
+
+    SECTION("a raising handler costs only that call")
+    {
+        const std::uint64_t spawns = PluginHostClient::spawn_count();
+        fire_named(LifecycleEvent::ProjectDirtyChanged, "raise");
+        REQUIRE(wait_events_idle());
+        fire_named(LifecycleEvent::ProjectDirtyChanged, "after-raise");
+        REQUIRE(wait_events_idle());
+        CHECK(recorded(fixture.log, "after-raise"));
+        CHECK(PluginHostClient::spawn_count() == spawns); // the helper was not reset
+    }
+
+    SECTION("a dead helper is replaced on the next batch")
+    {
+        REQUIRE(client.kill_child_for_testing());
+        CHECK(fire_named(LifecycleEvent::ProjectDirtyChanged, "after-kill-1") < std::chrono::milliseconds(1000));
+        REQUIRE(wait_events_idle());
+        fire_named(LifecycleEvent::ProjectDirtyChanged, "after-kill-2");
+        REQUIRE(wait_events_idle());
+        CHECK(recorded(fixture.log, "after-kill-2"));
+    }
+
+    SECTION("a hung handler is cut off after the event timeout")
+    {
+        PluginHostClient::set_event_timeout_for_testing(2000);
+        const std::uint64_t spawns = PluginHostClient::spawn_count();
+        CHECK(fire_named(LifecycleEvent::ProjectDirtyChanged, "hang") < std::chrono::milliseconds(1000));
+        REQUIRE(wait_queue_taken(k_events_key));
+        // Posting while the helper hangs still returns at once.
+        CHECK(fire_named(LifecycleEvent::ProjectDirtyChanged, "after-hang") < std::chrono::milliseconds(1000));
+        const auto started = std::chrono::steady_clock::now();
+        REQUIRE(wait_events_idle());
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(60));
+        CHECK(recorded(fixture.log, "after-hang"));
+        CHECK_FALSE(recorded(fixture.log, "hang"));
+        CHECK(PluginHostClient::spawn_count() > spawns); // the hung helper was replaced
+    }
+}
+
+TEST_CASE("Events: a hostile reply to an event batch resets the helper and EdgeSlicer carries on",
+          "[PluginEvents][PluginIpc][Python][slow]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    EventsFixture fixture("plugin-events-hostile");
+    REQUIRE(fixture.ready);
+
+    const std::vector<std::pair<const char*, std::function<void(json&)>>> hostile = {
+        {"id is a string", [](json& m) { m["id"] = "seven"; }},
+        {"id of another request", [](json& m) { m["id"] = 999999; }},
+        {"id dropped", [](json& m) { m.erase("id"); }},
+        {"wrong reply type", [](json& m) { m["type"] = "result"; }},
+        {"a load reply instead", [](json& m) { m["type"] = "load_ok"; }},
+        {"unknown reply type", [](json& m) { m["type"] = "lifecycle_event_maybe"; }},
+        {"counter is a string", [](json& m) { m["delivered"] = "lots"; }},
+        {"counter is negative", [](json& m) { m["failed"] = -4; }},
+        {"not an object", [](json& m) { m = json::array({1, 2, 3}); }},
+    };
+    for (const auto& [label, mutate] : hostile) {
+        DYNAMIC_SECTION(label)
+        {
+            const std::string   tag    = std::string("hostile-") + label;
+            const std::uint64_t spawns = PluginHostClient::spawn_count();
+            {
+                const auto  filter_fn = mutate;
+                ReplyFilter filter([filter_fn](json& msg) {
+                    if (msg.is_object() && msg.value("type", std::string()) == "lifecycle_event_ok")
+                        filter_fn(msg);
+                });
+                CHECK(fire_named(LifecycleEvent::ObjectChanged, tag) < std::chrono::milliseconds(1000));
+                REQUIRE(wait_events_idle());
+            }
+            // The helper was reset; the next batch goes to a fresh one.
+            fire_named(LifecycleEvent::ObjectChanged, tag + "-then");
+            REQUIRE(wait_events_idle());
+            CHECK(recorded(fixture.log, tag + "-then"));
+            CHECK(PluginHostClient::spawn_count() > spawns);
+        }
+    }
+    CHECK_FALSE(parent_imported_fixture());
+}
+
+TEST_CASE("Events: a path the plugin may not read is never sent to it", "[PluginEvents][PluginIpc][Python]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    EventsFixture fixture("plugin-events-perm");
+    REQUIRE(fixture.ready);
+    PluginManager& manager = PluginManager::instance();
+
+    ScopedTemporaryDir granted("plugin-events-granted");
+    ScopedTemporaryDir other("plugin-events-other");
+    const std::string  covered   = (granted.path() / "covered.3mf").string();
+    const std::string  uncovered = (other.path() / "uncovered.3mf").string();
+    PluginPermissionMutation grant;
+    grant.add.push_back({PluginPermissionCategory::FsRead, granted.path().generic_string() + "/*"});
+    REQUIRE(manager.mutate_plugin_permissions(k_events_key, grant));
+
+    std::vector<std::string> secrets;
+    for (const fs::path& p : PluginAuditManager::secret_store_paths())
+        secrets.push_back(p.string());
+    secrets.push_back((fs::path(data_dir()) / PluginAuditManager::default_denied_filenames().front()).string());
+
+    const auto snapshot_named = [](const std::string& name) {
+        plugin_ipc::LifecycleEventSnapshot s;
+        s.event = LifecycleEvent::ProjectOpened;
+        s.name  = name;
+        return s;
+    };
+    CHECK(PluginHostClient::lifecycle_event_visible_to(k_events_key, snapshot_named("Benchy")));
+    CHECK(PluginHostClient::lifecycle_event_visible_to(k_events_key, snapshot_named(covered)));
+    CHECK_FALSE(PluginHostClient::lifecycle_event_visible_to(k_events_key, snapshot_named(uncovered)));
+    for (const std::string& secret : secrets) {
+        INFO(secret);
+        CHECK_FALSE(PluginHostClient::lifecycle_event_visible_to(k_events_key, snapshot_named(secret)));
+    }
+    // A path in any field counts, not only the name.
+    plugin_ipc::LifecycleEventSnapshot in_msg = snapshot_named("Benchy");
+    in_msg.previous_name                      = uncovered;
+    CHECK_FALSE(PluginHostClient::lifecycle_event_visible_to(k_events_key, in_msg));
+
+    // End to end: only the covered path arrives.
+    {
+        LifecycleEventContext ctx;
+        ctx.name = covered;
+        fire_lifecycle_event(LifecycleEvent::ProjectOpened, ctx);
+        ctx.name = uncovered;
+        fire_lifecycle_event(LifecycleEvent::ProjectOpened, ctx);
+        REQUIRE(wait_events_idle());
+        CHECK(recorded(fixture.log, covered));
+        CHECK_FALSE(recorded(fixture.log, uncovered));
+    }
+
+    // Full access covers other paths, never a secret store.
+    PluginPermissionMutation full;
+    full.full_access = true;
+    REQUIRE(manager.mutate_plugin_permissions(k_events_key, full));
+    CHECK(PluginHostClient::lifecycle_event_visible_to(k_events_key, snapshot_named(uncovered)));
+    for (const std::string& secret : secrets) {
+        INFO(secret);
+        CHECK_FALSE(PluginHostClient::lifecycle_event_visible_to(k_events_key, snapshot_named(secret)));
+    }
 }
