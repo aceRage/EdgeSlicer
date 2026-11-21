@@ -9,6 +9,7 @@
 #include "Plater.hpp"
 #include "PartPlate.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/DualWallDither.hpp"
 #include "libslic3r/Model.hpp"
 #include "PresetBundle.hpp"
 #include "wxExtensions.hpp"
@@ -28,6 +29,7 @@
 #include <wx/wrapsizer.h>
 
 #include <algorithm>
+#include <cmath>
 #include <numeric>
 #include <utility>
 #include <set>
@@ -1053,6 +1055,29 @@ void MixedFilamentDialog::build_ui()
                 validate_cycle_pattern();
             });
             m_cycle_card_sizer->Add(input_wrapper, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(16));
+        }
+
+        // Dual wall dithering (experimental): pick a colour, get the outer / inner / backing pattern.
+        if (m_filament_colours.size() >= 2) {
+            auto* dwd_row = new wxBoxSizer(wxHORIZONTAL);
+            auto* dwd_btn = new Button(m_cycle_card, _L("Dual wall colour..."));
+            dwd_btn->SetToolTip(_L("Experimental. Pick a colour and get a pattern that prints a dense mix on the outer wall, "
+                                   "a second mix on the wall behind it and one backing filament deeper in. It needs "
+                                   "translucent filaments with a transmission distance set in each filament's settings, "
+                                   "at least 2 walls (3 are better), and thin layers (0.08 to 0.12 mm). "
+                                   "The predicted colour is a rough estimate."));
+            dwd_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { pick_dual_wall_colour(); });
+            dwd_row->Add(dwd_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+            m_dwd_swatch = new wxPanel(m_cycle_card, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(20), FromDIP(20)));
+            m_dwd_swatch->Hide();
+            dwd_row->Add(m_dwd_swatch, 0, wxALIGN_CENTER_VERTICAL);
+            m_cycle_card_sizer->Add(dwd_row, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(16));
+            m_dwd_result = new wxStaticText(m_cycle_card, wxID_ANY, wxEmptyString);
+            m_dwd_result->SetFont(Label::Body_12);
+            m_dwd_result->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#8F8F8F")));
+            m_dwd_result->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#FFFFFF")));
+            m_dwd_result->Hide();
+            m_cycle_card_sizer->Add(m_dwd_result, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(16));
         }
 
         // Divider
@@ -3420,6 +3445,85 @@ void MixedFilamentDialog::collect_result()
         break;
     }
     m_result.custom = true;
+}
+
+// ---------------------------------------------------------------------------
+// Dual wall dithering picker (experimental; tests/design_dual_wall_dithering.md, P2)
+// ---------------------------------------------------------------------------
+
+void MixedFilamentDialog::pick_dual_wall_colour()
+{
+    if (!m_pattern_ctrl)
+        return;
+    // A pattern digit is a physical filament, so only the first nine can take part.
+    const size_t count = std::min<size_t>(m_filament_colours.size(), 9);
+    if (count < 2)
+        return;
+
+    const DynamicPrintConfig  full = wxGetApp().preset_bundle->full_config();
+    const ConfigOptionFloats* tds  = full.option<ConfigOptionFloats>("filament_transmission_distance");
+    std::vector<DwdFilament> filaments;
+    std::vector<int>         physical_ids;
+    for (size_t i = 0; i < count; ++i) {
+        const wxColour c = parse_mixed_color(m_filament_colours[i]);
+        DwdFilament    f;
+        f.srgb  = { c.Red() / 255.f, c.Green() / 255.f, c.Blue() / 255.f };
+        f.td_mm = tds != nullptr && !tds->values.empty() ? tds->get_at(i) : 4.;
+        filaments.push_back(f);
+        physical_ids.push_back(int(i) + 1);
+    }
+
+    wxColourData data;
+    data.SetChooseFull(true);
+    wxColourDialog dlg(this, &data);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    const wxColour target = dlg.GetColourData().GetColour();
+
+    const uint8_t              backing = dwd_default_backing(filaments);
+    const std::vector<DwdPair> table   = dwd_build_table(filaments, backing, DwdModelParams());
+    const int best = dwd_nearest(table, { target.Red() / 255.f, target.Green() / 255.f, target.Blue() / 255.f });
+    if (best < 0)
+        return;
+    const DwdPair&    pair    = table[size_t(best)];
+    const std::string pattern = dwd_pattern(pair, physical_ids, 1, 2);
+    if (pattern.empty())
+        return;
+
+    m_pattern_ctrl->SetValue(from_u8(pattern));
+    // Sub-layer passes re-extrude every wall of the region, which would undo the per-wall split.
+    m_result.sublayer_method = static_cast<decltype(m_result.sublayer_method)>(MixedSublayerMethod::Cadence);
+    if (m_sublayer_method_combo)
+        m_sublayer_method_combo->SetSelection(MixedSublayerUi::method_to_choice(int(m_result.sublayer_method)));
+    update_sublayer_card();
+    validate_cycle_pattern();
+
+    const wxColour predicted(static_cast<unsigned char>(std::lround(pair.srgb[0] * 255.f)),
+                             static_cast<unsigned char>(std::lround(pair.srgb[1] * 255.f)),
+                             static_cast<unsigned char>(std::lround(pair.srgb[2] * 255.f)));
+    wxString text = wxString::Format(_L("Predicted %s for %s. Backing: filament %d. Up to %d filaments on a layer."),
+                                     predicted.GetAsString(wxC2S_HTML_SYNTAX), target.GetAsString(wxC2S_HTML_SYNTAX),
+                                     int(pair.backing) + 1, pair.filaments_used);
+    // An opaque filament on the outer wall hides the wall behind it, so say which ones are.
+    std::set<int> opaque;
+    for (uint8_t f : pair.outer)
+        if (filaments[f].td_mm < 2.)
+            opaque.insert(int(f) + 1);
+    for (int id : opaque)
+        text += " " + wxString::Format(_L("Filament %d is close to opaque (transmission distance under 2 mm), so the inner wall will barely show."), id);
+    if (m_dwd_swatch) {
+        m_dwd_swatch->SetBackgroundColour(predicted);
+        m_dwd_swatch->Show();
+        m_dwd_swatch->Refresh();
+    }
+    if (m_dwd_result) {
+        m_dwd_result->SetLabel(text);
+        m_dwd_result->Wrap(FromDIP(293));
+        m_dwd_result->Show();
+    }
+    Layout();
+    if (m_scrolled_content)
+        m_scrolled_content->FitInside();
 }
 
 // ---------------------------------------------------------------------------

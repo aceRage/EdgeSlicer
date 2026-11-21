@@ -93,6 +93,10 @@ private:
     Button*                 m_btn_cancel          = nullptr;
     Button*                 m_btn_confirm         = nullptr;
     wxTextCtrl*             m_pattern_ctrl        = nullptr;
+    // Dual wall dithering (experimental, design_dual_wall_dithering.md P2): pick a colour, get a grouped pattern.
+    wxPanel*                m_dwd_swatch          = nullptr;
+    wxStaticText*           m_dwd_result          = nullptr;
+    void                    pick_dual_wall_colour();
     std::vector<class MixedFilamentBadge*>  m_pattern_quick_buttons;
 
     // Card containers (StaticBox for rounded-corner cards)
