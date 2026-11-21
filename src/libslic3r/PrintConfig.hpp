@@ -2549,6 +2549,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,             filament_tower_interface_purge_volume))
     // Orca #12266: set the print temperature back as an interface purge starts, so the nozzle cools during it.
     ((ConfigOptionBool,               enable_tower_interface_cooldown_during_tower))
+    // Not a tower option; here only because GCodeConfig is at the macro limit (see above).
+    // Transmission distance (TD): how deep light gets into a filament. Not used by slicing; it feeds
+    // the colour models (dual wall dithering, see DualWallDither.hpp).
+    ((ConfigOptionFloats,             filament_transmission_distance))
 )
 
 // This object is mapped to Perl as Slic3r::Config::Print.
