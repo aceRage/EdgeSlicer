@@ -22,6 +22,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,9 @@ struct DwdTableParams
     // dropped; the threshold is raised until the table fits.
     size_t max_pairs = 256;
     double min_delta = 0.02;
+    // How many of the filaments (the first n) may appear in the wall sequences. 0 = all of them.
+    // Lets a backing filament that is not part of the mix sit at the end of the list.
+    size_t sequence_filaments = 0;
 };
 
 struct DwdPair
@@ -79,6 +83,11 @@ std::vector<std::vector<uint8_t>> dwd_inner_sequences(size_t n_filaments);
 // Supports 2 to 9 filaments (the pattern token limit); returns empty otherwise.
 std::vector<DwdPair> dwd_build_table(const std::vector<DwdFilament> &filaments, uint8_t backing,
                                      const DwdModelParams &model, const DwdTableParams &params = {});
+
+// The same table, built once per distinct input and shared: slicing asks for it for every layer
+// of every region. Thread-safe. Never null; empty when dwd_build_table() would return empty.
+std::shared_ptr<const std::vector<DwdPair>> dwd_cached_table(const std::vector<DwdFilament> &filaments, uint8_t backing,
+                                                             const DwdModelParams &model, const DwdTableParams &params = {});
 
 // Index of the table entry nearest the target colour (Oklab), or -1 for an empty table.
 int dwd_nearest(const std::vector<DwdPair> &table, const std::array<float, 3> &target_srgb);

@@ -5,6 +5,8 @@
 #include "I18N.hpp"
 #include "format.hpp"
 
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
 #include <wx/bitmap.h>
@@ -267,8 +269,9 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
     wxArrayString wall_methods;
     wall_methods.Add(_L("Colour runs along each layer"));
     wall_methods.Add(_L("Layer stripes (experimental)"));
+    wall_methods.Add(_L("Dual wall dithering (experimental)"));
     m_wall_method = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wall_methods);
-    m_wall_method->SetSelection(m_params.wall_method == IMAGE_FILL_WALL_STRIPES ? 1 : 0);
+    m_wall_method->SetSelection(std::max(0, std::min(2, m_params.wall_method)));
     m_wall_method->SetToolTip(_L("Colour runs: each layer's outer wall changes filament along its length wherever "
                                  "the picture changes colour - the sharpest result, at the cost of a tool change "
                                  "for every filament a layer uses.\n\n"
@@ -277,7 +280,14 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
                                  "where the picture wants that layer's colour and narrower where it does not, "
                                  "so each colour shows more or less from the side. At most one tool change per "
                                  "layer for the walls; softer than colour runs, and best with fine layers. "
-                                 "Experimental: how strongly it reads depends on your filaments."));
+                                 "Experimental: how strongly it reads depends on your filaments.\n\n"
+                                 "Dual wall dithering: for translucent filaments. The outer wall prints a dense "
+                                 "mix that changes every layer or two, the wall behind it a second mix that "
+                                 "shows through, and the part's own filament backs both, so four filaments give "
+                                 "many more colours than four. Each layer still changes filament at most once "
+                                 "per filament. Needs a transmission distance in each filament's settings, at "
+                                 "least 2 walls (3 are better), classic walls rather than Arachne, and thin "
+                                 "layers (0.08 to 0.12 mm). Experimental: the colours are a rough prediction."));
     row(_L("Side wall method") + ":", m_wall_method);
     m_stripe_depth = new wxSpinCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(100), -1),
                                     wxSP_ARROW_KEYS, 5, 80, m_params.stripe_depth_pct);
@@ -285,11 +295,36 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
                                   "normal width, in percent. 40 prints it between 60 % and 140 % of its width. "
                                   "Only the outside of the wall moves; the part's inside is unchanged."));
     row(_L("Stripe width swing (%)") + ":", m_stripe_depth);
+    // Dual wall dithering: say what in the current process settings will spoil it. A note, not a
+    // block - it still slices.
+    m_dwd_note = new wxStaticText(this, wxID_ANY, wxEmptyString);
+    m_dwd_note->SetForegroundColour(wxColour(0xD0, 0x7A, 0x00));
+    left->Add(m_dwd_note, 0, wxEXPAND | wxTOP, FromDIP(4));
     auto update_wall_controls = [this]() {
         const bool walls = m_row_walls->GetValue();
         m_wall_method->Enable(walls);
         m_stripe_depth->Enable(walls && m_wall_method->GetSelection() == 1);
+        wxString note;
+        if (walls && m_wall_method->GetSelection() == 2 && wxGetApp().preset_bundle != nullptr) {
+            const DynamicPrintConfig &process = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+            if (const auto *loops = process.option<ConfigOptionInt>("wall_loops"); loops != nullptr && loops->value < 2)
+                note += _L("Dual wall dithering needs at least 2 walls; 3 are better.") + "\n";
+            if (const auto *gen = process.option<ConfigOptionEnum<PerimeterGeneratorType>>("wall_generator");
+                gen != nullptr && gen->value == PerimeterGeneratorType::Arachne)
+                note += _L("Arachne varies the wall width, which shifts the colour. Classic walls are safer.") + "\n";
+            if (const auto *height = process.option<ConfigOptionFloat>("layer_height"); height != nullptr && height->value > 0.125)
+                note += _L("Layers above 0.12 mm make the colour bands visible.") + "\n";
+            note.Trim();
+        }
+        if (m_dwd_note->GetLabel() != note) {
+            m_dwd_note->SetLabel(note);
+            m_dwd_note->Wrap(FromDIP(320));
+            m_dwd_note->Show(!note.empty());
+            Layout();
+            Fit();
+        }
     };
+    m_dwd_note->Hide();
     update_wall_controls();
     m_row_walls->Bind(wxEVT_CHECKBOX, [update_wall_controls](wxCommandEvent &evt) { update_wall_controls(); evt.Skip(); });
     m_wall_method->Bind(wxEVT_CHOICE, [update_wall_controls](wxCommandEvent &evt) { update_wall_controls(); evt.Skip(); });
@@ -410,8 +445,8 @@ void ImageFillDialog::collect()
     // was asked to colour (ImageRowWalls.cpp reads it at slice time).
     m_params.surfaces = image_row_surfaces();
     // Phase 5b: the wall method and its swing ride the same params.
-    m_params.wall_method      = (m_wall_method != nullptr && m_wall_method->GetSelection() == 1) ? IMAGE_FILL_WALL_STRIPES
-                                                                                                   : IMAGE_FILL_WALL_RUNS;
+    m_params.wall_method      = m_wall_method != nullptr ? std::max(0, std::min(2, m_wall_method->GetSelection()))
+                                                         : IMAGE_FILL_WALL_RUNS;
     m_params.stripe_depth_pct = m_stripe_depth != nullptr ? m_stripe_depth->GetValue() : 40;
 
     // Phase 5c: placement.

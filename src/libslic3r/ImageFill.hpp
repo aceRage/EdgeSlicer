@@ -249,6 +249,10 @@ static constexpr int IMAGE_FILL_SURFACE_WALLS = 2;
 // ImageFillParams::wall_method values.
 static constexpr int IMAGE_FILL_WALL_RUNS    = 0;
 static constexpr int IMAGE_FILL_WALL_STRIPES = 1;
+// Dual wall dithering (experimental, DualWallDither.hpp): the outer wall and the first inner wall
+// are cut into runs like IMAGE_FILL_WALL_RUNS, but a run's colour is a solved PAIR of layer
+// sequences, so the filament of a run depends on the wall and on the layer.
+static constexpr int IMAGE_FILL_WALL_DWD     = 2;
 
 static constexpr int IMAGE_FILL_MAX_SUBDIVISION = 6;
 // A hard ceiling on leaves per volume, so a dense mesh at depth 6 cannot allocate for ever.

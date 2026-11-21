@@ -108,6 +108,7 @@ private:
     wxCheckBox       *m_row_top         = nullptr;   // "Nozzle-resolution colour: Top surfaces"
     wxCheckBox       *m_row_walls       = nullptr;   // "Nozzle-resolution colour: Side walls"
     wxChoice         *m_wall_method     = nullptr;   // Phase 5b: colour runs / layer stripes
+    wxStaticText     *m_dwd_note        = nullptr;   // dual wall dithering: process settings that spoil it
     wxSpinCtrl       *m_stripe_depth    = nullptr;   // Phase 5b: width swing, percent
     // Phase 5c: where the picture sits.
     wxSpinCtrlDouble *m_offset_u        = nullptr;   // percent of the box

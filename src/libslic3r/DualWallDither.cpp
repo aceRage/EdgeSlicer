@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <mutex>
 #include <numeric>
+#include <sstream>
 
 namespace Slic3r {
 
@@ -229,8 +232,9 @@ std::vector<DwdPair> dwd_build_table(const std::vector<DwdFilament> &filaments, 
         return table;
 
     const std::vector<Prepared> fils = prepare(filaments, model);
-    const auto outers = dwd_outer_sequences(n, params.relaxed_outer);
-    const auto inners = dwd_inner_sequences(n);
+    const size_t n_seq = params.sequence_filaments == 0 ? n : std::min(n, params.sequence_filaments);
+    const auto outers = dwd_outer_sequences(n_seq, params.relaxed_outer);
+    const auto inners = dwd_inner_sequences(n_seq);
 
     std::vector<DwdPair> all;
     all.reserve(outers.size() * inners.size());
@@ -287,6 +291,29 @@ std::vector<DwdPair> dwd_build_table(const std::vector<DwdFilament> &filaments, 
         }
         delta *= 1.15;
     }
+}
+
+std::shared_ptr<const std::vector<DwdPair>> dwd_cached_table(const std::vector<DwdFilament> &filaments, uint8_t backing,
+                                                             const DwdModelParams &model, const DwdTableParams &params)
+{
+    std::ostringstream key;
+    key << int(backing) << '|' << model.k << '|' << model.outer_width_mm << '|' << model.inner_width_mm << '|'
+        << params.relaxed_outer << '|' << params.max_pairs << '|' << params.min_delta << '|' << params.sequence_filaments;
+    for (const DwdFilament &f : filaments)
+        key << '|' << f.srgb[0] << ',' << f.srgb[1] << ',' << f.srgb[2] << ',' << f.td_mm;
+
+    static std::mutex                                                                     mutex;
+    static std::map<std::string, std::shared_ptr<const std::vector<DwdPair>>> cache;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = cache.find(key.str());
+    if (it != cache.end())
+        return it->second;
+    // A handful of filament sets per session at most; keep the cache from growing without bound anyway.
+    if (cache.size() >= 32)
+        cache.clear();
+    auto table = std::make_shared<const std::vector<DwdPair>>(dwd_build_table(filaments, backing, model, params));
+    cache.emplace(key.str(), table);
+    return table;
 }
 
 int dwd_nearest(const std::vector<DwdPair> &table, const std::array<float, 3> &target_srgb)

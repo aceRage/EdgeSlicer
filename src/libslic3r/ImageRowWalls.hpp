@@ -49,6 +49,7 @@
 
 #include "ExtrusionEntity.hpp"
 #include "ExtrusionEntityCollection.hpp"
+#include "DualWallDither.hpp"
 #include "ImageFill.hpp"
 #include "Point.hpp"
 
@@ -112,6 +113,15 @@ struct ImageRowWallContext
     // order), and image_row_stripe_wall_entity() widens or narrows the outer wall along its length.
     int                              wall_method  = 0;
     float                            stripe_depth = 0.4f;
+
+    // ---- Dual wall dithering (IMAGE_FILL_WALL_DWD) -------------------------------------------------
+    // The solved pairs for this row's filaments over the part's own filament as backing; null for
+    // every other wall method. A sample picks the pair nearest its colour (no error diffusion, so
+    // the outer and the inner wall choose the same pair at the same place), and a run's filament is
+    // dwd_physical[pair.outer or pair.inner [layer_index mod period]].
+    std::shared_ptr<const std::vector<DwdPair>> dwd_table;
+    std::vector<int>                 dwd_physical;   // table filament index -> physical 1-based id
+    int                              layer_index = 0;
 };
 
 // Phase 5a: the part's own filament for `region` on this layer - see ImageRowWallContext::
