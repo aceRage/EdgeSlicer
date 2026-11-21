@@ -16155,6 +16155,10 @@ void Plater::priv::delete_all_objects_from_model()
 
 void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
 {
+    // As in Orca: the snapshot and load_current_presets() below can flip the aggregate dirty state
+    // back and forth before it settles; coalesce those into one ProjectDirtyChanged.
+    EDGE_LIFECYCLE_ONLY(ProjectDirtyStateManager::NotificationSuppressor dirty_notify_suppressor(dirty_state);)
+
     Plater::TakeSnapshot snapshot(q, "Reset Project", UndoRedo::SnapshotType::ProjectSeparator);
 
     // Stop the background slicing / G-code export first, before anything below touches what it is
@@ -21730,6 +21734,10 @@ int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_
     //get_partplate_list().reinit();
     //get_partplate_list().update_slice_context_to_current_plate(p->background_process);
     //p->preview->update_gcode_result(p->partplate_list.get_current_slice_result());
+    // As in Orca: the reset + preset reload + baseline reset below settles its dirty state only
+    // once it completes, so ProjectDirtyChanged is held back until the new project's snapshot.
+    EDGE_LIFECYCLE_ONLY(std::optional<ProjectDirtyStateManager::NotificationSuppressor> dirty_notify_suppressor;
+                        dirty_notify_suppressor.emplace(p->dirty_state);)
     reset(transfer_preset_changes, reload_presets);
     profile.mark("reset");
     reset_project_dirty_after_save();
@@ -21747,6 +21755,7 @@ int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_
         p->set_project_name(project_name);
 
     Plater::TakeSnapshot snapshot(this, "New Project", UndoRedo::SnapshotType::ProjectSeparator);
+    EDGE_LIFECYCLE_ONLY(dirty_notify_suppressor.reset();)
     profile.mark("snapshot");
 
     Model m;
