@@ -770,7 +770,7 @@ TEST_CASE("ZAA segment-rate cap: thinning keeps corners and the last sample", "[
         CHECK(xy.size() == 9);
         CHECK(xy.front().isApprox(Vec2d(0.0, 0.0)));
         CHECK(xy.back().isApprox(Vec2d(1.0, 1.0)));
-        CHECK(d.back() == Approx(0.0));
+        CHECK(d.back() == Approx(0.0).margin(1e-9));
         const bool has_corner = std::any_of(xy.begin(), xy.end(), [](const Vec2d &p) { return p.isApprox(Vec2d(1.0, 0.0)); });
         CHECK(has_corner);
         // Every segment that starts at an added sample is at least the minimum, except into a kept point.
