@@ -2733,12 +2733,15 @@ void GLGizmoMeasure::set_to_parallel(bool same_model_object, bool take_shot, boo
                 v->set_instance_rotation(rotation);
                 selection->rotate(v->object_idx(), v->instance_idx(), v->get_instance_transformation().get_matrix());
             } else {
-                Geometry::Transformation world_tran(v->world_matrix());
-                auto        new_tran         = r_m * world_tran.get_rotation_matrix();
-                Transform3d volume_rotation_tran = v->get_instance_transformation().get_rotation_matrix().inverse() * new_tran;
-                Vec3d       rotation             = Geometry::extract_euler_angles(volume_rotation_tran);
-                v->set_volume_rotation(rotation);
-                selection->rotate(v->object_idx(), v->instance_idx(), v->volume_idx(), v->get_volume_transformation().get_matrix());
+                // Orca #17552: under a nonuniformly scaled parent, Euler angles cannot express the rotated
+                // part, and setting them deformed it. Rotate about the part origin, keeping its position
+                // and its full affine transform.
+                const Transform3d &instance = v->get_instance_transformation().get_matrix();
+                Transform3d rotated_world = instance * v->get_volume_transformation().get_matrix();
+                rotated_world.linear() = rotation_matrix * rotated_world.linear().eval();
+                const Transform3d volume_tran = instance.inverse() * rotated_world;
+                v->set_volume_transformation(volume_tran);
+                selection->rotate(v->object_idx(), v->instance_idx(), v->volume_idx(), volume_tran);
             }
             wxGetApp().plater()->canvas3D()->do_rotate("");
             register_single_mesh_pick();
