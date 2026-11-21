@@ -210,6 +210,7 @@
 #ifdef EDGE_PYTHON_PLUGINS
 #include "PluginWarnings.hpp"
 #endif
+#include "libslic3r/LifecycleFire.hpp"
 #include "PresetComboBoxes.hpp"
 #include "FavoriteFilamentsUI.hpp"
 #include "MsgDialog.hpp"
@@ -16061,7 +16062,11 @@ void Plater::priv::remove(size_t obj_idx)
         view3D->enable_layers_editing(false);
 
     m_worker.cancel_all();
+    EDGE_LIFECYCLE_ONLY(const std::string obj_name = (obj_idx < model.objects.size()) ? model.objects[obj_idx]->name : std::to_string(obj_idx);)
     model.delete_object(obj_idx);
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::ObjectDeleted,
+        ctx.name = obj_name;
+        ctx.code = LifecycleEvtCode::Ok;);
     //BBS: notify partplate the instance removed
     partplate_list.notify_instance_removed(obj_idx, -1);
     update();
@@ -16097,7 +16102,11 @@ bool Plater::priv::delete_object_from_model(size_t obj_idx, bool refresh_immedia
     if (obj->is_cut())
         sidebar->obj_list()->invalidate_cut_info_for_object(obj_idx);
 
+    EDGE_LIFECYCLE_ONLY(const std::string obj_name = obj->name;)
     model.delete_object(obj_idx);
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::ObjectDeleted,
+        ctx.name = obj_name;
+        ctx.code = LifecycleEvtCode::Ok;);
     //BBS: notify partplate the instance removed
     partplate_list.notify_instance_removed(obj_idx, -1);
 
@@ -16158,6 +16167,9 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
     this->background_process.stop();
 
     clear_warnings();
+    EDGE_LIFECYCLE_FIRE_IF(!get_project_filename().empty() || !model.objects.empty(), LifecycleEvent::ProjectClosed,
+        ctx.name = into_u8(get_project_filename());
+        ctx.code = LifecycleEvtCode::Ok;);
     // EdgeSlicer: a new or loaded project asks the per-session setting questions afresh (the
     // remembered "No" answers to the support top Z distance offer).
     ConfigManipulation::clear_session_prompts();
@@ -19243,8 +19255,10 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     this->background_process.reset_export();
     // This bool stops showing export finished notification even when process_completed_with_error is false
     bool has_error = false;
+    EDGE_LIFECYCLE_ONLY(std::string lifecycle_error_msg;)
     if (evt.error()) {
         auto message = evt.format_error_message();
+        EDGE_LIFECYCLE_ONLY(lifecycle_error_msg = message.first;)
         if (evt.critical_error()) {
             if (q->m_tracking_popup_menu) {
                 // We don't want to pop-up a message box when tracking a pop-up menu.
@@ -19305,6 +19319,16 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         this->notification_manager->set_slicing_progress_canceled(_u8L("Slicing Canceled"));
         is_finished = true;
     }
+
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::SlicingJobComplete,
+        if (const PrintBase* print = this->background_process.current_print()) {
+            const Model& print_model = print->model();
+            ctx.id                   = std::to_string(print_model.id().id);
+            if (print_model.model_info)
+                ctx.name = print_model.model_info->model_name;
+        }
+        ctx.code = evt.cancelled() ? LifecycleEvtCode::Warn : (has_error ? LifecycleEvtCode::Error : LifecycleEvtCode::Ok);
+        ctx.msg  = evt.cancelled() ? "cancelled" : (has_error ? lifecycle_error_msg : std::string()););
 
     //BBS: set the current plater's slice result to valid
     // A failed export or upload keeps a complete FFF slice valid, so Print and Export can be run again.
@@ -21696,6 +21720,10 @@ int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_
     if (!silent)
         wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor);
 
+    // Orca fires NewProject here, before reset() fires ProjectClosed for the project it replaces.
+    EDGE_LIFECYCLE_FIRE_IF(!silent, LifecycleEvent::NewProject,
+        ctx.code = LifecycleEvtCode::Ok;);
+
     // ORCA_STARTUP_PROFILE (startup round 2): the blank project post_init queues is ~0.7 s of the time
     // between the window showing and startup settling; these marks split it.
     Slic3r::StartupPhase profile("Plater::new_project");
@@ -21863,6 +21891,10 @@ void Plater::load_project(wxString const& filename2,
         if (load_restore && originfile.IsEmpty()) {
         p->set_project_name(_L("Untitled"));
         }
+
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::ProjectOpened,
+            ctx.name = into_u8(load_restore ? originfile : filename);
+            ctx.code = LifecycleEvtCode::Ok;);
 
     } else {
         if (using_exported_file()) {
@@ -22183,6 +22215,9 @@ int Plater::save_project(bool saveAs)
         return wxID_CANCEL;
 
     //BBS export 3mf without gcode
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::ProjectBeforeSave,
+        ctx.name = into_u8(filename);
+        ctx.code = LifecycleEvtCode::Ok;);
     if (export_3mf(into_path(filename), SaveStrategy::SplitModel | SaveStrategy::ShareMesh | SaveStrategy::FullPathSources) < 0) {
         wxString save_failed = _L("Failed to save the project.\nPlease check whether the folder exists online or if other programs open the project file.");
         if (!p->last_export_error.empty())
@@ -22190,6 +22225,9 @@ int Plater::save_project(bool saveAs)
         MessageDialog(this, save_failed, _L("Save project"), wxOK | wxICON_WARNING).ShowModal();
         return wxID_CANCEL;
     }
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::ProjectAfterSave,
+        ctx.name = into_u8(filename);
+        ctx.code = LifecycleEvtCode::Ok;);
 
     Slic3r::remove_backup(model(), false);
 
@@ -30123,6 +30161,11 @@ void Plater::changed_object(ModelObject &object){
     GLCanvas3D* canvas = get_current_canvas3D();
     if (canvas)
         canvas->requires_check_outside_state();
+
+    EDGE_LIFECYCLE_FIRE_IF(!is_loading_project(), LifecycleEvent::ObjectChanged,
+        ctx.name   = object.name;
+        ctx.id     = std::to_string(object.id().id);
+        ctx.source = "geometry";);
 }
 
 void Plater::changed_object(int obj_idx)
@@ -30159,6 +30202,20 @@ void Plater::changed_objects(const std::vector<size_t>& object_idxs)
 
     // update print
     this->p->schedule_background_process();
+
+    EDGE_LIFECYCLE_ONLY(
+    if (!is_loading_project()) {
+        for (size_t obj_idx : object_idxs) {
+            if (obj_idx >= p->model.objects.size() || p->model.objects[obj_idx] == nullptr)
+                continue;
+            const ModelObject* changed = p->model.objects[obj_idx];
+            EDGE_LIFECYCLE_FIRE(LifecycleEvent::ObjectChanged,
+                ctx.name   = changed->name;
+                ctx.id     = std::to_string(changed->id().id);
+                ctx.index  = static_cast<int>(obj_idx);
+                ctx.source = "geometry";);
+        }
+    })
 }
 
 void Plater::schedule_background_process(bool schedule/* = true*/)

@@ -19,6 +19,9 @@
 // Nothing escapes: an exception from building the payload or from a listener is swallowed, so a
 // fire site can never throw into slicing, G-code export or the UI.
 //
+// EDGE_LIFECYCLE_FIRE_IF(COND, EVENT, ...) fires only when COND holds; COND is not evaluated in
+// OFF builds either.
+//
 // EDGE_LIFECYCLE_ONLY(...) keeps a statement (e.g. capturing a name before an object is deleted)
 // in ON builds only, so OFF builds do not gain even an unused local.
 //
@@ -62,11 +65,14 @@ namespace detail {
 
 #define EDGE_LIFECYCLE_FIRE(EVENT, ...) \
     ::Slic3r::detail::fire_lifecycle_event_guarded((EVENT), [&](::Slic3r::LifecycleEventContext& ctx) { __VA_ARGS__ })
+#define EDGE_LIFECYCLE_FIRE_IF(COND, EVENT, ...) \
+    do { if (COND) EDGE_LIFECYCLE_FIRE(EVENT, __VA_ARGS__); } while (false)
 #define EDGE_LIFECYCLE_ONLY(...) __VA_ARGS__
 
 #else // EDGE_PYTHON_PLUGINS
 
 #define EDGE_LIFECYCLE_FIRE(EVENT, ...) do { } while (false)
+#define EDGE_LIFECYCLE_FIRE_IF(COND, EVENT, ...) do { } while (false)
 #define EDGE_LIFECYCLE_ONLY(...)
 
 #endif // EDGE_PYTHON_PLUGINS
