@@ -3194,3 +3194,58 @@ TEST_CASE("The small plate thumbnail of a picture wider than tall is the picture
     INFO(wrong << " of " << 128 * 128 * 3 << " colour values of the small thumbnail are not the mean of their block");
     CHECK(wrong == 0);
 }
+
+// Orca #17457: the plate override of the skirt start point was not written to the project.
+TEST_CASE("BBS 3MF round-trips a plate's skirt start angle", "[3mf][Regression]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "plate_skirt_start_angle.3mf").string();
+
+    PlateData *src_plate = new PlateData();
+    src_plate->plate_index = 0;
+    src_plate->config.set_key_value("skirt_start_angle", new ConfigOptionFloat(12.5));
+
+    StoreParams store_params;
+    store_params.path     = test_file.c_str();
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    store_params.plate_data_list.push_back(src_plate);
+    const bool stored = store_bbs_3mf(store_params);
+    release_PlateData_list(store_params.plate_data_list);
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = stored && load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets,
+                                               &is_bbl_3mf, &file_version, nullptr,
+                                               LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::Silence);
+    const bool   has_plate = !plate_data.empty();
+    const auto  *angle_opt = has_plate ? plate_data.front()->config.option<ConfigOptionFloat>("skirt_start_angle") : nullptr;
+    const bool   has_angle = angle_opt != nullptr;
+    const double angle     = has_angle ? angle_opt->value : 0.;
+    release_PlateData_list(plate_data);
+    for (Preset *preset : project_presets)
+        delete preset;
+    boost::filesystem::remove(test_file);
+
+    REQUIRE(stored);
+    REQUIRE(loaded);
+    REQUIRE(has_plate);
+    REQUIRE(has_angle);
+    REQUIRE(angle == Approx(12.5).margin(1e-6));
+}
