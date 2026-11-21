@@ -14,6 +14,7 @@
 #include "OrcaApiVersion.hpp"
 #include "PluginFsUtils.hpp"
 #include "PluginHooks.hpp"
+#include "HostedPluginImport.hpp"
 #include "PluginAuditManager.hpp"
 #include "PluginTrust.hpp"
 #include "host/PluginHostUi.hpp"
@@ -81,6 +82,8 @@ std::vector<std::string>* permission_bucket(PluginPermissions& permissions, Plug
 
 void Plugin::release_module()
 {
+    // A hosted plugin has no module here; the helper owns it (PluginHostClient::unload).
+    hosted = false;
     if (module == nullptr && plugin_sys_paths.empty() && plugin_modules.empty())
         return;
 
@@ -621,9 +624,9 @@ void PluginManager::load_enabled_plugins()
                 continue;
             }
 
-            // Trust is the import-time control. load_enabled_plugins imports a trusted plugin
-            // in-process with no OS sandbox. AppContainer / Landlock / App Sandbox cover helper
-            // execute, not this import. See docs/HLSD/plugin-permissions.md.
+            // Trust is checked here and again in load_plugin_impl. D3: the import itself runs in
+            // the sandboxed helper (AppContainer / Landlock / App Sandbox), except for a plugin
+            // signed by a shipped publisher key with the early slicing steps allowed.
             load_plugin(key);
         } catch (const std::exception& ex) {
             BOOST_LOG_TRIVIAL(error) << "[load_enabled_plugins] plugin=" << key << " error=" << ex.what();
@@ -1169,12 +1172,19 @@ void PluginManager::load_plugin_impl(const std::string& plugin_key, bool skip_de
         return;
     }
 
+    plugin_import::ImportPlacement placement = plugin_import::ImportPlacement::Helper;
     {
         const plugin_trust::TrustState trust = plugin_trust::evaluate(descriptor);
         if (!trust.allowed()) {
             fail(trust.error.empty() ? plugin_trust::refuse_untrusted_message() : trust.error);
             return;
         }
+        // D3 / D2: where the plugin's code is imported. Inside the helper, always here (it is
+        // the helper). In EdgeSlicer: in the sandboxed helper, unless the plugin is signed by a
+        // shipped publisher key and the early slicing steps are allowed (HostedPluginImport.hpp).
+        placement = plugin_import::placement_for(trust);
+        BOOST_LOG_TRIVIAL(info) << "[load_plugin_impl] plugin=" << plugin_key << " import=" << plugin_import::placement_name(placement)
+                                << " trust=" << trust.label;
     }
 
     // Reject a duplicate package or a capability-name collision BEFORE on_load() runs, so a
@@ -1190,7 +1200,11 @@ void PluginManager::load_plugin_impl(const std::string& plugin_key, bool skip_de
     Plugin      plugin;
     std::string error;
     bool        registration_failed = false;
-    if (!plugin_loader::load(descriptor, skip_deps, capabilities_to_enable, registry_precheck, plugin, error, &registration_failed)) {
+    const bool  loaded = placement == plugin_import::ImportPlacement::Helper ?
+                             plugin_import::load_hosted(descriptor, skip_deps, capabilities_to_enable, registry_precheck, plugin, error) :
+                             plugin_loader::load(descriptor, skip_deps, capabilities_to_enable, registry_precheck, plugin, error,
+                                                 &registration_failed);
+    if (!loaded) {
         if (error == LOAD_CANCELLED)
             return; // cancelled: nothing materialized survives, and no error is recorded
         if (registration_failed)
@@ -1237,7 +1251,10 @@ void PluginManager::load_plugin_impl(const std::string& plugin_key, bool skip_de
     }
 
     if (!committed) {
-        // Outside the lock: this runs on_unload() and DECREFs the module.
+        // Outside the lock: this runs on_unload() and DECREFs the module. A hosted plugin's
+        // module lives in the helper, which is told to drop it.
+        if (plugin.hosted)
+            plugin_ipc::PluginHostClient::instance().unload(plugin_key);
         plugin_loader::unload(plugin);
         if (!cancelled)
             fail(std::move(registry_error));
@@ -2904,11 +2921,22 @@ void PluginManager::dispatch_lifecycle_event(LifecycleEvent evt, const Lifecycle
     if (is_canceled())
         return;
 
+    // Hosted plugins (D3) subscribed in the helper: their proxies have no code here. Collect the
+    // plugins with an enabled listener and post them one plain-data snapshot each; the post only
+    // queues it, so this thread (UI or slicing) never waits on the helper.
+    std::vector<std::string> hosted_listeners;
     for (const auto& cap : get_plugin_capabilities()) {
         if (!cap || !cap->is_enabled())
             continue;
         if (is_canceled())
             break;
+        if (const plugin_import::HostedCapability* hosted = plugin_import::as_hosted(cap.get())) {
+            const std::string& key = cap->audit_plugin_key();
+            if (hosted->hosted_info().lifecycle_events &&
+                std::find(hosted_listeners.begin(), hosted_listeners.end(), key) == hosted_listeners.end())
+                hosted_listeners.push_back(key);
+            continue;
+        }
         try {
             cap->on_lifecycle_event(evt, ctx);
         } catch (const std::exception& ex) {
@@ -2923,6 +2951,17 @@ void PluginManager::dispatch_lifecycle_event(LifecycleEvent evt, const Lifecycle
                                        << ctx.msg << "']";
         }
     }
+
+    if (hosted_listeners.empty() || is_canceled())
+        return;
+    try {
+        const plugin_ipc::LifecycleEventSnapshot snapshot = plugin_ipc::snapshot_lifecycle_event(evt, ctx);
+        for (const std::string& plugin_key : hosted_listeners)
+            plugin_ipc::PluginHostClient::instance().post_lifecycle_event(plugin_key, snapshot);
+    } catch (const std::exception& ex) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": lifecycle event " << lifecycle_event_to_string(evt)
+                                   << " not queued for hosted plugins: " << ex.what();
+    } catch (...) {}
 }
 
 } // namespace Slic3r

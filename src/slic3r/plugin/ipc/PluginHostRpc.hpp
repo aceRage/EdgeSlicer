@@ -17,6 +17,9 @@ struct HostCall
     std::string    capability;
     std::string    method;
     nlohmann::json args = nlohmann::json::object();
+    // D3: set while EdgeSlicer waits for the helper to import this plugin. Only then may the
+    // helper forward the plugin's permission request (plugin.request_permissions).
+    bool           during_load = false;
 };
 
 struct HostResult

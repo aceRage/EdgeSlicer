@@ -27,6 +27,7 @@ const std::unordered_set<std::string>& allowed_methods()
         "host.model",
         "host.app_info",
         "host.plugin.storage",
+        k_method_request_permissions,
     };
     return k;
 }
@@ -122,6 +123,19 @@ HostResult handle_host_call(const HostCall& call)
             if (PluginAuditManager::instance().is_ultranet_plugins_path(boost::filesystem::path(path)))
                 return deny("plugin storage must not be the UltraNet plugins folder");
             ok.value = nlohmann::json{{"path", path}};
+            return ok;
+        }
+        if (call.method == k_method_request_permissions) {
+            // D3: the plugin asked for permissions while the helper imported it. EdgeSlicer owns
+            // the sidecar and the prompt; the helper only relays the request. Honoured only while
+            // EdgeSlicer is waiting for that import, never during a run.
+            if (!call.during_load)
+                return deny("permission requests are only accepted while the plugin is being loaded");
+            PluginPermissions requested;
+            std::string       parse_error;
+            if (!permissions_from_json(call.args, requested, parse_error))
+                return deny("bad permission request: " + parse_error);
+            ok.value = nlohmann::json{{"granted", PluginAuditManager::instance().request_permissions(call.plugin_key, requested)}};
             return ok;
         }
         return deny("unknown host method: " + call.method);

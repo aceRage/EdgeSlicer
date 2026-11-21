@@ -10,7 +10,10 @@
 //   python_plugins_in_process_steps      H7 / D4. Off: slicing-pipeline plugins run only at the
 //                                        G-code post-process step, in the sandboxed helper. On:
 //                                        the early slicing steps (Slice ... Skirt/brim) also run,
-//                                        inside EdgeSlicer, unsandboxed, with a live Print.
+//                                        inside EdgeSlicer, unsandboxed, with a live Print, for
+//                                        plugins signed by a shipped publisher key only (D2):
+//                                        those are then imported in-process. Every other plugin
+//                                        is imported and run in the helper (D3).
 //   python_plugins_allow_unsigned        H7 / D2. Only consulted in a signed release build: off
 //                                        means a plugin approved only by a local pin (not signed
 //                                        by a shipped publisher key) does not run there.

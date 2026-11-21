@@ -238,6 +238,11 @@ bool sandbox_unavailable_prompt_aborted();
 // override / test env) allowed an unsandboxed run. Default is Don't run.
 bool allow_unsandboxed_run(const std::string& plugin_key, const std::string& reason, bool& applied_out, std::string& error);
 
+// The same decision without a prompt: true only when the user already chose "Run anyway" for
+// this plugin's current files (or a test disabled the sandbox). Background work that must never
+// pop a dialog (lifecycle events) uses this.
+bool unsandboxed_run_already_allowed(const std::string& plugin_key);
+
 std::string sandbox_unavailable_message(const std::string& plugin_key, const std::string& reason);
 
 } // namespace Slic3r::plugin_ipc

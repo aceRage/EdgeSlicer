@@ -1265,6 +1265,8 @@ if (EDGE_PYTHON_PLUGINS)
         plugin/PluginTrust.hpp
         plugin/PluginPreferences.cpp
         plugin/PluginPreferences.hpp
+        plugin/HostedPluginImport.cpp
+        plugin/HostedPluginImport.hpp
         GUI/PluginPermissionValidation.cpp
         GUI/PluginPermissionValidation.hpp
         GUI/PluginsInspectorLogic.cpp
@@ -1384,6 +1386,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     plugin/PluginManager.cpp
     plugin/PluginAuditManager.cpp
     plugin/PluginTrust.cpp
+    plugin/HostedPluginImport.cpp
     GUI/PluginPermissionValidation.cpp
     GUI/PluginsInspectorLogic.cpp
     GUI/PluginsInspectorDialog.cpp

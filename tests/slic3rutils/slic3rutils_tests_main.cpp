@@ -41,6 +41,7 @@ struct TemporaryDirListener : Catch::TestEventListenerBase
 CATCH_REGISTER_LISTENER(TemporaryDirListener)
 
 #ifdef EDGE_PYTHON_PLUGINS
+#include <slic3r/plugin/HostedPluginImport.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
 #include <slic3r/plugin/PluginPreferences.hpp>
 #include <slic3r/plugin/PythonInterpreter.hpp>
@@ -49,7 +50,8 @@ namespace {
 
 // The plugin tests exercise the early slicing-step hooks, which ship off by default (H7, a user
 // preference read when the hooks are installed). Turn them on for the run; the H7 test turns
-// them off again around its own check.
+// them off again around its own check. The same listener keeps fixture imports in-process (D3):
+// the existing cases call into capabilities directly. The D3 tests switch to helper import.
 struct PluginInProcessStepsOn : Catch::TestEventListenerBase
 {
     using TestEventListenerBase::TestEventListenerBase;
@@ -58,6 +60,7 @@ struct PluginInProcessStepsOn : Catch::TestEventListenerBase
     {
         TestEventListenerBase::testRunStarting(info);
         Slic3r::plugin_prefs::set_override_for_testing(Slic3r::plugin_prefs::k_in_process_steps, 1);
+        Slic3r::plugin_import::set_in_process_import_for_testing(true);
     }
 };
 
