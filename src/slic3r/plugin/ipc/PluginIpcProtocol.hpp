@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <libslic3r/LifecycleEvents.hpp>
 #include <slic3r/plugin/PythonPluginInterface.hpp>
 
 #include <cstdint>
@@ -42,6 +43,10 @@ inline constexpr const char* k_type_host_call     = "host_call";
 inline constexpr const char* k_type_host_result   = "host_result";
 inline constexpr const char* k_type_audit_check   = "audit_check";
 inline constexpr const char* k_type_audit_result  = "audit_result";
+// Lifecycle events for a hosted plugin (fire-and-forget for the app; the helper acknowledges each
+// batch so the channel stays in step).
+inline constexpr const char* k_type_event         = "lifecycle_event";
+inline constexpr const char* k_type_event_ok      = "lifecycle_event_ok";
 
 inline constexpr const char* k_kind_script       = "script";
 inline constexpr const char* k_kind_post_process = "post_process";
@@ -69,7 +74,7 @@ inline constexpr std::size_t k_max_data_bytes          = 8u * 1024u * 1024u; // 
 inline constexpr std::size_t k_max_audit_targets       = 64;
 
 // H2: strict schema check of a message the helper sent to Edge (result, error, host_call,
-// audit_check, load_ok, unload_ok, hello_ok, shutdown_ok). Every field the parent reads must
+// audit_check, load_ok, unload_ok, lifecycle_event_ok, hello_ok, shutdown_ok). Every field the parent reads must
 // have the right JSON type and be in range (ids non-negative integers, status a PluginResult,
 // strings and lists within the limits above). Returns false with a reason otherwise; the parent
 // then kills the helper and fails the run. Never throws.
@@ -108,6 +113,49 @@ nlohmann::json permissions_to_json(const PluginPermissions& permissions);
 bool           permissions_from_json(const nlohmann::json& value, PluginPermissions& out, std::string& error);
 
 inline constexpr const char* k_method_request_permissions = "plugin.request_permissions";
+
+// ---- Lifecycle events for hosted plugins ----------------------------------------------------
+// EdgeSlicer queues events per plugin (at most k_max_event_queue; when full the OLDEST event is
+// dropped) and sends them to the helper in one batch per drain. The helper calls the plugin's
+// on_lifecycle_event with an ordinary LifecycleEventContext built from the snapshot, so the
+// plugin sees the same names and fields as in-process.
+inline constexpr std::size_t k_max_event_queue       = 64;
+inline constexpr std::size_t k_max_event_field_bytes = 4096;
+inline constexpr int         k_event_timeout_ms      = 10000; // per batch, then the helper is reset
+
+// Plain-data copy of a LifecycleEventContext: no callables, no pointers. Strings are cut to
+// k_max_event_field_bytes, made valid UTF-8 and passed through redact_secrets().
+struct LifecycleEventSnapshot
+{
+    LifecycleEvent   event{LifecycleEvent::NewProject};
+    LifecycleEvtCode code{LifecycleEvtCode::Ok};
+    std::string      name;
+    std::string      msg;
+    std::string      id;
+    std::string      previous_name;
+    std::string      device_id;
+    std::string      job_id;
+    std::string      source;
+    int              index{-1};
+    bool             dirty{false};
+};
+
+LifecycleEventSnapshot snapshot_lifecycle_event(LifecycleEvent event, const LifecycleEventContext& ctx);
+LifecycleEventContext  context_from_snapshot(const LifecycleEventSnapshot& snapshot);
+nlohmann::json         lifecycle_event_to_json(const LifecycleEventSnapshot& snapshot);
+// Strict: known event and code names, string fields of at most k_max_event_field_bytes, an int
+// index and a bool dirty. Never throws.
+bool lifecycle_event_from_json(const nlohmann::json& value, LifecycleEventSnapshot& out, std::string& error);
+bool lifecycle_event_from_name(const std::string& name, LifecycleEvent& out);
+
+// Replaces credential-looking values with "***": URL user info (scheme://user:pass@host),
+// key=value / key: value / "key": "value" pairs whose key names a secret (password, token,
+// api key, access code, secret, session, cookie, auth, ...), and Bearer/Basic tokens.
+std::string redact_secrets(const std::string& text);
+// Absolute local path or file:// URL (drive letter, UNC, POSIX root, ~/).
+bool looks_like_local_path(const std::string& text);
+// The fields of a snapshot that hold a local path (the permission filter checks each one).
+std::vector<std::string> lifecycle_snapshot_paths(const LifecycleEventSnapshot& snapshot);
 
 bool in_child_process();
 void set_in_child_process();

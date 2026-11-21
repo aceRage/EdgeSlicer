@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -69,6 +70,30 @@ public:
     // it from its load worker), bounded by the execute timeout. No plugin code runs in this
     // process. A malformed, hostile or dead helper fails the load and is reset; it never throws.
     bool load_in_helper(const std::string& plugin_key, std::vector<HostedCapabilityInfo>& capabilities, std::string& error);
+
+    // Lifecycle events for a hosted plugin. Fire-and-forget: returns at once on any thread (it
+    // only takes a short lock to queue the plain-data snapshot) and never throws. Per plugin at
+    // most k_max_event_queue events wait; when full the OLDEST is dropped, with one log line per
+    // overflow. The worker sends each plugin's queue as one batch, in order. At send time it
+    // drops the batch for a plugin that is no longer loaded or has no enabled listener, and each
+    // event naming a local path the plugin's grants do not cover (secret stores never pass, Full
+    // access included). A dead, hung (k_event_timeout_ms) or misbehaving helper is reset and that
+    // batch is lost; nothing waits for it. Never prompts: when the helper would need the "Run
+    // anyway" prompt the batch is dropped.
+    void post_lifecycle_event(const std::string& plugin_key, const LifecycleEventSnapshot& snapshot);
+    // Names of the plugin's enabled, hosted capabilities that override on_lifecycle_event; empty
+    // when the plugin is not loaded.
+    static std::vector<std::string> lifecycle_listeners(const std::string& plugin_key);
+    // Permission filter for one event (call with plugin_key's audit context set). False when a
+    // path field names a denied/secret path, or a path the plugin's grants do not cover.
+    static bool lifecycle_event_visible_to(const std::string& plugin_key, const LifecycleEventSnapshot& snapshot);
+
+    std::size_t              pending_lifecycle_events(const std::string& plugin_key) const;
+    std::vector<std::string> pending_lifecycle_event_names_for_testing(const std::string& plugin_key) const;
+    std::uint64_t            lifecycle_events_dropped(const std::string& plugin_key) const;
+    // Waits until no lifecycle batch is queued or being sent. False on timeout.
+    bool                     wait_lifecycle_events_idle_for_testing(std::chrono::milliseconds timeout);
+    static void              set_event_timeout_for_testing(int timeout_ms);
 
     // Cancels the in-flight request for plugin_key. Bound to that request id so a
     // later job with the same key is not cancelled.

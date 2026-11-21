@@ -10,6 +10,7 @@
 #include <libslic3r/Utils.hpp>
 #include <slic3r/GUI/GUI.hpp>
 #include <slic3r/GUI/GUI_App.hpp>
+#include <slic3r/plugin/HostedPluginImport.hpp>
 #include <slic3r/plugin/PluginAuditManager.hpp>
 #include <slic3r/plugin/PluginTrust.hpp>
 #include <slic3r/plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.hpp>
@@ -21,6 +22,7 @@
 #include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <chrono>
 #include <condition_variable>
@@ -28,6 +30,7 @@
 #include <future>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <wx/app.h>
 #include <wx/thread.h>
@@ -37,6 +40,7 @@ namespace {
 
 std::atomic<bool>          g_force_in_process{false};
 std::atomic<int>           g_execute_timeout_ms{k_default_timeout_ms};
+std::atomic<int>           g_event_timeout_ms{k_event_timeout_ms};
 std::atomic<std::uint64_t> g_spawn_count{0};
 std::atomic<bool>          g_logged_fallback{false};
 std::function<void()>      g_job_hook_for_testing;
@@ -89,7 +93,8 @@ using HostedLoadOutcome = std::pair<std::vector<HostedCapabilityInfo>, std::stri
 
 struct Job
 {
-    enum class Kind { Script, PostProcess, Unload, Load };
+    // Events: send the plugin's queued lifecycle events (Impl::event_queues) as one batch.
+    enum class Kind { Script, PostProcess, Unload, Load, Events };
     Kind                                                                   kind{Kind::Script};
     std::string                                                            plugin_key;
     std::string                                                            capability_name;
@@ -165,6 +170,29 @@ struct PluginHostClient::Impl
     SandboxSpec                sandbox_spec;
     SandboxReport              sandbox_report;
 
+    // Lifecycle events, under state_mutex. One bounded FIFO per plugin; at most one Events job per
+    // plugin waits in `queue` (drain_queued). events_outstanding counts Events jobs queued or
+    // running, for wait_lifecycle_events_idle_for_testing.
+    struct PendingEvents
+    {
+        std::deque<LifecycleEventSnapshot> events;
+        bool                               drain_queued{false};
+        bool                               overflow_logged{false};
+        std::uint64_t                      dropped{0};
+    };
+    std::unordered_map<std::string, PendingEvents> event_queues;
+    std::size_t                                    events_outstanding{0};
+    std::condition_variable                        events_idle_cv;
+
+    void event_job_done()
+    {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        if (events_outstanding > 0)
+            --events_outstanding;
+        if (events_outstanding == 0)
+            events_idle_cv.notify_all();
+    }
+
     bool is_cancelled_locked(std::uint64_t request_id) const
     {
         return cancel_requested.load(std::memory_order_acquire) && request_id != 0 && cancel_request_id == request_id;
@@ -201,7 +229,7 @@ struct PluginHostClient::Impl
 
     void fail_job(Job& job, const std::string& error, bool cancelled)
     {
-        if (job.kind == Job::Kind::Unload || job.finished)
+        if (job.kind == Job::Kind::Unload || job.kind == Job::Kind::Events || job.finished)
             return;
         job.finished = true;
         {
@@ -251,8 +279,20 @@ struct PluginHostClient::Impl
         return true;
     }
 
-    bool prompt_unsandboxed(std::unique_lock<std::mutex>& io, const std::string& plugin_key, const std::string& reason, std::string& error)
+    bool prompt_unsandboxed(std::unique_lock<std::mutex>& io,
+                            const std::string&            plugin_key,
+                            const std::string&            reason,
+                            std::string&                  error,
+                            bool                          allow_prompt = true)
     {
+        if (!allow_prompt) {
+            // Background work (lifecycle events) never shows the dialog; it runs only on a choice
+            // the user already made for these files.
+            if (unsandboxed_run_already_allowed(plugin_key))
+                return true;
+            error = "the OS sandbox is unavailable and the plugin was not allowed to run without it";
+            return false;
+        }
         io.unlock();
         bool       applied = false;
         const bool ok      = allow_unsandboxed_run(plugin_key, reason, applied, error);
@@ -264,7 +304,7 @@ struct PluginHostClient::Impl
         return ok;
     }
 
-    bool ensure_started_locked(std::unique_lock<std::mutex>& io, const SandboxSpec& spec, std::string& error)
+    bool ensure_started_locked(std::unique_lock<std::mutex>& io, const SandboxSpec& spec, std::string& error, bool allow_prompt = true)
     {
         if (stopping.load(std::memory_order_acquire)) {
             error = "plugin host is shutting down";
@@ -293,7 +333,7 @@ struct PluginHostClient::Impl
         // always false there and would prompt every user before spawn. Handshake is the
         // source of truth (child reports kind=app-sandbox via sandbox_check).
         if (!os_sandbox_available() && !sandbox_env_disable_requested()) {
-            if (!prompt_unsandboxed(io, spec.plugin_key, probe_os_sandbox().reason, error))
+            if (!prompt_unsandboxed(io, spec.plugin_key, probe_os_sandbox().reason, error, allow_prompt))
                 return false;
         }
 #endif
@@ -355,7 +395,7 @@ struct PluginHostClient::Impl
         if (!shipping && !sandbox_env_disable_requested()) {
             const std::string reason = sandbox_report.detail.empty() ? std::string("plugin host reported no shipping OS sandbox") :
                                                                        sandbox_report.detail;
-            if (!prompt_unsandboxed(io, spec.plugin_key, reason, error)) {
+            if (!prompt_unsandboxed(io, spec.plugin_key, reason, error, allow_prompt)) {
                 reset_child_locked();
                 return false;
             }
@@ -424,9 +464,12 @@ struct PluginHostClient::Impl
                            int                timeout_ms,
                            nlohmann::json&    result,
                            std::string&       error,
-                           const char*        ok_type     = k_type_result,
-                           bool               during_load = false)
+                           const char*        ok_type           = k_type_result,
+                           bool               during_load       = false,
+                           bool*              child_error_reply = nullptr)
     {
+        if (child_error_reply != nullptr)
+            *child_error_reply = false;
         const auto deadline = timeout_ms < 0 ? (std::chrono::steady_clock::time_point::max)() :
                                                std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         for (;;) {
@@ -543,6 +586,9 @@ struct PluginHostClient::Impl
                     result = std::move(msg);
                     return true;
                 }
+                // A well-formed error reply to this very request: the channel is still in step.
+                if (child_error_reply != nullptr && got == expected_id)
+                    *child_error_reply = true;
                 error = msg.value("message", std::string("plugin host error"));
                 return false;
             }
@@ -578,10 +624,102 @@ struct PluginHostClient::Impl
             reset_child_locked();
     }
 
+    // Sends plugin_key's queued lifecycle events as one batch, in the order they were fired.
+    // Never prompts. Anything but the matching lifecycle_event_ok (or a well-formed error reply
+    // to this batch) resets the helper, so the channel never goes out of step. The batch is then
+    // lost: events are fire-and-forget, and nothing in EdgeSlicer waits for them.
+    void run_events(Job& job)
+    {
+        std::deque<LifecycleEventSnapshot> batch;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            const auto                  it = event_queues.find(job.plugin_key);
+            if (it == event_queues.end())
+                return;
+            batch.swap(it->second.events);
+            it->second.drain_queued    = false;
+            it->second.overflow_logged = false;
+        }
+        if (batch.empty() || stopping.load(std::memory_order_acquire))
+            return;
+
+        // Only a plugin that is still loaded, through its enabled listeners.
+        const std::vector<std::string> listeners = PluginHostClient::lifecycle_listeners(job.plugin_key);
+        if (listeners.empty())
+            return;
+
+        ScopedPluginAuditContext audit(job.plugin_key, std::string());
+        nlohmann::json           events   = nlohmann::json::array();
+        std::size_t              filtered = 0;
+        for (const LifecycleEventSnapshot& event : batch) {
+            if (PluginHostClient::lifecycle_event_visible_to(job.plugin_key, event))
+                events.push_back(lifecycle_event_to_json(event));
+            else
+                ++filtered;
+        }
+        if (filtered > 0)
+            BOOST_LOG_TRIVIAL(info) << "plugin " << job.plugin_key << ": " << filtered
+                                    << " lifecycle event(s) not sent: they name a path its permissions do not cover";
+        if (events.empty())
+            return;
+
+        // The plugin's own storage folder (host.plugin.storage()), as for a script run.
+        try {
+            PluginAuditManager::instance().add_scoped_allowed_root(
+                boost::filesystem::path(PluginManager::instance().get_storage_dir(job.plugin_key)));
+        } catch (...) {}
+
+        std::unique_lock<std::mutex> io(io_mutex);
+        const SandboxSpec            spec       = make_sandbox_spec(job.plugin_key, std::string());
+        const int                    timeout_ms = g_event_timeout_ms.load(std::memory_order_acquire);
+        std::string                  error;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            error.clear();
+            if (!ensure_started_locked(io, spec, error, /*allow_prompt=*/false))
+                break;
+            // A failed import or write means the helper never saw this batch: one more try on a
+            // fresh helper (load_plugin_locked and the reset below both drop the old one).
+            if (!load_plugin_locked(job.plugin_key, error))
+                continue;
+            nlohmann::json msg = {
+                {"type", k_type_event},
+                {"id", next_id.fetch_add(1, std::memory_order_relaxed)},
+                {"capabilities", listeners},
+                {"events", events},
+            };
+            attach_plugin_identity(msg, job.plugin_key);
+            const std::uint64_t id = msg["id"].get<std::uint64_t>();
+            if (!host.channel.write_json(msg, timeout_ms, error)) {
+                reset_child_locked();
+                continue;
+            }
+            // From here at most once: the helper may already have run some handlers.
+            nlohmann::json reply;
+            bool           child_error = false;
+            if (pump_until_result(job.plugin_key, std::string(), id, timeout_ms, reply, error, k_type_event_ok, false, &child_error)) {
+                const auto failed = reply.value("failed", static_cast<std::uint64_t>(0));
+                if (failed > 0)
+                    BOOST_LOG_TRIVIAL(warning) << "plugin " << job.plugin_key << ": " << failed << " on_lifecycle_event call(s) raised";
+                return;
+            }
+            if (!child_error) {
+                enrich_host_error(host, error);
+                reset_child_locked();
+            }
+            break;
+        }
+        BOOST_LOG_TRIVIAL(warning) << "plugin " << job.plugin_key << ": " << events.size()
+                                   << " lifecycle event(s) not delivered: " << error;
+    }
+
     void run_job(Job& job)
     {
         if (job.kind == Job::Kind::Unload) {
             run_unload(job);
+            return;
+        }
+        if (job.kind == Job::Kind::Events) {
+            run_events(job);
             return;
         }
         std::string error;
@@ -749,17 +887,23 @@ struct PluginHostClient::Impl
                     continue;
                 job = std::move(queue.front());
                 queue.pop_front();
-                if (job && job->kind != Job::Kind::Unload) {
+                // An event batch is never a cancel target (cancel() binds to a script or
+                // post-process request id).
+                if (job && job->kind != Job::Kind::Unload && job->kind != Job::Kind::Events) {
                     running_plugin_key = job->plugin_key;
                     running_request_id = job->request_id;
                 }
                 if (stopping.load(std::memory_order_acquire)) {
                     lock.unlock();
                     fail_job(*job, "plugin host is shutting down", false);
+                    if (job->kind == Job::Kind::Events)
+                        event_job_done();
                     continue;
                 }
             }
             run_job_contained(*job);
+            if (job->kind == Job::Kind::Events)
+                event_job_done();
         }
     }
 
@@ -797,6 +941,13 @@ struct PluginHostClient::Impl
         try {
             fail_job(job, "plugin host error: " + failure, false);
         } catch (...) {}
+        if (job.kind == Job::Kind::Events) {
+            // The next post queues a fresh drain for whatever is still waiting.
+            std::lock_guard<std::mutex> lock(state_mutex);
+            const auto                  it = event_queues.find(job.plugin_key);
+            if (it != event_queues.end())
+                it->second.drain_queued = false;
+        }
     }
 };
 
@@ -1016,6 +1167,144 @@ bool PluginHostClient::load_in_helper(const std::string& plugin_key, std::vector
     }
 }
 
+void PluginHostClient::post_lifecycle_event(const std::string& plugin_key, const LifecycleEventSnapshot& snapshot)
+{
+    try {
+        if (plugin_key.empty())
+            return;
+        Impl&                       i = impl();
+        std::lock_guard<std::mutex> lock(i.state_mutex);
+        if (i.stopping.load(std::memory_order_acquire))
+            return;
+        Impl::PendingEvents& pending = i.event_queues[plugin_key];
+        // Drop policy: the oldest waiting event goes, so a listener sees the latest state. One
+        // log line per overflow; the next batch sent re-arms it.
+        while (pending.events.size() >= k_max_event_queue) {
+            pending.events.pop_front();
+            ++pending.dropped;
+            if (!pending.overflow_logged) {
+                pending.overflow_logged = true;
+                BOOST_LOG_TRIVIAL(warning) << "plugin " << plugin_key << ": lifecycle event queue full (" << k_max_event_queue
+                                           << "), dropping the oldest events until the helper catches up";
+            }
+        }
+        pending.events.push_back(snapshot);
+        if (pending.drain_queued)
+            return;
+        auto job        = std::make_shared<Job>();
+        job->kind       = Job::Kind::Events;
+        job->plugin_key = plugin_key;
+        job->request_id = 0; // never a cancel target
+        pending.drain_queued = true;
+        ++i.events_outstanding;
+        i.queue.push_back(std::move(job));
+        i.ensure_worker_locked();
+        i.cv.notify_one();
+    } catch (...) {
+        // Never let an event reach the caller as an exception (allocation failure, thread start).
+    }
+}
+
+std::vector<std::string> PluginHostClient::lifecycle_listeners(const std::string& plugin_key)
+{
+    std::vector<std::string> names;
+    PluginManager&           manager = PluginManager::instance();
+    if (plugin_key.empty() || !manager.is_plugin_loaded(plugin_key))
+        return names;
+    for (const auto& cap : manager.get_plugin_capabilities(plugin_key, PluginCapabilityType::Unknown, /*only_enabled=*/true)) {
+        if (!cap || !cap->is_enabled())
+            continue;
+        const plugin_import::HostedCapability* hosted = plugin_import::as_hosted(cap.get());
+        if (hosted != nullptr && hosted->hosted_info().lifecycle_events)
+            names.push_back(cap->name());
+    }
+    return names;
+}
+
+bool PluginHostClient::lifecycle_event_visible_to(const std::string& plugin_key, const LifecycleEventSnapshot& snapshot)
+{
+    const std::vector<std::string> paths = lifecycle_snapshot_paths(snapshot);
+    if (paths.empty())
+        return true;
+    if (plugin_key.empty())
+        return false;
+    // The audit checks below answer for the plugin in the current audit context.
+    ScopedPluginAuditContext scope(plugin_key, std::string());
+    bool              full_access = false;
+    PluginInstallState state;
+    if (PluginManager::instance().get_install_state(plugin_key, state))
+        full_access = state.permissions.full_access;
+    PluginAuditManager& audit = PluginAuditManager::instance();
+    for (const std::string& raw : paths) {
+        std::string text = raw;
+        if (text.size() >= 5 && (text.compare(0, 5, "file:") == 0 || text.compare(0, 5, "FILE:") == 0)) {
+            text.erase(0, 5);
+            // file:///C:/x -> C:/x, file:///home/x -> /home/x
+            if (text.size() >= 2 && text.compare(0, 2, "//") == 0)
+                text.erase(0, 2);
+            if (text.size() >= 3 && text[0] == '/' && std::isalpha(static_cast<unsigned char>(text[1])) && text[2] == ':')
+                text.erase(0, 1);
+        }
+        boost::filesystem::path path;
+        try {
+            path = boost::filesystem::path(text);
+        } catch (...) {
+            return false;
+        }
+        // Secret stores (hub tokens, access codes, sign-in data, app config) never, whatever the grants.
+        if (audit.is_denied_path(path))
+            return false;
+        if (full_access)
+            continue;
+        if (!audit.check_hosted_path_access(path, /*is_write=*/false).allowed)
+            return false;
+    }
+    return true;
+}
+
+std::size_t PluginHostClient::pending_lifecycle_events(const std::string& plugin_key) const
+{
+    if (!m_impl)
+        return 0;
+    std::lock_guard<std::mutex> lock(m_impl->state_mutex);
+    const auto                  it = m_impl->event_queues.find(plugin_key);
+    return it == m_impl->event_queues.end() ? 0 : it->second.events.size();
+}
+
+std::vector<std::string> PluginHostClient::pending_lifecycle_event_names_for_testing(const std::string& plugin_key) const
+{
+    std::vector<std::string> names;
+    if (!m_impl)
+        return names;
+    std::lock_guard<std::mutex> lock(m_impl->state_mutex);
+    const auto                  it = m_impl->event_queues.find(plugin_key);
+    if (it != m_impl->event_queues.end())
+        for (const LifecycleEventSnapshot& e : it->second.events)
+            names.push_back(e.name);
+    return names;
+}
+
+std::uint64_t PluginHostClient::lifecycle_events_dropped(const std::string& plugin_key) const
+{
+    if (!m_impl)
+        return 0;
+    std::lock_guard<std::mutex> lock(m_impl->state_mutex);
+    const auto                  it = m_impl->event_queues.find(plugin_key);
+    return it == m_impl->event_queues.end() ? 0 : it->second.dropped;
+}
+
+bool PluginHostClient::wait_lifecycle_events_idle_for_testing(std::chrono::milliseconds timeout)
+{
+    Impl&                        i = impl();
+    std::unique_lock<std::mutex> lock(i.state_mutex);
+    return i.events_idle_cv.wait_for(lock, timeout, [&i] { return i.events_outstanding == 0; });
+}
+
+void PluginHostClient::set_event_timeout_for_testing(int timeout_ms)
+{
+    g_event_timeout_ms.store(timeout_ms > 0 ? timeout_ms : k_event_timeout_ms, std::memory_order_release);
+}
+
 void PluginHostClient::set_reply_filter_for_testing(std::function<void(nlohmann::json&)> filter)
 {
     std::lock_guard<std::mutex> lock(g_reply_filter_mutex);
@@ -1030,6 +1319,8 @@ void PluginHostClient::unload(const std::string& plugin_key)
     job->plugin_key = plugin_key;
     {
         std::lock_guard<std::mutex> lock(i.state_mutex);
+        // Events still waiting for an unloaded plugin are never sent.
+        i.event_queues.erase(plugin_key);
         if (plugin_key.empty() || i.active.count(plugin_key))
             return;
         if (i.stopping.load(std::memory_order_acquire))
@@ -1142,6 +1433,7 @@ void PluginHostClient::shutdown()
     {
         std::lock_guard<std::mutex> lock(m_impl->state_mutex);
         leftover.swap(m_impl->queue);
+        m_impl->event_queues.clear();
         m_impl->active.clear();
         m_impl->running_plugin_key.clear();
         m_impl->running_request_id = 0;
@@ -1160,8 +1452,11 @@ void PluginHostClient::shutdown()
             m_impl->loaded.clear();
         }
     }
-    for (auto& job : leftover)
+    for (auto& job : leftover) {
         m_impl->fail_job(*job, "plugin host is shutting down", false);
+        if (job->kind == Job::Kind::Events)
+            m_impl->event_job_done();
+    }
     m_impl->stopping.store(false, std::memory_order_release);
     clear_sandbox_unavailable_prompt_abort();
 }

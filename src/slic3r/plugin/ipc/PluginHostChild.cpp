@@ -25,7 +25,9 @@
 #include <condition_variable>
 #include <cstdio>
 #include <iterator>
+#include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <thread>
 
@@ -141,6 +143,75 @@ bool load_plugin(const nlohmann::json& msg, std::string& error)
     return manager.wait_for_plugin_load(plugin_key, std::chrono::seconds(120), error);
 }
 
+// True when the capability's Python class defines its own on_lifecycle_event (Orca's listener
+// API). The base method is a pybind11 C++ function; anything else on the class is the plugin's.
+bool python_overrides_lifecycle_event(const std::shared_ptr<PluginCapabilityInterface>& cap)
+{
+    if (!cap || !Py_IsInitialized())
+        return false;
+    try {
+        pybind11::gil_scoped_acquire gil;
+        try {
+            pybind11::object self = pybind11::cast(cap);
+            if (!self || self.is_none())
+                return false;
+            pybind11::object method = pybind11::getattr(pybind11::type::of(self), "on_lifecycle_event", pybind11::none());
+            if (method.is_none())
+                return false;
+            PyObject* fn = method.ptr();
+            if (PyInstanceMethod_Check(fn))
+                fn = PyInstanceMethod_GET_FUNCTION(fn);
+            return !PyCFunction_Check(fn);
+        } catch (pybind11::error_already_set&) {
+            return false; // the error is cleared when error_already_set is destroyed, under the GIL
+        }
+    } catch (...) {
+        return false;
+    }
+}
+
+// Delivers one lifecycle_event batch to the named capabilities of a loaded plugin, in order.
+// A handler that raises costs only that call (counted in "failed"), as in-process.
+nlohmann::json deliver_lifecycle_events(const nlohmann::json& msg)
+{
+    const std::string     plugin_key = msg.value("plugin_key", std::string());
+    std::set<std::string> wanted;
+    if (msg.contains("capabilities") && msg["capabilities"].is_array())
+        for (const auto& name : msg["capabilities"])
+            if (name.is_string())
+                wanted.insert(name.get<std::string>());
+    std::vector<std::shared_ptr<PluginCapabilityInterface>> listeners;
+    for (const auto& cap : PluginManager::instance().get_plugin_capabilities(plugin_key, PluginCapabilityType::Unknown, false))
+        if (cap && wanted.count(cap->name()) != 0)
+            listeners.push_back(cap);
+
+    std::uint64_t delivered = 0;
+    std::uint64_t failed    = 0;
+    if (msg.contains("events") && msg["events"].is_array()) {
+        for (const auto& value : msg["events"]) {
+            LifecycleEventSnapshot snapshot;
+            std::string            why;
+            if (!lifecycle_event_from_json(value, snapshot, why)) {
+                ++failed;
+                continue;
+            }
+            const LifecycleEventContext ctx = context_from_snapshot(snapshot);
+            for (const auto& cap : listeners) {
+                try {
+                    cap->on_lifecycle_event(snapshot.event, ctx);
+                    ++delivered;
+                } catch (const std::exception& ex) {
+                    ++failed;
+                    child_diag("on_lifecycle_event raised in " + plugin_key + "/" + cap->name() + ": " + ex.what());
+                } catch (...) {
+                    ++failed;
+                }
+            }
+        }
+    }
+    return nlohmann::json{{"type", k_type_event_ok}, {"delivered", delivered}, {"failed", failed}};
+}
+
 // D3: what EdgeSlicer needs to know about a plugin this helper imported. Every capability the
 // plugin registered (enabled or not), its custom config HTML and its default config. Calls into
 // the plugin (get_config_ui / get_default_config) are contained: a raising one costs only that
@@ -171,6 +242,7 @@ std::vector<HostedCapabilityInfo> describe_loaded_capabilities(const std::string
             if (defaults.is_object())
                 info.default_config = std::move(defaults);
         } catch (...) {}
+        info.lifecycle_events = python_overrides_lifecycle_event(cap);
         out.push_back(std::move(info));
         if (out.size() >= k_max_capabilities)
             break;
@@ -504,6 +576,25 @@ int run_child(Channel& channel)
                 }
             } else
                 reply = {{"type", k_type_error}, {"message", load_error}};
+            stamp_request_id(reply, msg);
+            if (!channel.write_json(reply, k_default_timeout_ms, error))
+                break;
+            continue;
+        }
+        if (type == k_type_event) {
+            // Lifecycle events for a plugin this helper imported (EdgeSlicer imports it first;
+            // load_plugin only re-imports after a reset).
+            std::string    load_error;
+            nlohmann::json reply;
+            if (!load_plugin(msg, load_error)) {
+                reply = {{"type", k_type_error}, {"message", load_error}};
+            } else {
+                try {
+                    reply = deliver_lifecycle_events(msg);
+                } catch (const std::exception& ex) {
+                    reply = {{"type", k_type_error}, {"message", std::string("lifecycle events failed: ") + ex.what()}};
+                }
+            }
             stamp_request_id(reply, msg);
             if (!channel.write_json(reply, k_default_timeout_ms, error))
                 break;

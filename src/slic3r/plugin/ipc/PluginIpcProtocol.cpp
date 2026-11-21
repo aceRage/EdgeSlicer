@@ -3,7 +3,9 @@
 #include <slic3r/plugin/PluginFsUtils.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <set>
 #include <utility>
@@ -236,6 +238,18 @@ bool validate_child_message(const nlohmann::json& msg, std::string& error)
         }
         if (type == k_type_unload_ok)
             return check_id(msg, true, error);
+        if (type == k_type_event_ok) {
+            if (!check_id(msg, true, error))
+                return false;
+            for (const char* counter : {"delivered", "failed"}) {
+                const auto it = msg.find(counter);
+                if (it != msg.end() && !is_small_non_negative(*it, 1000000)) {
+                    error = std::string("field '") + counter + "' must be a small non-negative integer";
+                    return false;
+                }
+            }
+            return true;
+        }
         if (type == k_type_shutdown_ok)
             return check_id(msg, false, error);
         if (type == k_type_hello_ok) {
@@ -440,6 +454,364 @@ bool permissions_from_json(const nlohmann::json& value, PluginPermissions& out, 
         return true;
     } catch (const std::exception& ex) {
         error = std::string("malformed permissions: ") + ex.what();
+        return false;
+    }
+}
+
+// ---- Lifecycle events ----------------------------------------------------------------------
+
+namespace {
+
+bool is_key_char(unsigned char c) { return std::isalnum(c) != 0 || c == '_' || c == '-' || c == '.'; }
+
+bool is_space(unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+std::string to_lower_ascii(std::string s)
+{
+    for (char& c : s)
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
+    return s;
+}
+
+bool sensitive_key(const std::string& raw_key)
+{
+    const std::string key = to_lower_ascii(raw_key);
+    static const char* const contains[] = {"password", "passwd",  "passphrase",    "secret",     "token",      "apikey",
+                                           "api_key",  "api-key", "accesscode",    "access_code", "access-code", "authorization",
+                                           "credential", "cookie", "session",      "private_key", "privatekey"};
+    for (const char* part : contains)
+        if (key.find(part) != std::string::npos)
+            return true;
+    static const char* const exact[] = {"pwd", "pass", "auth", "key", "sig", "signature", "pin", "otp"};
+    for (const char* word : exact)
+        if (key == word)
+            return true;
+    return false;
+}
+
+bool starts_with_ci(const std::string& text, std::size_t pos, const char* word)
+{
+    const std::size_t len = std::strlen(word);
+    if (pos + len > text.size())
+        return false;
+    for (std::size_t i = 0; i < len; ++i) {
+        char c = text[pos + i];
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
+        if (c != word[i])
+            return false;
+    }
+    return true;
+}
+
+// End of an unquoted value: whitespace or a separator.
+std::size_t value_end(const std::string& text, std::size_t pos)
+{
+    while (pos < text.size()) {
+        const unsigned char c = static_cast<unsigned char>(text[pos]);
+        if (is_space(c) || std::strchr("&,;\"')}]", static_cast<char>(c)) != nullptr)
+            break;
+        ++pos;
+    }
+    return pos;
+}
+
+// Cuts to max_bytes on a code point boundary and replaces bytes that are not valid UTF-8 with
+// '?', so the snapshot always serialises (nlohmann refuses invalid UTF-8).
+std::string clean_text(const std::string& in, std::size_t max_bytes)
+{
+    std::string out;
+    out.reserve((std::min)(in.size(), max_bytes));
+    std::size_t i = 0;
+    while (i < in.size()) {
+        const unsigned char c   = static_cast<unsigned char>(in[i]);
+        std::size_t         len = 0;
+        if (c < 0x80)
+            len = 1;
+        else if (c >= 0xC2 && c <= 0xDF)
+            len = 2;
+        else if (c >= 0xE0 && c <= 0xEF)
+            len = 3;
+        else if (c >= 0xF0 && c <= 0xF4)
+            len = 4;
+        bool valid = len > 0 && i + len <= in.size();
+        for (std::size_t k = 1; valid && k < len; ++k)
+            valid = (static_cast<unsigned char>(in[i + k]) & 0xC0) == 0x80;
+        if (valid && len == 3) {
+            const unsigned char c1 = static_cast<unsigned char>(in[i + 1]);
+            valid = !(c == 0xE0 && c1 < 0xA0) && !(c == 0xED && c1 >= 0xA0); // overlong, surrogates
+        } else if (valid && len == 4) {
+            const unsigned char c1 = static_cast<unsigned char>(in[i + 1]);
+            valid = !(c == 0xF0 && c1 < 0x90) && !(c == 0xF4 && c1 >= 0x90);
+        }
+        const std::size_t take = valid ? len : 1;
+        if (out.size() + (valid ? len : 1) > max_bytes)
+            break;
+        if (valid)
+            out.append(in, i, len);
+        else
+            out.push_back('?');
+        i += take;
+    }
+    return out;
+}
+
+std::string snapshot_text(const std::string& in) { return redact_secrets(clean_text(in, k_max_event_field_bytes)); }
+
+const char* const k_event_string_fields[] = {"name", "msg", "id", "previous_name", "device_id", "job_id", "source"};
+
+std::string* snapshot_field(LifecycleEventSnapshot& s, const std::string& key)
+{
+    if (key == "name")
+        return &s.name;
+    if (key == "msg")
+        return &s.msg;
+    if (key == "id")
+        return &s.id;
+    if (key == "previous_name")
+        return &s.previous_name;
+    if (key == "device_id")
+        return &s.device_id;
+    if (key == "job_id")
+        return &s.job_id;
+    if (key == "source")
+        return &s.source;
+    return nullptr;
+}
+
+} // namespace
+
+std::string redact_secrets(const std::string& in)
+{
+    std::string       out;
+    const std::size_t n = in.size();
+    out.reserve(n);
+    std::size_t i = 0;
+    while (i < n) {
+        // scheme://user:password@host -> scheme://***@host
+        if (in.compare(i, 3, "://") == 0) {
+            out += "://";
+            i += 3;
+            std::size_t end = i;
+            while (end < n && std::strchr("/?#", in[end]) == nullptr && !is_space(static_cast<unsigned char>(in[end])))
+                ++end;
+            std::size_t at = std::string::npos;
+            for (std::size_t k = i; k < end; ++k)
+                if (in[k] == '@')
+                    at = k;
+            if (at != std::string::npos) {
+                out += "***@";
+                i = at + 1;
+            }
+            continue;
+        }
+        // Bearer / Basic tokens on their own.
+        if ((i == 0 || !is_key_char(static_cast<unsigned char>(in[i - 1]))) &&
+            (starts_with_ci(in, i, "bearer ") || starts_with_ci(in, i, "basic "))) {
+            const std::size_t word = starts_with_ci(in, i, "bearer ") ? 6 : 5;
+            out.append(in, i, word);
+            i += word;
+            while (i < n && is_space(static_cast<unsigned char>(in[i])))
+                out.push_back(in[i++]);
+            const std::size_t v = value_end(in, i);
+            if (v > i)
+                out += "***";
+            i = v;
+            continue;
+        }
+        const char c = in[i];
+        if (c == '=' || c == ':') {
+            // The key just before, skipping blanks and one closing quote ("token": "...").
+            std::size_t k = i;
+            while (k > 0 && (in[k - 1] == ' ' || in[k - 1] == '\t'))
+                --k;
+            if (k > 0 && (in[k - 1] == '"' || in[k - 1] == '\''))
+                --k;
+            std::size_t ks = k;
+            while (ks > 0 && is_key_char(static_cast<unsigned char>(in[ks - 1])))
+                --ks;
+            if (ks < k && sensitive_key(in.substr(ks, k - ks))) {
+                out.push_back(c);
+                ++i;
+                while (i < n && (in[i] == ' ' || in[i] == '\t'))
+                    out.push_back(in[i++]);
+                char quote = 0;
+                if (i < n && (in[i] == '"' || in[i] == '\'')) {
+                    quote = in[i];
+                    out.push_back(in[i++]);
+                }
+                std::size_t v = i;
+                if (quote != 0) {
+                    while (v < n && in[v] != quote)
+                        ++v;
+                } else {
+                    v = value_end(in, i);
+                    // "Authorization: Bearer abc": the scheme word and its token both go.
+                    const std::string word = to_lower_ascii(in.substr(i, v - i));
+                    if (word == "bearer" || word == "basic") {
+                        std::size_t t = v;
+                        while (t < n && is_space(static_cast<unsigned char>(in[t])))
+                            ++t;
+                        v = value_end(in, t);
+                    }
+                }
+                if (v > i)
+                    out += "***";
+                i = v;
+                continue;
+            }
+        }
+        out.push_back(c);
+        ++i;
+    }
+    return out;
+}
+
+bool looks_like_local_path(const std::string& text)
+{
+    if (text.size() >= 3 && std::isalpha(static_cast<unsigned char>(text[0])) != 0 && text[1] == ':' &&
+        (text[2] == '\\' || text[2] == '/'))
+        return true;
+    if (text.size() >= 2 && ((text[0] == '\\' && text[1] == '\\') || (text[0] == '/' && text[1] == '/')))
+        return true;
+    if (!text.empty() && text[0] == '/')
+        return true;
+    if (text.size() >= 2 && text[0] == '~' && (text[1] == '/' || text[1] == '\\'))
+        return true;
+    return starts_with_ci(text, 0, "file:");
+}
+
+std::vector<std::string> lifecycle_snapshot_paths(const LifecycleEventSnapshot& s)
+{
+    std::vector<std::string> out;
+    for (const std::string* field : {&s.name, &s.msg, &s.id, &s.previous_name, &s.device_id, &s.job_id, &s.source})
+        if (looks_like_local_path(*field))
+            out.push_back(*field);
+    return out;
+}
+
+LifecycleEventSnapshot snapshot_lifecycle_event(LifecycleEvent event, const LifecycleEventContext& ctx)
+{
+    LifecycleEventSnapshot s;
+    s.event         = event;
+    s.code          = ctx.code;
+    s.name          = snapshot_text(ctx.name);
+    s.msg           = snapshot_text(ctx.msg);
+    s.id            = snapshot_text(ctx.id);
+    s.previous_name = snapshot_text(ctx.previous_name);
+    s.device_id     = snapshot_text(ctx.device_id);
+    s.job_id        = snapshot_text(ctx.job_id);
+    s.source        = snapshot_text(ctx.source);
+    s.index         = ctx.index;
+    s.dirty         = ctx.dirty;
+    // ctx.cancellation_check is a live callable: never copied.
+    return s;
+}
+
+LifecycleEventContext context_from_snapshot(const LifecycleEventSnapshot& s)
+{
+    LifecycleEventContext ctx;
+    ctx.name          = s.name;
+    ctx.code          = s.code;
+    ctx.msg           = s.msg;
+    ctx.id            = s.id;
+    ctx.previous_name = s.previous_name;
+    ctx.device_id     = s.device_id;
+    ctx.job_id        = s.job_id;
+    ctx.source        = s.source;
+    ctx.index         = s.index;
+    ctx.dirty         = s.dirty;
+    return ctx;
+}
+
+nlohmann::json lifecycle_event_to_json(const LifecycleEventSnapshot& s)
+{
+    return json{
+        {"event", lifecycle_event_to_string(s.event)},
+        {"code", lifecycle_evt_code_to_string(s.code)},
+        {"name", s.name},
+        {"msg", s.msg},
+        {"id", s.id},
+        {"previous_name", s.previous_name},
+        {"device_id", s.device_id},
+        {"job_id", s.job_id},
+        {"source", s.source},
+        {"index", s.index},
+        {"dirty", s.dirty},
+    };
+}
+
+bool lifecycle_event_from_name(const std::string& name, LifecycleEvent& out)
+{
+    for (int i = static_cast<int>(LifecycleEvent::NewProject); i <= static_cast<int>(LifecycleEvent::SendJobFinished); ++i) {
+        const auto candidate = static_cast<LifecycleEvent>(i);
+        if (lifecycle_event_to_string(candidate) == name) {
+            out = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool lifecycle_event_from_json(const nlohmann::json& value, LifecycleEventSnapshot& out, std::string& error)
+{
+    out = LifecycleEventSnapshot{};
+    try {
+        if (!value.is_object()) {
+            error = "lifecycle event is not an object";
+            return false;
+        }
+        LifecycleEventSnapshot parsed;
+        const auto             event = value.find("event");
+        if (event == value.end() || !event->is_string() || !lifecycle_event_from_name(event->get<std::string>(), parsed.event)) {
+            error = "unknown lifecycle event";
+            return false;
+        }
+        const auto code = value.find("code");
+        if (code != value.end()) {
+            if (!code->is_string()) {
+                error = "lifecycle event code must be a string";
+                return false;
+            }
+            const std::string c = code->get<std::string>();
+            if (c == "Ok")
+                parsed.code = LifecycleEvtCode::Ok;
+            else if (c == "Error")
+                parsed.code = LifecycleEvtCode::Error;
+            else if (c == "Warn")
+                parsed.code = LifecycleEvtCode::Warn;
+            else {
+                error = "unknown lifecycle event code";
+                return false;
+            }
+        }
+        for (const char* key : k_event_string_fields) {
+            if (!check_string(value, key, false, k_max_event_field_bytes, error))
+                return false;
+            if (value.contains(key))
+                *snapshot_field(parsed, key) = value[key].get<std::string>();
+        }
+        const auto index = value.find("index");
+        if (index != value.end()) {
+            if (!index->is_number_integer()) {
+                error = "lifecycle event index must be an integer";
+                return false;
+            }
+            const std::int64_t v = index->get<std::int64_t>();
+            if (v < (std::numeric_limits<int>::min)() || v > (std::numeric_limits<int>::max)()) {
+                error = "lifecycle event index out of range";
+                return false;
+            }
+            parsed.index = static_cast<int>(v);
+        }
+        if (!check_bool(value, "dirty", error))
+            return false;
+        parsed.dirty = value.value("dirty", false);
+        out          = std::move(parsed);
+        return true;
+    } catch (const std::exception& ex) {
+        error = std::string("malformed lifecycle event: ") + ex.what();
         return false;
     }
 }

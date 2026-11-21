@@ -2921,11 +2921,22 @@ void PluginManager::dispatch_lifecycle_event(LifecycleEvent evt, const Lifecycle
     if (is_canceled())
         return;
 
+    // Hosted plugins (D3) subscribed in the helper: their proxies have no code here. Collect the
+    // plugins with an enabled listener and post them one plain-data snapshot each; the post only
+    // queues it, so this thread (UI or slicing) never waits on the helper.
+    std::vector<std::string> hosted_listeners;
     for (const auto& cap : get_plugin_capabilities()) {
         if (!cap || !cap->is_enabled())
             continue;
         if (is_canceled())
             break;
+        if (const plugin_import::HostedCapability* hosted = plugin_import::as_hosted(cap.get())) {
+            const std::string& key = cap->audit_plugin_key();
+            if (hosted->hosted_info().lifecycle_events &&
+                std::find(hosted_listeners.begin(), hosted_listeners.end(), key) == hosted_listeners.end())
+                hosted_listeners.push_back(key);
+            continue;
+        }
         try {
             cap->on_lifecycle_event(evt, ctx);
         } catch (const std::exception& ex) {
@@ -2940,6 +2951,17 @@ void PluginManager::dispatch_lifecycle_event(LifecycleEvent evt, const Lifecycle
                                        << ctx.msg << "']";
         }
     }
+
+    if (hosted_listeners.empty() || is_canceled())
+        return;
+    try {
+        const plugin_ipc::LifecycleEventSnapshot snapshot = plugin_ipc::snapshot_lifecycle_event(evt, ctx);
+        for (const std::string& plugin_key : hosted_listeners)
+            plugin_ipc::PluginHostClient::instance().post_lifecycle_event(plugin_key, snapshot);
+    } catch (const std::exception& ex) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": lifecycle event " << lifecycle_event_to_string(evt)
+                                   << " not queued for hosted plugins: " << ex.what();
+    } catch (...) {}
 }
 
 } // namespace Slic3r
