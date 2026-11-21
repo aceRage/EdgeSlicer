@@ -32,18 +32,19 @@ public:
         float value(Axis axis) const { return m_axis[axis]; }
         bool  has(char axis) const;
         bool  has_value(char axis, float &value) const;
-        float new_X(const GCodeReader &reader) const { return this->has(X) ? this->x() : reader.x(); }
-        float new_Y(const GCodeReader &reader) const { return this->has(Y) ? this->y() : reader.y(); }
-        float new_Z(const GCodeReader &reader) const { return this->has(Z) ? this->z() : reader.z(); }
+        // After G91, the X, Y and Z of a move are relative to the reader's position.
+        float new_X(const GCodeReader &reader) const { return this->has(X) ? (reader.relative_xyz() ? reader.x() + this->x() : this->x()) : reader.x(); }
+        float new_Y(const GCodeReader &reader) const { return this->has(Y) ? (reader.relative_xyz() ? reader.y() + this->y() : this->y()) : reader.y(); }
+        float new_Z(const GCodeReader &reader) const { return this->has(Z) ? (reader.relative_xyz() ? reader.z() + this->z() : this->z()) : reader.z(); }
         float new_E(const GCodeReader &reader) const { return this->has(E) ? this->e() : reader.e(); }
         float new_F(const GCodeReader &reader) const { return this->has(F) ? this->f() : reader.f(); }
-        float dist_X(const GCodeReader &reader) const { return this->has(X) ? (this->x() - reader.x()) : 0; }
-        float dist_Y(const GCodeReader &reader) const { return this->has(Y) ? (this->y() - reader.y()) : 0; }
-        float dist_Z(const GCodeReader &reader) const { return this->has(Z) ? (this->z() - reader.z()) : 0; }
+        float dist_X(const GCodeReader &reader) const { return this->has(X) ? (reader.relative_xyz() ? this->x() : this->x() - reader.x()) : 0; }
+        float dist_Y(const GCodeReader &reader) const { return this->has(Y) ? (reader.relative_xyz() ? this->y() : this->y() - reader.y()) : 0; }
+        float dist_Z(const GCodeReader &reader) const { return this->has(Z) ? (reader.relative_xyz() ? this->z() : this->z() - reader.z()) : 0; }
         float dist_E(const GCodeReader &reader) const { return this->has(E) ? (this->e() - reader.e()) : 0; }
         float dist_XY(const GCodeReader &reader) const {
-            float x = this->has(X) ? (this->x() - reader.x()) : 0;
-            float y = this->has(Y) ? (this->y() - reader.y()) : 0;
+            float x = this->dist_X(reader);
+            float y = this->dist_Y(reader);
             return sqrt(x*x + y*y);
         }
         bool cmd_is(const char *cmd_test)          const { return cmd_is(m_raw, cmd_test); }
@@ -101,7 +102,7 @@ public:
     typedef std::function<void(GCodeReader&, const char*, const char*)> raw_line_callback_t;
     
     GCodeReader() : m_verbose(false) { this->reset(); }
-    void reset() { memset(m_position, 0, sizeof(m_position)); }
+    void reset() { memset(m_position, 0, sizeof(m_position)); m_relative_xyz = false; }
     void apply_config(const GCodeConfig &config);
     void apply_config(const DynamicPrintConfig &config);
     const GCodeConfig& config() { return m_config ? *m_config : default_config(); };
@@ -147,6 +148,8 @@ public:
     // To be called by the callback to stop parsing.
     void quit_parsing() { m_parsing = false; }
 
+    // True after G91, until G90.
+    bool   relative_xyz() const { return m_relative_xyz; }
     float& x()       { return m_position[X]; }
     float  x() const { return m_position[X]; }
     float& y()       { return m_position[Y]; }
@@ -192,6 +195,7 @@ private:
     std::shared_ptr<const GCodeConfig> m_config;
     bool        m_use_relative_e_distances{ default_config().use_relative_e_distances.value };
     float       m_position[NUM_AXES];
+    bool        m_relative_xyz{ false };
     bool        m_verbose;
     // To be set by the callback to stop parsing.
     bool        m_parsing{ false };
