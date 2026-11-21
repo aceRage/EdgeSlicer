@@ -14,8 +14,10 @@
 #include <utility>
 #include <vector>
 
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCode/CoolingBuffer.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode/FanMover.hpp"
 #include "libslic3r/GCodeWriter.hpp"
 
@@ -614,6 +616,25 @@ TEST_CASE("Walls without an overhang fan transition keep their arcs", "[Cooling]
 // Upstream's test for Orca #16297 (tests/fff_print/test_cooling.cpp), on Catch2 v2 and our config API. The
 // sphere's lower half overhangs all round, so its walls are cooled along their whole length: the path-wide
 // marker carries that, and they keep their arcs.
+// Orca #17681: a raft prints support interface while the fan is held off, which ignores the interface fan. The
+// end marker of such a region was then left in the G-code.
+TEST_CASE("Cooling consumes the support interface fan markers while the fan is held off", "[Cooling][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"enable_support", "1"},
+        {"raft_layers", "3"},
+        {"support_material_interface_fan_speed", "50"},
+        {"close_fan_the_first_x_layers", "5"},
+    });
+    const std::string gcode = slice({TestMesh::cube_20x20x20}, config);
+    REQUIRE(gcode.find(GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) + ExtrusionEntity::role_to_string(erSupportMaterialInterface)) !=
+            std::string::npos);
+    CHECK(gcode.find(";_SUPP_INTERFACE_FAN") == std::string::npos);
+}
+
 TEST_CASE("Arc fitting remains active with overhang fan control", "[Cooling][Regression][Orca16297]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
