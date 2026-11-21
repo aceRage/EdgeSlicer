@@ -575,6 +575,7 @@ set(lisbslic3r_sources
     ThinFeatures.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
+    nanosvg_impl.cpp
     SvgSplit.cpp
     SvgSplit.hpp
     ObjColorMatch.cpp
@@ -855,6 +856,7 @@ slic3r_unity_build(libslic3r SKIP
     CodeEmboss.cpp                  # file-local rectangle()/circle()/to_svg() helpers with common names
     ImageTrace.cpp                  # using namespace image_trace_detail (to_svg(), luminance() ...)
     Format/GLTF.cpp                 # defines CGLTF_IMPLEMENTATION before its include
+    nanosvg_impl.cpp                # defines NANOSVG_IMPLEMENTATION before its include
     FilamentGroup.cpp               # namespace-scope using namespace FilamentGroupUtils - FilamentInfo ambiguity
     Format/ZipperArchiveImport.cpp  # read_ini()/CONFIG_FNAME also in Format/SL1.cpp
     Arrange.cpp                     # namespace-scope using namespace libnest2d
@@ -886,6 +888,9 @@ slic3r_unity_build(libslic3r SKIP
     Showcase/ShowcaseHdriLibrary.cpp # file-local hdri_stem; OpenSSL through ImageFill
     Layerling.cpp                   # file-local helpers (lower, trim, starts_with) with common names
 )
+# PCH would include headers before NANOSVG_IMPLEMENTATION; skip it so the implementation
+# compiles even if a PCH header later pulls in nanosvg.h.
+set_source_files_properties(nanosvg_impl.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 if (SLIC3R_STATIC)
     set(CGAL_Boost_USE_STATIC_LIBS ON CACHE BOOL "" FORCE)

@@ -16,15 +16,6 @@
 // Prints one JSON object on stdout and exits 0 when the two files meet the criteria, 1 when they
 // do not, 2 on a load error.
 
-// nanosvg is a header-only dependency whose implementation the application compiles inside
-// src/slic3r/GUI/BitmapCache.cpp. libslic3r references it (svg.cpp, NSVGUtils.cpp), so a non-GUI
-// executable linking libslic3r has to supply the implementation itself or the link fails on
-// nsvgParse / nsvgDelete. Three lines here, and no change to the shipped application.
-#define NANOSVG_IMPLEMENTATION
-#define NANOSVGRAST_IMPLEMENTATION
-#include "nanosvg/nanosvg.h"
-#include "nanosvg/nanosvgrast.h"
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
