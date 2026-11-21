@@ -19747,3 +19747,111 @@ msgstr ""
 #, c-format, boost-format
 #~ msgid "Support: propagate branches at layer %d"
 #~ msgstr "Atramos: skleisti šakas sluoksnyje %d"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Click to collapse or expand this section"
+msgstr "Spustelėkite, kad suskleistumėte arba išskleistumėte šį skyrių"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Search all settings"
+msgstr "Ieškoti visuose nustatymuose"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Expand all"
+msgstr "Išskleisti viską"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Collapse all"
+msgstr "Suskleisti viską"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "3D View"
+msgstr "3D vaizdas"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Projects & Files"
+msgstr "Projektai ir failai"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Slicing & Presets"
+msgstr "Sluoksniavimas ir profiliai"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Printers & Network"
+msgstr "Spausdintuvai ir tinklas"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Apps & Advanced"
+msgstr "Programos ir išplėstiniai"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "No settings match that search."
+msgstr "Paieškos neatitinka joks nustatymas."
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Language and region"
+msgstr "Kalba ir regionas"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Startup"
+msgstr "Paleidimas"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Updates"
+msgstr "Atnaujinimai"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Appearance"
+msgstr "Išvaizda"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Camera and mouse"
+msgstr "Kamera ir pelė"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Selection and tool panels"
+msgstr "Žymėjimas ir įrankių skydeliai"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "G-code preview"
+msgstr "G-kodo peržiūra"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Rendering quality"
+msgstr "Atvaizdavimo kokybė"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Opening projects"
+msgstr "Projektų atvėrimas"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Warnings when loading"
+msgstr "Įspėjimai įkeliant"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Project strip and recent files"
+msgstr "Projektų juosta ir paskiausi failai"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Saving and backup"
+msgstr "Išsaugojimas ir atsarginės kopijos"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Folders"
+msgstr "Aplankai"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Bambu Studio presets"
+msgstr "Bambu Studio profiliai"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Accounts and devices"
+msgstr "Paskyros ir įrenginiai"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "External apps"
+msgstr "Išorinės programos"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Optional tabs"
+msgstr "Pasirenkamos kortelės"
