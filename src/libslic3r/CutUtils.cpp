@@ -1139,7 +1139,7 @@ Cut::SavedPaintings Cut::save_paintings(const ModelObject* object, const std::ve
         std::optional<TriangleSelector::SavedPainting> sp = volume->save_painting();
         if (!sp)
             continue;
-        sp->mesh.transform(instance_matrix * volume->get_matrix(), true);
+        sp->transform(instance_matrix * volume->get_matrix());
         sp->field_to_saved = instance_matrix * volume->get_matrix();
         saved.emplace_back(std::move(sp));
     }
@@ -1346,7 +1346,7 @@ CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>&
             std::optional<TriangleSelector::SavedPainting> sp = v->save_painting();
             if (!sp)
                 continue;
-            sp->mesh.transform(to_object * frame, true);
+            sp->transform(to_object * frame);
             saved.emplace_back(std::move(*sp));
         }
     }
@@ -1405,7 +1405,7 @@ CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>&
             return;
         TriangleSelector::TriangleSplittingData result = TriangleSelector::remap_painting(
             sp.mesh.its, src, uncut.mesh().its, target,
-            std::optional<std::reference_wrapper<const TriangleSelector::TriangleSplittingData>>{ std::cref(dst.get_data()) });
+            std::optional<std::reference_wrapper<const TriangleSelector::TriangleSplittingData>>{ std::cref(dst.get_data()) }, sp.inside_out);
         if (!result.bitstream.empty())
             dst.set_data(std::move(result));
     };
