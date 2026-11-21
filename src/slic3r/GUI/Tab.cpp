@@ -4,6 +4,7 @@
 #include "BambuSetupNoticeDialog.hpp"
 #include "MixedSublayerUi.hpp"
 #include "PresetHints.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
@@ -9810,6 +9811,18 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                 (!dialog || !dialog->IsShown()))
                 plater->normalize_bed_types(false);
         }
+
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::PresetSelected,
+            ctx.name = preset_name;
+            ctx.code = LifecycleEvtCode::Ok;
+            switch (m_type) {
+            case Preset::TYPE_PRINT:        ctx.msg = "print"; break;
+            case Preset::TYPE_SLA_PRINT:    ctx.msg = "sla_print"; break;
+            case Preset::TYPE_FILAMENT:     ctx.msg = "filament"; break;
+            case Preset::TYPE_SLA_MATERIAL: ctx.msg = "sla_material"; break;
+            case Preset::TYPE_PRINTER:      ctx.msg = "printer"; break;
+            default: break;
+            });
 
         // Ultra: switching to a printer re-pulls that printer's newest Bambu Studio user presets.
         // Deferred so it runs after this switch settles. sync_bambu_user_presets only lists the Bambu

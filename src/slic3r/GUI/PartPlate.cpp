@@ -27,6 +27,7 @@
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/GCode/WipeTower2.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/MixedFilament.hpp"
@@ -2367,10 +2368,16 @@ void PartPlate::set_plate_name(const std::string& name)
     if (boost::equals(m_name, name))
         return;
 
+	EDGE_LIFECYCLE_ONLY(const std::string previous_name = m_name;)
 	m_name = name;
     sync_plate_name_to_print();
 
 	invalidate_plate_name_texture();
+
+    EDGE_LIFECYCLE_FIRE_IF(m_plater != nullptr && !m_plater->is_loading_project(), LifecycleEvent::PlateRenamed,
+        ctx.name          = name;
+        ctx.previous_name = previous_name;
+        ctx.index         = m_plate_index;);
 }
 
 //get the print's object, result and index
@@ -4460,6 +4467,10 @@ int PartPlateList::create_plate(bool adjust_position)
 		wxGetApp().obj_list()->on_plate_added(plate);
 	}
 
+    EDGE_LIFECYCLE_FIRE_IF(m_plater != nullptr && m_intialized && !m_plater->is_loading_project(), LifecycleEvent::PlateCreated,
+        ctx.name  = plate->get_plate_name();
+        ctx.index = new_index;);
+
 	BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(":created a new plate %1%") % new_index;
 	return new_index;
 }
@@ -4566,6 +4577,7 @@ int PartPlateList::delete_plate(int index)
 	}
 
 	plate = m_plate_list[index];
+	EDGE_LIFECYCLE_ONLY(const std::string plate_name = plate->get_plate_name();)
 	if (index != plate->get_index())
 	{
 		BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(":plate %1%, has an invalid index %2%") % index % plate->get_index();
@@ -4652,6 +4664,10 @@ int PartPlateList::delete_plate(int index)
 	destroy_print(print_index);
 
 	delete plate;
+
+    EDGE_LIFECYCLE_FIRE_IF(m_plater != nullptr && m_intialized && !m_plater->is_loading_project(), LifecycleEvent::PlateDeleted,
+        ctx.name  = plate_name;
+        ctx.index = index;);
 
     // FIX: context of BackgroundSliceProcess and gcode preview need to be updated before ObjectList::reload_all_plates().
 #if 0
@@ -4793,6 +4809,11 @@ int PartPlateList::select_plate(int index)
         m_plater->set_bed_position(pos);
 		//wxQueueEvent(m_plater, new SimpleEvent(EVT_GLCANVAS_PLATE_SELECT));
 	}
+
+    EDGE_LIFECYCLE_FIRE_IF(old_plate_index != index && m_intialized && m_plater != nullptr && !m_plater->is_loading_project(),
+        LifecycleEvent::PlateSelected,
+        ctx.name  = m_plate_list[index]->get_plate_name();
+        ctx.index = index;);
 
 	return 0;
 }
