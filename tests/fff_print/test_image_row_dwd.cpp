@@ -277,3 +277,159 @@ TEST_CASE("DwD walls: plain colour runs are not affected", "[dwd][imagefill][wal
         CHECK(a == b);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// P4: a textured model - the walls read the part's own texture through its own UVs
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// Gives the cube a 3 x 1 texture of the first three filament colours and UVs that put the first
+// on the +X side, the second on the -X side and the third on everything else.
+void texture_cube_by_side(Model &model)
+{
+    ModelVolume                *volume = model.objects.front()->volumes.front();
+    const indexed_triangle_set &mesh   = volume->mesh().its;
+
+    std::vector<uint8_t> rgb;
+    for (size_t i = 0; i < 3; ++i) {
+        const std::array<float, 3> c = MixedFilamentManager::hex_to_srgb01(kDwdColours[i]);
+        for (float v : c)
+            rgb.push_back(uint8_t(std::lround(v * 255.f)));
+    }
+    ImageFillUVs uvs(mesh.indices.size());
+    for (size_t f = 0; f < uvs.size(); ++f) {
+        const Vec3f &a = mesh.vertices[mesh.indices[f](0)], &b = mesh.vertices[mesh.indices[f](1)],
+                    &c = mesh.vertices[mesh.indices[f](2)];
+        const Vec3f n    = (b - a).cross(c - a).normalized();
+        const int   cell = n.x() > 0.5f ? 0 : n.x() < -0.5f ? 1 : 2;
+        for (size_t k = 0; k < 3; ++k)
+            uvs[f][k] = Vec2f((float(cell) + 0.5f) / 3.f, 0.5f);
+    }
+    REQUIRE(image_fill_set_volume_texture(*volume, model.image_assets, image_fill_encode_png(3, 1, rgb.data()), uvs));
+}
+
+// The extruders the outer wall used on the +X side, the -X side and the two Y sides, in the middle
+// of the cube's height and clear of the corners.
+struct SideExtruders
+{
+    std::map<int, size_t> plus_x, minus_x, y_sides;
+};
+
+SideExtruders outer_wall_by_side(const GCodeProcessorResult &result)
+{
+    struct Piece { Vec3f mid; int extruder; };
+    std::vector<Piece> pieces;
+    BoundingBoxf3      box;
+    for (size_t i = 1; i < result.moves.size(); ++i) {
+        const auto &m = result.moves[i];
+        if (m.type != EMoveType::Extrude || m.extrusion_role != erExternalPerimeter)
+            continue;
+        const Vec3f mid = 0.5f * (result.moves[i - 1].position + m.position);
+        pieces.push_back({mid, int(m.extruder_id)});
+        box.merge(mid.cast<double>());
+    }
+    SideExtruders out;
+    if (pieces.empty())
+        return out;
+    const Vec3d  centre = box.center();
+    const double half   = 0.5 * box.size().x();
+    for (const Piece &p : pieces) {
+        if (p.mid.z() < 3.f || p.mid.z() > 27.f)
+            continue;
+        const double dx = double(p.mid.x()) - centre.x(), dy = double(p.mid.y()) - centre.y();
+        if (std::abs(dy) < half - 4. && dx > half - 0.5)
+            ++out.plus_x[p.extruder];
+        else if (std::abs(dy) < half - 4. && dx < -(half - 0.5))
+            ++out.minus_x[p.extruder];
+        else if (std::abs(dx) < half - 4. && std::abs(dy) > half - 0.5)
+            ++out.y_sides[p.extruder];
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Mesh UV walls: each side of a textured cube prints its own texture colour", "[dwd][imagefill][walls][meshuv]")
+{
+    ImageFillParams p;
+    p.projection = ImageFillProjection::MeshUV;
+    p.faces      = ImageFillFaces::All;
+
+    Model                model;
+    MixedFilamentManager mgr;
+    make_dwd_cube(model, mgr, IMAGE_FILL_WALL_RUNS, p);
+    texture_cube_by_side(model);
+
+    DynamicPrintConfig config = dwd_test_config();
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+
+    GCodeProcessorResult result;
+    slice_dwd(model, config, result);
+    const SideExtruders sides = outer_wall_by_side(result);
+
+    // Filaments 1, 2, 3 are extruders 0, 1, 2: one colour per side, and nothing else there.
+    REQUIRE(sides.plus_x.size() == 1);
+    CHECK(sides.plus_x.begin()->first == 0);
+    REQUIRE(sides.minus_x.size() == 1);
+    CHECK(sides.minus_x.begin()->first == 1);
+    REQUIRE(sides.y_sides.size() == 1);
+    CHECK(sides.y_sides.begin()->first == 2);
+}
+
+TEST_CASE("Mesh UV walls: a part whose UVs no longer fit keeps its own filament", "[dwd][imagefill][walls][meshuv]")
+{
+    ImageFillParams p;
+    p.projection = ImageFillProjection::MeshUV;
+    p.faces      = ImageFillFaces::All;
+
+    Model                model;
+    MixedFilamentManager mgr;
+    make_dwd_cube(model, mgr, IMAGE_FILL_WALL_RUNS, p);
+    // No texture was ever stored on this part: the row has nothing to read.
+
+    DynamicPrintConfig config = dwd_test_config();
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+
+    GCodeProcessorResult result;
+    slice_dwd(model, config, result);
+    const SideExtruders sides = outer_wall_by_side(result);
+
+    // The part's own filament is 4 (extruder 3), on every side.
+    REQUIRE(sides.plus_x.size() == 1);
+    CHECK(sides.plus_x.begin()->first == 3);
+    REQUIRE(sides.minus_x.size() == 1);
+    CHECK(sides.minus_x.begin()->first == 3);
+    REQUIRE(sides.y_sides.size() == 1);
+    CHECK(sides.y_sides.begin()->first == 3);
+}
+
+TEST_CASE("Mesh UV walls: dual wall dithering reads the texture too", "[dwd][imagefill][walls][meshuv]")
+{
+    ImageFillParams p;
+    p.projection = ImageFillProjection::MeshUV;
+    p.faces      = ImageFillFaces::All;
+
+    Model                model;
+    MixedFilamentManager mgr;
+    make_dwd_cube(model, mgr, IMAGE_FILL_WALL_DWD, p);
+    texture_cube_by_side(model);
+
+    DynamicPrintConfig config = dwd_test_config();
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+
+    GCodeProcessorResult result;
+    slice_dwd(model, config, result);
+    const SideExtruders sides = outer_wall_by_side(result);
+
+    // A pure filament colour is its own nearest pair's outer wall, so each side's outer wall still
+    // carries that side's filament - through the pair table this time.
+    REQUIRE_FALSE(sides.plus_x.empty());
+    REQUIRE_FALSE(sides.minus_x.empty());
+    CHECK(sides.plus_x.count(0) == 1);
+    CHECK(sides.minus_x.count(1) == 1);
+    CHECK(sides.y_sides.count(2) == 1);
+    // The backing never shows on the outer wall of a textured side.
+    CHECK(sides.plus_x.count(3) == 0);
+    CHECK(sides.minus_x.count(3) == 0);
+}

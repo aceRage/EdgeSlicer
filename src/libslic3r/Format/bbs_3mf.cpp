@@ -10744,6 +10744,9 @@ bool _BBS_3MF_Exporter::_add_image_fill_to_archive(mz_zip_archive &archive, Mode
             if (image_fill_params_of(*volume, params) && !params.asset.empty() &&
                 std::find(used.begin(), used.end(), params.asset) == used.end())
                 used.push_back(params.asset);
+            // A textured model's UVs ride in the same store (ImageFillParams::uv_asset).
+            if (!params.uv_asset.empty() && std::find(used.begin(), used.end(), params.uv_asset) == used.end())
+                used.push_back(params.uv_asset);
         }
     }
     // Phase 3 (image row): a MixedFilament row can ALSO reference an asset, via its

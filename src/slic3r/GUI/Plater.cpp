@@ -14309,6 +14309,79 @@ static void notify_bambu_mixed_import(NotificationManager *notifications, const 
 }
 
 // BBS: backup & restore
+// Dual wall dithering on a textured model: a part that arrived with its own texture and UVs
+// (glTF, OBJ) can print its walls from that texture. Asks once per import; "Yes" creates one image
+// row that reads the model's own texture coordinates and binds it to the parts' walls.
+static void offer_texture_dual_wall(Plater *q, const std::vector<size_t> &obj_idxs)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (q == nullptr || bundle == nullptr)
+        return;
+    std::vector<ModelVolume *> textured;
+    for (size_t idx : obj_idxs)
+        if (idx < q->model().objects.size())
+            for (ModelVolume *v : q->model().objects[idx]->volumes)
+                if (v->is_model_part() && image_fill_volume_has_texture(*v, q->model().image_assets))
+                    textured.push_back(v);
+    if (textured.empty())
+        return;
+    const ConfigOptionStrings *colours = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+    const size_t num_physical = colours != nullptr ? colours->values.size() : 0;
+    if (num_physical < 2)
+        return;
+
+    MessageDialog dlg(q,
+                      _L("This model has a texture. Print its walls with dual wall dithering (experimental)?") + "\n\n" +
+                          _L("The outer wall and the wall behind it change filament layer by layer, so their colours mix "
+                             "into the texture's colours. It needs semi-translucent filaments, classic walls, at least 2 "
+                             "wall loops and thin layers, and it adds many filament changes.") + "\n\n" +
+                          _L("The first four filaments are used. To change or remove this later, use Image fill on the part."),
+                      _L("Dual wall dithering"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
+    if (dlg.ShowModal() != wxID_YES)
+        return;
+
+    std::vector<unsigned int> ids;
+    for (size_t i = 0; i < std::min<size_t>(num_physical, 4); ++i)
+        ids.push_back(unsigned(i) + 1);
+
+    ImageFillParams params;
+    params.projection  = ImageFillProjection::MeshUV;
+    params.faces       = ImageFillFaces::All;
+    params.surfaces    = IMAGE_FILL_SURFACE_WALLS;
+    params.wall_method = IMAGE_FILL_WALL_DWD;
+    params.allowed.assign(ids.begin(), ids.end());
+
+    MixedFilamentManager &mixed_mgr = bundle->mixed_filaments;
+    const size_t          before    = mixed_mgr.mixed_filaments().size();
+    mixed_mgr.add_custom_filament(ids[0], ids[1], 50, colours->values);
+    if (mixed_mgr.mixed_filaments().size() <= before) {
+        q->get_notification_manager()->push_plater_warning_notification(
+            _u8L("Dual wall dithering was not set: no room for another mixed filament."));
+        return;
+    }
+    MixedFilament &row         = mixed_mgr.mixed_filaments().back();
+    row.enabled                = true;
+    row.distribution_mode      = int(MixedFilament::ImageWeighted);
+    row.gradient_component_ids = MixedFilamentManager::encode_gradient_component_ids(ids);
+    row.component_a            = ids[0];
+    row.component_b            = ids[1];
+    row.image_fill_ref         = MixedFilamentManager::encode_image_fill_ref(params.to_string());
+    const unsigned int virtual_id =
+        mixed_mgr.filament_id_from_mixed_index(mixed_mgr.mixed_filaments().size() - 1, num_physical);
+    if (virtual_id == 0)
+        return;
+    for (ModelVolume *v : textured)
+        v->config.set_key_value("wall_filament", new ConfigOptionInt(int(virtual_id)));
+
+    const std::string serialized = mixed_mgr.serialize_custom_entries();
+    if (ConfigOptionString *opt = bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
+        opt->value = serialized;
+    else
+        bundle->project_config.set_key_value("mixed_filament_definitions", new ConfigOptionString(serialized));
+    q->sidebar().update_mixed_filament_panel(false);
+    q->update();
+}
+
 std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi,
                                              bool* config_loaded_out)
 {
@@ -15437,6 +15510,13 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(", before load_model_objects, count %1%")%model.objects.size();
             auto loaded_idxs = load_model_objects(model.objects, is_project_file);
             obj_idxs.insert(obj_idxs.end(), loaded_idxs.begin(), loaded_idxs.end());
+            // A textured import keeps its texture and UVs as image assets on the model it was read
+            // into; they have to come across with the objects.
+            for (const auto &asset : model.image_assets.assets())
+                if (!q->model().image_assets.contains(asset.first))
+                    q->model().image_assets.add(asset.second.bytes);
+            if (!is_project_file && RemoteAccess::dialog_mode() == RemoteAccess::Mode::Interactive)
+                offer_texture_dual_wall(q, loaded_idxs);
             if (shouldInitializeAssemblyPosition)
             {
                 ModelObjectPtrs loadedObjects;
@@ -31688,8 +31768,15 @@ void Plater::apply_image_fill(const wxString &image_path)
                              volume->mmu_segmentation_facets.get_data(), painted, initial_row_surfaces);
     if (dlg.ShowModal() != wxID_OK)
         return;
-    const ImageFillParams params       = dlg.params();
-    const int             row_surfaces = dlg.image_row_surfaces();
+    ImageFillParams params       = dlg.params();
+    const int       row_surfaces = dlg.image_row_surfaces();
+    // A textured model: its own texture coordinates, kept by the importer, are what "The model's
+    // own texture coordinates" projects through.
+    if (params.uv_asset.empty())
+        params.uv_asset = initial.uv_asset;
+    ImageFillUVs mesh_uvs;
+    if (params.projection == ImageFillProjection::MeshUV)
+        image_fill_volume_uvs(*volume, model().image_assets, mesh_uvs);
 
     std::vector<std::array<float, 3>> colors;
     std::vector<int>                  ids;
@@ -31703,7 +31790,7 @@ void Plater::apply_image_fill(const wxString &image_path)
     // Phase 2's facet painting always runs, whether or not the image-row boxes are ticked - the
     // dialog's own tooltips explain why (a printer/slicer that never reads the row still gets a
     // correct, if coarser, result).
-    const ImageFillResult res = image_fill_apply(*volume, params, model().image_assets, colors, ids);
+    const ImageFillResult res = image_fill_apply(*volume, params, model().image_assets, colors, ids, mesh_uvs);
     if (!res.ok) {
         show_error(this, from_u8(res.error.empty() ? "The image could not be applied." : res.error));
         return;
@@ -31790,6 +31877,8 @@ void Plater::apply_image_fill(const wxString &image_path)
                 ImageFillParams pv;
                 if (image_fill_params_of(*v, pv) && !pv.asset.empty())
                     keep.push_back(pv.asset);
+                if (!pv.uv_asset.empty())
+                    keep.push_back(pv.uv_asset);
             }
         model().image_assets.retain(keep);
     }

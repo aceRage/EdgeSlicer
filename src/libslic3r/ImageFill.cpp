@@ -6,6 +6,8 @@
 #include "PNGReadWrite.hpp"
 
 #include "ColorSolver.hpp"
+#include "AABBTreeIndirect.hpp"
+#include "miniz_extension.hpp"
 
 #include <openssl/sha.h>
 
@@ -385,6 +387,7 @@ std::string ImageFillParams::to_string() const
     std::ostringstream os;
     os << "v=1";
     if (!asset.empty()) os << ";img=" << asset;
+    if (!uv_asset.empty()) os << ";uv=" << uv_asset;
     os << ";proj=" << int(projection) << ";axis=" << int(axis);
     // Written always, not only when it is not the default: a params string that does not say
     // which faces it painted is a string from before this rule existed, and it must not be
@@ -444,6 +447,7 @@ bool ImageFillParams::from_string(const std::string &s, ImageFillParams &out)
         const std::string k = tok.substr(0, eq), val = tok.substr(eq + 1);
         if (k == "v")          seen_version = true;
         else if (k == "img")   out.asset = val;
+        else if (k == "uv")    out.uv_asset = val;
         else if (k == "proj")  out.projection = ImageFillProjection(std::max(0, std::min(3, std::atoi(val.c_str()))));
         else if (k == "axis")  out.axis = ImageFillAxis(std::max(0, std::min(2, std::atoi(val.c_str()))));
         else if (k == "pf")    out.faces = ImageFillFaces(std::max(0, std::min(2, std::atoi(val.c_str()))));
@@ -1302,6 +1306,218 @@ float image_fill_stripe_width_factor(const std::vector<float> &weights, size_t l
     const float n = float(weights.size());
     const float t = std::min(1.f, std::max(0.f, weights[layer_component] * n * 0.5f));
     return 1.f + depth * (2.f * t - 1.f);
+}
+
+// =============================================================================================
+// 12. Mesh UV at slice time
+// =============================================================================================
+
+std::vector<uint8_t> image_fill_encode_png(size_t width, size_t height, const uint8_t *rgb)
+{
+    std::vector<uint8_t> out;
+    if (width == 0 || height == 0 || rgb == nullptr)
+        return out;
+    size_t size = 0;
+    void  *png  = tdefl_write_image_to_png_file_in_memory_ex((const void *) rgb, int(width), int(height), 3, &size,
+                                                             MZ_DEFAULT_LEVEL, 0);
+    if (png != nullptr) {
+        out.assign((const uint8_t *) png, (const uint8_t *) png + size);
+        mz_free(png);
+    }
+    return out;
+}
+
+namespace {
+
+const char   UV_BLOB_MAGIC[8] = {'E', 'D', 'G', 'E', 'U', 'V', '1', 0};
+const size_t UV_BLOB_HEADER   = 8 + 4 + 8;
+
+// FNV-1a over the face indices: the triangle numbering, which is what the UV array is indexed by.
+uint64_t mesh_index_hash(const indexed_triangle_set &mesh)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (const stl_triangle_vertex_indices &f : mesh.indices)
+        for (int k = 0; k < 3; ++k) {
+            uint32_t v = uint32_t(f(k));
+            for (int b = 0; b < 4; ++b) {
+                h ^= uint64_t(v & 0xffu);
+                h *= 1099511628211ull;
+                v >>= 8;
+            }
+        }
+    return h;
+}
+
+} // namespace
+
+std::vector<uint8_t> image_fill_encode_uvs(const ImageFillUVs &uvs, const indexed_triangle_set &mesh)
+{
+    std::vector<uint8_t> out;
+    if (uvs.empty() || uvs.size() != mesh.indices.size())
+        return out;
+    out.resize(UV_BLOB_HEADER + uvs.size() * 6 * sizeof(float));
+    std::memcpy(out.data(), UV_BLOB_MAGIC, 8);
+    const uint32_t n = uint32_t(uvs.size());
+    const uint64_t h = mesh_index_hash(mesh);
+    std::memcpy(out.data() + 8, &n, 4);
+    std::memcpy(out.data() + 12, &h, 8);
+    float *dst = reinterpret_cast<float *>(out.data() + UV_BLOB_HEADER);
+    std::vector<float> flat(uvs.size() * 6);
+    for (size_t f = 0; f < uvs.size(); ++f)
+        for (size_t k = 0; k < 3; ++k) {
+            flat[f * 6 + k * 2]     = uvs[f][k].x();
+            flat[f * 6 + k * 2 + 1] = uvs[f][k].y();
+        }
+    std::memcpy((void *) dst, flat.data(), flat.size() * sizeof(float));
+    return out;
+}
+
+bool image_fill_decode_uvs(const std::vector<uint8_t> &bytes, const indexed_triangle_set &mesh, ImageFillUVs &out)
+{
+    if (bytes.size() < UV_BLOB_HEADER || std::memcmp(bytes.data(), UV_BLOB_MAGIC, 8) != 0)
+        return false;
+    uint32_t n = 0;
+    uint64_t h = 0;
+    std::memcpy(&n, bytes.data() + 8, 4);
+    std::memcpy(&h, bytes.data() + 12, 8);
+    if (n == 0 || size_t(n) != mesh.indices.size() || bytes.size() != UV_BLOB_HEADER + size_t(n) * 6 * sizeof(float))
+        return false;
+    if (h != mesh_index_hash(mesh))
+        return false;
+    std::vector<float> flat(size_t(n) * 6);
+    std::memcpy(flat.data(), bytes.data() + UV_BLOB_HEADER, flat.size() * sizeof(float));
+    out.resize(n);
+    for (size_t f = 0; f < size_t(n); ++f)
+        for (size_t k = 0; k < 3; ++k)
+            out[f][k] = Vec2f(flat[f * 6 + k * 2], flat[f * 6 + k * 2 + 1]);
+    return true;
+}
+
+bool image_fill_set_volume_texture(ModelVolume &volume, ImageAssetStore &assets, std::vector<uint8_t> texture_png,
+                                   const ImageFillUVs &uvs)
+{
+    if (texture_png.empty())
+        return false;
+    std::vector<uint8_t> blob = image_fill_encode_uvs(uvs, volume.mesh().its);
+    if (blob.empty())
+        return false;
+    ImageFillParams params;
+    params.projection = ImageFillProjection::MeshUV;
+    params.faces      = ImageFillFaces::All;
+    params.asset      = assets.add(std::move(texture_png));
+    params.uv_asset   = assets.add(std::move(blob));
+    if (params.asset.empty() || params.uv_asset.empty())
+        return false;
+    volume.config.set_key_value("image_fill_params", new ConfigOptionString(params.to_string()));
+    return true;
+}
+
+bool image_fill_volume_uvs(const ModelVolume &volume, const ImageAssetStore &assets, ImageFillUVs &out)
+{
+    ImageFillParams params;
+    if (!image_fill_params_of(volume, params) || params.uv_asset.empty())
+        return false;
+    const ImageAsset *blob = assets.find(params.uv_asset);
+    return blob != nullptr && image_fill_decode_uvs(blob->bytes, volume.mesh().its, out);
+}
+
+bool image_fill_volume_has_texture(const ModelVolume &volume, const ImageAssetStore &assets)
+{
+    ImageFillParams params;
+    if (!image_fill_params_of(volume, params) || params.uv_asset.empty() || params.asset.empty() ||
+        !assets.contains(params.asset))
+        return false;
+    ImageFillUVs uvs;
+    return image_fill_volume_uvs(volume, assets, uvs);
+}
+
+struct ImageFillUvLookup
+{
+    indexed_triangle_set             mesh;
+    ImageFillUVs                     uvs;
+    AABBTreeIndirect::Tree<3, float> tree;
+};
+
+std::shared_ptr<const ImageFillUvLookup> image_fill_uv_lookup(const ModelVolume &volume, const ImageAssetStore &assets)
+{
+    ImageFillParams params;
+    if (!image_fill_params_of(volume, params) || params.uv_asset.empty())
+        return nullptr;
+    const indexed_triangle_set &its = volume.mesh().its;
+    if (its.indices.empty() || its.vertices.empty())
+        return nullptr;
+
+    struct Entry
+    {
+        const indexed_triangle_set              *its = nullptr;
+        size_t                                   vertices = 0, faces = 0;
+        Vec3f                                    first = Vec3f::Zero(), last = Vec3f::Zero();
+        std::string                              uv;
+        std::shared_ptr<const ImageFillUvLookup> lookup;   // null: this blob does not fit this mesh
+    };
+    static std::mutex         mutex;
+    static std::vector<Entry> cache;
+    std::lock_guard<std::mutex> lock(mutex);
+    for (const Entry &e : cache)
+        if (e.its == &its && e.vertices == its.vertices.size() && e.faces == its.indices.size() &&
+            e.first == its.vertices.front() && e.last == its.vertices.back() && e.uv == params.uv_asset)
+            return e.lookup;
+
+    Entry e;
+    e.its      = &its;
+    e.vertices = its.vertices.size();
+    e.faces    = its.indices.size();
+    e.first    = its.vertices.front();
+    e.last     = its.vertices.back();
+    e.uv       = params.uv_asset;
+    ImageFillUVs uvs;
+    if (const ImageAsset *blob = assets.find(params.uv_asset);
+        blob != nullptr && image_fill_decode_uvs(blob->bytes, its, uvs)) {
+        auto lookup  = std::make_shared<ImageFillUvLookup>();
+        lookup->mesh = its;
+        lookup->uvs  = std::move(uvs);
+        lookup->tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(lookup->mesh.vertices, lookup->mesh.indices);
+        e.lookup     = std::move(lookup);
+    }
+    if (cache.size() >= 8)
+        cache.erase(cache.begin());
+    cache.push_back(e);
+    return e.lookup;
+}
+
+bool image_fill_sample_uv(const ImageFillUvLookup &lookup, const ImageFillParams &params, const ImageAsset &image,
+                          const Vec3f &p_mesh, std::array<float, 3> &color)
+{
+    size_t hit = 0;
+    Vec3f  on  = Vec3f::Zero();
+    if (AABBTreeIndirect::squared_distance_to_indexed_triangle_set(lookup.mesh.vertices, lookup.mesh.indices, lookup.tree,
+                                                                   p_mesh, hit, on) < 0.f ||
+        hit >= lookup.uvs.size())
+        return false;
+    // The point's barycentric weights in the triangle it lies on.
+    const stl_triangle_vertex_indices &f = lookup.mesh.indices[hit];
+    const Vec3f &a  = lookup.mesh.vertices[f(0)];
+    const Vec3f  v0 = lookup.mesh.vertices[f(1)] - a, v1 = lookup.mesh.vertices[f(2)] - a, v2 = on - a;
+    const float  d00 = v0.dot(v0), d01 = v0.dot(v1), d11 = v1.dot(v1), d20 = v2.dot(v0), d21 = v2.dot(v1);
+    const float  den = d00 * d11 - d01 * d01;
+    float        w1 = 1.f / 3.f, w2 = 1.f / 3.f;
+    if (std::abs(den) > 1e-20f) {
+        w1 = (d11 * d20 - d01 * d21) / den;
+        w2 = (d00 * d21 - d01 * d20) / den;
+    }
+    w1 = std::max(0.f, std::min(1.f, w1));
+    w2 = std::max(0.f, std::min(1.f - w1, w2));
+    const std::array<Vec2f, 3> &uv = lookup.uvs[hit];
+    const Vec2f                 t  = uv[0] * (1.f - w1 - w2) + uv[1] * w1 + uv[2] * w2;
+    if (!std::isfinite(t.x()) || !std::isfinite(t.y()))
+        return false;   // a face the importer marked as untextured
+    // The same mapping image_fill_compute() applies: REPEAT wrap, glTF's v runs down.
+    float u = t.x() - std::floor(t.x());
+    float v = 1.f - (t.y() - std::floor(t.y()));
+    if (params.flip_u) u = 1.f - u;
+    if (params.flip_v) v = 1.f - v;
+    color = image_fill_sample_pixel(image, u, v);
+    return true;
 }
 
 } // namespace Slic3r

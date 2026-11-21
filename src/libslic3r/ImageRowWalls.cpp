@@ -299,7 +299,17 @@ bool build_context_for_row(const PrintObject &object, const PrintRegion &region,
     // Phase 5c: the box and frame the picture was laid over, when the part's own params record
     // them (they follow the part through a cut); otherwise the mesh's own box, as before.
     ImageFillParams placed = ctx.params;
-    {
+    if (ctx.params.projection == ImageFillProjection::MeshUV) {
+        // A textured model: the picture and the UVs are the part's own. The lookup works in the
+        // part's mesh space as it is today, so no recorded box or frame applies.
+        const ImageAssetStore &assets = mv->get_object()->get_model()->image_assets;
+        ImageFillParams        vp;
+        if (image_fill_params_of(*mv, vp) && !vp.asset.empty())
+            ctx.params.asset = vp.asset;
+        ctx.uv_lookup = image_fill_uv_lookup(*mv, assets);
+        placed        = ctx.params;
+        placed.has_box = placed.has_frame = false;
+    } else {
         ImageFillParams vp;
         if (image_fill_params_of(*mv, vp) && vp.has_box) {
             placed.has_box   = true;
@@ -438,12 +448,26 @@ bool point_seen_from_above(const Layer *layer, const Point &pt)
     return true;
 }
 
+// The image along one straight piece of a wall. A projection is asked per point; a textured model
+// (MeshUV) has no projection, so the sampler returns the points uncoloured and each takes the
+// texture's colour at the nearest point of the part's surface.
+std::vector<ImageRowSample> sample_wall_segment(const ImageAssetStore &assets, const ImageRowWallContext &ctx,
+                                                const Vec3f &p0, const Vec3f &p1, const Vec3f &normal)
+{
+    std::vector<ImageRowSample> seg =
+        image_fill_sample_segment(ctx.params, ctx.mesh_box, assets, p0, p1, normal, ctx.sample_spacing_mm);
+    if (ctx.params.projection == ImageFillProjection::MeshUV && ctx.uv_lookup != nullptr && !ctx.params.asset.empty())
+        if (const ImageAsset *img = assets.pixels(ctx.params.asset); img != nullptr)
+            for (ImageRowSample &s : seg)
+                s.has_color = image_fill_sample_uv(*ctx.uv_lookup, ctx.params, *img, s.pos, s.color);
+    return seg;
+}
+
 // One sample of the image at a single mesh-space point, seen along `normal`.
 ImageRowSample sample_point(const ImageAssetStore &assets, const ImageRowWallContext &ctx, const Vec3f &p_mesh,
                             const Vec3f &normal)
 {
-    std::vector<ImageRowSample> one =
-        image_fill_sample_segment(ctx.params, ctx.mesh_box, assets, p_mesh, p_mesh, normal, ctx.sample_spacing_mm);
+    std::vector<ImageRowSample> one = sample_wall_segment(assets, ctx, p_mesh, p_mesh, normal);
     return one.empty() ? ImageRowSample() : one.front();
 }
 
@@ -506,8 +530,7 @@ bool compute_wall_samples(const ImageAssetStore &assets, const ImageRowWallConte
             }
         }
 
-        std::vector<ImageRowSample> seg = image_fill_sample_segment(ctx.params, ctx.mesh_box, assets, p0_mesh, p1_mesh,
-                                                                   n_mesh, ctx.sample_spacing_mm);
+        std::vector<ImageRowSample> seg = sample_wall_segment(assets, ctx, p0_mesh, p1_mesh, n_mesh);
 
         // Phase 5a: where may the image land along this segment? (Only with a base filament to
         // fall back on - without one, phase 4's behaviour is kept exactly.)
