@@ -21805,3 +21805,111 @@ msgstr "TAC Joint unterstützt keine individuelle Teilzuordnung. Starte einen ne
 #: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
 msgid "TAC Joint cannot be combined with Flexi connectors in the same cut."
 msgstr "TAC Joint kann im selben Schnitt nicht mit Flexi-Verbindern kombiniert werden."
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Click to collapse or expand this section"
+msgstr "Klicken, um diesen Abschnitt ein- oder auszuklappen"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Search all settings"
+msgstr "Alle Einstellungen durchsuchen"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Expand all"
+msgstr "Alle ausklappen"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Collapse all"
+msgstr "Alle einklappen"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "3D View"
+msgstr "3D-Ansicht"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Projects & Files"
+msgstr "Projekte & Dateien"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Slicing & Presets"
+msgstr "Slicen & Profile"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Printers & Network"
+msgstr "Drucker & Netzwerk"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Apps & Advanced"
+msgstr "Apps & Erweitert"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "No settings match that search."
+msgstr "Keine Einstellung passt zu dieser Suche."
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Language and region"
+msgstr "Sprache und Region"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Startup"
+msgstr "Programmstart"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Updates"
+msgstr "Updates"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Appearance"
+msgstr "Darstellung"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Camera and mouse"
+msgstr "Kamera und Maus"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Selection and tool panels"
+msgstr "Auswahl und Werkzeugfenster"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "G-code preview"
+msgstr "G-Code-Vorschau"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Rendering quality"
+msgstr "Renderqualität"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Opening projects"
+msgstr "Projekte öffnen"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Warnings when loading"
+msgstr "Warnungen beim Laden"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Project strip and recent files"
+msgstr "Projektleiste und zuletzt verwendete Dateien"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Saving and backup"
+msgstr "Speichern und Sicherung"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Folders"
+msgstr "Ordner"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Bambu Studio presets"
+msgstr "Bambu Studio-Profile"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Accounts and devices"
+msgstr "Konten und Geräte"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "External apps"
+msgstr "Externe Apps"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Optional tabs"
+msgstr "Optionale Tabs"

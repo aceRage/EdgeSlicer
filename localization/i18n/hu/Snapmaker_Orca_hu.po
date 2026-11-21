@@ -18268,3 +18268,111 @@ msgstr ""
 
 #~ msgid "Orient the model"
 #~ msgstr "Modell orientációja"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Click to collapse or expand this section"
+msgstr "Kattintson a szakasz összecsukásához vagy kibontásához"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Search all settings"
+msgstr "Keresés az összes beállításban"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Expand all"
+msgstr "Összes kibontása"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Collapse all"
+msgstr "Összes összecsukása"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "3D View"
+msgstr "3D nézet"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Projects & Files"
+msgstr "Projektek és fájlok"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Slicing & Presets"
+msgstr "Szeletelés és beállításkészletek"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Printers & Network"
+msgstr "Nyomtatók és hálózat"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Apps & Advanced"
+msgstr "Alkalmazások és haladó"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "No settings match that search."
+msgstr "Nincs a keresésnek megfelelő beállítás."
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Language and region"
+msgstr "Nyelv és régió"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Startup"
+msgstr "Indítás"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Updates"
+msgstr "Frissítések"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Appearance"
+msgstr "Megjelenés"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Camera and mouse"
+msgstr "Kamera és egér"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Selection and tool panels"
+msgstr "Kijelölés és eszközpanelek"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "G-code preview"
+msgstr "G-kód előnézet"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Rendering quality"
+msgstr "Megjelenítési minőség"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Opening projects"
+msgstr "Projektek megnyitása"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Warnings when loading"
+msgstr "Figyelmeztetések betöltéskor"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Project strip and recent files"
+msgstr "Projektsáv és legutóbbi fájlok"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Saving and backup"
+msgstr "Mentés és biztonsági mentés"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Folders"
+msgstr "Mappák"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Bambu Studio presets"
+msgstr "Bambu Studio beállításkészletek"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Accounts and devices"
+msgstr "Fiókok és eszközök"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "External apps"
+msgstr "Külső alkalmazások"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Optional tabs"
+msgstr "Választható lapok"

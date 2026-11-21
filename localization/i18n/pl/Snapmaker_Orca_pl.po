@@ -22092,3 +22092,111 @@ msgstr ""
 #~ "Proszę podać poprawne wartości:\n"
 #~ "start > 10 kroków >= 0\n"
 #~ "koniec > start + krok)"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Click to collapse or expand this section"
+msgstr "Kliknij, aby zwinąć lub rozwinąć tę sekcję"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Search all settings"
+msgstr "Szukaj we wszystkich ustawieniach"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Expand all"
+msgstr "Rozwiń wszystko"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Collapse all"
+msgstr "Zwiń wszystko"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "3D View"
+msgstr "Widok 3D"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Projects & Files"
+msgstr "Projekty i pliki"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Slicing & Presets"
+msgstr "Cięcie i profile"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Printers & Network"
+msgstr "Drukarki i sieć"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Apps & Advanced"
+msgstr "Aplikacje i zaawansowane"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "No settings match that search."
+msgstr "Żadne ustawienie nie pasuje do wyszukiwania."
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Language and region"
+msgstr "Język i region"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Startup"
+msgstr "Uruchamianie"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Updates"
+msgstr "Aktualizacje"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Appearance"
+msgstr "Wygląd"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Camera and mouse"
+msgstr "Kamera i mysz"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Selection and tool panels"
+msgstr "Zaznaczenie i panele narzędzi"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "G-code preview"
+msgstr "Podgląd G-code"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Rendering quality"
+msgstr "Jakość renderowania"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Opening projects"
+msgstr "Otwieranie projektów"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Warnings when loading"
+msgstr "Ostrzeżenia podczas wczytywania"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Project strip and recent files"
+msgstr "Pasek projektów i ostatnie pliki"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Saving and backup"
+msgstr "Zapisywanie i kopia zapasowa"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Folders"
+msgstr "Foldery"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Bambu Studio presets"
+msgstr "Profile Bambu Studio"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Accounts and devices"
+msgstr "Konta i urządzenia"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "External apps"
+msgstr "Aplikacje zewnętrzne"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Optional tabs"
+msgstr "Karty opcjonalne"
