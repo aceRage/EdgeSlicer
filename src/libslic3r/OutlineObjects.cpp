@@ -255,7 +255,14 @@ indexed_triangle_set outline_prism(const ExPolygons &shape, double z0, double z1
         return its;
     // Any positive depth: only the side of the vertex (front or back) is read from it
     const double depth = 1000.;
-    its = Emboss::polygons2model(shape, Emboss::ProjectZ(depth));
+    // The triangulation fails hard on duplicate points and on crossing edges. A good shape is
+    // returned unchanged by the healing.
+    ExPolygons healed = shape;
+    if (!Emboss::heal_expolygons(healed))
+        BOOST_LOG_TRIVIAL(warning) << "OutlineObjects: a shape of " << shape.size() << " islands is not fully healed";
+    if (healed.empty())
+        return its;
+    its = Emboss::polygons2model(healed, Emboss::ProjectZ(depth));
     for (Vec3f &v : its.vertices) {
         // Shared points of prisms stacked on each other get identical coordinates
         v.x() = float(unscale<double>(double(v.x())));
@@ -365,6 +372,31 @@ ExPolygons mirror_x(const ExPolygons &shape)
             add(h);
     }
     return union_ex(polygons, ClipperLib::pftEvenOdd);
+}
+
+// Gaps between the colour areas of a picture narrower than this are closed [in mm]
+const double PICTURE_GAP = 0.1;
+// Left over pieces around a picture smaller than this are dropped [in mm2]
+const double PICTURE_MIN_AREA = 0.02;
+
+// The part of the plate that is not covered by the picture. The colour areas of a traced image
+// do not meet exactly, which would leave hundreds of slivers between them: they can not be
+// printed and the triangulation fails on them.
+ExPolygons around_picture(const ExPolygons &plate, const ExPolygons &picture)
+{
+    if (picture.empty())
+        return plate;
+    const ExPolygons covered = closing_ex(picture, scaled_f(PICTURE_GAP / 2.), ClipperLib::jtMiter, 3.);
+    ExPolygons       out;
+    for (ExPolygon &piece : diff_ex(plate, covered)) {
+        if (piece.area() * SCALING_FACTOR * SCALING_FACTOR < PICTURE_MIN_AREA)
+            continue;
+        // thinner than the gap everywhere
+        if (opening_ex(ExPolygons{piece}, scaled_f(PICTURE_GAP / 4.), ClipperLib::jtMiter, 3.).empty())
+            continue;
+        out.push_back(std::move(piece));
+    }
+    return out;
 }
 
 ExPolygons inset(const ExPolygons &shape, double distance)
@@ -491,7 +523,7 @@ OutlineBoxResult make_outline_box(const ExPolygons &silhouette, const std::vecto
         if (picture_all.empty()) {
             bands.push_back({plate, 0., p.lid_thickness});
         } else {
-            bands.push_back({diff_ex(plate, picture_all), 0., p.decoration_depth});
+            bands.push_back({around_picture(plate, picture_all), 0., p.decoration_depth});
             bands.push_back({plate, p.decoration_depth, p.lid_thickness});
         }
         if (lip.empty())
