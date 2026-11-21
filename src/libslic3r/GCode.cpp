@@ -13701,7 +13701,8 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
         return gcode;
 
     // wipe (if it's enabled for this extruder and we have a stored wipe path and no-zero wipe distance)
-    if (EXTRUDER_CONFIG(wipe) && m_wipe.has_path() && scale_(EXTRUDER_CONFIG(wipe_distance)) > SCALED_EPSILON) {
+    const bool wiped = EXTRUDER_CONFIG(wipe) && m_wipe.has_path() && scale_(EXTRUDER_CONFIG(wipe_distance)) > SCALED_EPSILON;
+    if (wiped) {
         Wipe::RetractionValues wipeRetractions = m_wipe.calculateWipeRetractionLengths(*this, toolchange);
         gcode += toolchange ? m_writer.retract_for_toolchange(true, wipeRetractions.retraction_length_before_wipe) :
                               m_writer.retract(true, wipeRetractions.retraction_length_before_wipe);
@@ -13721,8 +13722,10 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
     // if (printer_model == "Snapmaker U1" && toolchange) {
     //     gcode += "M400\n";
     // }
-    if ((!this->on_first_layer() || this->config().bottom_surface_pattern != InfillPattern::ipHilbertCurve) &&
-        (role != erTopSolidInfill || this->config().top_surface_pattern != InfillPattern::ipHilbertCurve)) {
+    // Hilbert curve surfaces skip the retraction of a travel, but not a toolchange's, nor the rest of one a wipe has started.
+    if (wiped || toolchange ||
+        ((!this->on_first_layer() || this->config().bottom_surface_pattern != InfillPattern::ipHilbertCurve) &&
+         (role != erTopSolidInfill || this->config().top_surface_pattern != InfillPattern::ipHilbertCurve))) {
         gcode += toolchange ? m_writer.retract_for_toolchange() : m_writer.retract();
     }
 
