@@ -58,6 +58,7 @@
 
 #include "slic3r/Utils/FixModelByWin10.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
 #include <algorithm>
@@ -1258,17 +1259,33 @@ void ObjectList::update_name_in_model(const wxDataViewItem& item) const
     if (m_objects_model->GetItemType(item) & itObject) {
         std::string name = m_objects_model->GetName(item).ToUTF8().data();
         if (obj->name != name) {
+            EDGE_LIFECYCLE_ONLY(const std::string previous_name = obj->name;)
             obj->name = name;
             // if object has just one volume, rename this volume too
             if (obj->volumes.size() == 1)
                 obj->volumes[0]->name = obj->name;
             Slic3r::save_object_mesh(*obj);
+            EDGE_LIFECYCLE_FIRE(LifecycleEvent::ObjectRenamed,
+                ctx.name          = name;
+                ctx.previous_name = previous_name;
+                ctx.id            = std::to_string(obj->id().id);
+                ctx.index         = obj_idx;
+                ctx.source        = "object";);
         }
         return;
     }
 
     if (volume_id < 0) return;
+    EDGE_LIFECYCLE_ONLY(const std::string previous_name = obj->volumes[volume_id]->name;)
     obj->volumes[volume_id]->name = m_objects_model->GetName(item).ToUTF8().data();
+    // Orca returns early (and fires nothing) when the name did not change; EdgeSlicer keeps its
+    // assignment and only skips the event.
+    EDGE_LIFECYCLE_FIRE_IF(obj->volumes[volume_id]->name != previous_name, LifecycleEvent::ObjectRenamed,
+        ctx.name          = obj->volumes[volume_id]->name;
+        ctx.previous_name = previous_name;
+        ctx.id            = std::to_string(obj->volumes[volume_id]->id().id);
+        ctx.index         = volume_id;
+        ctx.source        = "volume";);
 }
 
 void ObjectList::update_name_in_list(int obj_idx, int vol_idx) const
@@ -3864,8 +3881,12 @@ void ObjectList::delete_all_connectors_for_object(int obj_idx)
             obj->delete_connectors();
 
             if (obj->volumes.empty() || !obj->has_solid_mesh()) {
+                EDGE_LIFECYCLE_ONLY(const std::string deleted_obj_name = obj->name;)
                 model.delete_object(idx);
                 wxGetApp().plater()->get_partplate_list().notify_instance_removed(idx, -1);
+                EDGE_LIFECYCLE_FIRE(LifecycleEvent::ObjectDeleted,
+                    ctx.name = deleted_obj_name;
+                    ctx.code = LifecycleEvtCode::Ok;);
                 m_objects_model->Delete(m_objects_model->GetItemById(idx));
                 continue;
             }
@@ -4434,6 +4455,10 @@ void ObjectList::add_object_to_list(size_t obj_idx, bool call_selection_changed,
     std::string warning_bitmap = get_warning_icon_name(model_object->mesh().stats());
     const auto item = m_objects_model->AddObject(model_object, warning_bitmap, model_object->is_cut());
     Expand(m_objects_model->GetParent(item));
+
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::ObjectAdded,
+        ctx.name = model_object->name;
+        ctx.code = LifecycleEvtCode::Ok;);
 
     if (!do_info_update)
         return;

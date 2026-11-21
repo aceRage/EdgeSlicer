@@ -8,6 +8,7 @@
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "libnest2d/common.hpp"
 #include "libslic3r/FillBedPack.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 
 #include <numeric>
 
@@ -498,6 +499,10 @@ void FillBedJob::finalize(bool canceled, std::exception_ptr &eptr)
         //BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ": model_object->ensure_on_bed()";
 
         m_plater->update();
+
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::ObjectTransformed,
+            ctx.code = LifecycleEvtCode::Ok;
+            ctx.msg  = "arranged";);
     }
 }
 
