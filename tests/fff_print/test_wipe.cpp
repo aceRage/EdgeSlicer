@@ -1230,3 +1230,46 @@ TEST_CASE("A filament with wipe off is not wiped inward beside one with it on", 
     CHECK(second[0] == 0);
     CHECK(second[1] == both[1]);
 }
+
+namespace {
+
+// A 20 mm cube in filament 1 at `cube_pos` and a pillar in filament 2, both relative to the plate at `plate_origin`.
+// Positions are instance offsets, as in load_tall_and_plate().
+void load_cube_and_pillar(Print &print, Model &model, const DynamicPrintConfig &config, const Vec3d &plate_origin, const Vec3d &cube_pos)
+{
+    ModelObject *cube = model.add_object();
+    cube->name        = "cube.stl";
+    cube->add_volume(make_cube(20., 20., 10.));
+    cube->add_instance()->set_offset(plate_origin + cube_pos);
+    cube->ensure_on_bed();
+
+    ModelObject *pillar = model.add_object();
+    pillar->name        = "pillar.stl";
+    pillar->add_volume(make_cube(6., 6., 10.));
+    pillar->add_instance()->set_offset(plate_origin + Vec3d(150., 185., 0.));
+    pillar->ensure_on_bed();
+    pillar->volumes.front()->config.set("extruder", 2);
+
+    print.set_plate_origin(plate_origin);
+    print.apply(model, config);
+    print.set_status_silent();
+}
+
+} // namespace
+
+// Orca #17681: the Type 2 tower's stand-in for the conflict check stayed on the first plate.
+TEST_CASE("The conflict check finds a Type 2 tower under an object on every plate", "[Wipe][WipeTower][Regression]")
+{
+    for (const double plate_offset : { 0., 300. }) {
+        INFO("plate offset " << plate_offset);
+        const DynamicPrintConfig config = cone_reservation_config("rectangle", "0");
+        Print print;
+        Model model;
+        // The tower is at (30, 80) on the plate and 35 mm wide; the cube stands on it.
+        load_cube_and_pillar(print, model, config, Vec3d(plate_offset, plate_offset, 0.), Vec3d(35., 85., 0.));
+        print.process();
+        REQUIRE(print.has_wipe_tower());
+        REQUIRE(print.wipe_tower_type() == WipeTowerType::Type2);
+        CHECK(print.get_conflict_result().has_value());
+    }
+}
