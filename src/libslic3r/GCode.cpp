@@ -1832,7 +1832,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         // Prepare a future wipe.
         gcodegen.m_wipe.reset_path();
         for (const Vec2f& wipe_pt : tcr.wipe_path)
-            gcodegen.m_wipe.path.points.emplace_back(wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(wipe_pt)));
+            gcodegen.m_wipe.path.points.emplace_back(wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(wipe_pt) + plate_origin_2d));
     }
 
     // Let the planner know we are traveling between objects.
@@ -2105,7 +2105,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         // Prepare a future wipe.
         gcodegen.m_wipe.reset_path();
         for (const Vec2f& wipe_pt : tcr.wipe_path)
-            gcodegen.m_wipe.path.points.emplace_back(wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(wipe_pt)));
+            gcodegen.m_wipe.path.points.emplace_back(wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(wipe_pt) + plate_origin_2d));
     }
 
     // Let the planner know we are traveling between objects.

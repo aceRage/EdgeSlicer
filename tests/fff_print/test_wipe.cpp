@@ -1273,3 +1273,58 @@ TEST_CASE("The conflict check finds a Type 2 tower under an object on every plat
         CHECK(print.get_conflict_result().has_value());
     }
 }
+
+namespace {
+
+// The points of the first wipe after each prime tower region, in G-code coordinates.
+std::vector<Vec2d> wipes_after_tower(const std::string &gcode)
+{
+    const std::string &tower_start = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start);
+    const std::string &tower_end   = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End);
+    const std::string &wipe_start  = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Start);
+    const std::string &wipe_end    = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_End);
+    std::vector<Vec2d> points;
+    for (size_t pos = gcode.find(tower_end); pos != std::string::npos; pos = gcode.find(tower_end, pos + 1)) {
+        const size_t start = gcode.find(wipe_start, pos);
+        if (start == std::string::npos)
+            break;
+        const size_t end = gcode.find(wipe_end, start);
+        if (end == std::string::npos || gcode.find(tower_start, pos) < start)
+            continue;
+        GCodeReader reader;
+        reader.parse_buffer(gcode.substr(start, end - start), [&points](GCodeReader &, const GCodeReader::GCodeLine &line) {
+            if (line.has_x() && line.has_y())
+                points.emplace_back(double(line.x()), double(line.y()));
+        });
+    }
+    return points;
+}
+
+} // namespace
+
+// Orca #17681: the wipe path kept after a toolchange was in the frame of the first plate, so on a later plate
+// the first wipe after the tower ran towards the first plate.
+TEST_CASE("The first wipe after the prime tower is the same on every plate", "[Wipe][WipeTower][Regression]")
+{
+    for (const char *tower_type : { "type1", "type2" }) {
+        INFO("tower " << tower_type);
+        DynamicPrintConfig config = cone_reservation_config("rectangle", "0");
+        config.set_deserialize_strict({ { "wipe_tower_type", tower_type }, { "wipe", "1,1" }, { "wipe_distance", "2,2" } });
+        auto tower_wipes = [&config](const Vec3d &plate_origin) {
+            Print print;
+            Model model;
+            // The objects and the tower are placed relative to the plate, so the G-code is the same on every plate.
+            load_cube_and_pillar(print, model, config, plate_origin, Vec3d(150., 100., 0.));
+            return wipes_after_tower(Test::gcode(print));
+        };
+        const std::vector<Vec2d> first_plate = tower_wipes(Vec3d::Zero());
+        const std::vector<Vec2d> other_plate = tower_wipes(Vec3d(300., 300., 0.));
+        REQUIRE_FALSE(first_plate.empty());
+        REQUIRE(other_plate.size() == first_plate.size());
+        for (size_t i = 0; i < first_plate.size(); ++i) {
+            INFO("wipe point " << i);
+            CHECK(other_plate[i].x() == Approx(first_plate[i].x()).margin(0.01));
+            CHECK(other_plate[i].y() == Approx(first_plate[i].y()).margin(0.01));
+        }
+    }
+}
