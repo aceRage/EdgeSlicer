@@ -20100,3 +20100,111 @@ msgstr ""
 
 #~ msgid "Right click to reset value to system default."
 #~ msgstr "Правая кнопка мыши - сброс значения до системного по умолчанию."
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Click to collapse or expand this section"
+msgstr "Нажмите, чтобы свернуть или развернуть этот раздел"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Search all settings"
+msgstr "Поиск по всем настройкам"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Expand all"
+msgstr "Развернуть все"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Collapse all"
+msgstr "Свернуть все"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "3D View"
+msgstr "3D-вид"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Projects & Files"
+msgstr "Проекты и файлы"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Slicing & Presets"
+msgstr "Нарезка и профили"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Printers & Network"
+msgstr "Принтеры и сеть"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Apps & Advanced"
+msgstr "Приложения и дополнительно"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "No settings match that search."
+msgstr "Нет настроек, соответствующих запросу."
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Language and region"
+msgstr "Язык и регион"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Startup"
+msgstr "Запуск"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Updates"
+msgstr "Обновления"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Appearance"
+msgstr "Внешний вид"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Camera and mouse"
+msgstr "Камера и мышь"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Selection and tool panels"
+msgstr "Выделение и панели инструментов"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "G-code preview"
+msgstr "Предпросмотр G-кода"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Rendering quality"
+msgstr "Качество отрисовки"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Opening projects"
+msgstr "Открытие проектов"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Warnings when loading"
+msgstr "Предупреждения при загрузке"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Project strip and recent files"
+msgstr "Панель проектов и недавние файлы"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Saving and backup"
+msgstr "Сохранение и резервное копирование"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Folders"
+msgstr "Папки"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Bambu Studio presets"
+msgstr "Профили Bambu Studio"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Accounts and devices"
+msgstr "Учётные записи и устройства"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "External apps"
+msgstr "Внешние приложения"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Optional tabs"
+msgstr "Дополнительные вкладки"
