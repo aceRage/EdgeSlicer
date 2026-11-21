@@ -713,7 +713,7 @@ bool cap_object(OutlineObject &out, const ExPolygons &plate, const std::vector<E
     if (picture_all.empty()) {
         bands.push_back({plate, 0., thickness});
     } else {
-        bands.push_back({diff_ex(plate, picture_all), 0., picture_depth});
+        bands.push_back({around_picture(plate, picture_all), 0., picture_depth});
         bands.push_back({plate, picture_depth, thickness});
     }
     bands.push_back({posts, thickness, thickness + MX_POST_HEIGHT});

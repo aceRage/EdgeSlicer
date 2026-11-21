@@ -93,6 +93,10 @@ private:
     ImageToObjectSettings collect() const;
     void                  update_enabled();
     void                  update_level_rows(const Shape &shape);
+    // "Match filaments" menu: add filaments of the picture's colours, recolour or use the nearest
+    void                  show_match_menu();
+    void                  match_filaments(TraceFilamentMatch mode);
+    void                  refill_filament_choices();
     void                  schedule_preview();
     void                  refresh_preview();
     void                  refresh_preview_unchecked();
@@ -164,6 +168,9 @@ private:
     std::array<wxStaticBitmap *, IMAGE_OBJECT_MAX_COLORS> m_level_swatch{};
     std::array<wxStaticText *, IMAGE_OBJECT_MAX_COLORS>   m_level_label{};
     std::array<wxChoice *, IMAGE_OBJECT_MAX_COLORS>       m_level_filament{};
+    wxButton                                             *m_match_filaments = nullptr;
+    // colours of the picture shown in the rows
+    std::vector<std::array<uint8_t, 3>> m_level_colors;
 
     wxStaticBitmap *m_source_preview = nullptr;
     wxStaticBitmap *m_preview_bitmap = nullptr;

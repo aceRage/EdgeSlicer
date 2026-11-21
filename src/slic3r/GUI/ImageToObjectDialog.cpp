@@ -9,6 +9,7 @@
 #include "MainFrame.hpp"
 #include "MsgDialog.hpp"
 #include "Plater.hpp"
+#include "PresetComboBoxes.hpp"
 #include "format.hpp"
 
 #include "libslic3r/AppConfig.hpp"
@@ -17,7 +18,10 @@
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/NSVGUtils.hpp"
+#include "libslic3r/FilamentColorLibrary.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "nanosvg/nanosvg.h"
 #include "nanosvg/nanosvgrast.h"
@@ -27,6 +31,7 @@
 #include <wx/checkbox.h>
 #include <wx/choice.h>
 #include <wx/image.h>
+#include <wx/menu.h>
 #include <wx/sizer.h>
 #include <wx/slider.h>
 #include <wx/spinctrl.h>
@@ -42,6 +47,14 @@
 #include <sstream>
 
 namespace Slic3r { namespace GUI {
+
+// Steps of the tool are written to the log at once: the log is buffered, so without the flush
+// the last lines before a crash are lost
+#define I2O_LOG(message)                                              \
+    do {                                                              \
+        BOOST_LOG_TRIVIAL(info) << "Image to object: " << message;    \
+        Slic3r::flush_logs();                                         \
+    } while (false)
 
 namespace {
 
@@ -156,7 +169,9 @@ wxString i2o_filament_label(int index) { return index == 0 ? _L("Default") : wxS
 // Add the objects to the plate, side by side, as one undo step
 void i2o_add_objects(Plater *plater, const std::vector<OutlineObject> &objects, const ImageToObjectDialog &dialog)
 {
+    I2O_LOG("taking the undo snapshot");
     Plater::TakeSnapshot snapshot(plater, "Image to object");
+    I2O_LOG("snapshot taken");
     Model               &model = plater->model();
     std::vector<size_t>  object_idxs;
 
@@ -170,17 +185,20 @@ void i2o_add_objects(Plater *plater, const std::vector<OutlineObject> &objects, 
     for (const OutlineObject &source : objects) {
         if (source.parts.empty())
             continue;
-        BOOST_LOG_TRIVIAL(info) << "Image to object: adding \"" << source.name << "\", " << source.parts.size() << " parts";
+        I2O_LOG("adding \"" << source.name << "\", " << source.parts.size() << " parts");
         ModelObject *object = model.add_object();
         object->name        = source.name;
         object->add_instance(); // each object should have at least one instance
         BoundingBoxf3 bb;
         for (const OutlinePart &part : source.parts) {
+            I2O_LOG("part \"" << part.name << "\": " << part.mesh.vertices.size() << " vertices, " << part.mesh.indices.size() << " triangles");
             TriangleMesh mesh{indexed_triangle_set(part.mesh)};
             bb.merge(mesh.bounding_box());
+            I2O_LOG("mesh ready");
             // the copying overload keeps the mesh where it is, so the parts stay aligned
             ModelVolume *volume = object->add_volume(mesh);
             volume->name        = part.name;
+            I2O_LOG("volume added");
             // the body follows the filament of the object
             if (int extruder = dialog.extruder(part); extruder > 0 && part.level >= 0)
                 volume->config.set_key_value("extruder", new ConfigOptionInt(extruder));
@@ -192,23 +210,27 @@ void i2o_add_objects(Plater *plater, const std::vector<OutlineObject> &objects, 
         object->config.set_key_value("extruder", new ConfigOptionInt(body));
         object->invalidate_bounding_box();
         object->translate(-bb.center());
+        I2O_LOG("object centered");
 
         double half = bb.size().x() / 2.;
         double x    = first ? next_x : next_x + half;
         object->instances[0]->set_offset(Vec3d(x, y, -object->origin_translation.z()));
         object->ensure_on_bed();
+        I2O_LOG("object placed at " << x << ", " << y);
         next_x = x + half + I2O_OBJECT_GAP;
         first  = false;
 
         model.InitializeAssemblyPositions({object});
+        I2O_LOG("assembly position set");
         Slic3r::save_object_mesh(*object);
+        I2O_LOG("backup saved");
         object_idxs.push_back(model.objects.size() - 1);
     }
-    BOOST_LOG_TRIVIAL(info) << "Image to object: " << object_idxs.size() << " objects in the model, updating the object list";
+    I2O_LOG(object_idxs.size() << " objects in the model, updating the object list");
     if (!object_idxs.empty())
         wxGetApp().obj_list()->paste_objects_into_list(object_idxs);
     wxGetApp().mainframe->update_title();
-    BOOST_LOG_TRIVIAL(info) << "Image to object: done";
+    I2O_LOG("done");
 }
 
 } // namespace
@@ -591,6 +613,12 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
         m_level_filament[size_t(i)]->SetToolTip(_L("Filament of this colour of the picture. By default the loaded filament with the nearest colour."));
         grid->Add(m_level_filament[size_t(i)], 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
     }
+    grid->Add(new wxStaticText(this, wxID_ANY, wxEmptyString));
+    m_match_filaments = new wxButton(this, wxID_ANY, _L("Match filaments") + dots);
+    m_match_filaments->SetToolTip(_L("Add filaments of the colours of the picture, give the project filaments these colours, "
+                                     "or use the nearest existing filaments."));
+    m_match_filaments->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { show_match_menu(); });
+    grid->Add(m_match_filaments, 0, wxALIGN_LEFT | wxALIGN_CENTER_VERTICAL);
 
     cols->Add(grid, 1, wxEXPAND | wxALL, FromDIP(10));
 
@@ -653,13 +681,19 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
         evt.Skip();
     });
     m_fit_test->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
-        if (finish_fit_test())
+        I2O_LOG("Add fit test piece pressed");
+        if (finish_fit_test()) {
+            I2O_LOG("closing the dialog");
             EndModal(wxID_OK);
+        }
     });
     Bind(wxEVT_TIMER, [this](wxTimerEvent &) { refresh_preview(); });
     m_ok->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
-        if (finish())
+        I2O_LOG("Add pressed");
+        if (finish()) {
+            I2O_LOG("closing the dialog");
             EndModal(wxID_OK);
+        }
     });
 
     SetSizer(root);
@@ -772,6 +806,8 @@ void ImageToObjectDialog::update_enabled()
             for (wxWindow *w : {static_cast<wxWindow *>(m_level_swatch[size_t(i)]), static_cast<wxWindow *>(m_level_label[size_t(i)]),
                                 static_cast<wxWindow *>(m_level_filament[size_t(i)])})
                 w->Show(false);
+    if (cutter || one)
+        m_match_filaments->Show(false);
     Layout();
     if (GetSizer() != nullptr)
         GetSizer()->Fit(this);
@@ -799,6 +835,105 @@ void ImageToObjectDialog::update_level_rows(const Shape &shape)
         wxImage swatch(FromDIP(22), FromDIP(14));
         swatch.SetRGB(wxRect(0, 0, swatch.GetWidth(), swatch.GetHeight()), shape.colors[i][0], shape.colors[i][1], shape.colors[i][2]);
         m_level_swatch[i]->SetBitmap(wxBitmap(swatch));
+    }
+    m_level_colors.assign(shape.colors.begin(), shape.colors.begin() + std::min(count, shape.colors.size()));
+    m_match_filaments->Show(count > 0);
+}
+
+void ImageToObjectDialog::refill_filament_choices()
+{
+    const int count = std::max<int>(1, int(m_filament_colors.size()));
+    auto      refill = [count](wxChoice *c) {
+        if (c == nullptr || int(c->GetCount()) == count + 1)
+            return;
+        int selection = c->GetSelection();
+        c->Freeze();
+        c->Clear();
+        for (int f = 0; f <= count; ++f)
+            c->Append(i2o_filament_label(f));
+        c->SetSelection(std::clamp(selection, 0, count));
+        c->Thaw();
+    };
+    refill(m_body_filament);
+    for (wxChoice *c : m_level_filament)
+        refill(c);
+}
+
+void ImageToObjectDialog::show_match_menu()
+{
+    if (m_level_colors.empty())
+        return;
+    wxMenu    menu;
+    const int add_id = wxWindow::NewControlId(), replace_id = wxWindow::NewControlId(), nearest_id = wxWindow::NewControlId();
+    menu.Append(add_id, _L("Add new filaments"),
+                _L("Add a filament of every colour of the picture; a filament of a very close colour is used instead of a new one."));
+    menu.Append(replace_id, _L("Replace filament colours"),
+                _L("Give filaments 1, 2, ... the colours of the picture, adding filaments when there are fewer."));
+    menu.Append(nearest_id, _L("Nearest existing filaments"), _L("Use the filament of the nearest colour, nothing changes."));
+    menu.Bind(wxEVT_MENU, [this, add_id, replace_id](wxCommandEvent &evt) {
+        TraceFilamentMatch mode = evt.GetId() == add_id     ? TraceFilamentMatch::AddNew :
+                                  evt.GetId() == replace_id ? TraceFilamentMatch::ReplaceColours :
+                                                              TraceFilamentMatch::Nearest;
+        // after the menu is closed, the filament changes rebuild the sidebar
+        CallAfter([this, mode]() { match_filaments(mode); });
+    });
+    PopupMenu(&menu, m_match_filaments->GetPosition() + wxPoint(0, m_match_filaments->GetSize().GetHeight()));
+}
+
+void ImageToObjectDialog::match_filaments(TraceFilamentMatch mode)
+{
+    Plater       *plater = wxGetApp().plater();
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (plater == nullptr || bundle == nullptr || m_level_colors.empty())
+        return;
+    const std::vector<std::array<uint8_t, 3>> colors = m_level_colors;
+    m_filament_colors      = plater->get_extruder_colors_from_plater_config(nullptr, false);
+    TraceFilamentPlan plan = plan_trace_filaments(colors, m_filament_colors, mode);
+
+    if (!plan.recolour.empty()) {
+        wxString text = GUI::format_wxstr(_L("Change the colour of filaments %1% to %2% to the colours of the picture?"),
+                                          plan.recolour.front().first, plan.recolour.back().first);
+        text += "\n" + _L("Other objects printed with these filaments change their colour too.");
+        if (!plan.add.empty())
+            text += "\n" + GUI::format_wxstr(_L("%1% filaments are added."), int(plan.add.size()));
+        MessageDialog dialog(this, text, _L("Replace filament colours"), wxYES_NO | wxICON_QUESTION);
+        if (dialog.ShowModal() != wxID_YES)
+            return;
+    }
+
+    // the same paths as the sidebar's "+" button and colour picker
+    Sidebar &sidebar = wxGetApp().sidebar();
+    size_t   added   = 0;
+    for (const std::string &hex : plan.add) {
+        const size_t before = bundle->num_physical_filaments();
+        sidebar.add_custom_filament(wxColour(from_u8(hex)));
+        if (bundle->num_physical_filaments() <= before)
+            break; // the slicer's own maximum of filaments
+        ++added;
+    }
+    for (const auto &[filament, hex] : plan.recolour) {
+        std::vector<PlaterPresetComboBox *> &combos = sidebar.combos_filament();
+        if (filament >= 1 && size_t(filament) <= combos.size() && combos[size_t(filament - 1)] != nullptr)
+            combos[size_t(filament - 1)]->ApplyFilamentColor(FilamentColor::FromColors({hex}, FilamentColorMode::Segment));
+    }
+
+    m_filament_colors = plater->get_extruder_colors_from_plater_config(nullptr, false);
+    refill_filament_choices();
+    const TraceFilamentPlan nearest = plan_trace_filaments(colors, m_filament_colors, TraceFilamentMatch::Nearest);
+    for (size_t i = 0; i < plan.filaments.size() && i < m_level_filament.size(); ++i) {
+        int filament = plan.filaments[i];
+        if (filament > int(m_filament_colors.size()))
+            filament = i < nearest.filaments.size() ? nearest.filaments[i] : 0; // not added (maximum of filaments)
+        m_level_filament[i]->SetSelection(std::clamp(filament, 0, int(m_level_filament[i]->GetCount()) - 1));
+        m_user_filament[i] = true;
+    }
+    refresh_preview();
+    if (added < plan.add.size()) {
+        m_warning->SetLabel(GUI::format_wxstr(_L("Only %1% of %2% filaments could be added, the slicer's maximum is reached. "
+                                                 "The other colours use the nearest filament."),
+                                              int(added), int(plan.add.size())));
+        m_warning->Wrap(FromDIP(I2O_PREVIEW_PX));
+        Layout();
     }
 }
 
@@ -882,7 +1017,7 @@ void ImageToObjectDialog::refresh_preview()
 void ImageToObjectDialog::refresh_preview_unchecked()
 {
     ImageToObjectSettings s  = collect();
-    BOOST_LOG_TRIVIAL(info) << "Image to object: preview of type " << int(s.type);
+    I2O_LOG("preview of type " << int(s.type));
     int                   px = FromDIP(I2O_PREVIEW_PX);
     Shape                 shape = make_shape(m_preview_image, s, I2O_PREVIEW_SIDE);
     if (s.auto_threshold && shape.threshold >= 0)
@@ -1010,8 +1145,8 @@ bool ImageToObjectDialog::finish()
 bool ImageToObjectDialog::finish_unchecked()
 {
     m_settings = collect();
-    BOOST_LOG_TRIVIAL(info) << "Image to object: generating type " << int(m_settings.type) << ", size " << m_settings.silhouette.longest_side
-                            << " mm, picture colours " << m_settings.picture_colors;
+    I2O_LOG("generating type " << int(m_settings.type) << ", size " << m_settings.silhouette.longest_side << " mm, picture colours "
+                               << m_settings.picture_colors);
     m_objects.clear();
     m_warnings.clear();
     m_is_fit_test = false;
@@ -1020,6 +1155,8 @@ bool ImageToObjectDialog::finish_unchecked()
         wxBusyCursor busy;
         Shape        shape = make_shape(m_image, m_settings, I2O_FINAL_SIDE);
         error              = shape.error;
+        I2O_LOG("traced: " << shape.silhouette.shape.size() << " islands, " << shape.detail.size() << " colour levels, "
+                           << shape.silhouette.width << " x " << shape.silhouette.height << " mm");
         if (shape.silhouette.empty()) {
             if (error.empty() && !shape.silhouette.warnings.empty())
                 error = shape.silhouette.warnings.front();
@@ -1063,7 +1200,7 @@ bool ImageToObjectDialog::finish_unchecked()
     }
     for (const OutlineObject &object : m_objects)
         for (const OutlinePart &part : object.parts)
-            BOOST_LOG_TRIVIAL(info) << "Image to object: generated \"" << part.name << "\", " << part.mesh.indices.size() << " triangles";
+            I2O_LOG("generated \"" << part.name << "\", " << part.mesh.indices.size() << " triangles");
     if (m_objects.empty()) {
         m_warning->SetLabel(_(from_u8(error.empty() ? std::string("The object could not be created.") : error)));
         m_warning->Wrap(FromDIP(I2O_PREVIEW_PX));
@@ -1084,6 +1221,7 @@ bool ImageToObjectDialog::finish_fit_test()
     try {
         wxBusyCursor busy;
         m_objects = make_clicker_fit_test(m_settings.clicker);
+        I2O_LOG("fit test generated, " << m_objects.size() << " objects");
     } catch (const std::exception &e) {
         m_objects.clear();
         show_failure(e.what());
@@ -1126,11 +1264,15 @@ bool create_object_from_image(const wxString &image_path)
     if (!ImageTraceDialog::load_image_file(nullptr, path, image, source_png, name))
         return false;
 
+    I2O_LOG("opening the dialog, image " << image.width << " x " << image.height << " px");
     ImageToObjectDialog dialog(nullptr, image, name, ImageToObjectDialog::load_from_config());
-    if (dialog.ShowModal() != wxID_OK || dialog.objects().empty())
+    int answer = dialog.ShowModal();
+    I2O_LOG("dialog closed, answer " << answer << ", " << dialog.objects().size() << " objects");
+    if (answer != wxID_OK || dialog.objects().empty())
         return false;
 
     i2o_add_objects(plater, dialog.objects(), dialog);
+    I2O_LOG("objects are on the plate");
     if (!dialog.warnings().empty())
         show_info(plater, i2o_messages(dialog.warnings()), _L("Image to object"));
     return true;
