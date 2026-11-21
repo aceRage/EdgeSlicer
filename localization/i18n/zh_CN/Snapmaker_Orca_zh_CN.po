@@ -15515,3 +15515,111 @@ msgstr "未配置官方 Full Spectrum 全光谱耗材，将自动使用已配置
 
 msgid "TD"
 msgstr "TD"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Click to collapse or expand this section"
+msgstr "点击以折叠或展开此分区"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Search all settings"
+msgstr "搜索所有设置"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Expand all"
+msgstr "全部展开"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Collapse all"
+msgstr "全部折叠"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "3D View"
+msgstr "3D 视图"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Projects & Files"
+msgstr "项目与文件"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Slicing & Presets"
+msgstr "切片与预设"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Printers & Network"
+msgstr "打印机与网络"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Apps & Advanced"
+msgstr "应用与高级"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "No settings match that search."
+msgstr "没有与搜索匹配的设置。"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Language and region"
+msgstr "语言和地区"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Startup"
+msgstr "启动"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Updates"
+msgstr "更新"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Appearance"
+msgstr "外观"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Camera and mouse"
+msgstr "相机和鼠标"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Selection and tool panels"
+msgstr "选择和工具面板"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "G-code preview"
+msgstr "G-code 预览"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Rendering quality"
+msgstr "渲染质量"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Opening projects"
+msgstr "打开项目"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Warnings when loading"
+msgstr "加载时的警告"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Project strip and recent files"
+msgstr "项目栏和最近的文件"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Saving and backup"
+msgstr "保存和备份"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Folders"
+msgstr "文件夹"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Bambu Studio presets"
+msgstr "Bambu Studio 预设"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Accounts and devices"
+msgstr "账户和设备"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "External apps"
+msgstr "外部应用"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Optional tabs"
+msgstr "可选标签页"
