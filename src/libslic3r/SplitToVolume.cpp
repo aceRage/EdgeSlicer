@@ -9,6 +9,7 @@
 #include "Geometry.hpp"
 #include "KDTreeIndirect.hpp"
 #include "Model.hpp"
+#include "PaintTransfer.hpp"
 #include "PrintConfig.hpp"
 #include "PushFit.hpp"
 #include "TriangleMesh.hpp"
@@ -3263,9 +3264,15 @@ static void split_leaf(ModelObject &leaf, int section, const SplitPlan &plan, co
                 for (int f : faces)
                     sub.indices.push_back(src->mesh().its.indices[size_t(f)]);
                 its_compactify_vertices(sub);
-                const std::optional<TriangleSelector::SavedPainting> saved = src->save_painting();
+                // Keep paint v2: each facet of the patch IS facet faces[k] of the source (same corners,
+                // same order), so the painting is copied facet by facet. An airbrushed part keeps the
+                // remap, which re-bakes its colour field.
+                const bool exact = !src->airbrush_field && PaintTransfer::has_painting(*src);
+                const std::optional<TriangleSelector::SavedPainting> saved = exact ? std::nullopt : src->save_painting();
                 dst->set_mesh(TriangleMesh(std::move(sub)));
                 dst->restore_painting(saved, false);
+                if (exact)
+                    PaintTransfer::copy_painting(*src, *dst, faces);
                 dst->calculate_convex_hull();
                 dst->invalidate_convex_hull_2d();
             } else if (!boxes_touch(src->mesh().transformed_bounding_box(inst * src->get_matrix()), pbb, 0.5)) {

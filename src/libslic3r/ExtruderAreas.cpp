@@ -61,6 +61,10 @@ ExtruderAreas compute_extruder_areas(const Pointfs &bed, const std::vector<Point
     out.shared     = out.printable.front();
     for (size_t e = 1; e < n; ++e)
         out.shared = intersection(out.shared, out.printable[e]);
+    // Areas that only touch leave a hairline (or nothing). There is then no place a prime
+    // tower can sit, so treat it as empty rather than a sliver (Orca #17439).
+    if (total_area(out.shared) < residual_area())
+        out.shared.clear();
 
     for (size_t e = 0; e < n; ++e) {
         out.unprintable.emplace_back(diff(Polygons{ bed_poly }, out.printable[e]));

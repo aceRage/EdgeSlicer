@@ -431,7 +431,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         static bool contains_reserved_tags(const std::string& gcode, unsigned int max_count, std::vector<std::string>& found_tag, bool is_bbl_printer);
 
         static int get_gcode_last_filament(const std::string &gcode_str);
-        static bool get_last_z_from_gcode(const std::string& gcode_str, double& z);
+        // Returns the Z position after the given custom G-code, starting from start_z.
+        // Tracks G90 (absolute) / G91 (relative) positioning: a relative Z move is a
+        // delta added to the running Z, not an absolute position (Snapmaker #1083 / #1191).
+        static bool get_last_z_from_gcode(const std::string& gcode_str, double& z, double start_z);
 
         static const float Wipe_Width;
         static const float Wipe_Height;

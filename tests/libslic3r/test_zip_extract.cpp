@@ -2,6 +2,7 @@
 
 #include "libslic3r/ZipOpen.hpp"
 #include "libslic3r/ZipWorkDir.hpp"
+#include "libslic3r/Utils.hpp"
 #include "libslic3r/miniz_extension.hpp"
 
 #include <boost/filesystem.hpp>
@@ -1091,4 +1092,51 @@ TEST_CASE("zip_fs_retry retries transient errors only", "[ZipExtract][ZipRetry]"
         CHECK_FALSE(ok);
         CHECK(calls == 1);
     }
+}
+
+// The ZIP open stack extracts into Documents/EdgeSlicer/Zip/<archive name>; a long archive name
+// (or a deep Documents folder) can push the dest past MAX_PATH. Writes, the free-space check and
+// the commit rename all go through extended-length paths (Orca #16552).
+TEST_CASE("extract_entries_confined writes under a dest longer than MAX_PATH", "[ZipExtract][ZipSlip]")
+{
+    TempDir        tmp;
+    const auto     zip  = tmp.dir / "bundle.zip";
+    const fs::path dest = tmp.dir / std::string(240, 'd') / "out";
+    REQUIRE(dest.string().size() > 260);
+    write_zip_entries(zip, {{"keep.stl", "AAA"}, {"skip.stl", "BBB"}, {"models/part.obj", "CCC"}, {"../evil.stl", "E"}});
+
+    std::string     err;
+    ZipExtractDests dests;
+    {
+        MZ_Archive archive;
+        REQUIRE(archive.open_reader(zip.string()));
+        REQUIRE(extract_entries_confined(archive.arch, {0, 2}, dest, ZipExtractCaps{}, dests, err));
+    }
+    CHECK(err.empty());
+    CHECK(dests.size() == 2);
+    CHECK(read_binary_file(extended_path(dest / "keep.stl")) == "AAA");
+    CHECK(read_binary_file(extended_path(dest / "models" / "part.obj")) == "CCC");
+    CHECK_FALSE(fs::exists(extended_path(dest / "skip.stl")));
+
+    // A second run replaces the committed file (stage + rename over it), still past MAX_PATH.
+    {
+        MZ_Archive archive;
+        REQUIRE(archive.open_reader(zip.string()));
+        REQUIRE(extract_entries_confined(archive.arch, {0}, dest, ZipExtractCaps{}, dests, err));
+    }
+    CHECK(read_binary_file(extended_path(dest / "keep.stl")) == "AAA");
+
+    // The traversal entry still rejects the whole call under the long dest, and nothing leaks out.
+    {
+        MZ_Archive archive;
+        REQUIRE(archive.open_reader(zip.string()));
+        CHECK_FALSE(extract_entries_confined(archive.arch, {1, 3}, dest, ZipExtractCaps{}, dests, err));
+    }
+    CHECK_FALSE(fs::exists(extended_path(dest / "skip.stl")));
+    CHECK_FALSE(fs::exists(extended_path(dest.parent_path() / "evil.stl")));
+    CHECK_FALSE(fs::exists(tmp.dir / "evil.stl"));
+
+    boost::system::error_code ec;
+    fs::remove_all(extended_path(tmp.dir / std::string(240, 'd')), ec);
+    CHECK_FALSE(ec);
 }

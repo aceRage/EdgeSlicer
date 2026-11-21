@@ -67,6 +67,7 @@ class ModelInstance;
 class ModelMaterial;
 class ModelObject;
 class ModelVolume;
+namespace PaintTransfer { struct Source; }
 class ModelWipeTower;
 class Print;
 class SLAPrint;
@@ -528,8 +529,11 @@ public:
     // its own ModelVolume::get_matrix()). The new volume takes the source's name (+ " - suffix"),
     // config, type and material, and sits at index src_idx. Its mesh is stored centred with a
     // pure-translation volume transformation, so the result stays exactly where the mesh is.
+    // Keep paint v2: with `paint_sources` (the boolean's inputs, in object coordinates, while they
+    // still exist) the result is painted from them (PaintTransfer).
     // Returns the new volume.
-    ModelVolume*            replace_volume_with_object_mesh(size_t src_idx, TriangleMesh &&mesh_in_object_coords, const std::string &name_suffix);
+    ModelVolume*            replace_volume_with_object_mesh(size_t src_idx, TriangleMesh &&mesh_in_object_coords, const std::string &name_suffix,
+                                                            const std::vector<PaintTransfer::Source> *paint_sources = nullptr);
     void                    delete_volume(size_t idx);
     void                    clear_volumes();
     void                    sort_volumes(bool full_sort);

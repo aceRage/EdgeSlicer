@@ -109,7 +109,9 @@ public:
     unsigned int get_triangle_num_tbb(double linear_defletion, double angle_defletion);
     void clean_mesh_data();
 
-    std::atomic<bool> m_stop_mesh;
+    // Before C++20, a default-constructed std::atomic has no initial value.
+    // Set it to false, or a meshing run can see a false cancel request.
+    std::atomic<bool> m_stop_mesh{false};
 private:
     std::string m_path;
     ImportStepProgressFn m_stepFn;

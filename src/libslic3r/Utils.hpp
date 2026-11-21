@@ -165,6 +165,9 @@ const std::string& custom_gcodes_dir();
 
 // Set a path with preset files.
 void set_data_dir(const std::string &path);
+// As set_data_dir(), but creates missing parents and leaves the path set (no throw) when its
+// status is access denied. For the sandboxed plugin helper only.
+void set_data_dir_tolerant(const std::string &path);
 // Return a full path to the GUI resource files.
 const std::string& data_dir();
 
@@ -810,6 +813,13 @@ void save_string_file(const boost::filesystem::path& p, const std::string& str);
 void load_string_file(const boost::filesystem::path& p, std::string& str);
 
 bool check_layer_id_pattern(const std::string& pattern, int layer_id);
+
+// On Windows, return an equivalent path carrying the extended-length ("\\?\" / "\\?\UNC\")
+// prefix so the Win32 APIs accept it past MAX_PATH even when LongPathsEnabled is off. The path
+// is made absolute and lexically normalized first, because the prefix disables normalisation.
+// A path that is already extended (or a device path) is returned unchanged; on other platforms,
+// or when an absolute path cannot be formed, the input is returned unchanged.
+boost::filesystem::path extended_path(const boost::filesystem::path& path);
 
 } // namespace Slic3r
 

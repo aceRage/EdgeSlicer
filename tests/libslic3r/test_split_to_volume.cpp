@@ -12,6 +12,7 @@
 #include <libslic3r/Semver.hpp>
 #include <libslic3r/SplitToVolume.hpp>
 #include <libslic3r/TriangleMesh.hpp>
+#include <libslic3r/TriangleSelector.hpp>
 #include <libslic3r/Utils.hpp>
 
 #include <boost/filesystem/operations.hpp>
@@ -21,6 +22,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
 #include <set>
@@ -2382,4 +2384,90 @@ TEST_CASE("Split to Fit P4: the grouped arrange report names unplaced items and 
     REQUIRE(bad.unplaced[2] == std::vector<size_t>{ 4 });
     REQUIRE(bad.plates[2] == std::vector<int>{ 1, 2 });
     REQUIRE(bad.shares[2]);
+}
+
+// Keep paint v2: Split to Fit cuts with KeepPaint (each plane cut paints by exact facet provenance)
+// and then separates a section's loose pieces by facet lists, whose painting is copied facet by
+// facet. Every paint kind comes through with its area, on the U whose top section falls apart.
+TEST_CASE("Split to Fit: painting of every kind survives the cuts and the loose pieces", "[SplitToVolume][PaintTransfer]")
+{
+    using FacetsMember = FacetsAnnotation ModelVolume::*;
+    struct Kind
+    {
+        const char         *name;
+        FacetsMember        member;
+        EnforcerBlockerType state;
+    };
+    const Kind kinds[] = {
+        { "colour 2", &ModelVolume::mmu_segmentation_facets, EnforcerBlockerType::Extruder2 },
+        { "colour 3", &ModelVolume::mmu_segmentation_facets, EnforcerBlockerType::Extruder3 },
+        { "support", &ModelVolume::supported_facets, EnforcerBlockerType::ENFORCER },
+        { "seam", &ModelVolume::seam_facets, EnforcerBlockerType::ENFORCER },
+        { "fuzzy skin", &ModelVolume::fuzzy_skin_facets, EnforcerBlockerType::FUZZY_SKIN },
+    };
+    auto area = [](const indexed_triangle_set &its) {
+        double a = 0.;
+        for (const Vec3i32 &f : its.indices)
+            a += 0.5 * double((its.vertices[f[1]] - its.vertices[f[0]]).cross(its.vertices[f[2]] - its.vertices[f[0]]).norm());
+        return a;
+    };
+    auto paint = [](ModelVolume &v, FacetsMember member, const std::function<EnforcerBlockerType(const Vec3f &)> &at) {
+        TriangleSelector sel(v.mesh());
+        sel.resample([&](const Vec3f &p) {
+            TriangleSelector::SampledState s;
+            s.state = at(p);
+            return s;
+        }, 0.5f);
+        (v.*member).set(sel);
+    };
+
+    Model        model;
+    ModelObject *mo = add_object(model, u_shape(), "U");
+    ModelVolume *v  = mo->volumes.front();
+    // The mesh is centred on its volume; the U's own frame is mesh + init shift.
+    const Vec3f shift = v->mesh().get_init_shift().cast<float>();
+    paint(*v, &ModelVolume::mmu_segmentation_facets, [&](const Vec3f &m) {
+        const Vec3f p = m + shift;
+        return p.x() < 23.f ? EnforcerBlockerType::Extruder2 : p.z() > 210.f ? EnforcerBlockerType::Extruder3 : EnforcerBlockerType::NONE;
+    });
+    paint(*v, &ModelVolume::supported_facets, [&](const Vec3f &m) {
+        const Vec3f p = m + shift;
+        return p.y() < 0.01f && p.x() > 140.f ? EnforcerBlockerType::ENFORCER : EnforcerBlockerType::NONE;
+    });
+    paint(*v, &ModelVolume::seam_facets, [&](const Vec3f &m) {
+        const Vec3f p = m + shift;
+        return p.x() > 277.f ? EnforcerBlockerType::ENFORCER : EnforcerBlockerType::NONE;
+    });
+    paint(*v, &ModelVolume::fuzzy_skin_facets, [&](const Vec3f &m) {
+        const Vec3f p = m + shift;
+        return std::abs(p.z() - 140.f) < 25.f ? EnforcerBlockerType::FUZZY_SKIN : EnforcerBlockerType::NONE;
+    });
+
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(400., 400., 205.), SplitOptions{});
+    REQUIRE(plan.piece_count() == 3);
+    const SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE(res.parts.size() == 3);
+
+    for (const Kind &k : kinds) {
+        const double in  = area((v->*k.member).get_facets(*v, k.state));
+        double       out = 0.;
+        for (const ModelObject *part : res.parts)
+            for (const ModelVolume *pv : part->volumes)
+                if (pv->is_model_part())
+                    out += area((pv->*k.member).get_facets(*pv, k.state));
+        INFO(k.name << ": source " << in << " mm2, parts " << out << " mm2");
+        REQUIRE(in > 100.);
+        // Kinds whose border lies on facets the Z plane splits are resampled there: the U's wall
+        // facets run its whole height, so the fuzzy band's two borders (800 mm) are resampled
+        // from a source painted at 0.5 mm, and come through to about 0.2 mm. The others are copies.
+        const double tol = k.member == &ModelVolume::fuzzy_skin_facets ? 0.03 : 0.01;
+        CHECK(std::abs(out - in) <= tol * in);
+    }
+    // Each pillar top got its own share of the fuzzy band (the band crosses the Z plane at 150).
+    for (size_t i = 1; i < 3; ++i) {
+        bool fuzzy = false;
+        for (const ModelVolume *pv : res.parts[i]->volumes)
+            fuzzy = fuzzy || (pv->is_model_part() && pv->is_fuzzy_skin_painted());
+        CHECK(fuzzy);
+    }
 }

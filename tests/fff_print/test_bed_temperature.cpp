@@ -60,7 +60,10 @@ TEST_CASE("Mixed print uses the highest bed temperature", "[BedTemperature]")
         // Wall printed by extruder 1 (0-based 0, low bed temp 35C), infill by extruder 2 (0-based 1, 65C).
         { "wall_filament", 1 },
         { "sparse_infill_filament", 2 },
-        { "solid_infill_filament", 2 }
+        { "solid_infill_filament", 2 },
+        // Skins on the infill filament, as before the surface filaments followed the walls.
+        {"top_surface_filament", 2},
+        {"bottom_surface_filament", 2}
     });
     std::string gcode = Slic3r::Test::slice({TestMesh::cube_20x20x20}, config);
     REQUIRE(first_layer_bed_temp(gcode) == 65);
@@ -87,7 +90,10 @@ TEST_CASE("A wall filament that prints nothing on the first layer does not raise
         { "brim_type", "auto_brim" },
         { "wall_filament", 2 },
         { "sparse_infill_filament", 1 },
-        { "solid_infill_filament", 1 }
+        { "solid_infill_filament", 1 },
+        // Skins on the infill filament, as before the surface filaments followed the walls.
+        {"top_surface_filament", 1},
+        {"bottom_surface_filament", 1}
     });
     std::string gcode = Slic3r::Test::slice({TestMesh::cube_20x20x20}, config);
     REQUIRE(first_layer_bed_temp(gcode) == 35);
@@ -108,6 +114,9 @@ TEST_CASE("bed_temperature_initial_layer_single expands to the max", "[BedTemper
         { "wall_filament", 1 },
         { "sparse_infill_filament", 2 },
         { "solid_infill_filament", 2 },
+        // Skins on the infill filament, as before the surface filaments followed the walls.
+        {"top_surface_filament", 2},
+        {"bottom_surface_filament", 2},
         { "machine_start_gcode", "M190 S{bed_temperature_initial_layer_single}" }
     });
     std::string gcode = Slic3r::Test::slice({TestMesh::cube_20x20x20}, config);

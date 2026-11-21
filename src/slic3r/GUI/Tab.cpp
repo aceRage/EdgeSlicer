@@ -58,6 +58,9 @@
 #include "EditGCodeDialog.hpp"
 #include "MsgDialog.hpp"
 #include "Notebook.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "PluginWarnings.hpp"
+#endif
 
 #include "Widgets/Label.hpp"
 #include "Widgets/TabCtrl.hpp"
@@ -4038,6 +4041,11 @@ void TabPrint::build()
         optgroup->append_single_option_line("outer_wall_filament", "multimaterial_settings_filament_for_features#walls");
         optgroup->append_single_option_line("sparse_infill_filament", "multimaterial_settings_filament_for_features#infill");
         optgroup->append_single_option_line("solid_infill_filament", "multimaterial_settings_filament_for_features#solid-infill");
+        // EdgeSlicer surface filaments (0 = "Same as walls").
+        optgroup->append_single_option_line("top_surface_filament", "multimaterial_settings_filament_for_features#solid-infill");
+        optgroup->append_single_option_line("bottom_surface_filament", "multimaterial_settings_filament_for_features#solid-infill");
+        // EdgeSlicer: 0 = "Same as the ironed surface".
+        optgroup->append_single_option_line("ironing_filament", "multimaterial_settings_filament_for_features#solid-infill");
         optgroup->append_single_option_line("wipe_tower_filament", "multimaterial_settings_filament_for_features#wipe-tower");
 
         optgroup = page->new_optgroup(L("Ooze prevention"), L"param_ooze_prevention");
@@ -5358,6 +5366,14 @@ static DynamicPrintConfig resolved_model_config_for_tab(const DynamicPrintConfig
             resolved.set_key_value("sparse_infill_filament", new ConfigOptionInt(extruder));
         if (!resolved.has("solid_infill_filament"))
             resolved.set_key_value("solid_infill_filament", new ConfigOptionInt(extruder));
+        // EdgeSlicer surface filaments: the object's filament resets them to "Same as walls"
+        // (apply_to_print_region_config(), PrintObject.cpp).
+        if (!resolved.has("top_surface_filament"))
+            resolved.set_key_value("top_surface_filament", new ConfigOptionInt(0));
+        if (!resolved.has("bottom_surface_filament"))
+            resolved.set_key_value("bottom_surface_filament", new ConfigOptionInt(0));
+        if (!resolved.has("ironing_filament"))
+            resolved.set_key_value("ironing_filament", new ConfigOptionInt(0));
     }
 
     if (!resolved.has("solid_infill_filament") && resolved.has("sparse_infill_filament"))
@@ -10322,6 +10338,12 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
         // Edge: the detach button asked for a detached copy already; the dialog only adds to that.
         detach           = detach || dlg.get_detach_value(m_type);
     }
+
+#ifdef EDGE_PYTHON_PLUGINS
+    m_presets->get_edited_preset().config.update_plugin_manifest();
+    if (!confirm_save_with_unresolved_plugins(this, m_presets->get_edited_preset().config))
+        return;
+#endif
 
     //BBS record current preset name
     std::string curr_preset_name = m_presets->get_edited_preset().name;

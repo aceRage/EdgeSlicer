@@ -142,6 +142,12 @@ void run(std::shared_ptr<Prepared> p, Sink sink);
 // the same rule needs_job_id follows.
 void describe_bambu(MachineObject* m, nlohmann::json& p);
 
+// describe_bambu's ams[]: one row per AMS unit {id, nozzle, side, type, name (a rack AMS only:
+// "AMS 3H" / "AMS-B"), humidity_level, humidity_pct, temp, trays[] {id, exists, type, sub_type,
+// color, remain, active (the tray feeding the toolhead; only when true), can_load, can_unload,
+// filament_why}}.
+nlohmann::json ams_json(MachineObject* m);
+
 // Whether a print host speaks Elegoo's SDCP (a Centauri Carbon 1 on "elegoolink"): its live state
 // comes from the hub's persistent connection to it, not from a Moonraker probe. `printer_model` is
 // the device's or preset's model; the Centauri Carbon 2 speaks MQTT instead and is left out.

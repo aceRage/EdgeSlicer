@@ -554,6 +554,29 @@ SCENARIO("A library 3MF is prepared for the current project's filaments, and che
             CHECK(bracket->config.has("filename_format"));
         }
     }
+    GIVEN("a volume with part settings including an untrusted key and an out-of-range extruder") {
+        Model        model;
+        ModelObject *object = model.add_object();
+        ModelVolume *volume = object->add_volume(make_cube(10, 10, 10));
+        volume->config.set("wall_loops", 5);
+        volume->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(40));
+        volume->config.set_key_value("post_process", new ConfigOptionStrings({"evil.sh"}));
+        volume->config.set("extruder", 9);
+
+        WHEN("it is prepared for a 4-filament project") {
+            const cm::ImportReport report = cm::prepare_imported_objects({object}, 4);
+            THEN("trusted part settings survive, untrusted keys are removed, and the extruder is clamped to 1") {
+                CHECK(volume->config.opt_int("wall_loops") == 5);
+                const auto *density = volume->config.get().option<ConfigOptionPercent>("sparse_infill_density");
+                REQUIRE(density != nullptr);
+                CHECK(density->value == Approx(40.));
+                CHECK_FALSE(volume->config.has("post_process"));
+                CHECK(volume->config.opt_int("extruder") == 1);
+                CHECK(report.untrusted_settings_removed >= 1);
+                CHECK(report.filaments_clamped());
+            }
+        }
+    }
 }
 
 SCENARIO("The filament keys are the ones a per-object or per-part setting can carry", "[CustomModels]") {
@@ -572,6 +595,143 @@ SCENARIO("The filament keys are the ones a per-object or per-part setting can ca
 // A library 3MF written by the full project save (what a person who drops a finished project into
 // the folder has): the loader hands back the project settings, and loading never applies them -
 // the application only applies them with LoadConfig, which Add Custom Models does not pass.
+SCENARIO("A project 3MF added to the current project is handled by the mode the user picked", "[CustomModels]") {
+    // An object with a per-object setting, a modifier part with settings, an untrusted key, a
+    // filament the project does not have, and a height-range setting.
+    auto build = [](Model &model) {
+        ModelObject *object = model.add_object();
+        object->config.set("extruder", 2);
+        object->config.set("wall_loops", 6);
+        ModelVolume *part = object->add_volume(make_cube(10, 10, 10));
+        part->config.set("wall_loops", 5);
+        part->config.set("extruder", 9);
+        part->config.set_key_value("post_process", new ConfigOptionStrings({"evil.sh"}));
+        ModelVolume *modifier = object->add_volume(make_cube(4, 4, 4));
+        modifier->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+        modifier->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(40));
+        object->layer_config_ranges[{1., 2.}].set("wall_loops", 3);
+        return object;
+    };
+
+    GIVEN("the stored import choice") {
+        THEN("1 and 2 keep their old meaning, 4 is the new choice, and other values read as before") {
+            CHECK(cm::project_import_mode_from_action("") == cm::ProjectImportMode::OpenAsProject);
+            CHECK(cm::project_import_mode_from_action("1") == cm::ProjectImportMode::OpenAsProject);
+            CHECK(cm::project_import_mode_from_action("2") == cm::ProjectImportMode::GeometryOnly);
+            CHECK(cm::project_import_mode_from_action("3") == cm::ProjectImportMode::GeometryOnly);
+            CHECK(cm::project_import_mode_from_action("4") == cm::ProjectImportMode::GeometryWithObjectSettings);
+            CHECK(cm::project_import_mode_from_action("0") == cm::ProjectImportMode::OpenAsProject);
+            CHECK(cm::project_import_mode_from_action("junk") == cm::ProjectImportMode::OpenAsProject);
+            CHECK(cm::project_import_action_value(cm::ProjectImportMode::OpenAsProject) == "1");
+            CHECK(cm::project_import_action_value(cm::ProjectImportMode::GeometryOnly) == "2");
+            CHECK(cm::project_import_action_value(cm::ProjectImportMode::GeometryWithObjectSettings) == "4");
+        }
+    }
+    GIVEN("a project object") {
+        Model        model;
+        ModelObject *object   = build(model);
+        ModelVolume *part     = object->volumes[0];
+        ModelVolume *modifier = object->volumes[1];
+
+        WHEN("it is imported as geometry only") {
+            const cm::ImportReport report = cm::apply_project_import_mode({object}, cm::ProjectImportMode::GeometryOnly, 4);
+            THEN("object and part settings are reset except the extruder, and nothing is reported") {
+                CHECK(object->config.opt_int("extruder") == 2);
+                CHECK_FALSE(object->config.has("wall_loops"));
+                CHECK(part->config.opt_int("extruder") == 9);
+                CHECK_FALSE(part->config.has("wall_loops"));
+                CHECK_FALSE(part->config.has("post_process"));
+                CHECK_FALSE(modifier->config.has("sparse_infill_density"));
+                CHECK(report.untrusted_settings_removed == 0);
+                CHECK_FALSE(report.filaments_clamped());
+            }
+        }
+        WHEN("it is imported with object settings into a 4-filament project") {
+            const cm::ImportReport report = cm::apply_project_import_mode({object}, cm::ProjectImportMode::GeometryWithObjectSettings, 4);
+            THEN("trusted settings, the modifier and the height range are kept, untrusted keys are removed and filaments are clamped") {
+                CHECK(object->config.opt_int("wall_loops") == 6);
+                CHECK(object->config.opt_int("extruder") == 2);
+                CHECK(part->config.opt_int("wall_loops") == 5);
+                CHECK_FALSE(part->config.has("post_process"));
+                CHECK(part->config.opt_int("extruder") == 1);
+                REQUIRE(modifier->config.has("sparse_infill_density"));
+                CHECK(object->layer_config_ranges.size() == 1);
+                CHECK(object->layer_config_ranges.begin()->second.opt_int("wall_loops") == 3);
+                CHECK(report.untrusted_settings_removed >= 1);
+                CHECK(report.filaments_clamped());
+            }
+        }
+        WHEN("the file is opened as a project") {
+            const cm::ImportReport report = cm::apply_project_import_mode({object}, cm::ProjectImportMode::OpenAsProject, 4);
+            THEN("the objects are not touched") {
+                CHECK(object->config.opt_int("wall_loops") == 6);
+                CHECK(part->config.opt_int("extruder") == 9);
+                CHECK(part->config.has("post_process"));
+                CHECK(modifier->config.has("sparse_infill_density"));
+                CHECK(report.untrusted_settings_removed == 0);
+            }
+        }
+    }
+}
+
+SCENARIO("File > Import asks how to bring in a project 3MF only when it carries object settings", "[CustomModels][3mf]") {
+    GIVEN("which behaviour is chosen in Preferences") {
+        const auto &d = cm::decide_import_project_choice;
+        THEN("nothing is asked without a 3MF that has object settings") {
+            for (const char *pref : {"load_all", "ask_when_relevant", "always_ask", "load_geometry_only", "load_geometry_with_settings", ""}) {
+                const cm::ImportChoice c = d(pref, "4", false);
+                CHECK_FALSE(c.ask);
+                CHECK(c.mode == cm::ProjectImportMode::GeometryOnly);
+            }
+        }
+        THEN("a preference that fixes the behaviour is not asked about") {
+            CHECK_FALSE(d("load_geometry_only", "", true).ask);
+            CHECK(d("load_geometry_only", "4", true).mode == cm::ProjectImportMode::GeometryOnly);
+            CHECK_FALSE(d("load_geometry_with_settings", "", true).ask);
+            CHECK(d("load_geometry_with_settings", "", true).mode == cm::ProjectImportMode::GeometryWithObjectSettings);
+            CHECK_FALSE(d("load_all", "", true).ask);
+            CHECK(d("load_all", "", true).mode == cm::ProjectImportMode::GeometryOnly);
+        }
+        THEN("otherwise it is asked, pre-selecting the last choice (geometry only unless it was with settings)") {
+            for (const char *pref : {"ask_when_relevant", "always_ask", ""}) {
+                CHECK(d(pref, "", true).ask);
+                CHECK(d(pref, "1", true).default_mode == cm::ProjectImportMode::GeometryOnly);
+                CHECK(d(pref, "2", true).default_mode == cm::ProjectImportMode::GeometryOnly);
+                CHECK(d(pref, "4", true).default_mode == cm::ProjectImportMode::GeometryWithObjectSettings);
+            }
+        }
+    }
+    GIVEN("saved 3MFs") {
+        ScratchDir scratch;
+        use_scratch_as_temporary_dir(scratch);
+        Model        source;
+        ModelObject *plain = make_bracket(source, "plain");
+        ModelObject *tuned = make_bracket(source, "tuned");
+        tuned->volumes.back()->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(35));
+        ModelObject *ranged = make_bracket(source, "ranged");
+        ranged->layer_config_ranges[{1., 2.}].set("wall_loops", 3);
+        ModelObject *only_extruder = make_bracket(source, "extruder");
+        only_extruder->config.set("extruder", 2);
+
+        const fs::path plain_file  = scratch.path / "plain.3mf";
+        const fs::path tuned_file  = scratch.path / "tuned.3mf";
+        const fs::path ranged_file = scratch.path / "ranged.3mf";
+        const fs::path ext_file    = scratch.path / "extruder.3mf";
+        REQUIRE(cm::save_objects({{plain, 0}}, plain_file).ok);
+        REQUIRE(cm::save_objects({{tuned, 0}}, tuned_file).ok);
+        REQUIRE(cm::save_objects({{ranged, 0}}, ranged_file).ok);
+        REQUIRE(cm::save_objects({{only_extruder, 0}}, ext_file).ok);
+        THEN("only files with per-part or height-range settings count") {
+            CHECK_FALSE(cm::project_3mf_has_object_settings(plain_file));
+            CHECK(cm::project_3mf_has_object_settings(tuned_file));
+            CHECK(cm::project_3mf_has_object_settings(ranged_file));
+            CHECK_FALSE(cm::project_3mf_has_object_settings(ext_file));
+            CHECK_FALSE(cm::project_3mf_has_object_settings(scratch.path / "missing.3mf"));
+            CHECK_FALSE(cm::project_3mf_has_object_settings(scratch.path / "model.stl"));
+        }
+    }
+}
+
 SCENARIO("A project 3MF dropped into the library carries settings that the loader reports but Add Custom Models never applies", "[CustomModels][3mf]") {
     GIVEN("a project saved with a full print configuration") {
         ScratchDir scratch;

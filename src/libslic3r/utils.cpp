@@ -290,12 +290,59 @@ const std::string& custom_gcodes_dir()
 Slic3r::I18N::translate_fn_type Slic3r::I18N::translate_fn = nullptr;
 static std::string g_data_dir;
 
+static bool data_dir_is_access_denied(const boost::system::error_code& ec)
+{
+    if (!ec)
+        return false;
+    if (ec == boost::system::errc::permission_denied || ec == boost::system::errc::operation_not_permitted)
+        return true;
+#ifdef _WIN32
+    if (ec.value() == ERROR_ACCESS_DENIED)
+        return true;
+#endif
+    return false;
+}
+
 void set_data_dir(const std::string &dir)
 {
     g_data_dir = dir;
     if (!g_data_dir.empty() && !boost::filesystem::exists(g_data_dir)) {
        boost::filesystem::create_directory(g_data_dir);
     }
+}
+
+// The sandboxed plugin helper (edge-plugin-host) only: under an AppContainer the data_dir status()
+// can be access denied, which must not abort the helper. Everyone else keeps set_data_dir().
+void set_data_dir_tolerant(const std::string& dir)
+{
+    g_data_dir = dir;
+    if (g_data_dir.empty())
+        return;
+
+    // Throwing exists() (pre-7b5a6c86) returned false for a missing path and threw on access
+    // denied. exists(path, ec) also returns false for a missing path but always assigns ENOENT
+    // to ec, so "create only when !exists && !ec" skipped the create. file_not_found is the
+    // create case. Access denied is the AppContainer helper: leave g_data_dir set, do not throw.
+    // Other status errors still throw, matching the old exists().
+    boost::system::error_code            ec;
+    const boost::filesystem::file_status st = boost::filesystem::status(g_data_dir, ec);
+    if (boost::filesystem::exists(st))
+        return;
+    if (st.type() != boost::filesystem::file_not_found) {
+        if (data_dir_is_access_denied(ec))
+            return;
+        throw boost::filesystem::filesystem_error("boost::filesystem::status", boost::filesystem::path(g_data_dir), ec);
+    }
+
+    // create_directories: the old create_directory() needed the parent to already exist.
+    // Tests (and GUI first-run) call set_data_dir on a path whose parents are missing.
+    ec.clear();
+    boost::filesystem::create_directories(g_data_dir, ec);
+    if (!ec)
+        return;
+    if (data_dir_is_access_denied(ec))
+        return;
+    throw boost::filesystem::filesystem_error("boost::filesystem::create_directories", boost::filesystem::path(g_data_dir), ec);
 }
 
 const std::string& data_dir()
@@ -2289,6 +2336,47 @@ bool check_layer_id_pattern(const std::string& pattern, int layer_id){
         return false;
     int mod = layer_id % interval; // For multiples, mod == 0
     return mod >= 0 && mod < count;
+}
+
+boost::filesystem::path extended_path(const boost::filesystem::path& path) {
+#ifdef _WIN32
+    namespace fs = boost::filesystem;
+
+    // Already extended, or an explicit device path (which is not subject to MAX_PATH and must not
+    // be absolutized or normalized): leave it alone.
+    {
+        fs::path prefix_candidate = path;
+        const std::wstring native = prefix_candidate.make_preferred().wstring();
+        if (native.rfind(L"\\\\?\\", 0) == 0 || native.rfind(L"\\\\.\\", 0) == 0)
+            return fs::path(native);
+    }
+
+    fs::path absolute = path;
+    if (!absolute.is_absolute()) {
+        boost::system::error_code ec;
+        absolute = fs::absolute(absolute, ec);
+        if (ec)
+            return path; // can't form a valid prefixed path from a relative one
+    }
+
+    // A trailing separator is redundant to the Win32 APIs, but lexically_normal() would rewrite it
+    // as a "." element, which the "\\?\" prefix (normalisation off) takes literally. Drop it first.
+    while (absolute.has_relative_path() && absolute.filename() == ".")
+        absolute = absolute.parent_path();
+
+    // The "\\?\" prefix turns off Win32 normalisation, so do it here first.
+    absolute = absolute.lexically_normal();
+
+    // Extended paths only recognize backslash separators.
+    const std::wstring native = absolute.make_preferred().wstring();
+    if (native.empty())
+        return path;
+    if (native.rfind(L"\\\\", 0) == 0)
+        return fs::path(L"\\\\?\\UNC\\" + native.substr(2)); // \\server\share\... -> \\?\UNC\server\share\...
+    return fs::path(L"\\\\?\\" + native);                    // C:\dir\... -> \\?\C:\dir\...
+#else
+    return path;
+#endif
 }
 
 

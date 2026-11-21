@@ -9,6 +9,7 @@
 #include "MTUtils.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
+#include "PaintTransfer.hpp"
 #include "Airbrush/AirbrushBake.hpp"
 
 #include "Format/AMF.hpp"
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <float.h>
+#include <memory>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
@@ -1636,7 +1638,8 @@ ModelVolume* ModelObject::add_volume_with_shared_mesh(const ModelVolume &other, 
     return v;
 }
 
-ModelVolume* ModelObject::replace_volume_with_object_mesh(size_t src_idx, TriangleMesh &&mesh_in_object_coords, const std::string &name_suffix)
+ModelVolume* ModelObject::replace_volume_with_object_mesh(size_t src_idx, TriangleMesh &&mesh_in_object_coords, const std::string &name_suffix,
+                                                          const std::vector<PaintTransfer::Source> *paint_sources)
 {
     assert(src_idx < this->volumes.size());
     const ModelVolume *old_volume = this->volumes[src_idx];
@@ -1651,6 +1654,13 @@ ModelVolume* ModelObject::replace_volume_with_object_mesh(size_t src_idx, Triang
     new_volume->config.apply(old_volume->config);
     new_volume->set_type(old_volume->type());
     new_volume->set_material_id(old_volume->material_id());
+    // Keep paint v2 (NeotkoCM keep-painting-sm240, re-ported from PR #605): the result is painted
+    // from the inputs while they still exist - support, seam, colour and fuzzy skin, and the skin
+    // of an input with another filament keeps that filament; a Difference's tool leaves its wall
+    // plain. An airbrushed input keeps the colour as before: no colour layer is carried, and the
+    // field is re-baked below.
+    if (paint_sources != nullptr && new_volume->is_model_part())
+        PaintTransfer::paint_boolean_result(*paint_sources, *new_volume);
     // Airbrush P3 (A4): the boolean drops the paint, but the colour field is position-keyed, so the
     // spray comes back on the result where it still has surface (over no other paint, as before).
     if (old_volume->airbrush_field && new_volume->is_model_part()) {
@@ -2539,6 +2549,14 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
         volume_mesh_begin += mesh_info.second;
 
         size_t counter = 1;
+        // Keep paint v2: each piece of a painted part gets its share, facet by facet (an airbrushed
+        // part's colour stays with its field, as before).
+        const bool painted = !is_multi_volume_object && PaintTransfer::has_painting(*volume);
+        std::unique_ptr<PaintTransfer::SplitPainter> painter;
+        if (painted)
+            painter = std::make_unique<PaintTransfer::SplitPainter>(*volume, volume->get_matrix(),
+                                                                    volume->airbrush_field ? PaintTransfer::ALL_LAYERS & ~unsigned(PaintTransfer::LAYER_COLOUR) :
+                                                                                             unsigned(PaintTransfer::ALL_LAYERS));
         for (TriangleMesh& mesh : meshes) {
             // FIXME: crashes if not satisfied
             if (mesh.facets_count() < 3)
@@ -2566,13 +2584,25 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
             new_object->instances.reserve(this->instances.size());
             for (const ModelInstance* model_instance : this->instances)
                 new_object->add_instance(*model_instance);
+            // Matched while the piece still has split()'s coordinates (add_volume() centres it).
+            const std::vector<int> piece_map = painted ? painter->match(mesh.its) : std::vector<int>{};
             ModelVolume* new_vol = new_object->add_volume(*volume, std::move(mesh));
+            if (painted)
+                painter->paint(*new_vol, piece_map, new_vol->get_matrix());
 
             if (is_multi_volume_object) {
                 // BBS: volume geometry not changed, so we can keep the color paint facets
                 if (new_vol->mmu_segmentation_facets.timestamp() == volume->mmu_segmentation_facets.timestamp())
                     new_vol->mmu_segmentation_facets.reset(); // BBS: let next assign take effect
                 new_vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
+                // Keep paint v2: support, seam and fuzzy skin stay the same way (same mesh); only the
+                // colour was kept before.
+                for (FacetsAnnotation ModelVolume::*layer : { &ModelVolume::supported_facets, &ModelVolume::seam_facets,
+                                                             &ModelVolume::fuzzy_skin_facets }) {
+                    if ((new_vol->*layer).timestamp() == (volume->*layer).timestamp())
+                        (new_vol->*layer).reset();
+                    (new_vol->*layer).assign(volume->*layer);
+                }
             }
 
             // BBS: clear volume's config, as we already set them into object
@@ -3279,7 +3309,24 @@ size_t ModelVolume::split(unsigned int max_extruders)
     if (has_image)
         image_old_its = this->mesh().its;
 
-    for (TriangleMesh &mesh : meshes) {
+    // Keep paint v2: each piece of a painted part gets its share, facet by facet (an airbrushed part's
+    // colour stays with its field, as before). The painting is read from a copy of the part as it is
+    // now: the first piece below takes this volume's place and drops its painting.
+    std::unique_ptr<ModelVolume>                 painted_original;
+    std::unique_ptr<PaintTransfer::SplitPainter> painter;
+    std::vector<std::vector<int>>                piece_maps;
+    if (PaintTransfer::has_painting(*this)) {
+        painted_original.reset(new ModelVolume(this->object, *this));
+        painter = std::make_unique<PaintTransfer::SplitPainter>(*painted_original, this->get_matrix(),
+                                                                this->airbrush_field ? PaintTransfer::ALL_LAYERS & ~unsigned(PaintTransfer::LAYER_COLOUR) :
+                                                                                       unsigned(PaintTransfer::ALL_LAYERS));
+        piece_maps.reserve(meshes.size());
+        for (const TriangleMesh &piece : meshes)
+            piece_maps.emplace_back(painter->match(piece.its));
+    }
+
+    for (size_t mesh_idx = 0; mesh_idx < meshes.size(); ++mesh_idx) {
+        TriangleMesh &mesh = meshes[mesh_idx];
         if (mesh.empty())
             // Repair may have removed unconnected triangles, thus emptying the mesh.
             continue;
@@ -3312,6 +3359,8 @@ size_t ModelVolume::split(unsigned int max_extruders)
         // +shift in the object's, which only puts it back where it was with no rotation, scale or mirror of the
         // part's own. Move it by the shift as the part's own transformation turns and sizes it.
         piece->set_offset(offset + piece->get_matrix_no_offset() * piece->get_offset());
+        if (painter)
+            painter->paint(*piece, piece_maps[mesh_idx], piece->get_matrix());
         this->object->volumes[ivolume]->name = name + "_" + std::to_string(idx + 1);
         //BBS: always set the extruder id the same as original
         this->object->volumes[ivolume]->config.set("extruder", this->extruder_id());
