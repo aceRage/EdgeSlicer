@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace Slic3r {
 
@@ -523,6 +524,408 @@ OutlineBoxResult make_outline_box(const ExPolygons &silhouette, const std::vecto
     if (!joined)
         out.warnings.emplace_back("Some parts of the box could not be joined into one mesh; they overlap, which still prints correctly.");
     return out;
+}
+
+// ---- clicker -----------------------------------------------------------------------------------
+
+namespace {
+
+ExPolygon square_at(const Vec2d &center, double side)
+{
+    double    h = side / 2.;
+    ExPolygon e;
+    e.contour.points = {Point::new_scale(center.x() - h, center.y() - h), Point::new_scale(center.x() + h, center.y() - h),
+                        Point::new_scale(center.x() + h, center.y() + h), Point::new_scale(center.x() - h, center.y() + h)};
+    return e;
+}
+
+ExPolygon rect_at(const Vec2d &center, double size_x, double size_y)
+{
+    double    hx = size_x / 2., hy = size_y / 2.;
+    ExPolygon e;
+    e.contour.points = {Point::new_scale(center.x() - hx, center.y() - hy), Point::new_scale(center.x() + hx, center.y() - hy),
+                        Point::new_scale(center.x() + hx, center.y() + hy), Point::new_scale(center.x() - hx, center.y() + hy)};
+    return e;
+}
+
+ExPolygon circle_at(const Vec2d &center, double radius, int segments = 48)
+{
+    ExPolygon e;
+    e.contour.points.reserve(size_t(segments));
+    for (int i = 0; i < segments; ++i) {
+        double a = 2. * PI * double(i) / double(segments);
+        e.contour.points.push_back(Point::new_scale(center.x() + radius * std::cos(a), center.y() + radius * std::sin(a)));
+    }
+    return e;
+}
+
+// Post under a cap: a cylinder with the cross of the stem cut out
+ExPolygons stem_post(const Vec2d &center, double fit)
+{
+    double     length = MX_CROSS_LENGTH + 2. * fit;
+    double     width  = MX_CROSS_WIDTH + 2. * fit;
+    ExPolygons cross  = union_ex(ExPolygons{rect_at(center, length, width), rect_at(center, width, length)});
+    return diff_ex(ExPolygons{circle_at(center, MX_POST_DIAMETER / 2.)}, cross);
+}
+
+// One switch in a body
+struct SwitchSocket
+{
+    Vec2d  position = Vec2d::Zero();
+    double fit      = 0.;
+};
+
+// Picture on a top face: the levels inside of the outline, made not to overlap
+std::vector<ExPolygons> picture_levels(const ExPolygons &silhouette, const std::vector<ExPolygons> &detail, double margin)
+{
+    std::vector<ExPolygons> out;
+    ExPolygons              area = inset(silhouette, margin);
+    ExPolygons              used;
+    for (const ExPolygons &level : detail) {
+        ExPolygons shape = intersection_ex(level, area);
+        if (!used.empty())
+            shape = diff_ex(shape, used);
+        if (!shape.empty())
+            shape = opening_ex(shape, scaled_f(DECORATION_MIN_WIDTH / 2.), ClipperLib::jtMiter, 3.);
+        if (!shape.empty())
+            used = union_ex(used, shape);
+        out.push_back(std::move(shape));
+    }
+    if (used.empty())
+        out.clear();
+    return out;
+}
+
+// Solid body with sockets. footprint .. outline of the body; low .. added to the footprint under
+// low_height (key ring tab); hole .. cut through everything (hole of the key ring)
+indexed_triangle_set socket_body(const ExPolygons &footprint, const ExPolygons &low, double low_height, const ExPolygons &hole,
+                                 const std::vector<SwitchSocket> &sockets, const ClickerParams &p, bool *joined)
+{
+    ExPolygons pockets, openings;
+    for (const SwitchSocket &s : sockets) {
+        pockets.push_back(square_at(s.position, MX_POCKET));
+        openings.push_back(square_at(s.position, MX_OPENING + 2. * s.fit));
+    }
+    pockets  = union_ex(pockets);
+    openings = union_ex(openings);
+
+    const double lip_z = p.body_height - MX_PLATE;
+    // Heights where the cross-section changes
+    std::vector<double> levels = {0., p.floor, lip_z, p.body_height};
+    int                 steps  = p.chamfer > 0. ? std::max(1, int(std::ceil(p.chamfer / CHAMFER_STEP - 1e-6))) : 0;
+    for (int i = 1; i <= steps; ++i)
+        levels.push_back(p.chamfer * double(i) / double(steps));
+    if (!low.empty() && low_height > 0. && low_height < p.body_height)
+        levels.push_back(low_height);
+    std::sort(levels.begin(), levels.end());
+    levels.erase(std::unique(levels.begin(), levels.end(), [](double a, double b) { return std::abs(a - b) < 1e-6; }), levels.end());
+
+    const ExPolygons with_low = low.empty() ? footprint : union_ex(footprint, low);
+    std::vector<OutlineBand> bands;
+    for (size_t i = 0; i + 1 < levels.size(); ++i) {
+        double     z0 = levels[i], z1 = levels[i + 1];
+        double     z  = (z0 + z1) / 2.;
+        ExPolygons shape = (!low.empty() && z < low_height) ? with_low : footprint;
+        if (z < p.chamfer)
+            shape = inset(shape, p.chamfer * (1. - z / p.chamfer));
+        if (!hole.empty())
+            shape = diff_ex(shape, hole);
+        if (z > lip_z)
+            shape = diff_ex(shape, openings);
+        else if (z > p.floor)
+            shape = diff_ex(shape, pockets);
+        if (!shape.empty())
+            bands.push_back({std::move(shape), z0, z1});
+    }
+    return join_outline_bands(bands, joined);
+}
+
+// Cap in print orientation (top face on the bed): plate with the picture inlaid and posts on it.
+// All shapes are already mirrored.
+bool cap_object(OutlineObject &out, const ExPolygons &plate, const std::vector<ExPolygons> &pictures, const ExPolygons &posts,
+                double thickness, double picture_depth, bool *joined)
+{
+    ExPolygons picture_all;
+    for (const ExPolygons &level : pictures)
+        append(picture_all, level);
+    picture_all = union_ex(picture_all);
+
+    std::vector<OutlineBand> bands;
+    if (picture_all.empty()) {
+        bands.push_back({plate, 0., thickness});
+    } else {
+        bands.push_back({diff_ex(plate, picture_all), 0., picture_depth});
+        bands.push_back({plate, picture_depth, thickness});
+    }
+    bands.push_back({posts, thickness, thickness + MX_POST_HEIGHT});
+
+    OutlinePart body;
+    body.name = "Cap";
+    body.mesh = join_outline_bands(bands, joined);
+    if (body.mesh.indices.empty())
+        return false;
+    out.parts.push_back(std::move(body));
+    for (size_t i = 0; i < pictures.size(); ++i) {
+        OutlinePart part;
+        part.mesh = outline_prism(pictures[i], 0., picture_depth);
+        if (part.mesh.indices.empty())
+            continue;
+        part.name  = "Colour " + std::to_string(i + 1);
+        part.level = int(i);
+        out.parts.push_back(std::move(part));
+    }
+    return true;
+}
+
+// Tab for a key ring: a ring which overlaps the edge of the shape in the given direction
+void keyring_tab(const ExPolygons &silhouette, double angle_deg, ExPolygons &tab, ExPolygons &hole)
+{
+    BoundingBox bb     = get_extents(silhouette);
+    Point       middle = bb.center();
+    Vec2d       origin(unscale<double>(middle.x()), unscale<double>(middle.y()));
+    double      a      = angle_deg * PI / 180.;
+    Vec2d       dir(std::cos(a), std::sin(a));
+    double      reach  = unscale<double>((bb.max - bb.min).cast<double>().norm());
+    // the last point of the ray which is inside of the shape
+    double edge = 0.;
+    for (double t = 0.; t <= reach; t += 0.2) {
+        Point pt = Point::new_scale(origin.x() + dir.x() * t, origin.y() + dir.y() * t);
+        for (const ExPolygon &e : silhouette)
+            if (e.contains(pt)) {
+                edge = t;
+                break;
+            }
+    }
+    // the hole lies just outside of the shape, the ring around it overlaps the shape
+    Vec2d center = origin + dir * (edge + KEYRING_HOLE / 2. + 0.5);
+    tab  = {circle_at(center, KEYRING_HOLE / 2. + KEYRING_WIDTH)};
+    hole = {circle_at(center, KEYRING_HOLE / 2.)};
+}
+
+double distance_to_boundary_sq(const ExPolygon &e, const Vec2d &p)
+{
+    double best = std::numeric_limits<double>::max();
+    auto   scan = [&best, &p](const Polygon &polygon) {
+        const Points &pts = polygon.points;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            Vec2d  a  = pts[i].cast<double>();
+            Vec2d  b  = pts[(i + 1) % pts.size()].cast<double>();
+            Vec2d  ab = b - a;
+            double l2 = ab.squaredNorm();
+            double t  = l2 > 0. ? std::clamp((p - a).dot(ab) / l2, 0., 1.) : 0.;
+            best      = std::min(best, (a + ab * t - p).squaredNorm());
+        }
+    };
+    scan(e.contour);
+    for (const Polygon &h : e.holes)
+        scan(h);
+    return best;
+}
+
+} // namespace
+
+Vec2d largest_inscribed_circle(const ExPolygons &shape, double *radius)
+{
+    if (radius != nullptr)
+        *radius = 0.;
+    if (shape.empty())
+        return Vec2d::Zero();
+    // Distance (scaled, squared) from the point to the outline, negative outside of the shape
+    auto depth = [&shape](const Vec2d &p) {
+        Point pt(coord_t(p.x()), coord_t(p.y()));
+        for (const ExPolygon &e : shape)
+            if (e.contains(pt))
+                return distance_to_boundary_sq(e, p);
+        return -1.;
+    };
+    BoundingBox bb   = get_extents(shape);
+    Vec2d       min  = bb.min.cast<double>();
+    Vec2d       size = (bb.max - bb.min).cast<double>();
+    Vec2d       best = bb.center().cast<double>();
+    double      best_depth = depth(best);
+    // Coarse grid, then finer grids around the best point
+    const int grid = 48;
+    Vec2d     step = size / double(grid);
+    for (int y = 0; y <= grid; ++y)
+        for (int x = 0; x <= grid; ++x) {
+            Vec2d  p(min.x() + step.x() * x, min.y() + step.y() * y);
+            double d = depth(p);
+            if (d > best_depth) {
+                best_depth = d;
+                best       = p;
+            }
+        }
+    for (int pass = 0; pass < 4; ++pass) {
+        Vec2d center = best;
+        Vec2d fine   = step / 4.;
+        for (int y = -4; y <= 4; ++y)
+            for (int x = -4; x <= 4; ++x) {
+                Vec2d  p(center.x() + fine.x() * x, center.y() + fine.y() * y);
+                double d = depth(p);
+                if (d > best_depth) {
+                    best_depth = d;
+                    best       = p;
+                }
+            }
+        step = fine;
+    }
+    if (best_depth < 0.)
+        return Vec2d::Zero();
+    if (radius != nullptr)
+        *radius = unscale<double>(std::sqrt(best_depth));
+    return Vec2d(unscale<double>(best.x()), unscale<double>(best.y()));
+}
+
+ClickerParams sanitize(const ClickerParams &params)
+{
+    ClickerParams p     = params;
+    p.floor             = std::clamp(p.floor, 0.6, 5.);
+    p.body_height       = std::clamp(p.body_height, p.floor + MX_DEPTH + MX_PLATE, 60.);
+    p.chamfer           = std::clamp(p.chamfer, 0., p.floor);
+    p.socket_fit        = std::clamp(p.socket_fit, -0.2, 0.5);
+    p.stem_fit          = std::clamp(p.stem_fit, -0.1, 0.3);
+    p.switch_offset.x() = std::clamp(p.switch_offset.x(), -200., 200.);
+    p.switch_offset.y() = std::clamp(p.switch_offset.y(), -200., 200.);
+    p.cap_overhang      = std::clamp(p.cap_overhang, 0., 10.);
+    p.decoration_depth  = std::clamp(p.decoration_depth, 0.2, 2.);
+    p.cap_thickness     = std::clamp(p.cap_thickness, std::max(0.8, p.decoration_depth + 0.4), 10.);
+    p.decoration_margin = std::clamp(p.decoration_margin, 0., 10.);
+    return p;
+}
+
+ClickerSections clicker_sections(const ExPolygons &silhouette, const std::vector<ExPolygons> &detail, const ClickerParams &params)
+{
+    ClickerSections out;
+    if (silhouette.empty())
+        return out;
+    const ClickerParams p = sanitize(params);
+    out.switch_position   = largest_inscribed_circle(silhouette, &out.inscribed_radius) + p.switch_offset;
+    // the corner of the pocket is the farthest point from the middle of the switch
+    out.needed_radius = MX_POCKET / 2. * std::sqrt(2.) + CLICKER_MIN_WALL;
+    out.pocket        = {square_at(out.switch_position, MX_POCKET)};
+    out.opening       = {square_at(out.switch_position, MX_OPENING + 2. * p.socket_fit)};
+    out.fits          = diff_ex(offset_ex(out.pocket, scaled_f(CLICKER_MIN_WALL), ClipperLib::jtMiter, 3.), silhouette).empty();
+
+    out.body = silhouette;
+    if (p.keyring) {
+        ExPolygons tab, hole;
+        keyring_tab(silhouette, p.keyring_angle, tab, hole);
+        out.body = diff_ex(union_ex(silhouette, tab), hole);
+    }
+    out.cap  = p.cap_overhang > 0. ? offset_ex(silhouette, scaled_f(p.cap_overhang), ClipperLib::jtRound) : silhouette;
+    out.post = stem_post(out.switch_position, p.stem_fit);
+    if (p.decoration && !detail.empty())
+        out.decoration = picture_levels(silhouette, detail, p.decoration_margin);
+    return out;
+}
+
+ClickerResult make_clicker(const ExPolygons &silhouette, const std::vector<ExPolygons> &detail, const ClickerParams &params)
+{
+    ClickerResult out;
+    if (silhouette.empty()) {
+        out.error = "There is no shape to make a clicker from.";
+        return out;
+    }
+    const ClickerParams   p        = sanitize(params);
+    const ClickerSections sections = clicker_sections(silhouette, detail, p);
+    if (!sections.fits) {
+        out.error = "The shape is too small for the switch at this place. Make the clicker larger or move the switch.";
+        return out;
+    }
+
+    bool joined = true, ok = false;
+    // ---- body --------------------------------------------------------------------------------
+    {
+        ExPolygons tab, hole;
+        if (p.keyring)
+            keyring_tab(silhouette, p.keyring_angle, tab, hole);
+        OutlinePart part;
+        part.name = "Body";
+        part.mesh = socket_body(silhouette, tab, KEYRING_HEIGHT, hole, {{sections.switch_position, p.socket_fit}}, p, &ok);
+        joined    = joined && ok;
+        if (part.mesh.indices.empty()) {
+            out.error = "The body of the clicker could not be created.";
+            return out;
+        }
+        out.body.name = "Body";
+        out.body.parts.push_back(std::move(part));
+    }
+    // ---- cap: printed with the top face on the bed, so everything is mirrored ----------------
+    {
+        std::vector<ExPolygons> pictures;
+        for (const ExPolygons &level : sections.decoration)
+            pictures.push_back(mirror_x(level));
+        out.cap.name = "Cap";
+        if (!cap_object(out.cap, mirror_x(sections.cap), pictures, mirror_x(sections.post), p.cap_thickness, p.decoration_depth, &ok)) {
+            out.error = "The cap of the clicker could not be created.";
+            return out;
+        }
+        joined = joined && ok;
+    }
+    if (!joined)
+        out.warnings.emplace_back("Some parts of the clicker could not be joined into one mesh; they overlap, which still prints correctly.");
+    return out;
+}
+
+std::vector<OutlineObject> make_clicker_fit_test(const ClickerParams &params)
+{
+    ClickerParams p = sanitize(params);
+    p.keyring       = false;
+    p.decoration    = false;
+    const double pitch = 22.;
+    // i + 1 notches in the front edge mark the socket / the stub
+    auto notches = [](const Vec2d &center, double front_y, int count) {
+        ExPolygons out;
+        for (int k = 0; k < count; ++k)
+            out.push_back(circle_at(Vec2d(center.x() + (double(k) - double(count - 1) / 2.) * 3., front_y), 1., 24));
+        return out;
+    };
+
+    std::vector<OutlineObject> objects;
+    // ---- tile with three sockets -------------------------------------------------------------
+    {
+        const double depth = MX_POCKET + 2. * (CLICKER_MIN_WALL + 1.8);
+        ExPolygons   tile  = {rect_at(Vec2d::Zero(), 3. * pitch, depth)};
+        std::vector<SwitchSocket> sockets;
+        ExPolygons                marks;
+        for (int i = 0; i < 3; ++i) {
+            Vec2d pos((i - 1) * pitch, 0.);
+            sockets.push_back({pos, CLICKER_FIT_TEST_SOCKET[i]});
+            append(marks, notches(pos, -depth / 2., i + 1));
+        }
+        tile = diff_ex(tile, union_ex(marks));
+        OutlineObject object;
+        object.name = "Fit test - switch";
+        OutlinePart part;
+        part.name = object.name;
+        part.mesh = socket_body(tile, {}, 0., {}, sockets, p, nullptr);
+        if (!part.mesh.indices.empty()) {
+            object.parts.push_back(std::move(part));
+            objects.push_back(std::move(object));
+        }
+    }
+    // ---- three cap stubs ---------------------------------------------------------------------
+    {
+        const double side = 14.;
+        ExPolygons   plates, posts, marks;
+        for (int i = 0; i < 3; ++i) {
+            Vec2d pos((i - 1) * pitch, 0.);
+            plates.push_back(square_at(pos, side));
+            append(posts, stem_post(pos, CLICKER_FIT_TEST_STEM[i]));
+            append(marks, notches(pos, -side / 2., i + 1));
+        }
+        plates = diff_ex(plates, union_ex(marks));
+        OutlineObject object;
+        object.name = "Fit test - cap";
+        OutlinePart part;
+        part.name = object.name;
+        part.mesh = join_outline_bands({{plates, 0., 1.2}, {posts, 1.2, 1.2 + MX_POST_HEIGHT}}, nullptr);
+        if (!part.mesh.indices.empty()) {
+            object.parts.push_back(std::move(part));
+            objects.push_back(std::move(object));
+        }
+    }
+    return objects;
 }
 
 } // namespace Slic3r
