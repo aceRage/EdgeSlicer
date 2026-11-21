@@ -261,7 +261,34 @@ indexed_triangle_set outline_prism(const ExPolygons &shape, double z0, double z1
         BOOST_LOG_TRIVIAL(warning) << "OutlineObjects: a shape of " << shape.size() << " islands is not fully healed";
     if (healed.empty())
         return its;
+    // A contour that runs back along itself (a sliver without area) can not be healed and gives
+    // triangles of points that do not exist: reading such a mesh ends the application.
+    auto valid = [](const indexed_triangle_set &mesh) {
+        if (mesh.indices.empty())
+            return false;
+        const int count = int(mesh.vertices.size());
+        for (const stl_triangle_vertex_indices &face : mesh.indices)
+            for (int k = 0; k < 3; ++k)
+                if (face[k] < 0 || face[k] >= count)
+                    return false;
+        return true;
+    };
     its = Emboss::polygons2model(healed, Emboss::ProjectZ(depth));
+    if (!valid(its)) {
+        // island by island, without the broken ones
+        its = {};
+        size_t dropped = 0;
+        for (const ExPolygon &island : healed) {
+            indexed_triangle_set part = Emboss::polygons2model(ExPolygons{island}, Emboss::ProjectZ(depth));
+            if (valid(part))
+                its_merge(its, part);
+            else
+                ++dropped;
+        }
+        BOOST_LOG_TRIVIAL(warning) << "OutlineObjects: " << dropped << " of " << healed.size() << " islands could not be triangulated";
+        if (its.indices.empty())
+            return its;
+    }
     for (Vec3f &v : its.vertices) {
         // Shared points of prisms stacked on each other get identical coordinates
         v.x() = float(unscale<double>(double(v.x())));
