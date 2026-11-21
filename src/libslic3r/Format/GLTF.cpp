@@ -599,12 +599,53 @@ RGBA modulate_srgb(const RGBA &texel, const cgltf_float *factor)
     return out;
 }
 
+// The texture as the image asset store keeps it: an RGB PNG of at most 2048 pixels on its longer
+// side (a wall is sampled about every 0.4 mm, so more than that is only a bigger project file),
+// with the material's base colour factor folded in.
+std::vector<uint8_t> texture_to_png(const TextureImage &tex, const cgltf_float *factor)
+{
+    if (!tex.ok())
+        return {};
+    size_t step = 1;
+    while (std::max(tex.width, tex.height) / step > 2048)
+        ++step;
+    const size_t w = std::max<size_t>(1, tex.width / step), h = std::max<size_t>(1, tex.height / step);
+    bool modulate = false;
+    if (factor != nullptr)
+        for (int c = 0; c < 3; ++c)
+            modulate = modulate || std::fabs((float) factor[c] - 1.f) > 1e-3f;
+    std::vector<uint8_t> rgb(w * h * 3);
+    for (size_t y = 0; y < h; ++y)
+        for (size_t x = 0; x < w; ++x) {
+            unsigned sum[3] = {0, 0, 0};
+            unsigned n      = 0;
+            for (size_t dy = 0; dy < step && y * step + dy < tex.height; ++dy)
+                for (size_t dx = 0; dx < step && x * step + dx < tex.width; ++dx) {
+                    const unsigned char *p = tex.pixels.data() + ((y * step + dy) * tex.width + x * step + dx) * tex.channels;
+                    sum[0] += p[0];
+                    sum[1] += p[1];
+                    sum[2] += p[2];
+                    ++n;
+                }
+            for (int c = 0; c < 3; ++c) {
+                float value = n > 0 ? float(sum[c]) / float(n) / 255.f : 0.f;
+                if (modulate)
+                    value = linear_to_srgb(srgb_to_linear(value) * (float) factor[c]);
+                rgb[(y * w + x) * 3 + size_t(c)] = uint8_t(std::lround(std::max(0.f, std::min(1.f, value)) * 255.f));
+            }
+        }
+    return image_fill_encode_png(w, h, rgb.data());
+}
+
 // its_remove_degenerate_faces erases faces, so a parallel per-face array has to lose exactly the
 // same entries. Same predicate as TriangleMesh.cpp's, applied to both arrays at once.
 // `sub_face_colors`, when given, holds `sub_stride` entries per triangle and moves in blocks.
 void remove_degenerate_faces_paired(indexed_triangle_set &its, std::vector<RGBA> &face_colors,
-                                    std::vector<RGBA> *sub_face_colors = nullptr, size_t sub_stride = 0)
+                                    std::vector<RGBA> *sub_face_colors = nullptr, size_t sub_stride = 0,
+                                    ImageFillUVs *face_uvs = nullptr)
 {
+    if (face_uvs != nullptr && face_uvs->size() != its.indices.size())
+        face_uvs = nullptr;
     size_t w = 0;
     for (size_t r = 0; r < its.indices.size(); ++r) {
         const stl_triangle_vertex_indices &f = its.indices[r];
@@ -612,6 +653,8 @@ void remove_degenerate_faces_paired(indexed_triangle_set &its, std::vector<RGBA>
             continue;
         its.indices[w] = its.indices[r];
         face_colors[w] = face_colors[r];
+        if (face_uvs != nullptr)
+            (*face_uvs)[w] = (*face_uvs)[r];
         if (sub_face_colors != nullptr && sub_stride > 0)
             for (size_t k = 0; k < sub_stride; ++k)
                 (*sub_face_colors)[w * sub_stride + k] = (*sub_face_colors)[r * sub_stride + k];
@@ -619,6 +662,8 @@ void remove_degenerate_faces_paired(indexed_triangle_set &its, std::vector<RGBA>
     }
     its.indices.resize(w);
     face_colors.resize(w);
+    if (face_uvs != nullptr)
+        face_uvs->resize(w);
     if (sub_face_colors != nullptr && sub_stride > 0)
         sub_face_colors->resize(w * sub_stride);
 }
@@ -769,8 +814,13 @@ bool sample_obj_textures(const std::string                       &base_dir,
                          int                                      depth,
                          std::vector<RGBA>                       &face_colors,
                          std::vector<RGBA>                       &sub_face_colors,
-                         std::string                             &warning)
+                         std::string                             &warning,
+                         std::vector<uint8_t>                    *single_texture_png)
 {
+    if (single_texture_png != nullptr)
+        single_texture_png->clear();
+    const TextureImage *only_texture   = nullptr;
+    bool                several_images = false;
     face_colors.clear();
     sub_face_colors.clear();
     if (face_texture.size() != uvs.size() || fallback_colors.size() != uvs.size() || uvs.empty())
@@ -832,6 +882,8 @@ bool sample_obj_textures(const std::string                       &base_dir,
             continue;
         }
         any = true;
+        several_images = several_images || (only_texture != nullptr && only_texture != tex);
+        only_texture   = tex;
         // OBJ's v runs up from the image's bottom row; TextureImage::sample() reads from the top.
         auto at = [tex](float u, float v) { return tex->sample(u, 1.f - v); };
         const std::array<Vec2f, 3> &uv = uvs[f];
@@ -849,6 +901,9 @@ bool sample_obj_textures(const std::string                       &base_dir,
         face_colors.clear();
         sub_face_colors.clear();
     }
+    // The walls can follow ONE picture per part; an OBJ whose faces use several keeps its painting only.
+    if (any && !several_images && only_texture != nullptr && single_texture_png != nullptr)
+        *single_texture_png = texture_to_png(*only_texture, nullptr);
     return any;
 }
 
@@ -1061,12 +1116,17 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
         std::vector<RGBA> face_colors;    // one per triangle, when a texture was sampled
         std::vector<RGBA> sub_face_colors;// 4^GLTF_TEXTURE_SUBDIVISION per triangle, same condition
         bool              has_color0{false};
+        // Mesh UV at slice time: the texture and each surviving triangle's three UVs, kept so an
+        // image row can read the texture along a wall (image_fill_set_volume_texture()).
+        ImageFillUVs         face_uvs;
+        std::vector<uint8_t> texture_png;
     };
     std::vector<BuiltPart> parts;
     std::set<std::string>  taken_names;
 
     std::map<const cgltf_material *, int> material_index_of;
     std::map<const cgltf_image *, std::shared_ptr<TextureImage>> texture_cache;
+    std::map<const TextureImage *, std::vector<uint8_t>>         texture_png_cache;
     bool   any_texture_sampled   = false;
     size_t triangles_total       = 0;
     size_t triangle_primitives   = 0;
@@ -1164,6 +1224,14 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
             its_flip_triangles(geo.its);
         // Keep the pre-weld colours addressable by position: welding keeps the lowest-index
         // vertex of each exact-coordinate group, so first-seen wins is exactly right.
+        // The UVs per face corner, taken while the indices still name the unwelded vertices.
+        ImageFillUVs face_uvs;
+        if (!face_colors.empty()) {
+            face_uvs.resize(geo.its.indices.size());
+            for (size_t t = 0; t < geo.its.indices.size(); ++t)
+                for (int k = 0; k < 3; ++k)
+                    face_uvs[t][size_t(k)] = geo.uvs[size_t(geo.its.indices[t](k))];
+        }
         std::map<std::array<float, 3>, RGBA> color_at;
         if (geo.has_color0)
             for (size_t i = 0; i < geo.its.vertices.size(); ++i)
@@ -1174,7 +1242,7 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
         if (face_colors.empty())
             its_remove_degenerate_faces(geo.its);
         else
-            remove_degenerate_faces_paired(geo.its, face_colors, &sub_face_colors, sub_per);
+            remove_degenerate_faces_paired(geo.its, face_colors, &sub_face_colors, sub_per, &face_uvs);
 
         if (geo.its.indices.empty()) {
             ++empty_after_hygiene;
@@ -1257,6 +1325,24 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
                 info.had_textures = true;
         }
 
+        if (tex != nullptr && !face_uvs.empty() && face_uvs.size() == geo.its.indices.size()) {
+            const cgltf_float *factor = prim.material != nullptr && prim.material->has_pbr_metallic_roughness
+                                            ? prim.material->pbr_metallic_roughness.base_color_factor
+                                            : nullptr;
+            bool plain = true;
+            if (factor != nullptr)
+                for (int c = 0; c < 3; ++c)
+                    plain = plain && std::fabs((float) factor[c] - 1.f) <= 1e-3f;
+            if (plain) {
+                auto found = texture_png_cache.find(tex);
+                if (found == texture_png_cache.end())
+                    found = texture_png_cache.emplace(tex, texture_to_png(*tex, nullptr)).first;
+                part.texture_png = found->second;
+            } else {
+                part.texture_png = texture_to_png(*tex, factor);
+            }
+            part.face_uvs = std::move(face_uvs);
+        }
         part.face_colors = std::move(face_colors);
         part.sub_face_colors = std::move(sub_face_colors);
         part.world       = world;
@@ -1317,6 +1403,10 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
         Transform3d t = Transform3d::Identity();
         t.matrix()    = part.world;
         volume->source.transform = Geometry::Transformation(t);
+
+        // Keep the texture and the UVs with the part, so its walls can follow the texture itself.
+        if (!part.face_uvs.empty() && part.face_uvs.size() == volume->mesh().its.indices.size())
+            image_fill_set_volume_texture(*volume, model->image_assets, std::move(part.texture_png), part.face_uvs);
 
         GltfPart out_part;
         out_part.name           = part.name;

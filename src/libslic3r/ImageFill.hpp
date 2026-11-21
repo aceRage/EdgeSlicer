@@ -23,6 +23,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -225,6 +226,13 @@ struct ImageFillParams
     // Phase 5c, the dialog's own state (key `pk`): scale_u / scale_v were worked out to keep the
     // picture's proportions. The mapping reads only scale_u / scale_v.
     bool                keep_aspect  = false;
+
+    // Mesh UV at slice time (key `uv`): the content hash of this part's own texture coordinates,
+    // kept in the image asset store beside the picture (image_fill_encode_uvs()). Set on a PART's
+    // params by the glTF and OBJ importers, with `asset` naming the model's texture, so an image
+    // row whose projection is MeshUV can look the picture up along a wall. Empty for everything
+    // that never had a UV layout.
+    std::string         uv_asset;
 
     // Phase 5c: the projection's own frame, so the picture stays where it was put when the part's
     // MESH is rewritten - a cut, which re-centres each half and bakes the instance's rotation into
@@ -604,6 +612,44 @@ std::vector<float> image_fill_mix_weights(const std::array<float, 3>            
 // at 1 + depth and every other layer at 1 - depth. `depth` is ImageFillParams::stripe_depth_pct /
 // 100.
 float image_fill_stripe_width_factor(const std::vector<float> &weights, size_t layer_component, float depth);
+
+// ---------------------------------------------------------------------------------------------
+// 10. Mesh UV at slice time
+// ---------------------------------------------------------------------------------------------
+//
+// A textured model's colour at a point of a wall. The importer keeps the texture (as a PNG asset)
+// and the per-face UVs (as a second asset, a small binary blob) and names both on the part's
+// image_fill_params. At slice time the wall sampler finds the triangle under a wall point, blends
+// that triangle's three UVs, and reads the pixel - no projection, no baking to facets.
+
+// An RGB image (3 bytes per pixel, top row first) as PNG bytes the asset store can decode.
+std::vector<uint8_t> image_fill_encode_png(size_t width, size_t height, const uint8_t *rgb);
+
+// Per-face UVs (glTF convention: origin top-left, v down) as an asset blob. The blob remembers the
+// face count and a hash of `mesh`'s face indices, so it is refused for any other mesh - a cut, a
+// simplify or a repair renumbers the triangles, and the old numbering would map the texture wrong.
+std::vector<uint8_t> image_fill_encode_uvs(const ImageFillUVs &uvs, const indexed_triangle_set &mesh);
+bool image_fill_decode_uvs(const std::vector<uint8_t> &bytes, const indexed_triangle_set &mesh, ImageFillUVs &out);
+
+// Store a part's texture and UVs and name them on its image_fill_params (projection MeshUV). The
+// part's painting is not touched. Returns false, changing nothing, when the arrays do not fit.
+bool image_fill_set_volume_texture(ModelVolume &volume, ImageAssetStore &assets, std::vector<uint8_t> texture_png,
+                                   const ImageFillUVs &uvs);
+
+// The part's own UVs, when its params name a blob that still fits its mesh.
+bool image_fill_volume_uvs(const ModelVolume &volume, const ImageAssetStore &assets, ImageFillUVs &out);
+// Does this part carry a texture and UVs that still fit its mesh?
+bool image_fill_volume_has_texture(const ModelVolume &volume, const ImageAssetStore &assets);
+
+// The triangle search for one part: its mesh, its UVs and a tree over the mesh. Built once per
+// part and shared (a small process-wide cache), because the wall sampler asks per layer.
+struct ImageFillUvLookup;
+std::shared_ptr<const ImageFillUvLookup> image_fill_uv_lookup(const ModelVolume &volume, const ImageAssetStore &assets);
+
+// The texture's colour at the surface point nearest `p_mesh` (the part's own mesh space). false
+// when the triangle there has no usable UVs.
+bool image_fill_sample_uv(const ImageFillUvLookup &lookup, const ImageFillParams &params, const ImageAsset &image,
+                          const Vec3f &p_mesh, std::array<float, 3> &color);
 
 } // namespace Slic3r
 
