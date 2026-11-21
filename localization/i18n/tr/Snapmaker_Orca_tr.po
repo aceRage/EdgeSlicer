@@ -21110,3 +21110,111 @@ msgstr ""
 #~ "Lütfen geçerli değerleri girin:\n"
 #~ "başlangıç > 10 adım >= 0\n"
 #~ "bitiş > başlangıç + adım)"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Click to collapse or expand this section"
+msgstr "Bu bölümü daraltmak veya genişletmek için tıklayın"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Search all settings"
+msgstr "Tüm ayarlarda ara"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Expand all"
+msgstr "Tümünü genişlet"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Collapse all"
+msgstr "Tümünü daralt"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "3D View"
+msgstr "3B Görünüm"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Projects & Files"
+msgstr "Projeler ve Dosyalar"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Slicing & Presets"
+msgstr "Dilimleme ve Ön Ayarlar"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Printers & Network"
+msgstr "Yazıcılar ve Ağ"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Apps & Advanced"
+msgstr "Uygulamalar ve Gelişmiş"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "No settings match that search."
+msgstr "Aramayla eşleşen ayar yok."
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Language and region"
+msgstr "Dil ve bölge"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Startup"
+msgstr "Başlangıç"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Updates"
+msgstr "Güncellemeler"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Appearance"
+msgstr "Görünüm"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Camera and mouse"
+msgstr "Kamera ve fare"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Selection and tool panels"
+msgstr "Seçim ve araç panelleri"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "G-code preview"
+msgstr "G-code önizlemesi"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Rendering quality"
+msgstr "Görüntü oluşturma kalitesi"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Opening projects"
+msgstr "Projeleri açma"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Warnings when loading"
+msgstr "Yükleme sırasındaki uyarılar"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Project strip and recent files"
+msgstr "Proje şeridi ve son dosyalar"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Saving and backup"
+msgstr "Kaydetme ve yedekleme"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Folders"
+msgstr "Klasörler"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Bambu Studio presets"
+msgstr "Bambu Studio ön ayarları"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Accounts and devices"
+msgstr "Hesaplar ve cihazlar"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "External apps"
+msgstr "Harici uygulamalar"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Optional tabs"
+msgstr "İsteğe bağlı sekmeler"

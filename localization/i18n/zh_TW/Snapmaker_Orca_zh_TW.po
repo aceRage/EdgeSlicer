@@ -18239,3 +18239,111 @@ msgstr ""
 
 #~ msgid ", ver: "
 #~ msgstr "，版本"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Click to collapse or expand this section"
+msgstr "點擊以摺疊或展開此區段"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Search all settings"
+msgstr "搜尋所有設定"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Expand all"
+msgstr "全部展開"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Collapse all"
+msgstr "全部摺疊"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "3D View"
+msgstr "3D 視圖"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Projects & Files"
+msgstr "專案與檔案"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Slicing & Presets"
+msgstr "切片與預設"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Printers & Network"
+msgstr "列印設備與網路"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Apps & Advanced"
+msgstr "應用程式與進階"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "No settings match that search."
+msgstr "沒有符合搜尋的設定。"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Language and region"
+msgstr "語言和地區"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Startup"
+msgstr "啟動"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Updates"
+msgstr "更新"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Appearance"
+msgstr "外觀"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Camera and mouse"
+msgstr "相機和滑鼠"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Selection and tool panels"
+msgstr "選取和工具面板"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "G-code preview"
+msgstr "G-code 預覽"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Rendering quality"
+msgstr "算繪品質"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Opening projects"
+msgstr "開啟專案"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Warnings when loading"
+msgstr "載入時的警告"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Project strip and recent files"
+msgstr "專案列和最近的檔案"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Saving and backup"
+msgstr "儲存和備份"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Folders"
+msgstr "資料夾"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Bambu Studio presets"
+msgstr "Bambu Studio 預設"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Accounts and devices"
+msgstr "帳號和裝置"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "External apps"
+msgstr "外部應用程式"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Optional tabs"
+msgstr "選用分頁"
