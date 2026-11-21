@@ -666,3 +666,130 @@ TEST_CASE("D3: a missing or dying helper fails the load with a clear message", "
     }
     CHECK_FALSE(parent_imported_fixture());
 }
+
+// ---- D2: only a shipped publisher key unlocks the in-process mode --------------------------
+
+namespace {
+
+// RFC 8032 test vector 1, TEST ONLY (tests/data/plugins/trust/TEST_ONLY.md). Never shipped.
+const char* const k_rfc_seed1 = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+const char* const k_rfc_pub1  = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+
+PluginDescriptor d2_descriptor(const fs::path& package)
+{
+    PluginDescriptor d;
+    d.plugin_key        = "d2_echo";
+    d.name              = "D2 Echo";
+    d.version           = "1.0.0";
+    d.display_types     = {"script"};
+    d.required_orca_api = "1.0.0";
+    d.entry_path        = package.string();
+    d.metadata_valid    = true;
+    return d;
+}
+
+void sign_with_rfc_key(const fs::path& package, const PluginDescriptor& d)
+{
+    plugin_trust::Signature sig;
+    std::string             error;
+    sig.hash = plugin_trust::sha256_plugin_tree(package, error);
+    REQUIRE_FALSE(sig.hash.empty());
+    sig.metadata = plugin_trust::metadata_from_descriptor(d);
+    REQUIRE(plugin_trust::public_key_from_seed(k_rfc_seed1, sig.public_key, error));
+    REQUIRE(plugin_trust::sign(k_rfc_seed1, plugin_trust::canonical_payload(sig.hash, sig.metadata), sig.signature, error));
+    sig.publisher = "D2 Test";
+    REQUIRE(plugin_trust::write_signature_file(package, sig, error));
+}
+
+plugin_import::ImportPlacement placement_with_pref(const plugin_trust::TrustState& state, bool pref)
+{
+    plugin_import::ImportPolicyInput in;
+    in.trust                 = state.kind;
+    in.shipped_publisher     = state.shipped_publisher;
+    in.in_process_steps_pref = pref;
+    return plugin_import::decide_import_placement(in);
+}
+
+} // namespace
+
+TEST_CASE("D2: a pinned or user-key plugin stays in the helper; a shipped key with the preference may run in-process",
+          "[PluginImport][D2][PluginTrust]")
+{
+    using plugin_import::ImportPlacement;
+    ScopedDataDir      data("plugin-import-d2");
+    ScopedResourcesDir resources("plugin-import-d2-res");
+    const fs::path     package = data.dir / "d2_echo.py";
+    {
+        std::ofstream out(package.string(), std::ios::binary);
+        out << "import orca\n";
+    }
+    const PluginDescriptor d = d2_descriptor(package);
+    std::string            error;
+
+    SECTION("local pin only")
+    {
+        const std::string hash = plugin_trust::sha256_plugin_tree(package, error);
+        REQUIRE(plugin_trust::pin_hash(d.plugin_key, hash, error));
+        const plugin_trust::TrustState state = plugin_trust::evaluate(d);
+        REQUIRE(state.kind == plugin_trust::TrustKind::ApprovedLocally);
+        CHECK_FALSE(state.shipped_publisher);
+        CHECK(placement_with_pref(state, false) == ImportPlacement::Helper);
+        CHECK(placement_with_pref(state, true) == ImportPlacement::Helper);
+        CHECK_FALSE(plugin_import::early_steps_allowed(state.kind, state.shipped_publisher, true));
+    }
+
+    SECTION("signed by a user-added publisher")
+    {
+        sign_with_rfc_key(package, d);
+        REQUIRE(plugin_trust::add_user_publisher({"D2 Test", k_rfc_pub1, "user"}, error));
+        const plugin_trust::TrustState state = plugin_trust::evaluate(d);
+        REQUIRE(state.kind == plugin_trust::TrustKind::Signed);
+        CHECK_FALSE(state.shipped_publisher);
+        CHECK(placement_with_pref(state, true) == ImportPlacement::Helper);
+        CHECK_FALSE(plugin_import::early_steps_allowed(state.kind, state.shipped_publisher, true));
+    }
+
+    SECTION("signed by a shipped publisher key")
+    {
+        sign_with_rfc_key(package, d);
+        const fs::path keys = resources.dir / "python_plugins" / "trust_keys.json";
+        fs::create_directories(keys.parent_path());
+        {
+            std::ofstream out(keys.string(), std::ios::binary);
+            out << json{{"version", 1}, {"publishers", json::array({json{{"name", "D2 Shipped"}, {"public_key", k_rfc_pub1}}})}}.dump();
+        }
+        const plugin_trust::TrustState state = plugin_trust::evaluate(d);
+        REQUIRE(state.kind == plugin_trust::TrustKind::Signed);
+        CHECK(state.shipped_publisher);
+        CHECK(placement_with_pref(state, false) == ImportPlacement::Helper);
+        CHECK(placement_with_pref(state, true) == ImportPlacement::InProcess);
+        CHECK(plugin_import::early_steps_allowed(state.kind, state.shipped_publisher, true));
+    }
+}
+
+TEST_CASE("D2: the live placement keeps a pinned plugin in the helper with every preference set", "[PluginImport][D2]")
+{
+    HelperImport helper_import;
+    struct PrefReset
+    {
+        ~PrefReset()
+        {
+            plugin_prefs::set_override_for_testing(plugin_prefs::k_in_process_steps, 1);
+            plugin_prefs::set_override_for_testing(plugin_prefs::k_allow_unsigned_plugins, -1);
+        }
+    } reset;
+    plugin_prefs::set_override_for_testing(plugin_prefs::k_in_process_steps, 1);
+    plugin_prefs::set_override_for_testing(plugin_prefs::k_allow_unsigned_plugins, 1);
+
+    plugin_trust::TrustState pinned;
+    pinned.kind = plugin_trust::TrustKind::ApprovedLocally;
+    CHECK(plugin_import::placement_for(pinned) == plugin_import::ImportPlacement::Helper);
+
+    plugin_trust::TrustState user_signed;
+    user_signed.kind = plugin_trust::TrustKind::Signed;
+    CHECK(plugin_import::placement_for(user_signed) == plugin_import::ImportPlacement::Helper);
+
+    plugin_trust::TrustState shipped = user_signed;
+    shipped.shipped_publisher        = true;
+    CHECK(plugin_import::placement_for(shipped) == plugin_import::ImportPlacement::InProcess);
+}

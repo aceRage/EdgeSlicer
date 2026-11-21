@@ -73,6 +73,9 @@ struct TrustState
 {
     TrustKind   kind{TrustKind::Untrusted};
     std::string publisher;
+    // D2: Signed by a key shipped with EdgeSlicer (resources/python_plugins/trust_keys.json), not
+    // a user-added publisher. Only these may be imported in-process / run on the early steps.
+    bool        shipped_publisher{false};
     std::string sha256;
     std::string label;
     std::string error;

@@ -1144,8 +1144,9 @@ TrustState evaluate_package(const boost::filesystem::path& package, const Plugin
         const std::string payload = canonical_payload(sig.hash, sig.metadata);
         if (verify(sig.public_key, payload, sig.signature)) {
             if (const Publisher* pub = find_publisher(store, sig.public_key)) {
-                state.kind      = TrustKind::Signed;
-                state.publisher = pub->name;
+                state.kind              = TrustKind::Signed;
+                state.publisher         = pub->name;
+                state.shipped_publisher = pub->source == "shipped";
                 state.label     = trust_label(state);
                 return state;
             }

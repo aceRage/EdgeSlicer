@@ -128,7 +128,8 @@ ImportPlacement placement_for(const plugin_trust::TrustState& trust)
     input.in_helper_process      = plugin_ipc::in_child_process();
     input.in_process_for_testing = in_process_import_for_testing() || !plugin_ipc::PluginHostClient::should_use_host();
     input.trust                  = trust.kind;
-    input.shipped_publisher      = trust.kind == plugin_trust::TrustKind::Signed;
+    // D2: a user-added publisher key is no better than a local pin here.
+    input.shipped_publisher      = trust.kind == plugin_trust::TrustKind::Signed && trust.shipped_publisher;
     input.in_process_steps_pref  = plugin_prefs::enabled(plugin_prefs::k_in_process_steps);
     return decide_import_placement(input);
 }
