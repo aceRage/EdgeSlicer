@@ -21,6 +21,11 @@ class SendJob : public Job
     PrintPrepareData    job_data;
     std::string         m_dev_id;
     bool                m_job_finished{ false };
+#ifdef EDGE_PYTHON_PLUGINS
+    // Plugin lifecycle events (SendJobStarted / SendJobFinished), as in OrcaSlicer.
+    bool                m_lifecycle_started{ false };
+    bool                m_lifecycle_finished{ false };
+#endif
     int                 m_print_job_completed_id = 0;
     bool                m_is_check_mode{false};
     bool                m_check_and_continue{false};

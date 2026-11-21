@@ -1,5 +1,6 @@
 #include "BoundingBox.hpp"
 #include "Config.hpp"
+#include "LifecycleFire.hpp"
 #include "GCode/WipePathHelpers.hpp"
 #include "Polygon.hpp"
 #include "ConnectedBodies.hpp"
@@ -3566,6 +3567,13 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     GCodeProcessor::s_IsBBLPrinter = print->is_BBL_printer();
     print->set_started(psGCodeExport);
 
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::GCodeExportStarted,
+        ctx.id                 = std::to_string(print->model().id().id);
+        ctx.name               = print->get_model_name();
+        ctx.code               = LifecycleEvtCode::Ok;
+        ctx.msg                = path;
+        ctx.cancellation_check = [print]() { return print->canceled(); };);
+
     // check if any custom gcode contains keywords used by the gcode processor to
     // produce time estimation and gcode toolpaths
     std::vector<std::pair<std::string, std::string>> validation_res = DoExport::validate_custom_gcode(*print);
@@ -3607,6 +3615,12 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
             // fs::create_directory(folder);
             BOOST_LOG_TRIVIAL(error) << "the parent path " + folder.string() + " is not there!!!" << std::endl;
         }
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::GCodeExportFinished,
+            ctx.id                 = std::to_string(print->model().id().id);
+            ctx.name               = print->get_model_name();
+            ctx.code               = LifecycleEvtCode::Error;
+            ctx.msg                = std::string(path) + "\nG-code export failed: cannot open the file for writing.";
+            ctx.cancellation_check = [print]() { return print->canceled(); };);
         throw Slic3r::RuntimeError(std::string("G-code export to ") + path + " failed.\nCannot open the file for writing.\n");
     }
 
@@ -3618,11 +3632,17 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
             boost::nowide::remove(path_tmp.c_str());
             throw Slic3r::RuntimeError(std::string("G-code export to ") + path + " failed\nIs the disk full?\n");
         }
-    } catch (std::exception& /* ex */) {
+    } catch (std::exception& EDGE_LIFECYCLE_ONLY(ex)) {
         // Rethrow on any exception. std::runtime_exception and CanceledException are expected to be thrown.
         // Close and remove the file.
         file.close();
         boost::nowide::remove(path_tmp.c_str());
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::GCodeExportFinished,
+            ctx.id                 = std::to_string(print->model().id().id);
+            ctx.name               = print->get_model_name();
+            ctx.code               = LifecycleEvtCode::Error;
+            ctx.msg                = std::string(path) + "\n" + ex.what();
+            ctx.cancellation_check = [print]() { return print->canceled(); };);
         throw;
     }
     file.close();
@@ -3743,8 +3763,16 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     // has curved tops on. On a curved-tops print a contact is an error: no G-code file is left behind.
     try {
         check_head_clearance(*print, m_processor.result());
-    } catch (const Slic3r::SlicingError &) {
+    } catch (const Slic3r::SlicingError & EDGE_LIFECYCLE_ONLY(ex)) {
         boost::nowide::remove(path_tmp.c_str());
+        // EdgeSlicer: Orca has no head clearance check; report its failure like the other export
+        // failures, so a listener that saw GCodeExportStarted always gets GCodeExportFinished.
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::GCodeExportFinished,
+            ctx.id                 = std::to_string(print->model().id().id);
+            ctx.name               = print->get_model_name();
+            ctx.code               = LifecycleEvtCode::Error;
+            ctx.msg                = std::string(path) + "\n" + ex.what();
+            ctx.cancellation_check = [print]() { return print->canceled(); };);
         throw;
     }
     //    DoExport::update_print_estimated_times_stats(m_processor, print->m_print_statistics);
@@ -3760,6 +3788,12 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
 
     std::error_code ret = rename_file(path_tmp, path);
     if (ret) {
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::GCodeExportFinished,
+            ctx.id                 = std::to_string(print->model().id().id);
+            ctx.name               = print->get_model_name();
+            ctx.code               = LifecycleEvtCode::Error;
+            ctx.msg                = std::string(path) + "\nFailed to rename the output G-code file: " + ret.message();
+            ctx.cancellation_check = [print]() { return print->canceled(); };);
         throw Slic3r::RuntimeError(std::string("Failed to rename the output G-code file from ") + path_tmp + " to " + path + '\n' +
                                    "error code " + ret.message() + '\n' + "Is " + path_tmp + " locked?" + '\n');
     } else {
@@ -3768,6 +3802,13 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
 
     BOOST_LOG_TRIVIAL(info) << "Exporting G-code finished" << log_memory_info();
     print->set_done(psGCodeExport);
+
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::GCodeExportFinished,
+        ctx.id                 = std::to_string(print->model().id().id);
+        ctx.name               = print->get_model_name();
+        ctx.code               = LifecycleEvtCode::Ok;
+        ctx.msg                = path;
+        ctx.cancellation_check = [print]() { return print->canceled(); };);
 
     // `result` is optional (see the `result != nullptr` guard above); null-check it
     // here as well instead of dereferencing it on the is_BBL_Printer() path.

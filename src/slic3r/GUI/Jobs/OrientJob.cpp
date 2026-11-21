@@ -6,6 +6,7 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/NotificationManager.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 
 
 namespace Slic3r { namespace GUI {
@@ -205,6 +206,9 @@ void OrientJob::finalize(bool canceled, std::exception_ptr &eptr)
         mesh.apply();
     }
 
+    EDGE_LIFECYCLE_FIRE_IF(!m_selected.empty(), LifecycleEvent::ObjectTransformed,
+        ctx.code = LifecycleEvtCode::Ok;
+        ctx.msg  = "auto_oriented";);
 
     m_plater->update();
 

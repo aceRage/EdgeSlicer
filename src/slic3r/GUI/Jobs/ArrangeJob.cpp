@@ -7,6 +7,7 @@
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 
 #include <algorithm>
 
@@ -856,6 +857,10 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
         ap.apply();
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(":arrange m_unprintable: name: %4%, bed_id %1%, trans {%2%,%3%}") % ap.bed_idx % unscale<double>(ap.translation(X)) % unscale<double>(ap.translation(Y)) % ap.name;
     }
+
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::ObjectTransformed,
+        ctx.code = LifecycleEvtCode::Ok;
+        ctx.msg  = "arranged";);
 
     m_plater->update();
     // BBS

@@ -186,6 +186,7 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_renamed_parent.cpp
 	test_preset_extra_extruders.cpp
 	test_preset_detached_children.cpp
+	$<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_lifecycle_preset_saved.cpp>
 	test_u1_tag_filament_match.cpp
 	test_preset_user_load_prefetch.cpp
 	test_filament_remap.cpp

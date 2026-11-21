@@ -1,4 +1,5 @@
 #include "SendJob.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 #include "libslic3r/MTUtils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -127,6 +128,13 @@ void SendJob::process(Ctl &ctl)
                                   "Use Send to Bambu Connect to print on it."));
         return;
     }
+
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::SendJobStarted,
+        ctx.name      = m_project_name;
+        ctx.device_id = m_dev_id;
+        ctx.source    = "send_job";);
+    EDGE_LIFECYCLE_ONLY(m_lifecycle_started = true;)
+
     int total_plate_num = m_plater->get_partplate_list().get_plate_count();
 
     PartPlate* plate = m_plater->get_partplate_list().get_plate(job_data.plate_idx);
@@ -441,6 +449,17 @@ void SendJob::finalize(bool canceled, std::exception_ptr &eptr)
     } catch (...) {
         eptr = std::current_exception();
     }
+
+    EDGE_LIFECYCLE_ONLY(
+    if (m_lifecycle_started && !m_lifecycle_finished) {
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::SendJobFinished,
+            ctx.name      = m_project_name;
+            ctx.device_id = m_dev_id;
+            ctx.source    = "send_job";
+            ctx.code      = canceled ? LifecycleEvtCode::Warn : (eptr ? LifecycleEvtCode::Error : (m_job_finished ? LifecycleEvtCode::Ok : LifecycleEvtCode::Error));
+            ctx.msg       = canceled ? "cancelled" : (eptr ? "exception" : (m_job_finished ? "" : "failed")););
+        m_lifecycle_finished = true;
+    })
 
     if (canceled || eptr)
         return;

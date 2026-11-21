@@ -6,6 +6,7 @@
 #include "MainFrame.hpp"
 #include "I18N.hpp"
 #include "Plater.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
 
@@ -17,13 +18,16 @@ namespace GUI {
 
 void ProjectDirtyStateManager::update_from_undo_redo_stack(bool dirty)
 {
+    EDGE_LIFECYCLE_ONLY(const bool was_dirty = is_dirty();)
     m_plater_dirty = dirty;
+    EDGE_LIFECYCLE_ONLY(notify_dirty_change(was_dirty, "undo_redo");)
     if (const Plater *plater = wxGetApp().plater(); plater && wxGetApp().initialized())
         wxGetApp().mainframe->update_title();
 }
 
 void ProjectDirtyStateManager::update_from_presets()
 {
+    EDGE_LIFECYCLE_ONLY(const bool was_dirty = is_dirty();)
     m_presets_dirty = false;
     // check switching of the presets only for exist/loaded project, but not for new
     GUI_App &app = wxGetApp();
@@ -45,17 +49,51 @@ void ProjectDirtyStateManager::update_from_presets()
     }
     m_presets_dirty |= app.has_unsaved_preset_changes();
     m_project_config_dirty = m_initial_project_config != app.preset_bundle->project_config;
+    EDGE_LIFECYCLE_ONLY(notify_dirty_change(was_dirty, "presets");)
     app.mainframe->update_title();
 }
 
 void ProjectDirtyStateManager::reset_after_save()
 {
+    EDGE_LIFECYCLE_ONLY(const bool was_dirty = is_dirty();)
     this->reset_initial_presets();
     m_plater_dirty  = false;
     m_presets_dirty = false;
     m_project_config_dirty = false;
+    EDGE_LIFECYCLE_ONLY(notify_dirty_change(was_dirty, "save");)
     wxGetApp().mainframe->update_title();
 }
+
+#ifdef EDGE_PYTHON_PLUGINS
+void ProjectDirtyStateManager::notify_dirty_change(bool was_dirty, const char *source)
+{
+    if (m_suppress_depth > 0)
+        return;
+    const bool dirty = is_dirty();
+    if (was_dirty == dirty)
+        return;
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::ProjectDirtyChanged,
+        ctx.code   = LifecycleEvtCode::Ok;
+        ctx.dirty  = dirty;
+        ctx.source = source;);
+}
+
+void ProjectDirtyStateManager::begin_suppress_notifications()
+{
+    if (m_suppress_depth == 0)
+        m_suppress_entry_dirty = is_dirty();
+    ++m_suppress_depth;
+}
+
+void ProjectDirtyStateManager::end_suppress_notifications()
+{
+    assert(m_suppress_depth > 0);
+    if (m_suppress_depth > 0)
+        --m_suppress_depth;
+    if (m_suppress_depth == 0)
+        notify_dirty_change(m_suppress_entry_dirty, "batch");
+}
+#endif // EDGE_PYTHON_PLUGINS
 
 void ProjectDirtyStateManager::reset_initial_presets()
 {

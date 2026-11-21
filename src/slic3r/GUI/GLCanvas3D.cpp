@@ -7,6 +7,7 @@
 #include <igl/unproject.h>
 
 #include "libslic3r/BuildVolume.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
@@ -7183,6 +7184,11 @@ void GLCanvas3D::do_move(const std::string& snapshot_type, bool force_volume_mov
     //BBS: nofity object list to update
     wxGetApp().plater()->sidebar().obj_list()->update_plate_values_for_items();
 
+    EDGE_LIFECYCLE_FIRE_IF(object_moved, LifecycleEvent::ObjectTransformed,
+        ctx.code = LifecycleEvtCode::Ok;
+        ctx.msg  = "moved";
+        if (done.size() == 1)
+            ctx.name = m_model->objects[done.begin()->first]->name;);
     if (object_moved)
         post_event(SimpleEvent(EVT_GLCANVAS_INSTANCE_MOVED));
 
@@ -7343,6 +7349,11 @@ void GLCanvas3D::do_rotate(const std::string& snapshot_type)
     //BBS: nofity object list to update
     wxGetApp().plater()->sidebar().obj_list()->update_plate_values_for_items();
 
+    EDGE_LIFECYCLE_FIRE_IF(!done.empty(), LifecycleEvent::ObjectTransformed,
+        ctx.code = LifecycleEvtCode::Ok;
+        ctx.msg  = "rotated";
+        if (done.size() == 1)
+            ctx.name = m_model->objects[done.begin()->first]->name;);
     if (!done.empty())
         post_event(SimpleEvent(EVT_GLCANVAS_INSTANCE_ROTATED));
 
@@ -7443,6 +7454,11 @@ void GLCanvas3D::do_scale(const std::string& snapshot_type)
     //BBS: notify object info update
     wxGetApp().plater()->show_object_info();
 
+    EDGE_LIFECYCLE_FIRE_IF(!done.empty(), LifecycleEvent::ObjectTransformed,
+        ctx.code = LifecycleEvtCode::Ok;
+        ctx.msg  = "scaled";
+        if (done.size() == 1)
+            ctx.name = m_model->objects[done.begin()->first]->name;);
     if (!done.empty())
         post_event(SimpleEvent(EVT_GLCANVAS_INSTANCE_SCALED));
 

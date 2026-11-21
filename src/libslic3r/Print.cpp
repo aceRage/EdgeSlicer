@@ -1,6 +1,7 @@
 #include "AdaptiveLayerMerge.hpp"
 #include "Config.hpp"
 #include "Exception.hpp"
+#include "LifecycleFire.hpp"
 #include "Print.hpp"
 #include "NozzleProcess.hpp"
 #include "ToolSlots.hpp"
@@ -6445,6 +6446,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     if (m_objects.empty())
         return;
 
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::SliceStarted,
+        ctx.id                 = std::to_string(m_model.id().id);
+        ctx.name               = get_model_name();
+        ctx.code               = LifecycleEvtCode::Ok;
+        ctx.cancellation_check = [this]() { return canceled(); };);
+
     for (PrintObject *obj : m_objects)
         obj->clear_shared_object();
 
@@ -7154,6 +7161,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     }
 
     BOOST_LOG_TRIVIAL(info) << "Slicing process finished." << log_memory_info();
+
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::SliceGeometryFinished,
+        ctx.id                 = std::to_string(m_model.id().id);
+        ctx.name               = get_model_name();
+        ctx.code               = LifecycleEvtCode::Ok;
+        ctx.cancellation_check = [this]() { return canceled(); };);
 }
 
 // G-code export process, running at a background thread.
@@ -8480,6 +8493,13 @@ bool Print::set_gcode_filament_prices(bool include)
 //BBS: add gcode file preload logic
 void Print::export_gcode_from_previous_file(const std::string& file, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::GCodeExportStarted,
+        ctx.id                 = std::to_string(m_model.id().id);
+        ctx.name               = get_model_name();
+        ctx.code               = LifecycleEvtCode::Ok;
+        ctx.msg                = file;
+        ctx.cancellation_check = [this]() { return canceled(); };);
+
     try {
         GCodeProcessor processor;
         GCodeProcessor::s_IsBBLPrinter = is_BBL_printer();
@@ -8505,13 +8525,26 @@ void Print::export_gcode_from_previous_file(const std::string& file, GCodeProces
             result->has_time_cost = true;
         }
         m_print_statistics.total_cost = compute_cost(*result).total;
-    } catch (std::exception & /* ex */) {
+    } catch (std::exception & EDGE_LIFECYCLE_ONLY(ex)) {
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ <<  boost::format(": found errors when process gcode file %1%") %file.c_str();
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::GCodeExportFinished,
+            ctx.id                 = std::to_string(m_model.id().id);
+            ctx.name               = get_model_name();
+            ctx.code               = LifecycleEvtCode::Error;
+            ctx.msg                = file + "\n" + ex.what();
+            ctx.cancellation_check = [this]() { return canceled(); };);
         throw Slic3r::RuntimeError(
             std::string("Failed to process the G-code file ") + file + " from previous 3mf\n");
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ <<  boost::format(":  process the G-code file %1% successfully")%file.c_str();
+
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::GCodeExportFinished,
+        ctx.id                 = std::to_string(m_model.id().id);
+        ctx.name               = get_model_name();
+        ctx.code               = LifecycleEvtCode::Ok;
+        ctx.msg                = file;
+        ctx.cancellation_check = [this]() { return canceled(); };);
 }
 
 void Print::reload_gcode_moves(GCodeProcessorResult* result) const

@@ -2,6 +2,7 @@
 
 #include "Config.hpp"
 #include "Exception.hpp"
+#include "LifecycleFire.hpp"
 #include "Preset.hpp"
 #include "StartupProfile.hpp"
 #include "BambuFlowSupport.hpp"
@@ -3228,6 +3229,7 @@ void PresetCollection::save_current_preset(const std::string &new_name, bool det
     // 1) Find the preset with a new_name or create a new one,
     // initialize it with the edited config.
     auto it = this->find_preset_internal(new_name);
+    EDGE_LIFECYCLE_ONLY(const bool preset_existed = (it != m_presets.end() && it->name == new_name);)
     if (it != m_presets.end() && it->name == new_name) {
         // Preset with the same name found.
         Preset &preset = *it;
@@ -3367,6 +3369,11 @@ void PresetCollection::save_current_preset(const std::string &new_name, bool det
         old_info.replace_extension(".info");
         fs::remove(old_info, ec);
     }
+
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::PresetSaved,
+        ctx.name = new_name;
+        ctx.msg  = preset_existed ? "overwrite" : "new";
+        ctx.code = LifecycleEvtCode::Ok;);
 }
 
 // Ultra: see ProjectPresetPrinters. Kept apart from save_current_preset() so a later "carry the

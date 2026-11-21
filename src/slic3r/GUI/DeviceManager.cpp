@@ -10,6 +10,7 @@
 #include "BambuSendDiagnosis.hpp"
 #include "BambuNetInfo.hpp"
 #include "AmsMatch.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
@@ -3059,7 +3060,12 @@ void MachineObject::reset()
 
 void MachineObject::set_print_state(std::string status)
 {
+    EDGE_LIFECYCLE_ONLY(const bool changed = (print_status != status);)
     print_status = status;
+    EDGE_LIFECYCLE_FIRE_IF(changed, LifecycleEvent::PrintStateChanged,
+        ctx.name = dev_id;
+        ctx.code = LifecycleEvtCode::Ok;
+        ctx.msg  = print_status;);
 }
 
 int MachineObject::connect(bool is_anonymous, bool use_openssl, bool session_up)
@@ -3125,8 +3131,13 @@ bool MachineObject::is_connecting()
 
 void MachineObject::set_online_state(bool on_off)
 {
+    EDGE_LIFECYCLE_ONLY(const bool changed = (m_is_online != on_off);)
     m_is_online = on_off;
     if (!on_off) m_active_state = NotActive;
+    EDGE_LIFECYCLE_FIRE_IF(changed, on_off ? LifecycleEvent::DeviceOnline : LifecycleEvent::DeviceOffline,
+        ctx.name = dev_id;
+        ctx.code = LifecycleEvtCode::Ok;
+        ctx.msg  = on_off ? "online" : "offline";);
 }
 
 bool MachineObject::is_info_ready()
@@ -7962,6 +7973,11 @@ void DeviceManager::on_machine_alive(std::string json_str)
 
 
             BOOST_LOG_TRIVIAL(info) << "SsdpDiscovery::New Machine, ip = " << Slic3r::GUI::wxGetApp().format_IP(dev_ip) << ", printer_name= " << dev_name << ", printer_type = " << printer_type_str << ", signal = " << printer_signal;
+
+            // First discovery of a new device (an announcement from a known one is the branch above).
+            EDGE_LIFECYCLE_FIRE(LifecycleEvent::DeviceDiscovered,
+                ctx.name = dev_id;
+                ctx.code = LifecycleEvtCode::Ok;);
         }
         update_local_machine(*obj);
     }
@@ -8319,6 +8335,11 @@ void DeviceManager::clean_user_info()
         }
     }
     userMachineList.clear();
+
+    // Orca fires this on every sign-out clean-up, whatever was selected.
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::DeviceSelected,
+        ctx.name = selected_machine;
+        ctx.code = LifecycleEvtCode::Ok;);
 }
 
 bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnect)
@@ -8419,6 +8440,9 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
             data.second.checked_filament.clear();
         }
     }
+    EDGE_LIFECYCLE_FIRE_IF(selected_machine != dev_id, LifecycleEvent::DeviceSelected,
+        ctx.name = dev_id; // empty is a deselection
+        ctx.code = LifecycleEvtCode::Ok;);
     selected_machine = dev_id;
     // Somebody chose this printer deliberately - the Device tab, or the hub's send / control path
     // in the hidden instance. The hidden instance's LAN watch rotation leaves that choice alone
