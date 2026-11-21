@@ -3,6 +3,12 @@
 // the fire sites compile to nothing and there is nothing to observe.
 #include <catch2/catch.hpp>
 
+// This file is built only in EDGE_PYTHON_PLUGINS builds, but libslic3r gets the definition
+// PRIVATE: define it here so LifecycleFire.hpp's ON half (the guard, the URL mask) is tested too.
+#ifndef EDGE_PYTHON_PLUGINS
+#define EDGE_PYTHON_PLUGINS
+#endif
+#include "libslic3r/LifecycleFire.hpp"
 #include "libslic3r/LifecycleEvents.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -180,4 +186,37 @@ TEST_CASE("No lifecycle hook: the fire sites do nothing", "[LifecycleFire]")
     auto  config = DynamicPrintConfig::full_print_config();
     init_print({mesh(TestMesh::cube_20x20x20)}, print, model, config);
     CHECK_NOTHROW(gcode(print));
+}
+
+TEST_CASE("EDGE_LIFECYCLE_FIRE builds no payload without a hook and never throws", "[LifecycleFire]")
+{
+    set_lifecycle_hook_fn(nullptr);
+    int fills = 0;
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::NewProject, ++fills;);
+    CHECK(fills == 0);
+
+    int calls = 0;
+    set_lifecycle_hook_fn([&calls](LifecycleEvent, const LifecycleEventContext &) { ++calls; });
+    CHECK_NOTHROW([&]() {
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::NewProject, ++fills; throw std::runtime_error("payload failure"););
+    }());
+    CHECK(fills == 1);
+    CHECK(calls == 0);
+    EDGE_LIFECYCLE_FIRE_IF(false, LifecycleEvent::NewProject, ++fills;);
+    EDGE_LIFECYCLE_FIRE_IF(true, LifecycleEvent::NewProject, ++fills;);
+    CHECK(fills == 2);
+    CHECK(calls == 1);
+    set_lifecycle_hook_fn(nullptr);
+}
+
+TEST_CASE("Upload error texts lose URL credentials and query strings", "[LifecycleFire]")
+{
+    using Slic3r::detail::lifecycle_mask_url_secrets;
+    CHECK(lifecycle_mask_url_secrets("") == "");
+    CHECK(lifecycle_mask_url_secrets("Connection refused") == "Connection refused");
+    CHECK(lifecycle_mask_url_secrets("http://192.168.1.5:7125/server/files/upload") == "http://192.168.1.5:7125/server/files/upload");
+    CHECK(lifecycle_mask_url_secrets("failed: http://user:secret@host:80/api/files/local x") == "failed: http://***@host:80/api/files/local x");
+    CHECK(lifecycle_mask_url_secrets("GET https://host/api?apikey=SECRET&x=1 failed") == "GET https://host/api failed");
+    CHECK(lifecycle_mask_url_secrets("(https://a:b@h?token=t), ftp://u@h/f#frag") == "(https://***@h), ftp://***@h/f");
+    CHECK(lifecycle_mask_url_secrets("http://host/path@not-userinfo") == "http://host/path@not-userinfo");
 }
