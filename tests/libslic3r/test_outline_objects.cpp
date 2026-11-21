@@ -764,4 +764,56 @@ TEST_CASE("Objects from a traced image", "[OutlineObjects]")
             REQUIRE(clicker.cap.parts.size() > 1);
         }
     }
+namespace {
+
+bool indices_in_range(const indexed_triangle_set &its)
+{
+    for (const stl_triangle_vertex_indices &face : its.indices)
+        for (int k = 0; k < 3; ++k)
+            if (face[k] < 0 || size_t(face[k]) >= its.vertices.size())
+                return false;
+    return true;
+}
+
+} // namespace
+
+TEST_CASE("Prism of a sliver that runs back along itself", "[OutlineObjects]")
+{
+    // Left over between two colour areas of a traced image [scaled]: the triangulation gave
+    // triangles of points that do not exist, which ended the application
+    std::vector<Points> slivers = {
+        {{-17510658, -24845776}, {-17512657, -24268097}, {-17392724, -23688425}, {-17392725, -23688427},
+         {-17512657, -24268095}, {-17510658, -24845778}, {-17438700, -25204573}, {-17438698, -25204573}},
+        {{-139428, -19941538}, {131421, -18905113}, {131421, -18905111}, {-139430, -19941543}, {-228766, -20161445}, {-228765, -20161445}},
+        {{-3995258, 130177}, {-3630467, 913727}, {-3265666, 1905188}, {-3194842, 2176032},
+         {-3265667, 1905185}, {-3630466, 913731}, {-3995257, 130180}, {-4621900, -861254}},
+    };
+    ExPolygons all;
+    for (const Points &points : slivers) {
+        ExPolygon sliver;
+        sliver.contour.points = points;
+        indexed_triangle_set its = outline_prism({sliver}, 0., 0.6);
+        REQUIRE(indices_in_range(its));
+        all.push_back(sliver);
+    }
+    // next to a good shape, the good shape is kept
+    all.push_back(rect(0., 0., 10., 10.));
+    indexed_triangle_set its = outline_prism(all, 0., 0.6);
+    REQUIRE(indices_in_range(its));
+    REQUIRE(its_volume(its) > 59.f);
+}
+
+TEST_CASE("Box lid with a picture of colour areas that do not meet exactly", "[OutlineObjects]")
+{
+    Silhouette s = make_silhouette({{rect(0., 0., 40., 40.)}}, plain_params(40.));
+    REQUIRE(!s.empty());
+    // two colour areas with a gap of 0.02 mm and a third one that touches in one point
+    std::vector<ExPolygons> levels = {{rect(-10., -10., 0., 10.)}, {rect(0.02, -10., 10., 10.)}, {rect(-14., -14., -10., -10.)}};
+    OutlineBoxResult res = make_outline_box(s.shape, levels, OutlineBoxParams());
+    REQUIRE(res.is_valid());
+    for (const OutlinePart &part : res.lid.parts) {
+        REQUIRE(indices_in_range(part.mesh));
+        REQUIRE(!part.mesh.indices.empty());
+    }
+    REQUIRE(its_num_open_edges(res.lid.parts.front().mesh) == 0);
 }
