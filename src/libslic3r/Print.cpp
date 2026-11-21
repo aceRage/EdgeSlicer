@@ -1428,6 +1428,8 @@ std::vector<unsigned int> Print::extruders(bool conside_custom_gcode) const
 
     if (conside_custom_gcode)
         this->append_tool_change_extruders(extruders);
+    // The supports list the object filaments again. Count each one once for the wipe tower filament.
+    sort_remove_duplicates(extruders);
     this->append_wipe_tower_extruder(extruders);
     sort_remove_duplicates(extruders);
     m_mixed_filament_mgr.expand_0based_extruder_ids(extruders, m_config.filament_diameter.size());
