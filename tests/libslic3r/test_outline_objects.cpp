@@ -3,6 +3,7 @@
 #include <libslic3r/OutlineObjects.hpp>
 #include <libslic3r/BoundingBox.hpp>
 #include <libslic3r/ClipperUtils.hpp>
+#include <libslic3r/ImageTrace.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 
 #include <cmath>
@@ -689,4 +690,78 @@ TEST_CASE("Clicker fit test", "[OutlineObjects]")
     REQUIRE_THAT(bounding_box(objects[0].parts.front().mesh).size().x(), WithinAbs(66., 0.01));
     // three separate stubs
     REQUIRE(its_split(objects[1].parts.front().mesh).size() == 3);
+}
+
+// The whole way the dialog goes: image -> trace -> silhouette -> object
+TEST_CASE("Objects from a traced image", "[OutlineObjects]")
+{
+    // A wavy blob with an eye and a mouth in other colours on a transparent background
+    TraceImage img;
+    img.width  = 700;
+    img.height = 560;
+    img.rgba.assign(size_t(img.width) * size_t(img.height) * 4, 0);
+    for (int y = 0; y < img.height; ++y)
+        for (int x = 0; x < img.width; ++x) {
+            double dx = (x - 350.) / 300., dy = (y - 280.) / 240.;
+            double a  = std::atan2(dy, dx);
+            double r  = std::sqrt(dx * dx + dy * dy);
+            if (r > 0.9 + 0.08 * std::sin(7. * a))
+                continue;
+            uint8_t *px = &img.rgba[(size_t(y) * size_t(img.width) + size_t(x)) * 4];
+            bool eye   = std::hypot(x - 250., y - 220.) < 45. || std::hypot(x - 450., y - 220.) < 45.;
+            bool mouth = std::abs(y - 380.) < 22. && std::abs(x - 350.) < 130.;
+            px[0] = eye ? 20 : (mouth ? 250 : 200);
+            px[1] = eye ? 40 : (mouth ? 240 : 30);
+            px[2] = eye ? 160 : (mouth ? 60 : 40);
+            px[3] = 255;
+        }
+
+    auto colors = GENERATE(1, 3);
+    auto size   = GENERATE(40., 80.);
+    DYNAMIC_SECTION("colours " << colors << ", size " << size)
+    {
+        ImageTraceParams tp;
+        tp.colors      = colors;
+        tp.max_side    = 1536;
+        tp.keep_source = false;
+        tp.width       = size;
+        ImageTraceResult trace = trace_image(img, tp, {}, false);
+        REQUIRE(trace.is_valid());
+
+        std::vector<ExPolygons> levels;
+        for (const ImageTraceLayer &layer : trace.layers)
+            levels.push_back(layer.shape);
+        SilhouetteParams sp;
+        sp.longest_side = size;
+        Silhouette s    = make_silhouette(levels, sp);
+        REQUIRE(s.shape.size() == 1);
+        std::vector<ExPolygons> detail;
+        if (colors > 1)
+            for (const ExPolygons &level : levels)
+                detail.push_back(to_silhouette_frame(level, s));
+
+        OutlineObjectResult cutter = make_cookie_cutter(s.shape, CookieCutterParams());
+        REQUIRE(cutter.is_valid());
+        REQUIRE(its_num_open_edges(cutter.mesh) == 0);
+
+        OutlineBoxResult box = make_outline_box(s.shape, detail, OutlineBoxParams());
+        REQUIRE(box.is_valid());
+        for (const OutlinePart &part : box.lid.parts)
+            REQUIRE(its_num_open_edges(part.mesh) == 0);
+        REQUIRE(its_num_open_edges(box.base.parts.front().mesh) == 0);
+
+        ClickerParams cp;
+        cp.keyring = true;
+        ClickerSections sec = clicker_sections(s.shape, detail, cp);
+        REQUIRE(sec.fits);
+        ClickerResult clicker = make_clicker(s.shape, detail, cp);
+        REQUIRE(clicker.is_valid());
+        REQUIRE(its_num_open_edges(clicker.body.parts.front().mesh) == 0);
+        for (const OutlinePart &part : clicker.cap.parts)
+            REQUIRE(its_num_open_edges(part.mesh) == 0);
+        if (colors > 1) {
+            REQUIRE(box.lid.parts.size() > 1);
+            REQUIRE(clicker.cap.parts.size() > 1);
+        }
+    }
 }

@@ -34,9 +34,11 @@
 #include <wx/stattext.h>
 #include <wx/utils.h>
 
+#include <boost/log/trivial.hpp>
+
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
+#include <exception>
 #include <sstream>
 
 namespace Slic3r { namespace GUI {
@@ -168,6 +170,7 @@ void i2o_add_objects(Plater *plater, const std::vector<OutlineObject> &objects, 
     for (const OutlineObject &source : objects) {
         if (source.parts.empty())
             continue;
+        BOOST_LOG_TRIVIAL(info) << "Image to object: adding \"" << source.name << "\", " << source.parts.size() << " parts";
         ModelObject *object = model.add_object();
         object->name        = source.name;
         object->add_instance(); // each object should have at least one instance
@@ -201,9 +204,11 @@ void i2o_add_objects(Plater *plater, const std::vector<OutlineObject> &objects, 
         Slic3r::save_object_mesh(*object);
         object_idxs.push_back(model.objects.size() - 1);
     }
+    BOOST_LOG_TRIVIAL(info) << "Image to object: " << object_idxs.size() << " objects in the model, updating the object list";
     if (!object_idxs.empty())
         wxGetApp().obj_list()->paste_objects_into_list(object_idxs);
     wxGetApp().mainframe->update_title();
+    BOOST_LOG_TRIVIAL(info) << "Image to object: done";
 }
 
 } // namespace
@@ -851,10 +856,33 @@ ImageToObjectDialog::Shape ImageToObjectDialog::make_shape(const TraceImage &ima
     return out;
 }
 
+void ImageToObjectDialog::show_failure(const std::string &what)
+{
+    BOOST_LOG_TRIVIAL(error) << "Image to object failed: " << what;
+    m_warning->SetLabel(_L("The object could not be created from this image with these settings.") + "\n" + from_u8(what));
+    m_warning->Wrap(FromDIP(I2O_PREVIEW_PX));
+    Layout();
+    if (GetSizer() != nullptr)
+        GetSizer()->Fit(this);
+}
+
 void ImageToObjectDialog::refresh_preview()
 {
     m_timer.Stop();
+    try {
+        refresh_preview_unchecked();
+    } catch (const std::exception &e) {
+        m_preview_bitmap->SetBitmap(wxBitmap(i2o_blank(FromDIP(I2O_PREVIEW_PX))));
+        m_info->SetLabel(wxEmptyString);
+        m_ok->Enable(false);
+        show_failure(e.what());
+    }
+}
+
+void ImageToObjectDialog::refresh_preview_unchecked()
+{
     ImageToObjectSettings s  = collect();
+    BOOST_LOG_TRIVIAL(info) << "Image to object: preview of type " << int(s.type);
     int                   px = FromDIP(I2O_PREVIEW_PX);
     Shape                 shape = make_shape(m_preview_image, s, I2O_PREVIEW_SIDE);
     if (s.auto_threshold && shape.threshold >= 0)
@@ -970,7 +998,20 @@ void ImageToObjectDialog::change_image()
 bool ImageToObjectDialog::finish()
 {
     m_timer.Stop();
+    try {
+        return finish_unchecked();
+    } catch (const std::exception &e) {
+        m_objects.clear();
+        show_failure(e.what());
+        return false;
+    }
+}
+
+bool ImageToObjectDialog::finish_unchecked()
+{
     m_settings = collect();
+    BOOST_LOG_TRIVIAL(info) << "Image to object: generating type " << int(m_settings.type) << ", size " << m_settings.silhouette.longest_side
+                            << " mm, picture colours " << m_settings.picture_colors;
     m_objects.clear();
     m_warnings.clear();
     m_is_fit_test = false;
@@ -1020,6 +1061,9 @@ bool ImageToObjectDialog::finish()
             }
         }
     }
+    for (const OutlineObject &object : m_objects)
+        for (const OutlinePart &part : object.parts)
+            BOOST_LOG_TRIVIAL(info) << "Image to object: generated \"" << part.name << "\", " << part.mesh.indices.size() << " triangles";
     if (m_objects.empty()) {
         m_warning->SetLabel(_(from_u8(error.empty() ? std::string("The object could not be created.") : error)));
         m_warning->Wrap(FromDIP(I2O_PREVIEW_PX));
@@ -1037,9 +1081,13 @@ bool ImageToObjectDialog::finish_fit_test()
     m_timer.Stop();
     m_settings = collect();
     m_warnings.clear();
-    {
+    try {
         wxBusyCursor busy;
         m_objects = make_clicker_fit_test(m_settings.clicker);
+    } catch (const std::exception &e) {
+        m_objects.clear();
+        show_failure(e.what());
+        return false;
     }
     if (m_objects.size() == 2) {
         m_objects[0].name = _u8L("Clicker fit test - switch");

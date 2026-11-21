@@ -30,7 +30,7 @@ namespace Slic3r { namespace GUI {
 enum class ImageObjectType : int { CookieCutter = 0, Box, Clicker };
 
 // The picture on the lid has at most this many colours
-constexpr int IMAGE_OBJECT_MAX_COLORS = 4;
+constexpr int IMAGE_OBJECT_MAX_COLORS = IMAGE_TRACE_MAX_COLORS;
 
 // Everything the user sets in the dialog
 struct ImageToObjectSettings
@@ -95,9 +95,13 @@ private:
     void                  update_level_rows(const Shape &shape);
     void                  schedule_preview();
     void                  refresh_preview();
+    void                  refresh_preview_unchecked();
+    // The geometry failed in an unexpected way: say so in the dialog instead of ending the application
+    void                  show_failure(const std::string &what);
     void                  refresh_source_preview();
     void                  change_image();
     bool                  finish();
+    bool                  finish_unchecked();
     // Replace the result by the fit test piece of the clicker
     bool                  finish_fit_test();
     void                  save_to_config() const;
