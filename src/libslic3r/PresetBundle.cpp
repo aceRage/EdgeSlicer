@@ -987,17 +987,17 @@ void PresetBundle::reset_project_embedded_presets()
     //update filament_presets
     for (size_t i = 0; i < filament_presets.size(); ++ i)
     {
-        Preset* selected_filament = this->filaments.find_preset(filament_presets[i], false);
+        // Snapmaker #1174: follow renamed_from, so a project naming a renamed system filament keeps it.
+        Preset* selected_filament = this->filaments.find_preset2(filament_presets[i], false);
         if (!selected_filament) {
-            //it should be the project embedded presets
+            // The project preset may have been removed. Resolve the printer's default as well,
+            // since it may still refer to a renamed system preset.
             Preset& current_printer = this->printers.get_selected_preset();
             const std::vector<std::string> &prefered_filament_profiles = current_printer.config.option<ConfigOptionStrings>("default_filament_profile")->values;
-            const std::string prefered_filament_profile = prefered_filament_profiles.empty() ? std::string() : prefered_filament_profiles.front();
-            if (!prefered_filament_profile.empty())
-                filament_presets[i] = prefered_filament_profile;
-            else
-            filament_presets[i] = this->filaments.first_visible().name;
+            if (!prefered_filament_profiles.empty())
+                selected_filament = this->filaments.find_preset2(prefered_filament_profiles.front(), false);
         }
+        filament_presets[i] = selected_filament ? selected_filament->name : this->filaments.first_visible().name;
     }
 }
 
@@ -4726,6 +4726,11 @@ DynamicPrintConfig PresetBundle::full_fff_config(const std::vector<int> *filamen
         assert(opt != nullptr);
         opt->value = boost::algorithm::clamp<int>(opt->value, 0, int(num_filaments));
     }
+
+    // EdgeSlicer surface filaments: 0 = follow the outer wall; a filament that is gone falls back to 0 too.
+    for (const char *key : {"top_surface_filament", "bottom_surface_filament", "ironing_filament"})
+        if (auto *opt = dynamic_cast<ConfigOptionInt*>(out.option(key, false)); opt != nullptr && (opt->value < 0 || opt->value > int(num_filaments)))
+            opt->value = 0;
 
     static const char* keys_1based[] = {"wall_filament", "sparse_infill_filament", "solid_infill_filament"};
     for (size_t i = 0; i < sizeof(keys_1based) / sizeof(keys_1based[0]); ++ i) {

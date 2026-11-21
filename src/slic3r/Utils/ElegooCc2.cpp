@@ -155,6 +155,95 @@ bool parse_upload_reply(const std::string& body, std::string& error)
     return true;
 }
 
+std::string describe_upload_failure(const std::string& body, const std::string& our_md5, size_t total)
+{
+    const json j = parse_object(body);
+    if (j.is_null())
+        return std::string();
+    const int code = int_at(j, "error_code", -1);
+    if (code == 0)
+        return std::string();
+    std::string out = error_text(code);
+    std::string md5 = str_at(j, "md5");
+    std::transform(md5.begin(), md5.end(), md5.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    auto it = j.find("offset");
+    const bool has_offset = it != j.end() && (it->is_number_integer() || it->is_number_unsigned());
+    if (has_offset || !md5.empty()) {
+        out += " (the printer reported";
+        if (has_offset)
+            out += " offset " + std::to_string(it->get<long long>()) + " of " + std::to_string(total) + " bytes sent";
+        if (!md5.empty()) {
+            out += std::string(has_offset ? ", " : " ") + "checksum " + md5;
+            if (!our_md5.empty())
+                out += md5 == our_md5 ? " (same as ours)" : " (ours is " + our_md5 + ")";
+        }
+        out += ")";
+    }
+    const std::string message = str_at(j, "message");
+    if (!message.empty())
+        out += ": " + message;
+    return out;
+}
+
+std::string encode_file_name_header(const std::string& name)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    std::string       out;
+    for (unsigned char c : name) {
+        const bool plain = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                           c == '-' || c == '_' || c == '.' || c == '!' || c == '~' || c == '*' || c == '\'' || c == '(' || c == ')';
+        if (plain) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(hex[c >> 4]);
+            out.push_back(hex[c & 15]);
+        }
+    }
+    return out;
+}
+
+int upload_retries_for(int http_status) { return http_status == 429 ? UPLOAD_429_RETRIES : UPLOAD_CHUNK_RETRIES; }
+
+int upload_retry_delay_ms(int attempt, int http_status, int retry_after_s)
+{
+    if (http_status != 429)
+        return UPLOAD_CHUNK_RETRY_MS;
+    if (retry_after_s > 0)
+        return std::min(retry_after_s, 30) * 1000;
+    return 1000 << std::min(std::max(attempt, 0), 3);
+}
+
+int retry_after_seconds(const std::string& headers)
+{
+    const size_t status_line = headers.rfind("HTTP/");
+    std::string  block       = status_line == std::string::npos ? headers : headers.substr(status_line);
+    std::vector<std::string> lines;
+    boost::split(lines, block, boost::is_any_of("\r\n"), boost::token_compress_on);
+    for (const std::string& line : lines) {
+        const size_t colon = line.find(':');
+        if (colon == std::string::npos || !boost::iequals(boost::trim_copy(line.substr(0, colon)), "Retry-After"))
+            continue;
+        try {
+            return std::max(0, std::stoi(boost::trim_copy(line.substr(colon + 1))));
+        } catch (...) {
+            return 0; // an HTTP date or junk: use the default back-off
+        }
+    }
+    return 0;
+}
+
+std::string too_many_requests_text()
+{
+    return "the printer is refusing requests because it is receiving too many (HTTP 429). Close other programs or web pages "
+           "connected to it (the Device tab, other slicers), wait a minute and send again";
+}
+
+bool upload_error_retryable(int http_status, const std::string& body)
+{
+    return http_status != 401 && http_status != 403 && int_at(parse_object(body), "error_code", -1) != ERR_ACCESS_DENIED;
+}
+
 std::string content_range(size_t offset, size_t length, size_t total)
 {
     const size_t last = length == 0 ? offset : offset + length - 1;
@@ -212,6 +301,27 @@ int auto_refill_choice(const std::map<std::string, std::string>& extended_info)
     return it->second == "1" ? 1 : 0;
 }
 
+std::string stable_client_id(int role)
+{
+    // Two ranges, so the roles cannot collide; random once per process so two EdgeSlicers on one PC differ.
+    static const int one_shot = random_in(1000, 4999);
+    static const int monitor  = random_in(5000, 9999);
+    return make_client_id(role == 1 ? monitor : one_shot);
+}
+
+int too_many_clients_delay_ms(int attempt)
+{
+    static const int delays[] = { 2000, 4000 };
+    return attempt >= 0 && attempt < 2 ? delays[attempt] : -1;
+}
+
+std::string too_many_clients_text()
+{
+    return "the printer has too many connections open, so it would not take the start command. The file is on the printer: "
+           "start it from the printer's screen, or close the other programs connected to it (the Elegoo app, ElegooSlicer, "
+           "the printer's web page, SimplyPrint) and send again";
+}
+
 std::string register_payload(const std::string& client_id, const std::string& request_id)
 {
     ojson j;
@@ -230,7 +340,7 @@ RegisterResult parse_register_response(const std::string& payload, const std::st
     if (str_at(j, "client_id") != client_id)
         return RegisterResult::NotForUs;
     const std::string e = j.contains("error") && j["error"].is_string() ? j["error"].get<std::string>() : std::string("fail");
-    if (e == "ok")
+    if (e == "ok" || e == "already registered")
         return RegisterResult::Ok;
     if (boost::icontains(e, "too many clients")) {
         error = "the printer has too many connections open";
@@ -348,6 +458,15 @@ std::string error_text(int error_code)
     case ERR_INVALID_PARAMETER:
     case ERR_INVALID_PARAMETER2: return "the printer refused the request as invalid";
     case ERR_BUSY: return "the printer is busy";
+    case ERR_UPLOAD_OFFSET_MISMATCH: return "the printer lost track of the upload (offset mismatch, error 9000)";
+    case 9001:
+    case 9002:
+    case 9003: return "the printer could not write the uploaded file (error " + std::to_string(error_code) + ")";
+    case ERR_UPLOAD_MD5_FAILED: return "the printer's checksum of the uploaded file did not match (error 9004)";
+    case ERR_UPLOAD_PATH_MISSING: return "the printer's upload folder does not exist (error 9007)";
+    case 9008:
+    case 9009: return "the printer could not check the uploaded file (error " + std::to_string(error_code) + ")";
+    case ERR_UPLOAD_SAME_NAME: return "the printer could not replace an existing file of the same name (error 9010)";
     case ERR_FILE_NOT_FOUND: return "the printer cannot find the uploaded file";
     case ERR_MISSING_BED_LEVELING: return "the printer has no bed leveling data";
     case -1: return "the printer did not say whether it worked";
@@ -399,6 +518,7 @@ bool Session::open(std::string& error)
         const RegisterResult r = parse_register_response(payload, m_client_id, why);
         if (r == RegisterResult::NotForUs)
             continue;
+        m_register_result = r;
         if (r == RegisterResult::Ok)
             return true;
         error = why;
@@ -507,6 +627,19 @@ StartResult start_print_over(Session&                                  session,
                              int                                       busy_checks,
                              int                                       busy_interval_ms)
 {
+    const CallFn call = [&session](int method, const std::string& params, Reply& reply, std::string& error) {
+        return session.call(method, params, reply, error);
+    };
+    return start_print_over(call, extended_info, pc_bed_type, filename, busy_checks, busy_interval_ms);
+}
+
+StartResult start_print_over(const CallFn&                             session,
+                             const std::map<std::string, std::string>& extended_info,
+                             int                                       pc_bed_type,
+                             const std::string&                        filename,
+                             int                                       busy_checks,
+                             int                                       busy_interval_ms)
+{
     StartResult out;
     std::string error;
     // The printer may still be taking in the file it was just sent: ask again for a while, as
@@ -516,7 +649,7 @@ StartResult start_print_over(Session&                                  session,
         if (i > 0 && busy_interval_ms > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(busy_interval_ms));
         Reply status;
-        if (!session.call(METHOD_GET_STATUS, "{}", status, error) || status.error_code != 0) {
+        if (!session(METHOD_GET_STATUS, "{}", status, error) || status.error_code != 0) {
             out.busy = false;
             break;
         }
@@ -535,7 +668,7 @@ StartResult start_print_over(Session&                                  session,
     const int refill = auto_refill_choice(extended_info);
     if (refill >= 0) {
         Reply r;
-        if (!session.call(METHOD_SET_AUTO_REFILL, auto_refill_params(refill == 1), r, error)) {
+        if (!session(METHOD_SET_AUTO_REFILL, auto_refill_params(refill == 1), r, error)) {
             out.error = "the CANVAS auto-refill setting was not answered (" + error + "), so the print was not started";
             return out;
         }
@@ -550,7 +683,7 @@ StartResult start_print_over(Session&                                  session,
     for (int attempt = 0; attempt < 2; ++attempt) {
         out.payload = start_print_params(extended_info, pc_bed_type, filename, force);
         Reply r;
-        if (!session.call(METHOD_START_PRINT, out.payload, r, error)) {
+        if (!session(METHOD_START_PRINT, out.payload, r, error)) {
             out.error = error;
             return out;
         }

@@ -207,11 +207,14 @@ static bool layer_height_ranges_equal(const t_layer_config_ranges &lr1, const t_
     auto it2 = lr2.begin();
     for (const auto &kvp1 : lr1) {
         const auto &kvp2 = *it2 ++;
-        if (!kvp2.second.has("layer_height") || !kvp1.second.has("layer_height"))
+        // A range without a layer height prints at the object's (layer_height_profile_from_ranges()): two such ranges are equal.
+        const ConfigOption *lh1 = kvp1.second.option("layer_height");
+        const ConfigOption *lh2 = kvp2.second.option("layer_height");
+        if ((lh1 == nullptr) != (lh2 == nullptr))
             return false;
         if (std::abs(kvp1.first.first  - kvp2.first.first ) > EPSILON ||
             std::abs(kvp1.first.second - kvp2.first.second) > EPSILON ||
-            (check_layer_height && std::abs(kvp1.second.option("layer_height")->getFloat() - kvp2.second.option("layer_height")->getFloat()) > EPSILON))
+            (check_layer_height && lh1 != nullptr && std::abs(lh1->getFloat() - lh2->getFloat()) > EPSILON))
             return false;
     }
     return true;
@@ -854,6 +857,18 @@ static bool solid_infill_filament_is_image_row(const MixedFilamentManager &mixed
            ! mf->image_fill_ref.empty();
 }
 
+// EdgeSlicer surface filaments on a painted region: paint colours the visible skins too, as it colours the walls
+// and the solid infill. With the surface keys and outer_wall_filament at 0 the skins already follow the painted
+// wall_filament, and the config stays as it was (a painted region equal to its parent still aliases it).
+static void paint_surface_filaments(PrintRegionConfig &cfg, int painted_extruder_id)
+{
+    const bool follows_painted_wall = cfg.outer_wall_filament.value <= 0;
+    if (cfg.top_surface_filament.value > 0 || ! follows_painted_wall)
+        cfg.top_surface_filament.value = painted_extruder_id;
+    if (cfg.bottom_surface_filament.value > 0 || ! follows_painted_wall)
+        cfg.bottom_surface_filament.value = painted_extruder_id;
+}
+
 // Whether the sparse infill filament of a region was chosen explicitly rather than left at Default.
 // The resolved region config cannot tell: it clamps Default to filament 1. This follows the override
 // precedence of region_config_from_model_volume(): print default, object, part, material, layer range;
@@ -1013,6 +1028,8 @@ bool verify_update_print_object_regions(
             // bound to the parent's solid_infill_filament keeps that virtual id here.
             if (! solid_infill_filament_is_image_row(mixed_mgr, cfg.solid_infill_filament.value, num_physical_filaments))
                 cfg.solid_infill_filament.value = region.extruder_id;
+            // EdgeSlicer surface filaments: mirrors generate_print_object_regions().
+            paint_surface_filaments(cfg, int(region.extruder_id));
             // Paint Depth Stage 2 (Task 3 item 2): mirrors generate_print_object_regions() -
             // sparse infill only follows the painted claim when paint_sparse_infill is active.
             // Orca #17314: an explicitly chosen sparse infill filament is kept; painting then only colors the surfaces.
@@ -1356,6 +1373,8 @@ static PrintObjectRegions* generate_print_object_regions(
                                                           num_physical_filaments);
                     if (! keep_image_row_solid_infill)
                         cfg.solid_infill_filament.value = painted_extruder_id;
+                    // EdgeSlicer surface filaments: the painted skins print with the paint.
+                    paint_surface_filaments(cfg, int(painted_extruder_id));
                     // Read before get_create_region() moves `cfg` out from under us.
                     const int expected_solid_infill_filament = cfg.solid_infill_filament.value;
                     // Paint Depth Stage 2 (Task 3 item 2): sparse infill only follows the
@@ -1554,9 +1573,10 @@ void Print::update_shrinkage_compensation(size_t num_extruders)
     std::vector<unsigned int> extruders;
     const auto append_feature_extruders = [num_filaments, &extruders](const PrintRegionConfig &config) {
         for (int id : { config.wall_filament.value, config.outer_wall_filament.value,
-                        config.sparse_infill_filament.value, config.solid_infill_filament.value }) {
+                        config.sparse_infill_filament.value, config.solid_infill_filament.value,
+                        config.top_surface_filament.value, config.bottom_surface_filament.value, config.ironing_filament.value }) {
             if (id <= 0)
-                continue; // outer_wall_filament 0 follows wall_filament
+                continue; // outer_wall_filament / top_surface_filament / bottom_surface_filament 0 follow the walls
             const unsigned int i = (unsigned int)std::max(0, id - 1);
             extruders.emplace_back(i >= num_filaments ? 0 : i);
         }
@@ -1626,6 +1646,17 @@ bool Print::install_pending_extruder_filament_info()
 {
     std::scoped_lock<std::mutex> lock(this->state_mutex());
     return this->install_pending_extruder_filament_info_unguarded();
+}
+
+// What normalize_fdm_2 calls the number of objects: print by object builds a prime tower only for a plate with one
+// copy on it (the plater and the CLI's tower placement count copies). Several copies of one object are one PrintObject,
+// and counting PrintObjects left the tower on for them, so the G-code printed the copies layer by layer.
+static int printed_copies_count(const PrintObjectPtrs &objects)
+{
+    size_t count = 0;
+    for (const PrintObject *object : objects)
+        count += object->instances().size();
+    return int(count);
 }
 
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
@@ -1727,7 +1758,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     //new_full_config.normalize_fdm(used_filaments);
     new_full_config.normalize_fdm_1();
-    t_config_option_keys changed_keys = new_full_config.normalize_fdm_2(objects().size(), used_filaments);
+    t_config_option_keys changed_keys = new_full_config.normalize_fdm_2(printed_copies_count(m_objects), used_filaments);
     if (changed_keys.size() > 0) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", got changed_keys, size=%1%")%changed_keys.size();
         for (int i = 0; i < changed_keys.size(); i++)
@@ -1761,6 +1792,24 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         }
 
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", has_scarf_joint_seam:" << has_scarf_joint_seam;
+    }
+
+    // Orca #17476: a value outside [1, nozzle count] means nozzle 1. Normalize it here so the
+    // slicing engine only sees in-range values. This works on this print's copy of the config;
+    // readers of the plate/project config are not changed. Run before keep_sliced_filament_map
+    // so the input snapshot is the clamped map.
+    if (auto *filament_map_opt = new_full_config.option<ConfigOptionInts>("filament_map")) {
+        const auto *nozzle_diameter_opt = new_full_config.option<ConfigOptionFloats>("nozzle_diameter");
+        const int   nozzle_count        = nozzle_diameter_opt ? std::max(1, static_cast<int>(nozzle_diameter_opt->values.size())) : 1;
+        bool        out_of_range        = false;
+        for (int &nozzle : filament_map_opt->values)
+            if (nozzle < 1 || nozzle > nozzle_count) {
+                nozzle       = 1;
+                out_of_range = true;
+            }
+        if (out_of_range)
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": filament_map names a nozzle outside 1.." << nozzle_count
+                                     << ", using nozzle 1 for those filaments";
     }
 
     // Ultra (dual-nozzle): filament_map is the grouping's input, but the slice overwrites the Print's copy
@@ -2290,7 +2339,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     //BBS: check the config again
     int new_used_filaments = this->extruders(true).size();
-    t_config_option_keys new_changed_keys = new_full_config.normalize_fdm_2(objects().size(), new_used_filaments);
+    t_config_option_keys new_changed_keys = new_full_config.normalize_fdm_2(printed_copies_count(m_objects), new_used_filaments);
     if (new_changed_keys.size() > 0) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", got new_changed_keys, size=%1%")%new_changed_keys.size();
         for (int i = 0; i < new_changed_keys.size(); i++)
@@ -2549,7 +2598,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         DynamicPrintConfig after              = m_full_print_config;
         if (auto *ept = after.option<ConfigOptionBool>("enable_prime_tower"))
             ept->value = requested_enable_prime_tower;
-        t_config_option_keys keys = after.normalize_fdm_2(int(m_objects.size()), used_after_regions);
+        t_config_option_keys keys = after.normalize_fdm_2(printed_copies_count(m_objects), used_after_regions);
         auto                 differs = [&](const t_config_option_key &key) {
             const ConfigOption *live = m_config.option(key);
             const ConfigOption *want = after.option(key);

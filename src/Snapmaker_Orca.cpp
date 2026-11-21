@@ -88,6 +88,7 @@ using namespace nlohmann;
 #include "libslic3r/MixedFilamentCliGates.hpp"
 #include "libslic3r/CliNamedPresets.hpp"
 #include "libslic3r/CliPresetSlots.hpp"
+#include "libslic3r/CliAmfInch.hpp"
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
@@ -105,6 +106,9 @@ using namespace nlohmann;
 #include "slic3r/Utils/PaintCLI.hpp"
 #include "slic3r/Utils/WebView2Args.hpp"
 #include "slic3r/Utils/WinFirewall.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "slic3r/plugin/ipc/PluginSandbox.hpp"
+#endif
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
@@ -2381,6 +2385,10 @@ int CLI::run(int argc, char **argv)
                     model = Model::read_from_step(file, strategy, nullptr, nullptr, nullptr, 0.003, 0.5, false);
                 } else {
                     model = Model::read_from_file(file, &config, &config_substitutions, strategy, &plate_data_src, &project_presets, &is_bbl_3mf, &file_version, nullptr, nullptr, nullptr, plate_to_slice);
+                    // For an AMF this flag means "the file is in inches", not "Bambu 3MF".
+                    // Convert the units and clear it, otherwise the project settings that an
+                    // AMF does not have would be read (OrcaSlicer #17311).
+                    cli_apply_amf_inch_flag(file, model, is_bbl_3mf);
                     // Snapshot keys the file actually carried before create=true reads insert defaults
                     // (printer_model, printable_area, bed_exclude_area, upward_compatible_machine, …).
                     if (project_file_keys.empty() && !config.empty())
@@ -2923,7 +2931,7 @@ int CLI::run(int argc, char **argv)
             load_filaments_config.push_back(std::move(config));
             load_filaments_index.push_back(current_index);
 
-            load_filaments_set.emplace(config_name);
+            load_filaments_set.emplace(cli_filament_identity(config_name, cli_filament_colour_of(load_filaments_config.back())));
 
             BOOST_LOG_TRIVIAL(info) << boost::format("loaded filament %1% from file %2%, type %3%, name %4%, inherits %5%")%(index+1) %file %config_from %config_name % inherits;
         }
@@ -2936,7 +2944,7 @@ int CLI::run(int argc, char **argv)
                 load_filaments_index.push_back(current_index);
                 load_filaments_inherit.push_back(default_filament_inherit);
 
-                load_filaments_set.emplace(default_load_fila_name);
+                load_filaments_set.emplace(cli_filament_identity(default_load_fila_name, cli_filament_colour_of(load_filaments_config.back())));
             }
             continue;
         }
@@ -2946,8 +2954,20 @@ int CLI::run(int argc, char **argv)
 
     if (is_bbl_3mf && (load_filament_count > 0) && (load_filaments_set.size() == 1))
     {
-        disable_wipe_tower_after_mapping = true;
-        BOOST_LOG_TRIVIAL(info) << boost::format("map all the filaments to the same one, load_filament_count %1%")%load_filament_count;
+        // Same preset name does not mean the same filament: several "Generic PLA"
+        // configs can carry different colours. Only map them to one filament (and
+        // disable the prime tower) when the effective colours are also the same.
+        // Check the loaded filament configs first, then the project config from
+        // the 3MF (Snapmaker/OrcaSlicer #1190).
+        const std::set<std::string> filament_color_set =
+            cli_distinct_filament_colours(load_filaments_config, &m_print_config);
+        if (cli_should_disable_wipe_tower_after_mapping(is_bbl_3mf, load_filament_count, load_filaments_set.size(),
+                                                        filament_color_set.size())) {
+            disable_wipe_tower_after_mapping = true;
+            BOOST_LOG_TRIVIAL(info) << boost::format("map all the filaments to the same one, load_filament_count %1%")%load_filament_count;
+        } else {
+            BOOST_LOG_TRIVIAL(info) << boost::format("filaments share one preset name but have %1% distinct colours, keeping prime tower enabled")%filament_color_set.size();
+        }
     }
 
     //load system config if needed
@@ -5348,6 +5368,11 @@ int CLI::run(int argc, char **argv)
                 } else if (auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure")) {
                     arrange_cfg.align_to_y_axis = (printer_structure_opt->value == PrinterStructure::psI3);
                 }
+                // Arrange towards the printer's preferred spot, as the application's Arrange does
+                // (ArrangeJob.cpp init_arrange_params). Left unset, align_center kept the bed's middle,
+                // whatever best_object_pos says (the H2D family's 0.3x0.5, the A1 mini's 0.7x0.5).
+                if (const auto *best_object_pos = m_print_config.option<ConfigOptionPoint>("best_object_pos"))
+                    arrange_cfg.align_center = best_object_pos->value;
 
                 arrangement::update_arrange_params(arrange_cfg, &m_print_config, selected);
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
@@ -5781,6 +5806,11 @@ int CLI::run(int argc, char **argv)
                 } else if (auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure")) {
                     arrange_cfg.align_to_y_axis = (printer_structure_opt->value == PrinterStructure::psI3);
                 }
+                // Arrange towards the printer's preferred spot, as the application's Arrange does
+                // (ArrangeJob.cpp init_arrange_params). Left unset, align_center kept the bed's middle,
+                // whatever best_object_pos says (the H2D family's 0.3x0.5, the A1 mini's 0.7x0.5).
+                if (const auto *best_object_pos = m_print_config.option<ConfigOptionPoint>("best_object_pos"))
+                    arrange_cfg.align_center = best_object_pos->value;
 
                 arrangement::update_arrange_params(arrange_cfg, &m_print_config, selected);
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
@@ -8025,6 +8055,12 @@ bool CLI::setup(int argc, char **argv)
             m_config.option(optdef.first, true);
 
     set_data_dir(m_config.opt_string("datadir"));
+#ifdef EDGE_PYTHON_PLUGINS
+    // CLI / headless slice never reaches GUI PluginManager::initialize. Sweep leftover
+    // AppContainer ACEs now that data_dir is known (data_dir journal plus the stable
+    // LocalAppData journal that covers python_home / helper / resources).
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+#endif
 
     //FIXME Validating at this stage most likely does not make sense, as the config is not fully initialized yet.
     if (!validity.empty()) {

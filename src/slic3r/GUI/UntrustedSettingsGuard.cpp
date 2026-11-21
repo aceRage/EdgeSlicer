@@ -42,13 +42,34 @@ TrustedValues collect_trusted(const PresetBundle &bundle)
         if (const auto *ff = p.config.option<ConfigOptionString>("filename_format"))
             t.filename_format.insert(ff->value);
     };
+    // Plugin choices and settings live in print, filament and printer presets.
+    auto add_plugins = [&t](const Preset &p) {
+        for (const std::string &key : plugin_selection_keys()) {
+            const std::string v = plugin_selection_value(p.config, key);
+            if (!v.empty())
+                t.plugin_values.insert(key + "=" + v);
+        }
+    };
     for (auto it = bundle.prints.begin(); it != bundle.prints.end(); ++it)
-        if (is_own(*it))
+        if (is_own(*it)) {
             add(*it);
-    // The print settings being edited right now count as the user's own even when unsaved.
+            add_plugins(*it);
+        }
+    for (const PresetCollection *coll : {static_cast<const PresetCollection *>(&bundle.filaments),
+                                         static_cast<const PresetCollection *>(&bundle.printers)})
+        for (auto it = coll->begin(); it != coll->end(); ++it)
+            if (is_own(*it))
+                add_plugins(*it);
+    // The settings being edited right now count as the user's own even when unsaved.
     const Preset &edited = bundle.prints.get_edited_preset();
-    if (is_own(bundle.prints.get_selected_preset()))
+    if (is_own(bundle.prints.get_selected_preset())) {
         add(edited);
+        add_plugins(edited);
+    }
+    if (is_own(bundle.filaments.get_selected_preset()))
+        add_plugins(bundle.filaments.get_edited_preset());
+    if (is_own(bundle.printers.get_selected_preset()))
+        add_plugins(bundle.printers.get_edited_preset());
     return t;
 }
 
@@ -121,6 +142,9 @@ bool ask_keep(const std::string &file_label, const std::vector<UntrustedSetting>
         seen[std::to_string(int(s.risk)) + s.value] = true;
         if (s.risk == SettingRisk::RunsPrograms)
             what += "\n\n" + _L("Post-processing scripts (programs run on this computer):") + "\n" + shorten(s.value);
+        else if (s.risk == SettingRisk::RunsPlugins)
+            what += "\n\n" + _L("Slicing plugins, or settings for them (Python code that runs while slicing and can change the G-code):") +
+                    "\n" + shorten(s.value);
         else
             what += "\n\n" + _L("Output file name that leaves the output folder:") + "\n" + shorten(s.value);
     }

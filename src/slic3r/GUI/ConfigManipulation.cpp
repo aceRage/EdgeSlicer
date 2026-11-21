@@ -920,6 +920,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool has_bottom_shell = config->opt_int("bottom_shell_layers") > 0;
     bool has_solid_infill = has_top_shell_layers || has_bottom_shell;
     toggle_field("top_surface_pattern", has_top_shell);
+    // EdgeSlicer surface filaments: only meaningful when the skin is printed.
+    toggle_field("top_surface_filament", has_top_shell);
+    toggle_field("bottom_surface_filament", has_bottom_shell);
     // EdgeSlicer: the undertop pattern serves top surfaces below 100% density, 0% included, so it follows the
     // top shell layers rather than has_top_shell (which, since Orca #14929, also needs a top surface density > 0).
     toggle_field("undertop_surface_pattern", has_top_shell_layers);
@@ -1187,6 +1190,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_line(el, has_ironing);
     
     toggle_line("ironing_speed", has_ironing || has_support_ironing);
+    // EdgeSlicer: the ironing filament (Filament for Features) means nothing without ironing.
+    toggle_field("ironing_filament", has_ironing);
 
     // ZAA: the three detail settings only matter once Z contouring is on.
     bool has_zaa = config->opt_bool("zaa_enabled");
@@ -1246,7 +1251,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     // Bambu machine inherits, so the group was hidden on H2D/H3C/X1C even with several filaments loaded.
     // A user may also be designing for another printer, so single-nozzle printers show it too.
     const bool have_multiple_filaments = preset_bundle->filament_presets.size() > 1;
-    for (auto el : {"wall_filament", "outer_wall_filament", "sparse_infill_filament", "solid_infill_filament", "wipe_tower_filament"})
+    for (auto el : {"wall_filament", "outer_wall_filament", "sparse_infill_filament", "solid_infill_filament", "top_surface_filament",
+                    "bottom_surface_filament", "ironing_filament", "wipe_tower_filament"})
         toggle_line(el, have_multiple_filaments);
 
     bool purge_in_primetower = preset_bundle->printers.get_edited_preset().config.opt_bool("purge_in_prime_tower");

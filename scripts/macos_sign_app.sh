@@ -26,6 +26,8 @@ APP=${1:?usage: macos_sign_app.sh <App.app> <identity> <entitlements.plist>}
 IDENTITY=${2:?usage: macos_sign_app.sh <App.app> <identity> <entitlements.plist>}
 ENTITLEMENTS=${3:?usage: macos_sign_app.sh <App.app> <identity> <entitlements.plist>}
 KEYCHAIN=${4:-}
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+HELPER_ENTITLEMENTS="$SCRIPT_DIR/edge-plugin-host.entitlements"
 
 # The self-hosted Mac runner is a LaunchDaemon: codesign there searches the system-domain keychain
 # list, which cannot include the per-run build keychain, so the workflow names it here.
@@ -59,7 +61,13 @@ while IFS= read -r -d '' f; do
         *) continue ;;
     esac
     echo "signing nested: ${f#"$APP"/}"
-    codesign --force --options runtime --timestamp ${keychain_args[@]+"${keychain_args[@]}"} --sign "$IDENTITY" "$f"
+    if [ "$(basename "$f")" = "edge-plugin-host" ] && [ -f "$HELPER_ENTITLEMENTS" ]; then
+        # Helper gets com.apple.security.app-sandbox, not the main app entitlements.
+        codesign --force --options runtime --timestamp --entitlements "$HELPER_ENTITLEMENTS" \
+            ${keychain_args[@]+"${keychain_args[@]}"} --sign "$IDENTITY" "$f"
+    else
+        codesign --force --options runtime --timestamp ${keychain_args[@]+"${keychain_args[@]}"} --sign "$IDENTITY" "$f"
+    fi
     nested=$((nested + 1))
 done < <(find "$APP/Contents" -depth -type f -print0)
 

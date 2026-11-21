@@ -1088,6 +1088,9 @@ TEST_CASE("total_toolchanges counts tool changes without a wipe tower", "[Print]
             {"sparse_infill_density",  "20%"},
             {"sparse_infill_filament", "2"},
             {"solid_infill_filament",  "2"},
+            // Skins on the infill filament, as before the surface filaments followed the walls.
+            {"top_surface_filament",  "2"},
+            {"bottom_surface_filament",  "2"},
             {"machine_start_gcode",    "; TT=[total_toolchanges] TT2={total_toolchanges}\n"},
         });
         Print print;
@@ -1264,6 +1267,63 @@ TEST_CASE("Non-mixed multi-object ByObject G-code dump", "[Print][GCode]")
     }
 }
 
+// Print by object builds a prime tower only for a plate with one copy on it (Bambu 93b1a335d2; the plater
+// and the CLI's tower placement count copies). Print::apply counted PrintObjects, and several copies of one
+// object are one PrintObject: the tower stayed on, and the G-code, which prints by object only without a
+// tower, printed the copies layer by layer with a tower the plater did not show.
+TEST_CASE("Print by object with two copies of one object prints the copies one after the other", "[Print][GCode][ByObject]")
+{
+    const int copies = GENERATE(1, 2);
+    DYNAMIC_SECTION(copies << " copies")
+    {
+        DynamicPrintConfig config = two_filament_config(true, false);
+        config.set_deserialize_strict({
+            {"enable_prime_tower",     "1"},
+            {"wall_filament",          "2"},
+            {"gcode_label_objects",    "1"},
+            {"wipe_tower_x",           "20"},
+            {"wipe_tower_y",           "100"},
+        });
+        Model        model;
+        ModelObject *object = model.add_object();
+        object->name        = "cube";
+        TriangleMesh cube   = Test::mesh(TestMesh::cube_20x20x20);
+        cube.scale(Vec3f(0.5f, 0.5f, 0.15f));
+        object->add_volume(cube);
+        for (int i = 0; i < copies; ++i)
+            object->add_instance();
+        object->center_around_origin();
+        for (int i = 0; i < copies; ++i)
+            object->instances[i]->set_offset(Vec3d(40. + 80. * i, 40., 0.));
+        object->ensure_on_bed();
+
+        Print print;
+        print.apply(model, config);
+        print.validate();
+        REQUIRE(print.objects().size() == 1);
+        REQUIRE(print.objects().front()->instances().size() == size_t(copies));
+        // One copy keeps the tower; several turn it off, as several objects do.
+        CHECK(print.has_wipe_tower() == (copies == 1));
+
+        const std::string gcode = export_print_gcode(print);
+        REQUIRE(count_toolchange(gcode, 1) >= 1);
+        // The copy each "; printing object" marker names, in order: printed by object, it changes once.
+        std::vector<int> order;
+        std::istringstream lines(gcode);
+        for (std::string line; std::getline(lines, line);)
+            if (line.rfind("; printing object ", 0) == 0) {
+                const size_t at = line.rfind(" copy ");
+                REQUIRE(at != std::string::npos);
+                order.push_back(std::atoi(line.c_str() + at + 6));
+            }
+        REQUIRE_FALSE(order.empty());
+        size_t switches = 0;
+        for (size_t i = 1; i < order.size(); ++i)
+            switches += order[i] != order[i - 1];
+        CHECK(switches == size_t(copies - 1));
+    }
+}
+
 // A printer with several tools whose start G-code sets no nozzle temperature: the slicer sets the first layer's
 // temperature of every printing tool before the start G-code. Without ooze prevention only the highest-numbered
 // tool's was written, so the tool that printed first started cold.
@@ -1284,6 +1344,9 @@ TEST_CASE("Every printing tool is heated when the start G-code sets no nozzle te
             {"wall_filament",                    "1"},
             {"sparse_infill_filament",           "2"},
             {"solid_infill_filament",            "2"},
+            // Skins on the infill filament, as before the surface filaments followed the walls.
+            {"top_surface_filament",            "2"},
+            {"bottom_surface_filament",            "2"},
         });
         Print print;
         Model model;
@@ -3337,4 +3400,16 @@ TEST_CASE("No sparse layers still refuses an object that rises past the lid clea
     CHECK(print.validate().string.empty());
     print.set_status_silent();
     REQUIRE_THROWS_WITH(print.process(), Catch::Contains("No sparse layers"));
+}
+
+TEST_CASE("Print validation rejects a zero layer height", "[Print]")
+{
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "layer_height", 0. } });
+    Slic3r::Test::init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    const StringObjectException result = print.validate();
+    CHECK_FALSE(result.string.empty());
+    CHECK(result.opt_key == "layer_height");
 }

@@ -1,7 +1,9 @@
 #include <catch2/catch.hpp>
 
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtruderAreas.hpp"
+#include "libslic3r/GCode/WipeTowerInterface.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -1121,4 +1123,83 @@ SCENARIO("the side scrape's ring beyond the tower brim counts in the prime tower
     };
     GIVEN("the scrape off") { THEN("the tower is fine") { CHECK_FALSE(has_tower_text(tower_error(config(false)))); } }
     GIVEN("the scrape on") { THEN("the right nozzle cannot reach the scrape's ring: refused") { CHECK(has_tower_text(tower_error(config(true)))); } }
+}
+
+// Orca #17439: Edge uses ExtruderAreas rather than get_shared_poly / get_bed_shape(use_share).
+// Non-overlapping areas must not crash, must share nothing, and must still place objects on the
+// whole bed (the U1 declares no areas and stays unconstrained).
+
+TEST_CASE("Extruder printable areas that do not overlap share no area", "[ExtruderAreas]")
+{
+    const Pointfs bed = { { 0., 0. }, { 200., 0. }, { 200., 200. }, { 0., 200. } };
+    auto strip = [](double left, double right) -> Pointfs {
+        return { { left, 0. }, { right, 0. }, { right, 200. }, { left, 200. } };
+    };
+
+    SECTION("areas that only touch")
+    {
+        const ExtruderAreas areas = compute_extruder_areas(bed, { strip(0., 100.), strip(100., 200.) }, {});
+        REQUIRE(areas.multi());
+        CHECK(areas.shared.empty());
+        CHECK(areas.has_exclusive_regions());
+    }
+    SECTION("areas that sit apart")
+    {
+        const ExtruderAreas areas = compute_extruder_areas(bed, { strip(0., 80.), strip(120., 200.) }, {});
+        REQUIRE(areas.multi());
+        CHECK(areas.shared.empty());
+    }
+    SECTION("the H2D overlapping areas still share their intersection")
+    {
+        const ExtruderAreas areas = h2d_areas();
+        REQUIRE_FALSE(areas.shared.empty());
+        CHECK(area_mm2(areas.shared) == Approx(300. * 320.).margin(0.01));
+    }
+}
+
+TEST_CASE("The shared printable box is undefined when the extruders share no area", "[ExtruderAreas]")
+{
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("printable_area", new ConfigOptionPoints({ { 0., 0. }, { 200., 0. }, { 200., 200. }, { 0., 200. } }));
+    cfg.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(std::vector<Vec2ds>{
+        { { 0., 0. }, { 100., 0. }, { 100., 200. }, { 0., 200. } },
+        { { 100., 0. }, { 200., 0. }, { 200., 200. }, { 100., 200. } } }));
+    CHECK_FALSE(TowerInterface::shared_printable_box(cfg).defined);
+
+    cfg.set_key_value("printable_area", new ConfigOptionPoints(H2D_BED));
+    cfg.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(std::vector<Vec2ds>{
+        Vec2ds(H2D_LEFT.begin(), H2D_LEFT.end()), Vec2ds(H2D_RIGHT.begin(), H2D_RIGHT.end()) }));
+    const BoundingBoxf overlap = TowerInterface::shared_printable_box(cfg);
+    REQUIRE(overlap.defined);
+    CHECK(overlap.min.x() == Approx(25.));
+    CHECK(overlap.max.x() == Approx(325.));
+}
+
+TEST_CASE("A printer without per-nozzle areas keeps the whole bed as the shared box", "[ExtruderAreas]")
+{
+    // The U1 / a single-nozzle machine: no extruder_printable_area, so the box is the bed.
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("printable_area", new ConfigOptionPoints(H2D_BED));
+    const BoundingBoxf box = TowerInterface::shared_printable_box(cfg);
+    REQUIRE(box.defined);
+    CHECK(box.min.x() == Approx(0.));
+    CHECK(box.max.x() == Approx(350.));
+    CHECK(box.min.y() == Approx(0.));
+    CHECK(box.max.y() == Approx(320.));
+}
+
+TEST_CASE("Objects are placed on the whole bed when the extruders share no area", "[ExtruderAreas]")
+{
+    // Edge's get_bed_shape is the whole printable_area (no use_share). Arrangement must not
+    // collapse onto an empty shared polygon the way Orca's get_shared_poly used to.
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("printable_area", new ConfigOptionPoints({ { 0., 0. }, { 200., 0. }, { 200., 200. }, { 0., 200. } }));
+    cfg.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(std::vector<Vec2ds>{
+        { { 0., 0. }, { 100., 0. }, { 100., 200. }, { 0., 200. } },
+        { { 100., 0. }, { 200., 0. }, { 200., 200. }, { 100., 200. } } }));
+    const Points bed = get_bed_shape(cfg);
+    REQUIRE(bed.size() == 4);
+    const BoundingBox bb(bed);
+    CHECK(bb.min == Point(0, 0));
+    CHECK(bb.max == Point(scaled(200.), scaled(200.)));
 }

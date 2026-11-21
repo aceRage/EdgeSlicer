@@ -25,6 +25,8 @@
 #include <wx/listimpl.cpp>
 #include <wx/display.h>
 #include <wx/hyperlink.h>
+#include <wx/wrapsizer.h>
+#include <wx/wupdlock.h>
 #include <algorithm>
 #include <map>
 #include <memory>
@@ -1800,10 +1802,363 @@ PreferencesDialog::PreferencesDialog(wxWindow *parent, wxWindowID id, const wxSt
         });
 }
 
+// ---------------------------------------------------------------------------------------------
+// Layout: tabs -> collapsible sections -> table rows (tests/mockups/preferences_layout.html).
+//
+// The create_item_*() helpers above still build each setting's controls, unchanged, so upstream
+// ports keep applying to them. The functions below only place what they return: add_row() puts a
+// helper's sizer on a striped row panel and re-flows it so the label leads and stretches while the
+// controls sit at the right edge.
+// ---------------------------------------------------------------------------------------------
+#define PREF_ROW_ALT_COLOR wxColour(248, 248, 248)
+#define PREF_SECTION_COLOR wxColour(238, 238, 238)
+
+static const char *PREF_SECTIONS_KEY = "preferences_sections";
+
+static wxString pref_chevron(bool open)
+{
+    // U+25BE (down) when open, U+25B8 (right) when collapsed.
+    return wxString::FromUTF8(open ? "\xE2\x96\xBE" : "\xE2\x96\xB8");
+}
+
+// A row's controls were created for a white page; give them the row's own colour. StaticBox
+// widgets (TextInput, ComboBox, Button) paint their corners with it; their fill is separate.
+static void pref_paint_row(wxWindow *parent, const wxColour &colour)
+{
+    for (wxWindow *child : parent->GetChildren()) {
+        if (dynamic_cast<wxTextCtrl *>(child) != nullptr)
+            continue;
+        child->SetBackgroundColour(colour);
+        if (dynamic_cast<StaticBox *>(child) == nullptr)
+            pref_paint_row(child, colour);
+    }
+}
+
+// The text a row is found by: its labels and tooltips, lower case.
+static void pref_collect_row_text(wxWindow *parent, wxString &text)
+{
+    for (wxWindow *child : parent->GetChildren()) {
+        if (auto *label = dynamic_cast<wxStaticText *>(child))
+            text += label->GetLabel() + "\n";
+        text += child->GetToolTipText() + "\n";
+        if (dynamic_cast<StaticBox *>(child) == nullptr)
+            pref_collect_row_text(child, text);
+    }
+}
+
+static void pref_strip_edge_spacers(wxBoxSizer *box)
+{
+    while (box->GetItemCount() > 0 && box->GetItem(size_t(0))->IsSpacer())
+        box->Remove(0);
+    while (box->GetItemCount() > 0 && box->GetItem(box->GetItemCount() - 1)->IsSpacer())
+        box->Remove(int(box->GetItemCount() - 1));
+}
+
+// The helpers give unit labels ("Second", "%", "files") the fixed title width; let them be as
+// wide as their text so the controls end at the row's right edge.
+static void pref_release_fixed_width(wxStaticText *text)
+{
+    text->SetMinSize(wxDefaultSize);
+    text->InvalidateBestSize();
+}
+
+void PreferencesDialog::tabulate_row(wxSizer *sizer)
+{
+    auto *box = dynamic_cast<wxBoxSizer *>(sizer);
+    if (box == nullptr)
+        return;
+
+    if (box->GetOrientation() == wxVERTICAL) {
+        // Several lines in one row (selection highlight, link associations): each line is a table line.
+        for (wxSizerItem *child : box->GetChildren()) {
+            if (child->IsSizer()) {
+                child->SetFlag((child->GetFlag() & ~wxALIGN_MASK) | wxEXPAND);
+                tabulate_row(child->GetSizer());
+            }
+        }
+        return;
+    }
+
+    pref_strip_edge_spacers(box);
+
+    wxStaticText *label         = nullptr;
+    bool          other_stretch = false;
+    for (wxSizerItem *child : box->GetChildren()) {
+        if (child->IsSizer()) {
+            // A second control group on the same line ("every [10] Second" after a checkbox).
+            if (auto *inner = dynamic_cast<wxBoxSizer *>(child->GetSizer()); inner != nullptr && inner->GetOrientation() == wxHORIZONTAL) {
+                pref_strip_edge_spacers(inner);
+                for (wxSizerItem *inner_child : inner->GetChildren())
+                    if (auto *text = dynamic_cast<wxStaticText *>(inner_child->GetWindow()))
+                        pref_release_fixed_width(text);
+            }
+            continue;
+        }
+        auto *text = dynamic_cast<wxStaticText *>(child->GetWindow());
+        if (text != nullptr && label == nullptr) {
+            label = text;
+            continue;
+        }
+        if (child->GetProportion() > 0)
+            other_stretch = true;
+        else if (text != nullptr)
+            pref_release_fixed_width(text);
+    }
+    if (label == nullptr)
+        return;
+
+    // The label leads. It takes the free width unless the row has a stretching value of its own
+    // (a folder path), in which case it becomes a fixed first column.
+    label->SetMaxSize(wxDefaultSize);
+    pref_release_fixed_width(label);
+    const int best = label->GetBestSize().x + FromDIP(5);
+    box->Detach(label);
+    if (other_stretch) {
+        label->SetMinSize(wxSize(std::max(best, FromDIP(150)), -1));
+        box->Insert(0, label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    } else {
+        label->SetMinSize(wxSize(std::min(best, FromDIP(380)), -1));
+        box->Insert(0, label, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    }
+}
+
+wxWindow *PreferencesDialog::new_page()
+{
+    auto *page = new wxWindow(m_scrolledWindow, wxID_ANY);
+    page->SetBackgroundColour(*wxWHITE);
+    page->SetSizer(new wxBoxSizer(wxVERTICAL));
+    return page;
+}
+
+PreferencesDialog::PrefSection *PreferencesDialog::begin_section(wxWindow *page, const std::string &id, const wxString &title, bool open_by_default)
+{
+    const size_t index = m_sections.size();
+    m_sections.emplace_back();
+    PrefSection &sec = m_sections.back();
+    sec.id    = id;
+    sec.index = index;
+    sec.page  = page;
+    auto state = m_section_open.find(id);
+    sec.open   = state != m_section_open.end() ? state->second : open_by_default;
+
+    auto *header = new wxPanel(page, wxID_ANY);
+    header->SetBackgroundColour(PREF_SECTION_COLOR);
+    header->SetMinSize(wxSize(-1, FromDIP(30)));
+    header->SetCursor(wxCursor(wxCURSOR_HAND));
+    header->SetToolTip(_L("Click to collapse or expand this section"));
+
+    auto *chevron = new wxStaticText(header, wxID_ANY, pref_chevron(sec.open), wxDefaultPosition, wxSize(FromDIP(16), -1),
+                                     wxALIGN_CENTRE_HORIZONTAL | wxST_NO_AUTORESIZE);
+    chevron->SetFont(::Label::Head_13);
+    chevron->SetForegroundColour(DESIGN_GRAY800_COLOR);
+    auto *label = new wxStaticText(header, wxID_ANY, title);
+    label->SetFont(::Label::Head_13);
+    label->SetForegroundColour(DESIGN_GRAY800_COLOR);
+
+    auto *header_sizer = new wxBoxSizer(wxHORIZONTAL);
+    header_sizer->Add(chevron, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+    header_sizer->Add(label, 1, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(6));
+    header->SetSizer(header_sizer);
+
+    auto *body = new wxPanel(page, wxID_ANY);
+    body->SetBackgroundColour(*wxWHITE);
+    sec.sizer = new wxBoxSizer(wxVERTICAL);
+    body->SetSizer(sec.sizer);
+    body->Show(sec.open);
+
+    sec.header  = header;
+    sec.body    = body;
+    sec.chevron = chevron;
+
+    wxSizer *page_sizer = page->GetSizer();
+    page_sizer->Add(header, 0, wxEXPAND | wxTOP, page_sizer->IsEmpty() ? 0 : FromDIP(10));
+    page_sizer->Add(body, 0, wxEXPAND);
+
+    auto toggle = [this, index](wxMouseEvent &) { set_section_open(m_sections[index], !m_sections[index].open, true); };
+    header->Bind(wxEVT_LEFT_DOWN, toggle);
+    chevron->Bind(wxEVT_LEFT_DOWN, toggle);
+    label->Bind(wxEVT_LEFT_DOWN, toggle);
+
+    return &sec;
+}
+
+wxWindow *PreferencesDialog::row(PrefSection *sec)
+{
+    auto *panel = new wxPanel(sec->body, wxID_ANY);
+    panel->SetBackgroundColour(sec->rows % 2 == 0 ? *wxWHITE : PREF_ROW_ALT_COLOR);
+    sec->pending = panel;
+    return panel;
+}
+
+void PreferencesDialog::finish_row(PrefSection *sec, wxSizer *content, bool indent)
+{
+    wxWindow *panel = sec->pending;
+    assert(panel != nullptr);
+    if (panel == nullptr)
+        return;
+    sec->pending = nullptr;
+
+    auto *line = new wxBoxSizer(wxHORIZONTAL);
+    line->AddSpacer(FromDIP(indent ? 34 : 12));
+    line->Add(content, 1, wxALIGN_CENTER_VERTICAL);
+    line->AddSpacer(FromDIP(12));
+    auto *outer = new wxBoxSizer(wxVERTICAL);
+    outer->Add(line, 1, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(3));
+    panel->SetSizer(outer);
+    panel->SetMinSize(wxSize(-1, FromDIP(36)));
+
+    pref_paint_row(panel, panel->GetBackgroundColour());
+
+    PrefRow entry;
+    entry.panel   = panel;
+    entry.section = sec->index;
+    pref_collect_row_text(panel, entry.text);
+    entry.text.MakeLower();
+    m_rows.push_back(entry);
+
+    sec->sizer->Add(panel, 0, wxEXPAND);
+    ++sec->rows;
+}
+
+void PreferencesDialog::add_row(PrefSection *sec, wxSizer *item, bool indent)
+{
+    tabulate_row(item);
+    finish_row(sec, item, indent);
+}
+
+void PreferencesDialog::add_row(PrefSection *sec, wxWindow *item, bool indent)
+{
+    tabulate_row(item->GetSizer());
+    auto *content = new wxBoxSizer(wxHORIZONTAL);
+    content->Add(item, 1, wxALIGN_CENTER_VERTICAL);
+    finish_row(sec, content, indent);
+}
+
+void PreferencesDialog::load_section_states()
+{
+    m_section_open.clear();
+    std::vector<wxString> entries;
+    Split(app_config->get(PREF_SECTIONS_KEY), ";", entries);
+    for (const wxString &entry : entries) {
+        const int eq = entry.Find('=');
+        if (eq > 0)
+            m_section_open[into_u8(entry.Left(size_t(eq)))] = entry.Mid(size_t(eq) + 1) == "1";
+    }
+}
+
+void PreferencesDialog::save_section_states()
+{
+    std::string value;
+    for (const auto &[id, open] : m_section_open) {
+        if (!value.empty())
+            value += ";";
+        value += id + (open ? "=1" : "=0");
+    }
+    app_config->set(PREF_SECTIONS_KEY, value);
+}
+
+void PreferencesDialog::set_section_open(PrefSection &sec, bool open, bool remember)
+{
+    sec.open = open;
+    sec.body->Show(open);
+    sec.chevron->SetLabel(pref_chevron(open));
+    if (remember) {
+        m_section_open[sec.id] = open;
+        save_section_states();
+        relayout();
+    }
+}
+
+void PreferencesDialog::set_page_sections_open(bool open)
+{
+    if (m_current_page >= m_pages.size())
+        return;
+    wxWindow *page = m_pages[m_current_page].second;
+    for (PrefSection &sec : m_sections) {
+        if (sec.page != page)
+            continue;
+        set_section_open(sec, open, false);
+        m_section_open[sec.id] = open;
+    }
+    save_section_states();
+    relayout();
+}
+
+void PreferencesDialog::relayout()
+{
+    m_scrolledWindow->FitInside();
+    m_scrolledWindow->Layout();
+    // A page or section whose own size did not change gets no size event, so lay them out by hand.
+    for (auto &page : m_pages)
+        if (page.second->IsShown())
+            page.second->Layout();
+    for (PrefSection &sec : m_sections)
+        if (sec.body->IsShown())
+            sec.body->Layout();
+    m_scrolledWindow->FitInside();
+    m_scrolledWindow->Refresh();
+}
+
+void PreferencesDialog::select_page(size_t index)
+{
+    if (index >= m_pages.size())
+        return;
+    m_current_page = index;
+    if (m_search_input != nullptr && !m_search_input->GetTextCtrl()->IsEmpty())
+        m_search_input->GetTextCtrl()->ChangeValue(wxEmptyString);
+    apply_search(wxEmptyString);
+    m_scrolledWindow->Scroll(0, 0);
+}
+
+// An empty query shows the current tab as it was; anything else shows the matching rows of every tab.
+void PreferencesDialog::apply_search(const wxString &query)
+{
+    wxString q = query;
+    q.Trim(true).Trim(false);
+    q.MakeLower();
+    const bool searching = !q.empty();
+
+    wxWindowUpdateLocker freeze(this);
+
+    std::vector<int> hits(m_sections.size(), 0);
+    for (PrefRow &entry : m_rows) {
+        const bool show = !searching || entry.text.Contains(q);
+        entry.panel->Show(show);
+        if (show)
+            ++hits[entry.section];
+    }
+
+    bool                      any = false;
+    std::vector<wxWindow *>   pages_with_hits;
+    for (size_t i = 0; i < m_sections.size(); ++i) {
+        PrefSection &sec     = m_sections[i];
+        const bool   visible = hits[i] > 0;
+        sec.header->Show(visible);
+        sec.body->Show(visible && (searching || sec.open));
+        if (visible) {
+            any = true;
+            pages_with_hits.push_back(sec.page);
+        }
+    }
+
+    for (size_t i = 0; i < m_pages.size(); ++i) {
+        wxWindow *page = m_pages[i].second;
+        const bool show = searching ? std::find(pages_with_hits.begin(), pages_with_hits.end(), page) != pages_with_hits.end()
+                                    : i == m_current_page;
+        page->Show(show);
+        m_tab_buttons[i]->SetStyle(!searching && i == m_current_page ? ButtonStyle::Confirm : ButtonStyle::Regular, ButtonType::Compact);
+    }
+    if (m_no_results != nullptr)
+        m_no_results->Show(searching && !any);
+
+    relayout();
+}
+
 void PreferencesDialog::create()
 {
     app_config             = get_app_config();
     m_backup_interval_time = app_config->get("backup_interval");
+    load_section_states();
 
     // set icon for dialog
     std::string icon_path = (boost::format("%1%/images/EdgeSlicerTitle.ico") % resources_dir()).str();
@@ -1812,67 +2167,83 @@ void PreferencesDialog::create()
 
     auto main_sizer = new wxBoxSizer(wxVERTICAL);
 
+    auto top_line = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, 1), wxTAB_TRAVERSAL);
+    top_line->SetBackgroundColour(DESIGN_GRAY400_COLOR);
+    main_sizer->Add(top_line, 0, wxEXPAND, 0);
+
+    // Search across every tab, and expand / collapse for the sections of the current one.
+    m_search_input = new ::TextInput(this, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(260), -1), wxTE_PROCESS_ENTER);
+    m_search_input->GetTextCtrl()->SetHint(_L("Search all settings"));
+    m_search_input->GetTextCtrl()->Bind(wxEVT_TEXT, [this](wxCommandEvent &e) {
+        apply_search(m_search_input->GetTextCtrl()->GetValue());
+        e.Skip();
+    });
+    auto *expand_all = new Button(this, _L("Expand all"));
+    expand_all->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    expand_all->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { set_page_sections_open(true); });
+    auto *collapse_all = new Button(this, _L("Collapse all"));
+    collapse_all->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    collapse_all->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { set_page_sections_open(false); });
+
+    auto *tools = new wxBoxSizer(wxHORIZONTAL);
+    tools->Add(m_search_input, 0, wxALIGN_CENTER_VERTICAL);
+    tools->AddStretchSpacer(1);
+    tools->Add(expand_all, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    tools->Add(collapse_all, 0, wxALIGN_CENTER_VERTICAL);
+
     m_scrolledWindow = new MyscrolledWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL);
     m_scrolledWindow->SetScrollRate(5, 5);
-
+    m_scrolledWindow->SetBackgroundColour(*wxWHITE);
     m_sizer_body = new wxBoxSizer(wxVERTICAL);
 
-    auto m_top_line = new wxPanel(m_scrolledWindow, wxID_ANY, wxDefaultPosition, wxSize(DESIGN_RESOUTION_PREFERENCES.x, 1), wxTAB_TRAVERSAL);
-    m_top_line->SetBackgroundColour(DESIGN_GRAY400_COLOR);
-
-    m_sizer_body->Add(m_top_line, 0, wxEXPAND, 0);
-
-    auto general_page = create_general_page();
-    auto ultra_page   = create_ultra_page();
+    m_pages = {
+        { _L("General"), create_page_general() },
+        { _L("3D View"), create_page_view() },
+        { _L("Projects & Files"), create_page_projects() },
+        { _L("Slicing & Presets"), create_page_slicing() },
+        { _L("Printers & Network"), create_page_devices() },
+        { _L("Apps & Advanced"), create_page_advanced() },
+    };
 #if !BBL_RELEASE_TO_PUBLIC
-    auto debug_page   = create_debug_page();
+    m_pages.emplace_back(_L("Develop"), create_debug_page());
 #endif
 
-    // Tab bar switching between the pages (BambuStudio-style tabbed preferences).
-    std::vector<std::pair<wxString, wxWindow*>> pages = { { _L("General"), general_page }, { _L("Extras"), ultra_page } };
-#if !BBL_RELEASE_TO_PUBLIC
-    pages.emplace_back(_L("Develop"), debug_page);
-#endif
-    auto* tab_bar = new wxBoxSizer(wxHORIZONTAL);
-    auto* tab_buttons = new std::vector<Button*>();
-    for (size_t i = 0; i < pages.size(); ++i) {
-        auto* btn = new Button(m_scrolledWindow, pages[i].first);
+    // Tab bar. It wraps, so translated tab names cannot push the dialog wider.
+    auto *tab_bar = new wxWrapSizer(wxHORIZONTAL);
+    for (size_t i = 0; i < m_pages.size(); ++i) {
+        auto *btn = new Button(this, m_pages[i].first);
         btn->SetStyle(i == 0 ? ButtonStyle::Confirm : ButtonStyle::Regular, ButtonType::Compact);
-        tab_buttons->push_back(btn);
-        tab_bar->Add(btn, 0, wxRIGHT, FromDIP(8));
-        wxWindow* page = pages[i].second;
-        page->Show(i == 0);
-        btn->Bind(wxEVT_BUTTON, [this, i, pages, tab_buttons](wxCommandEvent&) {
-            for (size_t j = 0; j < pages.size(); ++j) {
-                pages[j].second->Show(j == i);
-                (*tab_buttons)[j]->SetStyle(j == i ? ButtonStyle::Confirm : ButtonStyle::Regular, ButtonType::Compact);
-            }
-            m_scrolledWindow->Layout();
-            m_sizer_body->Layout();
-            Layout();
-            Refresh();
-        });
+        m_tab_buttons.push_back(btn);
+        tab_bar->Add(btn, 0, wxRIGHT | wxBOTTOM, FromDIP(6));
+        btn->Bind(wxEVT_BUTTON, [this, i](wxCommandEvent &) { select_page(i); });
     }
 
-    m_sizer_body->Add(0, 0, 0, wxTOP, FromDIP(14));
-    m_sizer_body->Add(tab_bar, 0, wxLEFT | wxRIGHT, FromDIP(38));
-    m_sizer_body->Add(0, 0, 0, wxTOP, FromDIP(14));
-    m_sizer_body->Add(general_page, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(38));
-    m_sizer_body->Add(ultra_page, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(38));
-#if !BBL_RELEASE_TO_PUBLIC
-    m_sizer_body->Add(debug_page, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(38));
-#endif
-    m_sizer_body->Add(0, 0, 0, wxBOTTOM, FromDIP(28));
-    m_scrolledWindow->SetSizerAndFit(m_sizer_body);
+    m_no_results = new wxStaticText(m_scrolledWindow, wxID_ANY, _L("No settings match that search."));
+    m_no_results->SetFont(::Label::Body_13);
+    m_no_results->SetForegroundColour(DESIGN_GRAY600_COLOR);
+    m_no_results->Hide();
 
+    for (auto &page : m_pages)
+        m_sizer_body->Add(page.second, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(16));
+    m_sizer_body->Add(m_no_results, 0, wxALL, FromDIP(24));
+    m_sizer_body->Add(0, 0, 0, wxBOTTOM, FromDIP(20));
+    m_scrolledWindow->SetSizer(m_sizer_body);
+
+    main_sizer->Add(tools, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(16));
+    main_sizer->Add(tab_bar, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(16));
+    main_sizer->Add(0, 0, 0, wxTOP, FromDIP(4));
     main_sizer->Add(m_scrolledWindow, 1, wxEXPAND);
-
     SetSizer(main_sizer);
+
+    // One size for every tab: the widest page sets the width, the sections scroll.
+    int width = FromDIP(720);
+    for (auto &page : m_pages)
+        width = std::max(width, page.second->GetBestSize().x + FromDIP(60));
+    const int screen_height = wxDisplay(m_parent).GetClientArea().GetHeight();
+    SetSize(wxSize(width, std::min(FromDIP(760), screen_height * 4 / 5)));
+
+    select_page(0);
     Layout();
-    Fit();
-    int screen_height = wxDisplay(m_parent).GetClientArea().GetHeight();
-    if (this->GetSize().GetY() > screen_height)
-        this->SetSize(this->GetSize().GetX() + FromDIP(40), screen_height * 4 / 5);
 
     CenterOnParent();
     wxPoint start_pos = this->GetPosition();
@@ -1914,13 +2285,13 @@ void PreferencesDialog::Split(const std::string &src, const std::string &separat
     dest.push_back(substring);
 }
 
-wxWindow* PreferencesDialog::create_general_page()
+// The six pages. Each setting keeps its create_item_*() call (label, tooltip and config key as
+// before); only the page and section it sits in changed.
+wxWindow* PreferencesDialog::create_page_general()
 {
-    auto page = new wxWindow(m_scrolledWindow, wxID_ANY);
-    page->SetBackgroundColour(*wxWHITE);
-    wxBoxSizer *sizer_page = new wxBoxSizer(wxVERTICAL);
+    wxWindow* page = new_page();
 
-    auto title_general_settings = create_item_title(_L("General Settings"), page, _L("General Settings"));
+    PrefSection* sec = begin_section(page, "general.language", _L("Language and region"));
 
     // bbs supported languages
     wxLanguage supported_languages[]{
@@ -1959,75 +2330,124 @@ wxWindow* PreferencesDialog::create_general_page()
                 language_infos.emplace_back(langinfo);
             }
         }
-        //if (langinfo != nullptr) language_infos.emplace_back(langinfo);
     }
     sort_remove_duplicates(language_infos);
     std::sort(language_infos.begin(), language_infos.end(), [](const wxLanguageInfo *l, const wxLanguageInfo *r) { return l->Description < r->Description; });
-    auto item_language = create_item_language_combobox(_L("Language"), page, _L("Language"), 50, "language", language_infos);
+    add_row(sec, create_item_language_combobox(_L("Language"), row(sec), _L("Language"), 50, "language", language_infos));
 
-    std::vector<wxString> Regions         = {_L("Asia-Pacific"), _L("Chinese Mainland"), _L("Europe"), _L("North America"), _L("Others")};
-    auto                  item_region= create_item_region_combobox(_L("Login Region"), page, _L("Login Region"), Regions);
+    std::vector<wxString> Regions = {_L("Asia-Pacific"), _L("Chinese Mainland"), _L("Europe"), _L("North America"), _L("Others")};
+    add_row(sec, create_item_region_combobox(_L("Login Region"), row(sec), _L("Login Region"), Regions));
 
-    // SM Beta: temporarily open the item_stealth_mode and close the network plugin
+    std::vector<wxString> Units = {_L("Metric") + " (mm, g)", _L("Imperial") + " (in, oz)"};
+    add_row(sec, create_item_combobox(_L("Units"), row(sec), _L("Units"), "use_inches", Units));
 
-    /*auto item_stealth_mode = create_item_checkbox(_L("Stealth mode"), page, _L("This stops the transmission of data to Bambu's cloud services. Users who don't use BBL machines or use LAN mode only can safely turn on this function."), 50, "stealth_mode");
-    /*auto item_stealth_mode = create_item_checkbox(_L("Stealth mode"), page, _L("This stops the transmission of data to Bambu's cloud services. Users who don't use BBL machines or use LAN mode only can safely turn on this function."), 50, "stealth_mode");
-    auto item_enable_plugin = create_item_checkbox(_L("Enable network plugin"), page, _L("Enable network plugin"), 50, "installed_networking");
-    auto item_legacy_network_plugin = create_item_checkbox(_L("Use legacy network plugin (Takes effect after restarting Orca)"), page, _L("Disable to use latest network plugin that supports new BambuLab firmwares."), 50, "legacy_networking");
-    */
-    // Ultra: the SM Beta force-off of the Bambu network plugin is lifted; both
-    // switches now live on the Ultra tab (Bambu Network section) as opt-ins.
-
-
-    //auto item_check_stable_version_only = create_item_checkbox(_L("Check for stable updates only"), page, _L("Check for stable updates only"), 50, "check_stable_update_only");
-
-    std::vector<wxString> Units         = {_L("Metric") + " (mm, g)", _L("Imperial") + " (in, oz)"};
-    auto item_currency = create_item_combobox(_L("Units"), page, _L("Units"), "use_inches", Units);
-    auto item_single_instance = create_item_checkbox(_L("Allow only one EdgeSlicer instance"), page,
+    sec = begin_section(page, "general.startup", _L("Startup"));
+    std::vector<wxString> DefaultPage = {_L("Home"), _L("Prepare")};
+    add_row(sec, create_item_combobox(_L("Default Page"), row(sec), _L("Set the page opened on startup."), "default_page", DefaultPage));
+    add_row(sec, create_item_checkbox(_L("Show splash screen"), row(sec), _L("Show the splash screen during startup."), 50, "show_splash_screen"));
+    add_row(sec, create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), row(sec), _L("If enabled, useful hints are displayed at startup."), 50, "show_hints"));
+    add_row(sec, create_item_checkbox(_L("Allow only one EdgeSlicer instance"), row(sec),
     #if __APPLE__
             _L("On OSX there is always only one instance of app running by default. However it is allowed to run multiple instances "
                 "of same app from the command line. In such case this settings will allow only one instance."),
     #else
             _L("If this is enabled, when starting EdgeSlicer and another instance of the same EdgeSlicer is already running, that instance will be reactivated instead."),
     #endif
-            50, "single_instance");
+            50, "single_instance"));
+    // Project strip P3: session restore (opt-in).
+    add_row(sec, create_item_checkbox(_L("Reopen the open projects at the next start"), row(sec),
+                                      _L("When EdgeSlicer closes with several projects in the project strip, they come back at the next start as they were, unsaved changes included."),
+                                      50, "project_strip_restore_session"));
 
-    std::vector<wxString> DefaultPage = {_L("Home"), _L("Prepare")};
-    auto item_default_page = create_item_combobox(_L("Default Page"), page, _L("Set the page opened on startup."), "default_page", DefaultPage);
+    sec = begin_section(page, "general.updates", _L("Updates"));
+    add_row(sec, create_item_checkbox(_L("Check for new versions on startup"), row(sec),
+        _L("If enabled, EdgeSlicer asks GitHub once per start whether a newer release has been published and offers it. "
+           "Help > Check for Update works either way."),
+        50, "check_for_updates_on_startup"));
+    std::vector<wxString>    UpdateChannels      = { _L("Stable"), _L("Nightly") };
+    std::vector<std::string> UpdateChannelValues = { "stable", "nightly" };
+    add_row(sec, create_item_combobox(_L("Update channel"), row(sec),
+        _L("Stable: offer new EdgeSlicer releases.\n"
+           "Nightly: offer the nightly build, made automatically from the latest source whenever it changed. "
+           "Nightly builds are untested and may be broken; switch back to Stable and install the latest release to return."),
+        "update_channel", UpdateChannels, UpdateChannelValues), true);
+    add_row(sec, create_item_checkbox(_L("Update built-in Presets automatically."), row(sec), _L("System Sync"), 50, "sync_system_preset"));
+    // User presets are never synced with a cloud account (PresetSyncPolicy.hpp): no checkbox for it.
+    if (PresetSync::cloud_sync_enabled())
+        add_row(sec, create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), row(sec), _L("User Sync"), 50, "sync_user_preset"));
 
+    //dark mode
+#ifdef _WIN32
+    sec = begin_section(page, "general.appearance", _L("Appearance"));
+    add_row(sec, create_item_darkmode_checkbox(_L("Enable Dark mode"), row(sec), _L("Enable dark mode"), 50, "dark_color_mode"));
+    if (Theme::base_dark() >= 0 && m_dark_mode_ckeckbox != nullptr) {
+        // The running theme picks light or dark itself.
+        m_dark_mode_ckeckbox->Enable(false);
+        m_dark_mode_ckeckbox->SetToolTip(_L("The current theme chooses light or dark (main menu > Themes...)."));
+    }
+#endif
+
+    // The "User Experience" section ("Join Customer Experience Improvement Program", linking to
+    // Snapmaker's privacy policy) is gone: EdgeSlicer runs no such program. What replaced it is
+    // the one thing EdgeSlicer can send, opt-in crash reports (docs/privacy.md).
+    sec = begin_section(page, "general.privacy", _L("Privacy"));
+    const wxString crash_reports_what =
+        _L("When EdgeSlicer crashes, send a crash report to its developers (via Sentry): the crash stack trace, "
+           "the app version, your operating system and the last warning and error lines of the app log. IP addresses, "
+           "host names, printer serial numbers, access codes, passwords, tokens, e-mail addresses and the user name in "
+           "file paths are removed from the log lines first. Nothing is sent while this is off, and EdgeSlicer sends no "
+           "usage statistics either way.");
+    wxWindow* crash_row = row(sec);
+    auto item_crash_reports = create_item_checkbox(_L("Send crash reports"), crash_row, crash_reports_what, 50, "send_crash_reports");
+    auto crash_reports_link = new wxHyperlinkCtrl(crash_row, wxID_ANY, _L("What is sent (privacy note)"),
+                                                  "https://github.com/aceRage/EdgeSlicer/blob/main/docs/privacy.md");
+    crash_reports_link->SetFont(Label::Head_13);
+    auto crash_reports_text = new wxStaticText(crash_row, wxID_ANY, crash_reports_what);
+    crash_reports_text->SetForegroundColour(DESIGN_GRAY600_COLOR);
+    crash_reports_text->SetFont(::Label::Body_12);
+    crash_reports_text->Wrap(FromDIP(560));
+    if (!sentryCrashReportsAvailable()) {
+        // A local or fork build has no destination: say so rather than offer a switch that
+        // could not send anything. (Item 1 is the checkbox; add_row() re-orders the sizer later.)
+        if (wxSizerItem* cb = item_crash_reports->GetItem(size_t(1)); cb != nullptr && cb->GetWindow() != nullptr)
+            cb->GetWindow()->Disable();
+        crash_reports_text->SetLabel(crash_reports_what + "\n" +
+                                     _L("This build was made without a crash-report destination, so it cannot send any."));
+        crash_reports_text->Wrap(FromDIP(560));
+    }
+    auto crash_sizer = new wxBoxSizer(wxVERTICAL);
+    crash_sizer->Add(item_crash_reports, 0, wxEXPAND);
+    crash_sizer->Add(crash_reports_link, 0, wxTOP, FromDIP(2));
+    crash_sizer->Add(crash_reports_text, 0, wxTOP | wxBOTTOM, FromDIP(4));
+    add_row(sec, crash_sizer);
+
+    return page;
+}
+
+wxWindow* PreferencesDialog::create_page_view()
+{
+    wxWindow* page = new_page();
+
+    PrefSection* sec = begin_section(page, "view.camera", _L("Camera and mouse"));
     std::vector<wxString> CameraNavStyle = {_L("Default"), _L("Touchpad")};
-    auto item_camera_navigation_style = create_item_combobox(_L("Camera style"), page, _L("Select camera navigation style.\nDefault: LMB+move for rotation, RMB/MMB+move for panning.\nTouchpad: Alt+move for rotation, Shift+move for panning."), "camera_navigation_style", CameraNavStyle);
+    add_row(sec, create_item_combobox(_L("Camera style"), row(sec), _L("Select camera navigation style.\nDefault: LMB+move for rotation, RMB/MMB+move for panning.\nTouchpad: Alt+move for rotation, Shift+move for panning."), "camera_navigation_style", CameraNavStyle));
+    add_row(sec, create_camera_orbit_mult_input(_L("Orbit speed multiplier"), row(sec), _L("Multiplies the orbit speed for finer or coarser camera movement.")));
+    add_row(sec, create_item_checkbox(_L("Zoom to mouse position"), row(sec), _L("Zoom in towards the mouse pointer's position in the 3D view, rather than the 2D window center."), 50, "zoom_to_mouse"));
+    add_row(sec, create_item_checkbox(_L("Use free camera"), row(sec), _L("If enabled, use free camera. If not enabled, use constrained camera."), 50, "use_free_camera"));
+    add_row(sec, create_item_checkbox(_L("Swap pan and rotate mouse buttons"), row(sec), _L("If enabled, swaps the left and right mouse buttons pan and rotate functions."), 50, "swap_mouse_buttons"));
+    add_row(sec, create_item_checkbox(_L("Reverse mouse zoom"), row(sec), _L("If enabled, reverses the direction of zoom with mouse wheel."), 50, "reverse_mouse_wheel_zoom"));
 
-    auto item_mouse_zoom_settings = create_item_checkbox(_L("Zoom to mouse position"), page, _L("Zoom in towards the mouse pointer's position in the 3D view, rather than the 2D window center."), 50, "zoom_to_mouse");
-    auto item_use_free_camera_settings = create_item_checkbox(_L("Use free camera"), page, _L("If enabled, use free camera. If not enabled, use constrained camera."), 50, "use_free_camera");
-    auto swap_pan_rotate = create_item_checkbox(_L("Swap pan and rotate mouse buttons"), page, _L("If enabled, swaps the left and right mouse buttons pan and rotate functions."), 50, "swap_mouse_buttons");
-    auto reverse_mouse_zoom = create_item_checkbox(_L("Reverse mouse zoom"), page, _L("If enabled, reverses the direction of zoom with mouse wheel."), 50, "reverse_mouse_wheel_zoom");
-    auto allow_filament_temp_mixing = create_item_checkbox(_L("Allow high/low temperature filament mixing"), page, _L("If enabled, allows printing with both high-temperature and low-temperature filaments simultaneously."), 50, "allow_filament_temp_mixing",
-        [this](bool new_val, bool old_val) -> bool {
-            // Only confirm when turning ON; allow turning OFF without dialog.
-            if (!new_val)
-                return false;
+    sec = begin_section(page, "view.selection", _L("Selection and tool panels"));
+    add_row(sec, create_item_selection_highlight(row(sec)));
+    // AppConfig["gizmo_panel_opacity"] is read live by GLGizmoBase::gizmo_panel_opacity().
+    add_row(sec, create_item_gizmo_panel_opacity(row(sec),
+        _L("Background opacity of the tool panels on the 3D view. Lower values let you see the model behind a docked panel. Applies immediately.")));
+    add_row(sec, create_item_checkbox(_L("Bottom-referenced Z position"), row(sec),
+        _L("Show and edit the Move panel's Z as the height of the object's bottom above the bed (world coordinates), instead of the object center."), 50, "bottom_referenced_z"));
+    add_row(sec, create_item_checkbox(_L("Hide other plates while moving"), row(sec),
+        _L("While the Move tool is open, show only the plate you are working on. The other plates and their objects come back when the Move tool closes, and a plate you drag onto reappears when you release."), 50, "hide_other_plates_on_move"));
 
-            wxString msg = _L("Mixing materials with significantly different printing temperatures may result in:\n"
-                              "· Extruder clogging\n"
-                              "· Nozzle damage\n"
-                              "· Layer adhesion issues\n\n"
-                              "Do you want to enable this feature?");
-            MessageDialog dlg(this, msg, _L("High and Low Temperature Material Mixing Risk"), wxICON_WARNING | wxOK | wxCANCEL);
-            dlg.SetButtonLabel(wxID_OK, _L("Confirm"));
-            dlg.SetButtonLabel(wxID_CANCEL, _L("Cancel"));
-            return dlg.ShowModal() == wxID_OK;
-        });
-    // Was built on an unreachable "GUI" preferences page (create_gui_page(), never added to the
-    // dialog's tab list) so it was inaccessible from the UI; moved here since the row itself works
-    // and AppConfig["gizmo_panel_opacity"] is read live by GLGizmoBase::gizmo_panel_opacity().
-    // Placed before "Orbit speed multiplier" (rather than after, alongside PR #85's own insertion
-    // point) so this row and PR #85's selection-highlight rows land on disjoint lines and merge
-    // cleanly in either order.
-    auto item_panel_opacity = create_item_gizmo_panel_opacity(page,
-        _L("Background opacity of the tool panels on the 3D view. Lower values let you see the model behind a docked panel. Applies immediately."));
-    auto camera_orbit_mult = create_camera_orbit_mult_input(_L("Orbit speed multiplier"), page, _L("Multiplies the orbit speed for finer or coarser camera movement."));
-    auto item_selection_highlight = create_item_selection_highlight(page);
+    sec = begin_section(page, "view.preview", _L("G-code preview"));
     // OrcaSlicer #15769 (libvgcode stage 3): the view type the sliced preview opens with.
     std::vector<wxString>    preview_view_type_labels;
     std::vector<std::string> preview_view_type_values;
@@ -2035,18 +2455,18 @@ wxWindow* PreferencesDialog::create_general_page()
         preview_view_type_values.push_back(value);
         preview_view_type_labels.push_back(from_u8(label));
     }
-    auto item_preview_view_type = create_item_combobox(_L("Default preview view type"), page,
+    add_row(sec, create_item_combobox(_L("Default preview view type"), row(sec),
         _L("The color scheme the sliced preview opens with.\n"
            "Automatic: Filament for multi material prints, Line Type for single material ones.\n"
            "Last used: the view type you selected last.\n"
            "Any other value always opens that view type.\n"
            "You can still switch the view type in the preview afterwards."),
-        "preview_default_view_type", preview_view_type_labels, preview_view_type_values);
+        "preview_default_view_type", preview_view_type_labels, preview_view_type_values));
     // OrcaSlicer #14705 / #15001 (libvgcode stage 3): darken the layers below the one the layer slider shows.
-    auto item_dim_previous_layers = create_item_checkbox(_L("Dim lower layers in the G-code preview"), page,
+    add_row(sec, create_item_checkbox(_L("Dim lower layers in the G-code preview"), row(sec),
         _L("When scrubbing the layer slider in the sliced preview, render the layers below the current one darkened so that only the layer being viewed is shown at full brightness."),
-        50, "preview_dim_previous_layers");
-    auto item_dim_previous_layers_brightness = create_item_input(_L("Dimmed layer brightness"), _L("%"), page,
+        50, "preview_dim_previous_layers"));
+    add_row(sec, create_item_input(_L("Dimmed layer brightness"), _L("%"), row(sec),
         _L("How brightly the dimmed layers are rendered when \"Dim lower layers\" is on: 99% is barely darkened, 0% renders them black."),
         "preview_dim_previous_layers_brightness", [this](wxString value) {
             long brightness = 40;
@@ -2061,23 +2481,28 @@ wxWindow* PreferencesDialog::create_general_page()
                     canvas->request_extra_frame();
                 }
             }
-        });
+        }), true);
 
-    // Orca #13538: Graphics (Orca's own Graphics tab; EdgeSlicer keeps it as a section of this page).
-    auto title_graphics = create_item_title(_L("Graphics"), page, _L("Graphics"));
-    auto item_antialiasing = create_item_combobox(_L("MSAA Multiplier"), page,
+    // Orca #13538: Graphics (Orca's own Graphics tab).
+    sec = begin_section(page, "view.rendering", _L("Rendering quality"));
+    add_row(sec, create_item_combobox(_L("MSAA Multiplier"), row(sec),
         _L("Set the Multi-Sample Anti-Aliasing level.\n"
            "Higher values result in smoother edges, but the impact on performance is exponential.\n"
            "Lower values improve performance, at the cost of jagged edges.\n"
            "If disabled, it is recommended to enable FXAA to reduce jagged edges with minimal performance impact.\n\n"
            "Requires application restart."),
-        SETTING_OPENGL_AA_SAMPLES, { _L("Disabled"), "2x", "4x", "8x", "16x" }, { "0", "2", "4", "8", "16" });
-    auto item_fxaa = create_item_checkbox(_L("FXAA post-processing"), page,
+        SETTING_OPENGL_AA_SAMPLES, { _L("Disabled"), "2x", "4x", "8x", "16x" }, { "0", "2", "4", "8", "16" }));
+    add_row(sec, create_item_checkbox(_L("FXAA post-processing"), row(sec),
         _L("Applies Fast Approximate Anti-Aliasing as a screen-space pass.\n"
            "Useful for disabling or reducing the MSAA setting to improve performance.\n\n"
            "Takes effect immediately."),
-        50, SETTING_OPENGL_FXAA_ENABLED);
-    auto item_fps_cap = create_item_input(_L("FPS cap"), _L("FPS (0 = unlimited)"), page,
+        50, SETTING_OPENGL_FXAA_ENABLED));
+    // Orca #14080 / #14724: smooth normals, for the model whether or not the realistic view is on.
+    add_row(sec, create_item_checkbox(_L("Smooth normals"), row(sec),
+        _L("Applies smooth normals to the model.\n\nRequires manual scene reload to take effect "
+           "(right-click on 3D view > \"Reload All\")."),
+        50, SETTING_OPENGL_PHONG_SMOOTH_NORMALS));
+    add_row(sec, create_item_input(_L("FPS cap"), _L("FPS (0 = unlimited)"), row(sec),
         _L("Limits viewport frame rate to reduce GPU load and power usage.\n"
            "Set to 0 for unlimited frame rate."),
         SETTING_OPENGL_FPS_CAP, [this](wxString value) {
@@ -2086,454 +2511,184 @@ wxWindow* PreferencesDialog::create_general_page()
                 fps_cap = 0;
             fps_cap = std::clamp(fps_cap, 0L, 240L);
             app_config->set(SETTING_OPENGL_FPS_CAP, std::to_string(fps_cap));
-        });
-    auto item_fps_overlay = create_item_checkbox(_L("Show FPS overlay"), page,
-        _L("Displays current viewport FPS in the top-right corner."), 50, SETTING_OPENGL_SHOW_FPS_OVERLAY);
-    // Orca #14080 / #14724: smooth normals, for the model whether or not the realistic view is on.
-    auto item_smooth_normals = create_item_checkbox(_L("Smooth normals"), page,
-        _L("Applies smooth normals to the model.\n\nRequires manual scene reload to take effect "
-           "(right-click on 3D view > \"Reload All\")."),
-        50, SETTING_OPENGL_PHONG_SMOOTH_NORMALS);
+        }));
+    add_row(sec, create_item_checkbox(_L("Show FPS overlay"), row(sec),
+        _L("Displays current viewport FPS in the top-right corner."), 50, SETTING_OPENGL_SHOW_FPS_OVERLAY));
+
     // Orca #13704: realistic view (also View > Realistic View).
-    auto item_realistic_mode = create_item_checkbox(_L("Realistic view"), page,
+    sec = begin_section(page, "view.realistic", _L("Realistic view"));
+    add_row(sec, create_item_checkbox(_L("Realistic view"), row(sec),
         _L("Renders the objects of the 3D view more realistically, with the options below. Also in View > Realistic View."),
-        50, SETTING_OPENGL_REALISTIC_MODE);
-    auto item_realistic_phong = create_item_checkbox(_L("Phong shading"), page,
-        _L("Uses Phong shading inside realistic view."), 50, SETTING_OPENGL_REALISTIC_PHONG);
-    auto item_realistic_ssao = create_item_checkbox(_L("SSAO ambient occlusion"), page,
-        _L("Applies SSAO in realistic view."), 50, SETTING_OPENGL_PHONG_SSAO);
-    auto item_realistic_shadows = create_item_checkbox(_L("Shadows"), page,
-        _L("Renders cast shadows on the plate, other objects, and each object onto itself in realistic view."), 50, SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS);
+        50, SETTING_OPENGL_REALISTIC_MODE));
+    add_row(sec, create_item_checkbox(_L("Phong shading"), row(sec),
+        _L("Uses Phong shading inside realistic view."), 50, SETTING_OPENGL_REALISTIC_PHONG), true);
+    add_row(sec, create_item_checkbox(_L("SSAO ambient occlusion"), row(sec),
+        _L("Applies SSAO in realistic view."), 50, SETTING_OPENGL_PHONG_SSAO), true);
+    add_row(sec, create_item_checkbox(_L("Shadows"), row(sec),
+        _L("Renders cast shadows on the plate, other objects, and each object onto itself in realistic view."), 50, SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS), true);
 
-    auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
-    auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");
-    auto item_check_updates = create_item_checkbox(_L("Check for new versions on startup"), page,
-        _L("If enabled, EdgeSlicer asks GitHub once per start whether a newer release has been published and offers it. "
-           "Help > Check for Update works either way."),
-        50, "check_for_updates_on_startup");
-    std::vector<wxString>    UpdateChannels      = { _L("Stable"), _L("Nightly") };
-    std::vector<std::string> UpdateChannelValues = { "stable", "nightly" };
-    auto item_update_channel = create_item_combobox(_L("Update channel"), page,
-        _L("Stable: offer new EdgeSlicer releases.\n"
-           "Nightly: offer the nightly build, made automatically from the latest source whenever it changed. "
-           "Nightly builds are untested and may be broken; switch back to Stable and install the latest release to return."),
-        "update_channel", UpdateChannels, UpdateChannelValues);
-    auto item_sm_auto_login = create_item_checkbox(_L("Sign in to my Snapmaker account automatically at startup"), page,
-        _L("If enabled, EdgeSlicer quietly reuses the Snapmaker account session saved from your last sign-in when it starts, "
-           "so you do not have to sign in again. Nothing is shown; if there is no saved session you simply stay signed out."),
-        50, "snapmaker_auto_login");
+    return page;
+}
 
-    auto item_calc_mode = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time the color changed."), page, _L("If enabled, auto-calculate every time the color changed."), 50, "auto_calculate");
-    auto item_calc_in_long_retract = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time when the filament is changed."), page, _L("If enabled, auto-calculate every time when filament is changed"), 50, "auto_calculate_when_filament_change");
-    auto item_remember_printer_config = create_item_checkbox(_L("Remember printer configuration"), page, _L("If enabled, Orca will remember and switch filament/process configuration for each printer automatically."), 50, "remember_printer_config");
-    auto item_remember_print_action = create_item_checkbox(_L("Remember last print action"), page,
-        _L("If enabled, EdgeSlicer will remember the last selected option in the print button's dropdown (for example Print, Print plate, Export plate sliced file, or Export G-code file) and restore it on the next startup and when the printer or preset changes, when the current printer still offers it."),
-        50, "remember_print_action");
-    auto item_step_mesh_setting = create_item_checkbox(_L("Show the step mesh parameter setting dialog."), page, _L("If enabled,a parameter settings dialog will appear during STEP file import."), 50, "enable_step_mesh_setting");
-    auto item_multi_machine = create_item_checkbox(_L("Multi-device Management (Take effect after restarting EdgeSlicer)."), page, _L("With this option enabled, you can send a task to multiple devices at the same time and manage multiple devices."), 50, "enable_multi_machine");
-    auto item_auto_arrange  = create_item_checkbox(_L("Auto arrange plate after cloning"), page, _L("Auto arrange plate after object cloning"), 50, "auto_arrange");
-    auto item_auto_reslice  = create_item_auto_reslice(_L("Auto slice after changes"), page,
-        _L("If enabled, EdgeSlicer slices again by itself whenever a slicing-related setting changes."),
-        _L("Delay in seconds before auto slicing starts, allowing multiple edits to be grouped. Use 0 to slice immediately."));
-    auto item_warn_low_memory = create_item_checkbox(_L("Warn when memory is low during slicing"), page,
-        _L("When the PC is nearly out of free memory during slicing, pause and ask whether to continue. "
-           "Turn this off to keep slicing without asking (a notice and a log line are still shown). "
-           "The trade-off: if the PC really runs out of memory, the slicer may freeze or crash and unsaved work can be lost. "
-           "Slicing started from the phone or hub is always stopped when memory runs out, regardless of this setting."),
-        50, "warn_low_memory_slicing");
-    auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
-    //auto title_network = create_item_title(_L("Network"), page, _L("Network"));
-    // User presets are never synced with a cloud account (PresetSyncPolicy.hpp): no checkbox for it.
-    wxBoxSizer *item_user_sync = PresetSync::cloud_sync_enabled()
-        ? create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), page, _L("User Sync"), 50, "sync_user_preset")
-        : nullptr;
-    auto item_system_sync        = create_item_checkbox(_L("Update built-in Presets automatically."), page, _L("System Sync"), 50, "sync_system_preset");
-    auto item_save_presets = create_item_button(_L("Clear my choice on the unsaved presets."), _L("Clear"), page, L"", _L("Clear my choice on the unsaved presets."), []() {
-        wxGetApp().app_config->set("save_preset_choise", "");
-    });
+wxWindow* PreferencesDialog::create_page_projects()
+{
+    wxWindow* page = new_page();
 
-#ifdef _WIN32
-    auto title_associate_file = create_item_title(_L("Associate files to EdgeSlicer"), page, _L("Associate files to EdgeSlicer"));
-
-    // associate file
-    auto item_associate_3mf  = create_item_checkbox(_L("Associate .3mf files to EdgeSlicer"), page,
-                                                        _L("If enabled, sets EdgeSlicer as default application to open .3mf files"), 50, "associate_3mf");
-    auto item_associate_stl  = create_item_checkbox(_L("Associate .stl files to EdgeSlicer"), page,
-                                                        _L("If enabled, sets EdgeSlicer as default application to open .stl files"), 50, "associate_stl");
-    auto item_associate_step = create_item_checkbox(_L("Associate .step/.stp files to EdgeSlicer"), page,
-                                                         _L("If enabled, sets EdgeSlicer as default application to open .step files"), 50, "associate_step");
-
-    auto title_associate_url = create_item_title(_L("Associate web links to EdgeSlicer"), page, _L("Associate URLs to EdgeSlicer"));
-
-    auto associate_url_orcaslicer  = create_item_link_association(page, L"orcaslicer", "Printables.com (Orca links)");
-    auto associate_url_prusaslicer = create_item_link_association(page, L"prusaslicer", "Printables.com");
-    auto associate_url_bambustudio = create_item_link_association(page, L"bambustudio", "Makerworld.com");
-    auto associate_url_cura        = create_item_link_association(page, L"cura", "Thingiverse.com");
-#endif // _WIN32
-
-#if defined(_WIN32) || defined(__APPLE__)
-    // Home > Models (ModelBrowserPanel): Windows, and macOS versions that have what its isolation needs.
-    wxBoxSizer* title_model_browser = nullptr;
-    wxBoxSizer* item_model_browser  = nullptr;
-    if (model_browser_supported()) {
-        title_model_browser = create_item_title(_L("Model browser"), page, _L("Model browser"));
-        item_model_browser  = create_item_checkbox(_L("Model browser (beta)"), page,
-                                                   _L("Adds Models to the Home tab: browse Printables, MakerWorld and Snapmaker Space inside "
-                                                      "EdgeSlicer. It is a separate browser with its own logins and no access to EdgeSlicer; "
-                                                      "model files you download there open here."),
-                                                   50, "model_browser_beta");
-    }
-#endif
-
-    // The Layerling tab (LayerlingPanel): an optional download, never bundled.
-    wxBoxSizer* title_layerling = nullptr;
-    wxBoxSizer* item_layerling  = nullptr;
-    if (layerling_supported()) {
-        title_layerling = create_item_title(_L("Layerling"), page, _L("Layerling"));
-        item_layerling  = create_item_checkbox(_L("Show the Layerling tab"), page,
-                                               _L("Adds a Layerling tab: a free CAD for 3D printing by henmedia (AGPL-3.0) that "
-                                                  "EdgeSlicer can download from its GitHub releases and run on this computer. "
-                                                  "What you export there goes onto the plate. Hiding the tab keeps Layerling "
-                                                  "and your designs."),
-                                               50, "show_layerling_tab");
-    }
-
-    // auto title_modelmall = create_item_title(_L("Online Models"), page, _L("Online Models"));
-    // auto item_backup = create_item_switch(_L("Backup switch"), page, _L("Backup switch"), "units");
-    // auto item_modelmall = create_item_checkbox(_L("Show online staff-picked models on the home page"), page, _L("Show online staff-picked models on the home page"), 50, "staff_pick_switch");
-
-    auto title_project = create_item_title(_L("Project"), page, "");
-
-    std::vector<wxString> projectLoadSettingsBehaviourOptions = {_L("Load All"), _L("Ask When Relevant"), _L("Always Ask"), _L("Load Geometry Only")};
-    std::vector<string> projectLoadSettingsConfigOptions = { OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_ALL, OPTION_PROJECT_LOAD_BEHAVIOUR_ASK_WHEN_RELEVANT, OPTION_PROJECT_LOAD_BEHAVIOUR_ALWAYS_ASK, OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY };
-    auto item_project_load_behaviour = create_item_combobox(_L("Load Behaviour"), page, _L("Should printer/filament/process settings be loaded when opening a .3mf?"), SETTING_PROJECT_LOAD_BEHAVIOUR, projectLoadSettingsBehaviourOptions, projectLoadSettingsConfigOptions);
+    PrefSection* sec = begin_section(page, "projects.opening", _L("Opening projects"));
+    std::vector<wxString> projectLoadSettingsBehaviourOptions = {_L("Load All"), _L("Ask When Relevant"), _L("Always Ask"), _L("Load Geometry Only"), _L("Load Geometry With Object Settings")};
+    std::vector<string> projectLoadSettingsConfigOptions = { OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_ALL, OPTION_PROJECT_LOAD_BEHAVIOUR_ASK_WHEN_RELEVANT, OPTION_PROJECT_LOAD_BEHAVIOUR_ALWAYS_ASK, OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY, OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY_WITH_SETTINGS };
+    add_row(sec, create_item_combobox(_L("Load Behaviour"), row(sec), _L("Should printer/filament/process settings be loaded when opening a .3mf? \"Load Geometry Only\" adds the models without their object settings; \"Load Geometry With Object Settings\" adds the models and keeps the settings set on each object, part and modifier."), SETTING_PROJECT_LOAD_BEHAVIOUR, projectLoadSettingsBehaviourOptions, projectLoadSettingsConfigOptions));
 
     // Project strip P3 (D7): a project file double-clicked in Explorer / Finder while EdgeSlicer runs ("Allow only one
     // instance" on) opens as another project in the strip, or in place of the current one as before.
     std::vector<wxString>    shellOpenOptions       = { _L("New project tab"), _L("The current project") };
     std::vector<std::string> shellOpenConfigOptions = { "strip", "replace" };
-    auto item_shell_open = create_item_combobox(_L("Open project files from Explorer / Finder in"), page,
-                                                _L("Where a project file opened from Explorer or Finder goes while EdgeSlicer is running (with \"Allow only one EdgeSlicer instance\" on)."),
-                                                "project_strip_shell_open", shellOpenOptions, shellOpenConfigOptions);
-    // Project strip P3: session restore (opt-in).
-    auto item_strip_session = create_item_checkbox(_L("Reopen the open projects at the next start"), page,
-                                                   _L("When EdgeSlicer closes with several projects in the project strip, they come back at the next start as they were, unsaved changes included."),
-                                                   50, "project_strip_restore_session");
+    add_row(sec, create_item_combobox(_L("Open project files from Explorer / Finder in"), row(sec),
+                                      _L("Where a project file opened from Explorer or Finder goes while EdgeSlicer is running (with \"Allow only one EdgeSlicer instance\" on)."),
+                                      "project_strip_shell_open", shellOpenOptions, shellOpenConfigOptions));
+    add_row(sec, create_item_checkbox(_L("Keep my printer when opening project files"), row(sec),
+        _L("When opening a project made for another printer, switch back to the last printer you selected or sliced with, instead of the printer embedded in the file."), 50, "keep_printer_on_open"));
+    add_row(sec, create_item_checkbox(_L("Drop imported models to the bed"), row(sec),
+        _L("When off, imported models keep the Z position stored in the file instead of being dropped onto the build plate."), 50, "auto_drop_on_import"));
+    add_row(sec, create_item_checkbox(_L("Show the step mesh parameter setting dialog."), row(sec), _L("If enabled,a parameter settings dialog will appear during STEP file import."), 50, "enable_step_mesh_setting"));
 
+    sec = begin_section(page, "projects.warnings", _L("Warnings when loading"));
+    add_row(sec, create_item_checkbox(_L("Skip Settings Mapping Warnings"), row(sec),
+        _L("Don't show warnings about unrecognized or invalid settings replaced while loading project files; the defaults or automatic fixes are applied silently."), 50, "skip_settings_mapping_warnings"));
+    add_row(sec, create_item_checkbox(_L("No warnings when loading 3MF with modified G-code"), row(sec), _L("No warnings when loading 3MF with modified G-code"), 50, "no_warn_when_modified_gcodes"));
+    add_row(sec, create_item_button(_L("Clear my choice on the unsaved projects."), _L("Clear"), row(sec), L"", _L("Clear my choice on the unsaved projects."), []() {
+        wxGetApp().app_config->set("save_project_choise", "");
+    }));
+
+    sec = begin_section(page, "projects.recent", _L("Project strip and recent files"));
     // Project strip P4: each open project keeps a live Plater (its model, slice and preview), so the count bounds memory.
-    auto item_strip_max_open = create_item_input(_L("Maximum open projects"), "", page,
-                                                 _L("How many projects the project strip keeps open (2 to 16, 8 by default). Each one stays loaded, sliced "
-                                                    "results included, so more open projects use more memory. At the limit you are asked which one to close."),
-                                                 "project_strip_max_open", [](wxString) {});
-    auto item_max_recent_count = create_item_input(_L("Maximum recent files"), "", page, _L("Maximum count of recent files"), "max_recent_count", [](wxString value) {
+    add_row(sec, create_item_input(_L("Maximum open projects"), "", row(sec),
+                                   _L("How many projects the project strip keeps open (2 to 16, 8 by default). Each one stays loaded, sliced "
+                                      "results included, so more open projects use more memory. At the limit you are asked which one to close."),
+                                   "project_strip_max_open", [](wxString) {}));
+    add_row(sec, create_item_input(_L("Maximum recent files"), "", row(sec), _L("Maximum count of recent files"), "max_recent_count", [](wxString value) {
         long max = 0;
         if (value.ToLong(&max))
             wxGetApp().mainframe->set_max_recent_count(max);
-    });
+    }));
+    add_row(sec, create_item_checkbox(_L("Add model files (stl/step) to recent file list."), row(sec), _L("Add model files (stl/step) to recent file list."), 50, "recent_models"));
 
-    auto item_recent_models = create_item_checkbox(_L("Add model files (stl/step) to recent file list."), page, _L("Add model files (stl/step) to recent file list."), 50, "recent_models");
+    sec = begin_section(page, "projects.saving", _L("Saving and backup"));
+    {
+        wxWindow* parent = row(sec);
+        auto item_autosave = create_item_checkbox(_L("Auto-Save project"), parent,
+            _L("Periodically save the project to its own file. Only projects that have already been saved once are auto-saved."), 50, "autosave_switch");
+        item_autosave->Add(create_item_autosave_input(_L("every"), parent, _L("The period of auto-save in seconds."), "autosave_interval"), 0, wxLEFT, 0);
+        add_row(sec, item_autosave);
+    }
+    {
+        wxWindow* parent = row(sec);
+        auto item_backup = create_item_checkbox(_L("Auto-Backup"), parent, _L("Backup your project periodically for restoring from the occasional crash."), 50, "backup_switch");
+        item_backup->Add(create_item_backup_input(_L("every"), parent, _L("The period of backup in seconds."), "backup_interval"), 0, wxLEFT, 0);
+        add_row(sec, item_backup);
+    }
 
-    auto item_save_choise = create_item_button(_L("Clear my choice on the unsaved projects."), _L("Clear"), page, L"", _L("Clear my choice on the unsaved projects."), []() {
-        wxGetApp().app_config->set("save_project_choise", "");
-    });
-    // auto item_backup = create_item_switch(_L("Backup switch"), page, _L("Backup switch"), "units");
-    auto item_gcodes_warning = create_item_checkbox(_L("No warnings when loading 3MF with modified G-code"), page, _L("No warnings when loading 3MF with modified G-code"), 50, "no_warn_when_modified_gcodes");
-    auto item_backup  = create_item_checkbox(_L("Auto-Backup"), page,_L("Backup your project periodically for restoring from the occasional crash."), 50, "backup_switch");
-    auto item_backup_interval = create_item_backup_input(_L("every"), page, _L("The period of backup in seconds."), "backup_interval");
-
-    //downloads
-    auto title_downloads = create_item_title(_L("Downloads"), page, _L("Downloads"));
-    auto item_downloads = create_item_downloads(page,50,"download_path");
+    sec = begin_section(page, "projects.folders", _L("Folders"));
+    add_row(sec, create_item_downloads(row(sec), 50, "download_path"));
+    add_row(sec, create_item_vault_downloads_dir(row(sec),
+        _L("Where files you download from a vault on the Home tab go. A vault can have its own folder in its settings. "
+           "The folder is added to your Library the first time a file lands in it.")));
     // ZIP files (PR C): extraction folder clean-up.
-    auto title_zip_files  = create_item_title(_L("ZIP files"), page, _L("ZIP files"));
-    auto item_zip_cleanup = create_item_checkbox(_L("Delete extracted ZIP files automatically"), page,
+    add_row(sec, create_item_zip_work_folder(row(sec),
+        _L("Where files opened from a ZIP are extracted. Set zip_work_dir in the configuration file to use another folder.")));
+    add_row(sec, create_item_checkbox(_L("Delete extracted ZIP files automatically"), row(sec),
         _L("Files you open from a ZIP are extracted to a local folder. When this is on, extraction folders older than the "
            "number of days below are deleted in the background at startup and after a ZIP is opened. Folders used by the "
            "open project are never deleted."),
-        50, ZIP_WORK_CLEANUP_KEY);
-    auto item_zip_cleanup_days = create_item_input(_L("Delete after"), _L("days"), page,
+        50, ZIP_WORK_CLEANUP_KEY));
+    add_row(sec, create_item_input(_L("Delete after"), _L("days"), row(sec),
         _L("How old an extraction folder must be before it is deleted automatically (1 to 3650 days)."), ZIP_WORK_CLEANUP_DAYS_KEY,
         [this](wxString value) {
             app_config->set(ZIP_WORK_CLEANUP_DAYS_KEY, std::to_string(zip_cleanup_days_from_value(into_u8(value))));
-        });
-    auto item_zip_folder = create_item_zip_work_folder(page,
-        _L("Where files opened from a ZIP are extracted. Set zip_work_dir in the configuration file to use another folder."));
+        }), true);
 
-    auto item_vault_downloads = create_item_vault_downloads_dir(page,
-        _L("Where files you download from a vault on the Home tab go. A vault can have its own folder in its settings. "
-           "The folder is added to your Library the first time a file lands in it."));
-
-    // "Export & Open in Bambu Studio" looks for an installed Bambu Studio automatically
-    // (registry / file association / default path); this lets a user whose install it cannot
-    // find point at bambu-studio.exe directly. Left blank, discovery runs as usual.
-    auto title_bambu_studio = create_item_title(_L("Bambu Studio"), page, _L("Bambu Studio"));
-    auto item_bambu_studio_path = create_item_text_input(_L("Bambu Studio path"), page,
-        _L("Only needed if \"Export & Open in Bambu Studio\" cannot find your Bambu Studio installation automatically. "
-           "Full path to bambu-studio.exe (Windows), the BambuStudio.app bundle (macOS), or the executable (Linux)."),
-        "bambu_studio_path");
-
-    // "Edit in Blender" finds Blender on its own (file association, usual install folders, PATH,
-    // Snap, Flatpak); this is for an install it cannot find.
-    auto title_blender = create_item_title(_L("Blender"), page, _L("Blender"));
-    auto item_blender_path = create_item_text_input(_L("Blender path"), page,
-        _L("Only needed if \"Edit in Blender\" cannot find Blender automatically. "
-           "Full path to blender.exe (Windows), the Blender.app bundle (macOS), or the blender executable (Linux)."),
-        "blender_path");
-
-    // "Edit in FreeCAD" finds FreeCAD on its own (file association, installed-programs list, usual
-    // install folders, PATH, Snap, Flatpak); this is for an install it cannot find. The add-on adds
-    // "Send to EdgeSlicer" and "Update EdgeSlicer" to FreeCAD for every document.
-    auto title_freecad = create_item_title(_L("FreeCAD"), page, _L("FreeCAD"));
-    auto item_freecad_path = create_item_text_input(_L("FreeCAD path"), page,
-        _L("Only needed if \"Edit in FreeCAD\" cannot find FreeCAD automatically. "
-           "Full path to FreeCAD.exe or its install folder (Windows), the FreeCAD.app bundle (macOS), or the FreeCAD executable or AppImage (Linux)."),
-        "freecad_path");
-    auto item_freecad_addon = create_item_button(_L("FreeCAD add-on"), _L("Install FreeCAD add-on"), page,
-        _L("FreeCAD add-on"),
-        _L("Copy the EdgeSlicer add-on into FreeCAD's user Mod folder (FreeCAD 0.21 and 1.x), so \"Send to EdgeSlicer\" "
-           "and \"Update EdgeSlicer\" are on a toolbar in every FreeCAD document. Restart FreeCAD afterwards."),
-        [this]() { FreeCADBridge::install_addon(this); });
-
-    //dark mode
 #ifdef _WIN32
-    auto title_darkmode = create_item_title(_L("Dark Mode"), page, _L("Dark Mode"));
-    auto item_darkmode = create_item_darkmode_checkbox(_L("Enable Dark mode"), page,_L("Enable dark mode"), 50, "dark_color_mode");
-    if (Theme::base_dark() >= 0 && m_dark_mode_ckeckbox != nullptr) {
-        // The running theme picks light or dark itself.
-        m_dark_mode_ckeckbox->Enable(false);
-        m_dark_mode_ckeckbox->SetToolTip(_L("The current theme chooses light or dark (main menu > Themes...)."));
-    }
-#endif
+    sec = begin_section(page, "projects.associations", _L("Associate files to EdgeSlicer"));
+    add_row(sec, create_item_checkbox(_L("Associate .3mf files to EdgeSlicer"), row(sec),
+                                      _L("If enabled, sets EdgeSlicer as default application to open .3mf files"), 50, "associate_3mf"));
+    add_row(sec, create_item_checkbox(_L("Associate .stl files to EdgeSlicer"), row(sec),
+                                      _L("If enabled, sets EdgeSlicer as default application to open .stl files"), 50, "associate_stl"));
+    add_row(sec, create_item_checkbox(_L("Associate .step/.stp files to EdgeSlicer"), row(sec),
+                                      _L("If enabled, sets EdgeSlicer as default application to open .step files"), 50, "associate_step"));
 
-    // The "User Experience" section ("Join Customer Experience Improvement Program", linking to
-    // Snapmaker's privacy policy) is gone: EdgeSlicer runs no such program. What replaced it is
-    // the one thing EdgeSlicer can send, opt-in crash reports (docs/privacy.md).
-    auto title_privacy = create_item_title(_L("Privacy"), page, _L("Privacy"));
-    const wxString crash_reports_what =
-        _L("When EdgeSlicer crashes, send a crash report to its developers (via Sentry): the crash stack trace, "
-           "the app version, your operating system and the last warning and error lines of the app log. IP addresses, "
-           "host names, printer serial numbers, access codes, passwords, tokens, e-mail addresses and the user name in "
-           "file paths are removed from the log lines first. Nothing is sent while this is off, and EdgeSlicer sends no "
-           "usage statistics either way.");
-    auto item_crash_reports = create_item_checkbox(_L("Send crash reports"), page, crash_reports_what, 50, "send_crash_reports");
-    auto crash_reports_link = new wxHyperlinkCtrl(page, wxID_ANY, _L("What is sent (privacy note)"),
-                                                  "https://github.com/aceRage/EdgeSlicer/blob/main/docs/privacy.md");
-    crash_reports_link->SetFont(Label::Head_13);
-    item_crash_reports->Add(crash_reports_link, 0, wxALIGN_CENTER | wxLEFT, FromDIP(10));
-    auto crash_reports_text = new wxStaticText(page, wxID_ANY, crash_reports_what);
-    crash_reports_text->SetForegroundColour(DESIGN_GRAY600_COLOR);
-    crash_reports_text->SetFont(::Label::Body_12);
-    crash_reports_text->Wrap(FromDIP(560));
-    if (!sentryCrashReportsAvailable()) {
-        // A local or fork build has no destination: say so rather than offer a switch that
-        // could not send anything.
-        if (wxSizerItem* cb = item_crash_reports->GetItem(size_t(1)); cb != nullptr && cb->GetWindow() != nullptr)
-            cb->GetWindow()->Disable();
-        crash_reports_text->SetLabel(crash_reports_what + "\n" +
-                                     _L("This build was made without a crash-report destination, so it cannot send any."));
-        crash_reports_text->Wrap(FromDIP(560));
-    }
-
-    auto title_develop_mode = create_item_title(_L("Develop mode"), page, _L("Develop mode"));
-    auto item_develop_mode  = create_item_checkbox(_L("Develop mode"), page, _L("Develop mode"), 50, "developer_mode");
-    auto item_skip_ams_blacklist_check  = create_item_checkbox(_L("Skip AMS blacklist check"), page, _L("Skip AMS blacklist check"), 50, "skip_ams_blacklist_check");
-
-    sizer_page->Add(title_general_settings, 0, wxEXPAND, 0);
-    sizer_page->Add(item_language, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_region, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_currency, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_default_page, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_camera_navigation_style, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_single_instance, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_mouse_zoom_settings, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_use_free_camera_settings, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(swap_pan_rotate, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(reverse_mouse_zoom, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(allow_filament_temp_mixing, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_panel_opacity, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(camera_orbit_mult, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_selection_highlight, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_preview_view_type, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_dim_previous_layers, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_dim_previous_layers_brightness, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_show_splash_screen, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_hints, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_check_updates, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_update_channel, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_sm_auto_login, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_calc_in_long_retract, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_multi_machine, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_step_mesh_setting, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_auto_arrange, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_auto_reslice, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_warn_low_memory, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(title_graphics, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_antialiasing, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_fxaa, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_fps_cap, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_fps_overlay, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_smooth_normals, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_realistic_mode, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_realistic_phong, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_realistic_ssao, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_realistic_shadows, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
-    if (item_user_sync)
-        sizer_page->Add(item_user_sync, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_system_sync, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_remember_printer_config, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_remember_print_action, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_save_presets, 0, wxTOP, FromDIP(3));
-    //sizer_page->Add(title_network, 0, wxTOP | wxEXPAND, FromDIP(20));
-    //sizer_page->Add(item_check_stable_version_only, 0, wxTOP, FromDIP(3));
-
-    // SM Beta: temporarily open the item_stealth_mode and close the network plugin
-
-    /*sizer_page->Add(item_stealth_mode, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_enable_plugin, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_legacy_network_plugin, 0, wxTOP, FromDIP(3));
-    */
-#ifdef _WIN32
-    sizer_page->Add(title_associate_file, 0, wxTOP| wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_associate_3mf, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_associate_stl, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_associate_step, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(title_associate_url, 0, wxTOP| wxEXPAND, FromDIP(20));
-    sizer_page->Add(associate_url_orcaslicer, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(associate_url_prusaslicer, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(associate_url_bambustudio, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(associate_url_cura, 0, wxTOP, FromDIP(3));
+    sec = begin_section(page, "projects.links", _L("Associate web links to EdgeSlicer"), false);
+    add_row(sec, create_item_link_association(row(sec), L"orcaslicer", "Printables.com (Orca links)"));
+    add_row(sec, create_item_link_association(row(sec), L"prusaslicer", "Printables.com"));
+    add_row(sec, create_item_link_association(row(sec), L"bambustudio", "Makerworld.com"));
+    add_row(sec, create_item_link_association(row(sec), L"cura", "Thingiverse.com"));
 #endif // _WIN32
-#if defined(_WIN32) || defined(__APPLE__)
-    if (title_layerling != nullptr && item_layerling != nullptr) {
-        sizer_page->Add(title_layerling, 0, wxTOP | wxEXPAND, FromDIP(20));
-        sizer_page->Add(item_layerling, 0, wxTOP, FromDIP(3));
-    }
-    if (title_model_browser != nullptr && item_model_browser != nullptr) {
-        sizer_page->Add(title_model_browser, 0, wxTOP | wxEXPAND, FromDIP(20));
-        sizer_page->Add(item_model_browser, 0, wxTOP, FromDIP(3));
-    }
-#endif
-    // auto item_title_modelmall = sizer_page->Add(title_modelmall, 0, wxTOP | wxEXPAND, FromDIP(20));
-    // auto item_item_modelmall = sizer_page->Add(item_modelmall, 0, wxTOP, FromDIP(3));
-    // auto update_modelmall = [this, item_title_modelmall, item_item_modelmall] (wxEvent & e) {
-    //     bool has_model_mall = wxGetApp().has_model_mall();
-    //     item_title_modelmall->Show(has_model_mall);
-    //     item_item_modelmall->Show(has_model_mall);
-    //     Layout();
-    //     Fit();
-    // };
-    // wxCommandEvent eee(wxEVT_COMBOBOX);
-    // update_modelmall(eee);
-    // item_region->GetItem(size_t(2))->GetWindow()->Bind(wxEVT_COMBOBOX, update_modelmall);
-    sizer_page->Add(title_project, 0, wxTOP| wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_project_load_behaviour, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_shell_open, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_strip_session, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_strip_max_open, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_max_recent_count, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_recent_models, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_save_choise, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_gcodes_warning, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_backup, 0, wxTOP,FromDIP(3));
-    item_backup->Add(item_backup_interval, 0, wxLEFT, 0);
 
-    sizer_page->Add(title_downloads, 0, wxTOP| wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_downloads, 0, wxEXPAND, FromDIP(3));
-    sizer_page->Add(item_vault_downloads, 0, wxEXPAND, FromDIP(3));
-
-    sizer_page->Add(title_zip_files, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_zip_cleanup, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_zip_cleanup_days, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_zip_folder, 0, wxEXPAND | wxTOP, FromDIP(3));
-
-    sizer_page->Add(title_bambu_studio, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_bambu_studio_path, 0, wxTOP, FromDIP(3));
-
-    sizer_page->Add(title_blender, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_blender_path, 0, wxTOP, FromDIP(3));
-
-    sizer_page->Add(title_freecad, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_freecad_path, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_freecad_addon, 0, wxTOP, FromDIP(3));
-
-#ifdef _WIN32
-    sizer_page->Add(title_darkmode, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_darkmode, 0, wxEXPAND, FromDIP(3));
-#endif
-
-    sizer_page->Add(title_privacy, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_crash_reports, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(crash_reports_text, 0, wxLEFT | wxTOP, FromDIP(50));
-    sizer_page->Add(title_develop_mode, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_develop_mode, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_skip_ams_blacklist_check, 0, wxTOP, FromDIP(3));
-
-    page->SetSizer(sizer_page);
-    page->Layout();
-    sizer_page->Fit(page);
     return page;
 }
 
-// Ultra: page collecting all fork-specific options in one place.
-wxWindow* PreferencesDialog::create_ultra_page()
+wxWindow* PreferencesDialog::create_page_slicing()
 {
-    auto page = new wxWindow(m_scrolledWindow, wxID_ANY);
-    page->SetBackgroundColour(*wxWHITE);
-    wxBoxSizer* sizer_page = new wxBoxSizer(wxVERTICAL);
+    wxWindow* page = new_page();
 
-    auto title_project = create_item_title(_L("Project"), page, _L("Project"));
-    auto item_autosave = create_item_checkbox(_L("Auto-Save project"), page,
-        _L("Periodically save the project to its own file. Only projects that have already been saved once are auto-saved."), 50, "autosave_switch");
-    auto item_autosave_interval = create_item_autosave_input(_L("every"), page, _L("The period of auto-save in seconds."), "autosave_interval");
-    auto item_keep_printer = create_item_checkbox(_L("Keep my printer when opening project files"), page,
-        _L("When opening a project made for another printer, switch back to the last printer you selected or sliced with, instead of the printer embedded in the file."), 50, "keep_printer_on_open");
-    auto item_skip_mapping_warnings = create_item_checkbox(_L("Skip Settings Mapping Warnings"), page,
-        _L("Don't show warnings about unrecognized or invalid settings replaced while loading project files; the defaults or automatic fixes are applied silently."), 50, "skip_settings_mapping_warnings");
-    auto item_print_by_object_caution = create_item_checkbox(_L("Show print-by-object caution notices"), page,
-        _L("Show the advisory notices suggesting auto-arrange, and the pre-slice caution, when Print sequence is set to \"By object\". Turn off here or via \"Do not show again\" on the notice itself."), 50, "show_print_by_object_caution");
+    PrefSection* sec = begin_section(page, "slicing.slicing", _L("Slicing"));
+    add_row(sec, create_item_auto_reslice(_L("Auto slice after changes"), row(sec),
+        _L("If enabled, EdgeSlicer slices again by itself whenever a slicing-related setting changes."),
+        _L("Delay in seconds before auto slicing starts, allowing multiple edits to be grouped. Use 0 to slice immediately.")));
+    add_row(sec, create_item_checkbox(_L("Warn when memory is low during slicing"), row(sec),
+        _L("When the PC is nearly out of free memory during slicing, pause and ask whether to continue. "
+           "Turn this off to keep slicing without asking (a notice and a log line are still shown). "
+           "The trade-off: if the PC really runs out of memory, the slicer may freeze or crash and unsaved work can be lost. "
+           "Slicing started from the phone or hub is always stopped when memory runs out, regardless of this setting."),
+        50, "warn_low_memory_slicing"));
+    add_row(sec, create_item_checkbox(_L("Auto arrange plate after cloning"), row(sec), _L("Auto arrange plate after object cloning"), 50, "auto_arrange"));
+    add_row(sec, create_item_checkbox(_L("Show print-by-object caution notices"), row(sec),
+        _L("Show the advisory notices suggesting auto-arrange, and the pre-slice caution, when Print sequence is set to \"By object\". Turn off here or via \"Do not show again\" on the notice itself."), 50, "show_print_by_object_caution"));
+    add_row(sec, create_item_checkbox(_L("Allow high/low temperature filament mixing"), row(sec), _L("If enabled, allows printing with both high-temperature and low-temperature filaments simultaneously."), 50, "allow_filament_temp_mixing",
+        [this](bool new_val, bool old_val) -> bool {
+            // Only confirm when turning ON; allow turning OFF without dialog.
+            if (!new_val)
+                return false;
 
-    auto item_auto_drop = create_item_checkbox(_L("Drop imported models to the bed"), page,
-        _L("When off, imported models keep the Z position stored in the file instead of being dropped onto the build plate."), 50, "auto_drop_on_import");
-    auto item_bottom_z = create_item_checkbox(_L("Bottom-referenced Z position"), page,
-        _L("Show and edit the Move panel's Z as the height of the object's bottom above the bed (world coordinates), instead of the object center."), 50, "bottom_referenced_z");
-    auto item_hide_other_plates = create_item_checkbox(_L("Hide other plates while moving"), page,
-        _L("While the Move tool is open, show only the plate you are working on. The other plates and their objects come back when the Move tool closes, and a plate you drag onto reappears when you release."), 50, "hide_other_plates_on_move");
+            wxString msg = _L("Mixing materials with significantly different printing temperatures may result in:\n"
+                              "· Extruder clogging\n"
+                              "· Nozzle damage\n"
+                              "· Layer adhesion issues\n\n"
+                              "Do you want to enable this feature?");
+            MessageDialog dlg(this, msg, _L("High and Low Temperature Material Mixing Risk"), wxICON_WARNING | wxOK | wxCANCEL);
+            dlg.SetButtonLabel(wxID_OK, _L("Confirm"));
+            dlg.SetButtonLabel(wxID_CANCEL, _L("Cancel"));
+            return dlg.ShowModal() == wxID_OK;
+        }));
 
-    auto title_cost = create_item_title(_L("Cost"), page, _L("Cost"));
-    // The key keeps its first name (gcode_include_filament_prices) so existing settings carry over.
-    auto item_gcode_prices = create_item_checkbox(_L("Include costs in exported G-code"), page,
-        _L("Write your costs into G-code you export or send to a printer, and into the settings of an exported "
-           "3MF with G-code: the filament prices (the \"; filament cost\" and \"; total filament cost\" lines, "
-           "filament_cost) and the machine rate (time_cost). Off by default, so a file you share does not tell "
-           "anyone what you pay for filament or charge per hour; the rest of the file is the same either way. "
-           "With it off, the cost of a G-code opened on its own reads \"not in file\"; projects and sliced plates "
-           "still show their cost here."), 50, "gcode_include_filament_prices");
-    currency_symbol(); // the locale's symbol becomes the stored default the first time
-    auto item_currency_symbol = create_item_text_input(_L("Currency symbol"), page,
-        _L("Shown before every price and cost (filament prices, machine rates, the cost after slicing). A label only: prices are never "
-           "converted. Leave it empty for plain numbers."), "cost_currency_symbol");
-    auto item_filament_prices = create_item_button(_L("Your own costs"), _L("Costs") + dots, page,
-        _L("Filament prices per kilogram and machine rates per hour that apply over the presets' values"),
-        _L("Open the Costs window"), [this]() { show_costs_dialog(this); });
+    sec = begin_section(page, "slicing.flushing", _L("Flushing volumes"));
+    add_row(sec, create_item_checkbox(_L("Flushing volumes: Auto-calculate every time the color changed."), row(sec), _L("If enabled, auto-calculate every time the color changed."), 50, "auto_calculate"));
+    add_row(sec, create_item_checkbox(_L("Flushing volumes: Auto-calculate every time when the filament is changed."), row(sec), _L("If enabled, auto-calculate every time when filament is changed"), 50, "auto_calculate_when_filament_change"));
 
-    auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
-    auto item_prefer_last_print = create_item_checkbox(_L("Prefer Last Used Print Profile"), page,
-        _L("When a project's print profile is not available, pick the profile you last used at the same layer height instead of the first compatible one."), 50, "prefer_last_print_profile");
-    auto item_auto_shadow = create_item_checkbox(_L("Seamless System Filament Edits"), page,
-        _L("Saving a modified system preset silently saves and selects \"<name> - Custom\" instead of asking for a new name every time."), 50, "auto_shadow_system_presets");
-    auto item_sync_bambu_presets = create_item_checkbox(_L("Import Bambu Studio user presets"), page,
-        _L("At startup, mirror your custom Bambu Studio print & filament presets into EdgeSlicer so they are usable here too. One-way (Bambu Studio stays the source); your own presets and deletions are preserved. Takes effect after restart."), 50, "sync_bambu_user_presets");
-    auto item_sync_now = create_item_button(_L("Import from Bambu Studio now"), _L("Sync now"), page,
+    sec = begin_section(page, "slicing.presets", _L("Presets"));
+    add_row(sec, create_item_checkbox(_L("Remember printer configuration"), row(sec), _L("If enabled, Orca will remember and switch filament/process configuration for each printer automatically."), 50, "remember_printer_config"));
+    add_row(sec, create_item_checkbox(_L("Remember last print action"), row(sec),
+        _L("If enabled, EdgeSlicer will remember the last selected option in the print button's dropdown (for example Print, Print plate, Export plate sliced file, or Export G-code file) and restore it on the next startup and when the printer or preset changes, when the current printer still offers it."),
+        50, "remember_print_action"));
+    add_row(sec, create_item_checkbox(_L("Prefer Last Used Print Profile"), row(sec),
+        _L("When a project's print profile is not available, pick the profile you last used at the same layer height instead of the first compatible one."), 50, "prefer_last_print_profile"));
+    add_row(sec, create_item_checkbox(_L("Seamless System Filament Edits"), row(sec),
+        _L("Saving a modified system preset silently saves and selects \"<name> - Custom\" instead of asking for a new name every time."), 50, "auto_shadow_system_presets"));
+    add_row(sec, create_item_button(_L("Clear my choice on the unsaved presets."), _L("Clear"), row(sec), L"", _L("Clear my choice on the unsaved presets."), []() {
+        wxGetApp().app_config->set("save_preset_choise", "");
+    }));
+
+    sec = begin_section(page, "slicing.bambu_presets", _L("Bambu Studio presets"));
+    add_row(sec, create_item_checkbox(_L("Import Bambu Studio user presets"), row(sec),
+        _L("At startup, mirror your custom Bambu Studio print & filament presets into EdgeSlicer so they are usable here too. One-way (Bambu Studio stays the source); your own presets and deletions are preserved. Takes effect after restart."), 50, "sync_bambu_user_presets"));
+    add_row(sec, create_item_button(_L("Import from Bambu Studio now"), _L("Sync now"), row(sec),
         _L("Import from Bambu Studio now"),
         _L("Re-run the one-way import of your Bambu Studio custom print/filament/machine presets and refresh the lists immediately."),
-        []() { wxGetApp().sync_bambu_user_presets(true); });
+        []() { wxGetApp().sync_bambu_user_presets(true); }));
     // Recovery affordance: an earlier build could delete mirrored presets it had copied (a Bambu
     // preset the loader could not parse was removed from disk and flagged deleted in the manifest,
     // so it was never pulled again). Clearing the flags makes the next sync restore them from
     // Bambu Studio, which still has every one of them.
-    auto item_repull = create_item_button(_L("Re-import presets removed earlier"), _L("Re-pull all"), page,
+    add_row(sec, create_item_button(_L("Re-import presets removed earlier"), _L("Re-pull all"), row(sec),
         _L("Re-import presets removed earlier"),
         _L("Forget which mirrored presets were removed from this slicer, so the next import pulls them "
            "back from Bambu Studio. Your own presets are untouched."),
@@ -2543,112 +2698,185 @@ wxWindow* PreferencesDialog::create_ultra_page()
             MessageDialog(nullptr,
                 wxString::Format(_L("Re-imported %d preset(s) that had been removed from this slicer."), cleared),
                 _L("Import from Bambu Studio"), wxICON_INFORMATION | wxOK).ShowModal();
-        });
+        }));
 
-    auto title_bambu = create_item_title(_L("Bambu Network"), page, _L("Bambu Network"));
-    auto item_bambu_plugin = create_item_checkbox(_L("Enable Bambu network plugin"), page,
-        _L("Connect to Bambu Lab printers (cloud login or LAN). The plug-in is downloaded from Bambu on first use; takes effect after restarting."), 50, "installed_networking");
-    auto item_bambu_stealth = create_item_checkbox(_L("Stealth mode (no Bambu cloud telemetry)"), page,
-        _L("Stops data transmission to Bambu's cloud services. Safe to enable for LAN-only use; disable it to sign in to a Bambu account."), 50, "stealth_mode");
+    sec = begin_section(page, "slicing.cost", _L("Cost"));
+    // The key keeps its first name (gcode_include_filament_prices) so existing settings carry over.
+    add_row(sec, create_item_checkbox(_L("Include costs in exported G-code"), row(sec),
+        _L("Write your costs into G-code you export or send to a printer, and into the settings of an exported "
+           "3MF with G-code: the filament prices (the \"; filament cost\" and \"; total filament cost\" lines, "
+           "filament_cost) and the machine rate (time_cost). Off by default, so a file you share does not tell "
+           "anyone what you pay for filament or charge per hour; the rest of the file is the same either way. "
+           "With it off, the cost of a G-code opened on its own reads \"not in file\"; projects and sliced plates "
+           "still show their cost here."), 50, "gcode_include_filament_prices"));
+    currency_symbol(); // the locale's symbol becomes the stored default the first time
+    add_row(sec, create_item_text_input(_L("Currency symbol"), row(sec),
+        _L("Shown before every price and cost (filament prices, machine rates, the cost after slicing). A label only: prices are never "
+           "converted. Leave it empty for plain numbers."), "cost_currency_symbol"));
+    add_row(sec, create_item_button(_L("Your own costs"), _L("Costs") + dots, row(sec),
+        _L("Filament prices per kilogram and machine rates per hour that apply over the presets' values"),
+        _L("Open the Costs window"), [this]() { show_costs_dialog(this); }));
+
+    return page;
+}
+
+wxWindow* PreferencesDialog::create_page_devices()
+{
+    wxWindow* page = new_page();
+
+    PrefSection* sec = begin_section(page, "devices.bambu", _L("Bambu Network"));
+    add_row(sec, create_item_checkbox(_L("Enable Bambu network plugin"), row(sec),
+        _L("Connect to Bambu Lab printers (cloud login or LAN). The plug-in is downloaded from Bambu on first use; takes effect after restarting."), 50, "installed_networking"));
+    add_row(sec, create_item_checkbox(_L("Stealth mode (no Bambu cloud telemetry)"), row(sec),
+        _L("Stops data transmission to Bambu's cloud services. Safe to enable for LAN-only use; disable it to sign in to a Bambu account."), 50, "stealth_mode"), true);
     // "New Bambu LiveView" (tests/plan_own_camera_view.md): on by default (AppConfig::set_defaults).
     // Read at every Play, so it applies without a restart.
-    auto item_bambu_own_liveview = create_item_checkbox(_L("New Bambu LiveView"), page,
+    add_row(sec, create_item_checkbox(_L("New Bambu LiveView"), row(sec),
         _L("Play Bambu printer cameras on the Device tab through EdgeSlicer's own camera relay (go2rtc, the one the phone uses) "
            "instead of Bambu's camera files. Used for printers on the LAN with an access code; others keep the Bambu player. "
            "Turn it off to use Bambu's camera files instead. Applies the next time you press Play; no restart needed."),
-        50, "liveview_go2rtc");
-    auto item_bambu_abnormal_storage = create_item_checkbox(_L("Allow Abnormal Storage"), page,
-        _L("This allows the use of Storage that is marked as abnormal by the Printer.\nUse at your own risk, can cause issues!"), 50, "allow_abnormal_storage");
+        50, "liveview_go2rtc"), true);
+    add_row(sec, create_item_checkbox(_L("Allow Abnormal Storage"), row(sec),
+        _L("This allows the use of Storage that is marked as abnormal by the Printer.\nUse at your own risk, can cause issues!"), 50, "allow_abnormal_storage"), true);
     // The "Use legacy network plugin" switch is gone: EdgeSlicer ships one network plug-in and
     // ignores the legacy_networking setting (GUI_App resets it at start-up).
 
-    auto title_spoolman = create_item_title(_L("Spool Manager"), page, _L("Spool Manager"));
-    auto item_spoolman_enabled = create_item_checkbox(_L("Enable Spoolman integration"), page,
-        _L("Connect to a self-hosted Spoolman server for spool inventory and filament-usage tracking."), 50, "spoolman_enabled");
-    auto item_spoolman_url = create_item_text_input(_L("Server URL"), page,
-        _L("Spoolman server address, e.g. http://10.0.0.5:7912"), "spoolman_url");
-    auto item_spoolman_deduct = create_item_checkbox(_L("Deduct filament usage when sending a print"), page,
-        _L("After a job is sent to the printer, subtract the sliced filament weight from the spools bound to each slot in the Spool Manager."), 50, "spoolman_deduct");
+    sec = begin_section(page, "devices.accounts", _L("Accounts and devices"));
+    add_row(sec, create_item_checkbox(_L("Sign in to my Snapmaker account automatically at startup"), row(sec),
+        _L("If enabled, EdgeSlicer quietly reuses the Snapmaker account session saved from your last sign-in when it starts, "
+           "so you do not have to sign in again. Nothing is shown; if there is no saved session you simply stay signed out."),
+        50, "snapmaker_auto_login"));
+    add_row(sec, create_item_checkbox(_L("Multi-device Management (Take effect after restarting EdgeSlicer)."), row(sec), _L("With this option enabled, you can send a task to multiple devices at the same time and manage multiple devices."), 50, "enable_multi_machine"));
+
+    sec = begin_section(page, "devices.spoolman", _L("Spool Manager"));
+    add_row(sec, create_item_checkbox(_L("Enable Spoolman integration"), row(sec),
+        _L("Connect to a self-hosted Spoolman server for spool inventory and filament-usage tracking."), 50, "spoolman_enabled"));
+    add_row(sec, create_item_text_input(_L("Server URL"), row(sec),
+        _L("Spoolman server address, e.g. http://10.0.0.5:7912"), "spoolman_url"), true);
+    add_row(sec, create_item_checkbox(_L("Deduct filament usage when sending a print"), row(sec),
+        _L("After a job is sent to the printer, subtract the sliced filament weight from the spools bound to each slot in the Spool Manager."), 50, "spoolman_deduct"), true);
 
     // Ultra: hidden service mode. The hub passes SNORCA_HIDDEN explicitly for the slicers it starts,
     // so this only decides slicers started by hand (double-click, file association, command line).
-    auto title_phone = create_item_title(_L("Phone access"), page, _L("Phone access"));
-    auto item_start_hidden = create_item_checkbox(_L("Start hidden (serve the phone without a window)"), page,
-        _L("Slicers you start by hand run without a window and serve the phone in the background. Bring a window back from the hub's tray icon (Slicer windows > Show), the hub page, or the phone's \"Show on PC\". Slicers started from the phone are always hidden, and a hidden slicer shows itself when it needs a person at the PC."), 50, "start_hidden");
+    sec = begin_section(page, "devices.phone", _L("Phone access"));
+    add_row(sec, create_item_checkbox(_L("Start hidden (serve the phone without a window)"), row(sec),
+        _L("Slicers you start by hand run without a window and serve the phone in the background. Bring a window back from the hub's tray icon (Slicer windows > Show), the hub page, or the phone's \"Show on PC\". Slicers started from the phone are always hidden, and a hidden slicer shows itself when it needs a person at the PC."), 50, "start_hidden"));
     // Ultra (phone Snapmaker connect): a Snapmaker printer only answers a client holding the certificate it
     // issued at pairing, which the Device tab keeps in the web page alone. With this on, a connect made on
     // this PC leaves a copy under <datadir>/hub/snapmaker_keys.json so the phone can connect the printer
     // later. Off by default: it is a private key at rest.
-    auto item_sm_keys = create_item_checkbox(_L("Remember Snapmaker printer certificates so the phone can connect them"), page,
-        _L("After you connect a Snapmaker printer on the Device tab, keep its pairing certificate on this PC (under the data folder's hub\snapmaker_keys.json) so the phone's Devices tab can connect that printer without you at the PC. The certificate never leaves this PC. Off by default because it is a private key stored on disk."), 50, "snapmaker_remember_keys");
+    add_row(sec, create_item_checkbox(_L("Remember Snapmaker printer certificates so the phone can connect them"), row(sec),
+        _L("After you connect a Snapmaker printer on the Device tab, keep its pairing certificate on this PC (under the data folder's hub\snapmaker_keys.json) so the phone's Devices tab can connect that printer without you at the PC. The certificate never leaves this PC. Off by default because it is a private key stored on disk."), 50, "snapmaker_remember_keys"));
 
     // Ultra (G-code archive): every file this PC uploads is kept, with the printer it went to, so
     // the phone can send it again later without the project being open.
-    auto title_archive = create_item_title(_L("G-Code Archive"), page, _L("G-Code Archive"));
-    auto item_archive = create_item_checkbox(_L("Store G-Code Files"), page,
-        _L("Keep a copy of every G-code file this PC sends to a printer - from here or from the phone - together with which printer it went to, so it can be sent again later without opening the project."), 50, "ultra_gcode_archive");
-    auto item_archive_dir = create_item_gcode_archive_dir(page,
-        _L("Where the copies are kept. The default is a gcode_archive folder inside the data folder; the folder is created the first time a file is stored."));
-    auto item_archive_max = create_item_gcode_archive_max(page,
-        _L("How many stored files to keep. When a new file takes the count past this, the oldest ones are deleted with their details and previews."));
+    sec = begin_section(page, "devices.archive", _L("G-Code Archive"));
+    add_row(sec, create_item_checkbox(_L("Store G-Code Files"), row(sec),
+        _L("Keep a copy of every G-code file this PC sends to a printer - from here or from the phone - together with which printer it went to, so it can be sent again later without opening the project."), 50, "ultra_gcode_archive"));
+    add_row(sec, create_item_gcode_archive_dir(row(sec),
+        _L("Where the copies are kept. The default is a gcode_archive folder inside the data folder; the folder is created the first time a file is stored.")), true);
+    add_row(sec, create_item_gcode_archive_max(row(sec),
+        _L("How many stored files to keep. When a new file takes the count past this, the oldest ones are deleted with their details and previews.")), true);
+
+    return page;
+}
+
+wxWindow* PreferencesDialog::create_page_advanced()
+{
+    wxWindow* page = new_page();
+
+    PrefSection* sec = begin_section(page, "advanced.apps", _L("External apps"));
+    // "Export & Open in Bambu Studio" looks for an installed Bambu Studio automatically
+    // (registry / file association / default path); this lets a user whose install it cannot
+    // find point at bambu-studio.exe directly. Left blank, discovery runs as usual.
+    add_row(sec, create_item_text_input(_L("Bambu Studio path"), row(sec),
+        _L("Only needed if \"Export & Open in Bambu Studio\" cannot find your Bambu Studio installation automatically. "
+           "Full path to bambu-studio.exe (Windows), the BambuStudio.app bundle (macOS), or the executable (Linux)."),
+        "bambu_studio_path"));
+    // "Edit in Blender" finds Blender on its own (file association, usual install folders, PATH,
+    // Snap, Flatpak); this is for an install it cannot find.
+    add_row(sec, create_item_text_input(_L("Blender path"), row(sec),
+        _L("Only needed if \"Edit in Blender\" cannot find Blender automatically. "
+           "Full path to blender.exe (Windows), the Blender.app bundle (macOS), or the blender executable (Linux)."),
+        "blender_path"));
+    // "Edit in FreeCAD" finds FreeCAD on its own (file association, installed-programs list, usual
+    // install folders, PATH, Snap, Flatpak); this is for an install it cannot find. The add-on adds
+    // "Send to EdgeSlicer" and "Update EdgeSlicer" to FreeCAD for every document.
+    add_row(sec, create_item_text_input(_L("FreeCAD path"), row(sec),
+        _L("Only needed if \"Edit in FreeCAD\" cannot find FreeCAD automatically. "
+           "Full path to FreeCAD.exe or its install folder (Windows), the FreeCAD.app bundle (macOS), or the FreeCAD executable or AppImage (Linux)."),
+        "freecad_path"));
+    add_row(sec, create_item_button(_L("FreeCAD add-on"), _L("Install FreeCAD add-on"), row(sec),
+        _L("FreeCAD add-on"),
+        _L("Copy the EdgeSlicer add-on into FreeCAD's user Mod folder (FreeCAD 0.21 and 1.x), so \"Send to EdgeSlicer\" "
+           "and \"Update EdgeSlicer\" are on a toolbar in every FreeCAD document. Restart FreeCAD afterwards."),
+        [this]() { FreeCADBridge::install_addon(this); }));
+
+    // Home > Models (ModelBrowserPanel): Windows, and macOS versions that have what its isolation needs.
+    // The Layerling tab (LayerlingPanel): an optional download, never bundled.
+    bool model_browser = false;
+#if defined(_WIN32) || defined(__APPLE__)
+    model_browser = model_browser_supported();
+#endif
+    const bool layerling = layerling_supported();
+    if (model_browser || layerling) {
+        sec = begin_section(page, "advanced.tabs", _L("Optional tabs"));
+        if (model_browser)
+            add_row(sec, create_item_checkbox(_L("Model browser (beta)"), row(sec),
+                                              _L("Adds Models to the Home tab: browse Printables, MakerWorld and Snapmaker Space inside "
+                                                 "EdgeSlicer. It is a separate browser with its own logins and no access to EdgeSlicer; "
+                                                 "model files you download there open here."),
+                                              50, "model_browser_beta"));
+        if (layerling)
+            add_row(sec, create_item_checkbox(_L("Show the Layerling tab"), row(sec),
+                                              _L("Adds a Layerling tab: a free CAD for 3D printing by henmedia (AGPL-3.0) that "
+                                                 "EdgeSlicer can download from its GitHub releases and run on this computer. "
+                                                 "What you export there goes onto the plate. Hiding the tab keeps Layerling "
+                                                 "and your designs."),
+                                              50, "show_layerling_tab"));
+    }
+
+#ifdef EDGE_PYTHON_PLUGINS
+    // D10 / H7: Python plugins stay off until the user turns them on here (restart).
+    sec = begin_section(page, "advanced.python", _L("Python plugins (experimental)"));
+    add_row(sec, create_item_checkbox(
+        _L("Enable Python plugins (takes effect after restarting EdgeSlicer)"), row(sec),
+        _L("Runs Python plugins you install from Home > Plugins. Plugin code runs in a separate, sandboxed helper; "
+           "installing or enabling a plugin still loads it into EdgeSlicer, so only install plugins you trust."),
+        50, "enable_python_plugins"));
+    add_row(sec, create_item_checkbox(
+        _L("Allow plugins on the early slicing steps (unsandboxed)"), row(sec),
+        _L("Lets slicing-pipeline plugins run on the slicing steps before G-code export. Those steps run inside "
+           "EdgeSlicer with full access to your files, not in the sandbox. Off: such plugins only post-process "
+           "the G-code, in the sandbox."),
+        50, "python_plugins_in_process_steps"), true);
+    add_row(sec, create_item_checkbox(
+        _L("Allow plugins that are not signed by a known publisher"), row(sec),
+        _L("A plugin you approved on this computer but that no shipped publisher key signs. Only applies to signed "
+           "release builds; developer builds always allow them."),
+        50, "python_plugins_allow_unsigned"), true);
+#endif
 
     // Support: lets a user raise the log level without a developer build. Same app_config key and the
     // same combobox as the internal Develop page; the level is applied immediately and persisted.
-    auto title_troubleshooting = create_item_title(_L("Troubleshooting"), page, _L("Troubleshooting"));
+    sec = begin_section(page, "advanced.troubleshooting", _L("Troubleshooting"));
     auto log_level_list = std::vector<wxString>{_L("fatal"), _L("error"), _L("warning"), _L("info"), _L("debug"), _L("trace")};
-    auto item_log_level = create_item_loglevel_combobox(_L("Log level"), page,
+    add_row(sec, create_item_loglevel_combobox(_L("Log level"), row(sec),
         _L("How much detail goes into the log files in %APPDATA%\\EdgeSlicer\\log (Help > Show Configuration Folder). "
            "Use 'info' or 'debug' when sending a log for support; 'warning' is the default. "
            "Verbose levels (debug, trace) make the log files grow quickly, so set it back afterwards."),
-        log_level_list);
+        log_level_list));
 
-    sizer_page->Add(title_project, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_autosave, 0, wxTOP, FromDIP(3));
-    item_autosave->Add(item_autosave_interval, 0, wxLEFT, 0);
-    sizer_page->Add(item_keep_printer, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_skip_mapping_warnings, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_print_by_object_caution, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_auto_drop, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_bottom_z, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_hide_other_plates, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(title_cost, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_gcode_prices, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_currency_symbol, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_filament_prices, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_prefer_last_print, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_auto_shadow, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_sync_bambu_presets, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_sync_now, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_repull, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(title_bambu, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_bambu_plugin, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_bambu_stealth, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_bambu_own_liveview, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_bambu_abnormal_storage, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(title_spoolman, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_spoolman_enabled, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_spoolman_url, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_spoolman_deduct, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(title_phone, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_start_hidden, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_sm_keys, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(title_archive, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_archive, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_archive_dir, 0, wxTOP | wxEXPAND, FromDIP(3));
-    sizer_page->Add(item_archive_max, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(title_troubleshooting, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_log_level, 0, wxTOP, FromDIP(3));
+    sec = begin_section(page, "advanced.develop", _L("Develop mode"), false);
+    add_row(sec, create_item_checkbox(_L("Develop mode"), row(sec), _L("Develop mode"), 50, "developer_mode"));
+    add_row(sec, create_item_checkbox(_L("Skip AMS blacklist check"), row(sec), _L("Skip AMS blacklist check"), 50, "skip_ams_blacklist_check"), true);
 
-    page->SetSizer(sizer_page);
-    page->Layout();
-    sizer_page->Fit(page);
     return page;
 }
 
 // NOTE: this page is still never added to create()'s `pages` tab list (create_gui_page() itself
 // is never called), so it remains unreachable from the UI. The one working control it built,
-// the gizmo panel opacity slider, has been moved to create_general_page() (see
+// the gizmo panel opacity slider, has been moved to create_page_view() (see
 // create_item_gizmo_panel_opacity() usage there). "show_home_page" is left here unexposed: it is
 // only ever set to a default in AppConfig::set_defaults() and is not read anywhere else, so a
 // checkbox for it would not do anything yet.

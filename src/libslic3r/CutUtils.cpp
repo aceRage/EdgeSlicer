@@ -13,6 +13,7 @@
 #include "MeshBoolean.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
+#include "PaintTransfer.hpp"
 #include "Airbrush/AirbrushBake.hpp"
 #include "ObjectID.hpp"
 #include "AABBMesh.hpp"
@@ -497,11 +498,12 @@ static Transform3d cut_pre_transform(const Transform3d& cut_matrix, const Transf
     return invert_cut_matrix * instance_matrix * volume->get_matrix();
 }
 
-static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelVolume* src_volume, const Transform3d& cut_matrix, const std::string& suffix = {}, ModelVolumeType type = ModelVolumeType::MODEL_PART,
+// Returns the new volume, or nullptr for an empty mesh.
+static ModelVolume* add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelVolume* src_volume, const Transform3d& cut_matrix, const std::string& suffix = {}, ModelVolumeType type = ModelVolumeType::MODEL_PART,
                            const Transform3d* pre_transform = nullptr)
 {
     if (mesh.empty())
-        return;
+        return nullptr;
 
     mesh.transform(cut_matrix);
     ModelVolume* vol = object->add_volume(mesh);
@@ -520,6 +522,45 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
     if (pre_transform != nullptr)
         image_fill_rebase_volume(*vol, src_volume->mesh().its,
                                  translation_transform(-1 * vol->get_offset()) * cut_matrix * *pre_transform);
+    return vol;
+}
+
+// Keep paint v2 (NeotkoCM 8f5eae374, re-ported from PR #776): whether a plane cut paints this
+// model part's pieces by exact facet provenance (PaintTransfer) instead of the spatial remap in
+// Cut::finalize(). Only when nothing after the cut rebuilds the halves' meshes (an applied TAC joint
+// re-bakes them), the part has no airbrush colour field (finalize() re-bakes that from the saved
+// painting, on top of the paint UNDER it), and the part is not mirrored (process_volume_cut() flips
+// the corner order of a mirrored part's facets, which a facet's painting is relative to).
+static bool exact_cut_paint(const ModelVolume& volume, const Transform3d& instance_matrix, ModelObjectCutAttributes attributes)
+{
+    return attributes.has(ModelObjectCutAttribute::KeepPaint) && !attributes.has(ModelObjectCutAttribute::ApplyTacJoints) &&
+           volume.is_model_part() && !volume.mesh().empty() && PaintTransfer::has_painting(volume) && !volume.airbrush_field &&
+           (instance_matrix * volume.get_matrix()).matrix().block<3, 3>(0, 0).determinant() > 0.;
+}
+
+// Paints the pieces cut out of `src`. `src_to_world` and each piece's matrix map into the same frame
+// (the cut instance without its offset). `maps` (one per piece) say which facets of the piece are
+// facets of `src` the plane did not cross: their painting is copied bit for bit. The cap is marked
+// FACET_UNPAINTED; only the facets the plane split are resampled from the source.
+static void carry_cut_painting(const ModelVolume& src, const Transform3d& src_to_world, const std::array<ModelVolume*, 2>& pieces,
+                               const std::array<const std::vector<int>*, 2>& maps)
+{
+    PaintTransfer::Source source;
+    source.volume   = &src;
+    source.to_world = src_to_world;
+    source.filament = PaintTransfer::effective_filament(src);
+    PaintTransfer::Transfer transfer(std::vector<PaintTransfer::Source>{ source });
+    for (size_t i = 0; i < pieces.size(); ++i) {
+        ModelVolume* piece = pieces[i];
+        if (piece == nullptr)
+            continue;
+        const std::vector<int>* map = maps[i] != nullptr && !maps[i]->empty() ? maps[i] : nullptr;
+        // The piece's own filament: the same config as the source, so the map is always honoured.
+        const PaintTransfer::Stats stats = transfer.to(*piece, piece->get_matrix(), PaintTransfer::effective_filament(*piece), map);
+        BOOST_LOG_TRIVIAL(debug) << "Cut paint (exact): " << piece->name << " facets " << piece->mesh().its.indices.size()
+                                 << " samples " << stats.samples << " load " << stats.load_ms << " ms, resample "
+                                 << stats.resample_ms << " ms, store " << stats.store_ms << " ms";
+    }
 }
 
 // PHASE 3: `thickness` is the kerf. A flat cut with a kerf is TWO half-space
@@ -533,7 +574,7 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
 static void process_volume_cut( ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
                                 ModelObjectCutAttributes attributes, TriangleMesh& upper_mesh, TriangleMesh& lower_mesh,
                                 double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred,
-                                float cut_z = 0.f)
+                                float cut_z = 0.f, std::vector<int>* upper_map = nullptr, std::vector<int>* lower_map = nullptr)
 {
     const auto volume_matrix = volume->get_matrix();
 
@@ -546,14 +587,40 @@ static void process_volume_cut( ModelVolume* volume, const Transform3d& instance
     mesh.transform(invert_cut_matrix * instance_matrix * volume_matrix, true);
 
     indexed_triangle_set upper_its, lower_its;
+    double face_lo = cut_z, face_hi = cut_z;
     if (thickness > 0.0) {
-        double face_lo = 0.0, face_hi = 0.0;
         curved_cut_thickness_faces(thickness, offset, face_lo, face_hi);
         cut_mesh(mesh.its, float(face_lo), nullptr, &lower_its);
         cut_mesh(mesh.its, float(face_hi), &upper_its, nullptr);
     }
     else
         cut_mesh(mesh.its, cut_z, &upper_its, &lower_its);
+    // Keep paint v2: the facets the plane does not cross come out of cut_mesh() with the very same
+    // corners, in the same order (the caller only asks for maps when the transformation does not
+    // mirror). Whatever cut_mesh() rebuilt - split facets, facets it closed next to a vertex - finds
+    // no match and is resampled. The cap lies on the plane (at the kerf face with a kerf): new facets
+    // that are not skin, left unpainted without sampling them.
+    if (upper_map != nullptr || lower_map != nullptr) {
+        const PaintTransfer::FacetMatcher matcher(mesh.its);
+        auto mark_cap = [](const indexed_triangle_set& its, std::vector<int>& map, float plane_z) {
+            const float eps = 1e-4f;
+            for (size_t i = 0; i < map.size(); ++i)
+                if (map[i] < 0) {
+                    const auto& f = its.indices[i];
+                    if (std::abs(its.vertices[f(0)].z() - plane_z) < eps && std::abs(its.vertices[f(1)].z() - plane_z) < eps &&
+                        std::abs(its.vertices[f(2)].z() - plane_z) < eps)
+                        map[i] = PaintTransfer::FACET_UNPAINTED;
+                }
+        };
+        if (upper_map != nullptr && attributes.has(ModelObjectCutAttribute::KeepUpper)) {
+            *upper_map = matcher.match(upper_its);
+            mark_cap(upper_its, *upper_map, float(face_hi));
+        }
+        if (lower_map != nullptr && attributes.has(ModelObjectCutAttribute::KeepLower)) {
+            *lower_map = matcher.match(lower_its);
+            mark_cap(lower_its, *lower_map, float(face_lo));
+        }
+    }
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
         upper_mesh = TriangleMesh(upper_its);
     if (attributes.has(ModelObjectCutAttribute::KeepLower))
@@ -849,36 +916,56 @@ static void process_solid_part_cut(ModelVolume* volume, const Transform3d& insta
     const Transform3d pre = cut_pre_transform(cut_matrix, instance_matrix, volume);
     // Perform cut
     TriangleMesh upper_mesh, lower_mesh;
-    process_volume_cut(volume, instance_matrix, cut_matrix, attributes, upper_mesh, lower_mesh, thickness, offset);
+    // Keep paint v2: the pieces are painted from `volume` by exact facet provenance (see exact_cut_paint()).
+    const bool       exact_paint = exact_cut_paint(*volume, instance_matrix, attributes);
+    std::vector<int> upper_map, lower_map;
+    process_volume_cut(volume, instance_matrix, cut_matrix, attributes, upper_mesh, lower_mesh, thickness, offset, 0.f,
+                       exact_paint ? &upper_map : nullptr, exact_paint ? &lower_map : nullptr);
 
     // Add required cut parts to the objects
-
+    ModelVolume *upper_vol = nullptr, *lower_vol = nullptr;
     if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", ModelVolumeType::MODEL_PART, &pre);
+        upper_vol = add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", ModelVolumeType::MODEL_PART, &pre);
         if (!lower_mesh.empty()) {
-            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B", ModelVolumeType::MODEL_PART, &pre);
+            lower_vol = add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B", ModelVolumeType::MODEL_PART, &pre);
             upper->volumes.back()->cut_info.is_from_upper = false;
         }
-        return;
+    } else {
+        if (attributes.has(ModelObjectCutAttribute::KeepUpper))
+            upper_vol = add_cut_volume(upper_mesh, upper, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
+
+        if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
+            lower_vol = add_cut_volume(lower_mesh, lower, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
     }
 
-    if (attributes.has(ModelObjectCutAttribute::KeepUpper))
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
-
-    if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
-        add_cut_volume(lower_mesh, lower, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
+    if (exact_paint)
+        carry_cut_painting(*volume, instance_matrix * volume->get_matrix(), { upper_vol, lower_vol }, { &upper_map, &lower_map });
 }
 
 static void reset_instance_transformation(ModelObject* object, size_t src_instance_idx, 
                                           const Transform3d& cut_matrix = Transform3d::Identity(),
                                           bool place_on_cut = false, bool flip = false)
 {
-    // Reset instance transformation except offset and Z-rotation
+    // Reset instance transformation except offset and Z-rotation.
+    // The halves' meshes already carry the cut instance's rotation, scale and mirroring. Any other
+    // instance keeps only what it had on top of the cut one, or its copy would show that one's
+    // rotation twice and lose its own scale.
+    const Transformation src_trafo = src_instance_idx < object->instances.size() ?
+                                         object->instances[src_instance_idx]->get_transformation() : Transformation();
+    const Transform3d    src_linear = src_trafo.get_matrix_no_offset();
+    const Transform3d    src_inv    = std::abs(src_linear.matrix().determinant()) > 1e-12 ? src_linear.inverse() : Transform3d::Identity();
+    const double         src_rot_z  = src_trafo.get_rotation().z();
 
     for (size_t i = 0; i < object->instances.size(); ++i) {
         auto& obj_instance = object->instances[i];
         const double rot_z = obj_instance->get_rotation().z();
-        
+
+        if (!flip && !place_on_cut && i != src_instance_idx) {
+            obj_instance->set_transformation(Transformation(translation_transform(obj_instance->get_offset()) *
+                                                            obj_instance->get_transformation().get_matrix_no_offset() * src_inv));
+            continue;
+        }
+
         Transformation inst_trafo = Transformation(obj_instance->get_transformation().get_matrix_no_scaling_factor());
         // add respect to mirroring
         if (obj_instance->is_left_handed())
@@ -887,11 +974,7 @@ static void reset_instance_transformation(ModelObject* object, size_t src_instan
         obj_instance->set_transformation(inst_trafo);
 
         Vec3d rotation = Vec3d::Zero();
-        if (!flip && !place_on_cut) {
-            if ( i != src_instance_idx)
-            rotation[Z] = rot_z;
-        }
-        else {
+        if (flip || place_on_cut) {
             Transform3d rotation_matrix = Transform3d::Identity();
             if (flip)
                 rotation_matrix = rotation_transform(PI * Vec3d::UnitX());
@@ -900,13 +983,37 @@ static void reset_instance_transformation(ModelObject* object, size_t src_instan
                 rotation_matrix = rotation_matrix * Transformation(cut_matrix).get_rotation_matrix().inverse();
 
             if (i != src_instance_idx)
-                rotation_matrix = rotation_transform(rot_z * Vec3d::UnitZ()) * rotation_matrix;
+                rotation_matrix = rotation_transform((rot_z - src_rot_z) * Vec3d::UnitZ()) * rotation_matrix;
 
             rotation = Transformation(rotation_matrix).get_rotation();
         }
 
         obj_instance->set_rotation(rotation);
     }
+}
+
+// The upper half of a flat horizontal cut goes onto the bed by its own lowest point, so its height
+// ranges move down by as much as that point is above the old object's bottom; a range wholly below
+// it no longer has anything to apply to. Only this plain case: the half is neither flipped nor laid
+// on its cut, and the source does not sink below the bed.
+static void shift_upper_layer_ranges(ModelObject* upper, size_t instance, const Transform3d& cut_matrix, const BoundingBoxf3& src_bb)
+{
+    if (upper->layer_config_ranges.empty() || upper->volumes.empty() || instance >= upper->instances.size() || !src_bb.defined ||
+        src_bb.min.z() < -EPSILON)
+        return;
+    if ((Transformation(cut_matrix).get_rotation_matrix() * Vec3d::UnitZ() - Vec3d::UnitZ()).norm() > EPSILON)
+        return;
+    const BoundingBoxf3 upper_bb = upper->instance_bounding_box(instance);
+    if (!upper_bb.defined)
+        return;
+    const double shift = upper_bb.min.z() - src_bb.min.z();
+    if (shift <= EPSILON)
+        return;
+    t_layer_config_ranges shifted;
+    for (auto& [range, config] : upper->layer_config_ranges)
+        if (range.second > shift + EPSILON)
+            shifted[{ std::max(0., range.first - shift), range.second - shift }] = std::move(config);
+    upper->layer_config_ranges = std::move(shifted);
 }
 
 
@@ -992,7 +1099,9 @@ void Cut::post_process(ModelObject* object, ModelObjectPtrs& cut_object_ptrs, bo
 {
     if (!object) return;
 
-    if (keep && !object->volumes.empty()) {
+    // A side with no part to print (a plane just above or below the parts, with a modifier
+    // reaching across it) is not a result: delete_extra_modifiers() would leave it empty.
+    if (keep && std::any_of(object->volumes.begin(), object->volumes.end(), [](const ModelVolume* v) { return v->is_model_part(); })) {
         reset_instance_transformation(object, m_instance, m_cut_matrix, place_on_cut, flip);
         cut_object_ptrs.push_back(object);
     }
@@ -1014,7 +1123,7 @@ void Cut::post_process(ModelObject* upper, ModelObject* lower, ModelObjectPtrs& 
 }
 
 
-Cut::SavedPaintings Cut::save_paintings(const ModelObject* object) const
+Cut::SavedPaintings Cut::save_paintings(const ModelObject* object, const std::vector<const ModelVolume*>& skip) const
 {
     SavedPaintings saved;
     if (object == nullptr || !m_attributes.has(ModelObjectCutAttribute::KeepPaint) ||
@@ -1025,6 +1134,8 @@ Cut::SavedPaintings Cut::save_paintings(const ModelObject* object) const
     // their init shift) sit in exactly this frame, which is what restore_painting() maps from.
     const Transform3d instance_matrix = object->instances[m_instance]->get_transformation().get_matrix_no_offset();
     for (const ModelVolume* volume : object->volumes) {
+        if (std::find(skip.begin(), skip.end(), volume) != skip.end())
+            continue;
         std::optional<TriangleSelector::SavedPainting> sp = volume->save_painting();
         if (!sp)
             continue;
@@ -1331,6 +1442,24 @@ bool has_flexi_joint(const ModelObject* mo)
     return false;
 }
 
+std::string flexi_connectors_error(size_t flexi_joints, size_t other_connectors)
+{
+    if (flexi_joints == 0 || (flexi_joints == 1 && other_connectors == 0))
+        return {};
+    return L("Only one Flexi joint can be made in a cut, with no other connectors. Remove the others to cut.");
+}
+
+std::string flexi_connectors_error(const CutConnectors& connectors)
+{
+    size_t flexi = 0, other = 0;
+    for (const CutConnector& c : connectors)
+        if (is_flexi_connector_type(c.attribs.type))
+            ++ flexi;
+        else if (!is_tac_joint_connector_type(c.attribs.type))
+            ++ other;
+    return flexi_connectors_error(flexi, other);
+}
+
 ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name)
 {
     using namespace Geometry;
@@ -1430,14 +1559,9 @@ void bake_cut_connectors(ModelObject* mo, const std::string& connector_name, flo
             add_tac_joint_volume(mo, connector, "TAC Joint-" + std::to_string(++connector_id));
             continue;
         }
-        TriangleMesh mesh = TriangleMesh(cut_connector_unit_mesh(connector.attribs, snap_space_proportion, snap_bulge_proportion));
-        // Mesh will be centered when loading.
-        ModelVolume* new_volume = mo->add_volume(std::move(mesh), ModelVolumeType::NEGATIVE_VOLUME);
-
-        // Transform the new modifier to be aligned inside the instance
-        new_volume->set_transformation(translation_transform(connector.pos) * connector.rotation_m *
-                                       rotation_transform(-connector.z_angle * Vec3d::UnitZ()) *
-                                       scale_transform(Vec3f(connector.radius, connector.radius, connector.height).cast<double>()));
+        // Placed as the gizmo draws it (centred on its height only): see add_cut_connector_volume().
+        ModelVolume* new_volume = add_cut_connector_volume(
+            *mo, cut_connector_unit_mesh(connector.attribs, snap_space_proportion, snap_bulge_proportion), connector);
 
         new_volume->cut_info = { connector.attribs.type, connector.radius_tolerance, connector.height_tolerance };
         new_volume->name     = connector_name + "-" + std::to_string(++connector_id);
@@ -1473,6 +1597,21 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
 
     ModelObject* mo = m_model.objects.front();
 
+    // One Flexi joint per cut and nothing beside it: the cut below makes one joint and has no
+    // place for any other connector. Refused before anything is changed, as the gizmo refuses it
+    // before the click.
+    {
+        size_t flexi = 0, other = 0;
+        for (const ModelVolume* v : mo->volumes)
+            if (is_unprocessed_flexi_volume(v))
+                ++ flexi;
+            else if (v->cut_info.is_connector && !v->cut_info.is_processed && !v->cut_info.is_tac_joint())
+                ++ other;
+        const std::string error = flexi_connectors_error(flexi, other);
+        if (!error.empty())
+            throw std::invalid_argument(error);
+    }
+
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_flexi_joints - start";
 
     const SavedPaintings saved_paintings = save_paintings(mo);
@@ -1487,23 +1626,18 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     const Transformation cut_transformation = Transformation(m_cut_matrix);
     const Transform3d    inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
 
-    // Phase 1: exactly one joint per cut. Extra joints are ignored with a warning.
+    // Exactly one joint per cut, checked above.
     FlexiJointParams params;
     Transform3d      joint_matrix = Transform3d::Identity();
     ModelVolume*     first_solid  = nullptr;
-    int              joints       = 0;
     for (ModelVolume* v : mo->volumes) {
         if (is_unprocessed_flexi_volume(v)) {
-            if (++ joints == 1) {
-                params       = v->cut_info.flexi;
-                joint_matrix = inverse_cut_matrix * v->get_matrix();
-            }
+            params       = v->cut_info.flexi;
+            joint_matrix = inverse_cut_matrix * v->get_matrix();
             v->cut_info.set_processed();
         } else if (v->is_model_part() && !v->mesh().empty() && first_solid == nullptr)
             first_solid = v;
     }
-    if (joints > 1)
-        BOOST_LOG_TRIVIAL(warning) << "Flexi joint: " << joints << " joints placed, only the first is applied (phase 1)";
 
     // PHASE 3: the kerf ADDS to the joint's own gap, in the params, BEFORE anything
     // is generated. flexi_effective_gap() sets where the two flat faces go, and
@@ -1558,7 +1692,13 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     TriangleMesh lower_mesh(std::move(lower_its));
     TriangleMesh upper_mesh(std::move(upper_its));
 
-    bool boolean_ok = !lower_mesh.empty() && !upper_mesh.empty();
+    // A joint needs material on both sides of it. `out` is handed to m_model before a refusal so
+    // it is freed with the rest.
+    if (lower_mesh.empty() || upper_mesh.empty()) {
+        m_model.objects.push_back(out);
+        throw std::invalid_argument(L("The Flexi joint could not be made: the cut leaves nothing on one side of it."));
+    }
+    bool boolean_ok = true;
 
     // Union each segment's own joint body into it, then subtract the OTHER side's body
     // inflated by the clearance. For the revolved kinds the lower relief list is empty and
@@ -1589,8 +1729,14 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
             if (!flexi_boolean(upper_mesh, relief, "A_NOT_B")) { boolean_ok = false; break; }
         }
 
-    if (!boolean_ok)
-        BOOST_LOG_TRIVIAL(error) << "Flexi joint: boolean failed, the cut falls back to two plain halves";
+    // A failed boolean refuses the cut. Going on would give halves with the joint partly made (a
+    // body joined to one half with no room cut for it in the other) or not made at all, and the
+    // person would not know.
+    if (!boolean_ok) {
+        BOOST_LOG_TRIVIAL(error) << "Flexi joint: boolean failed, the cut is refused";
+        m_model.objects.push_back(out);
+        throw std::invalid_argument(L("The Flexi joint could not be made: joining it to the halves failed. Try another size or position."));
+    }
 
     add_cut_volume(upper_mesh, out, first_solid, m_cut_matrix, "_A");
     if (!lower_mesh.empty()) {
@@ -2145,8 +2291,22 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
 
     BOOST_LOG_TRIVIAL(trace) << "ModelObject::cut - start";
 
+    // Keep paint v2: the model parts process_solid_part_cut() paints by exact facet provenance are
+    // left out of the spatial remap in finalize(); the others (airbrushed, mirrored, an applied TAC
+    // joint) keep it.
+    std::vector<const ModelVolume*> exact_paint_parts;
+    if (m_instance >= 0 && size_t(m_instance) < mo->instances.size()) {
+        const Transform3d inst = mo->instances[m_instance]->get_transformation().get_matrix_no_offset();
+        for (const ModelVolume* volume : mo->volumes)
+            if (exact_cut_paint(*volume, inst, m_attributes))
+                exact_paint_parts.push_back(volume);
+    }
+    auto is_exact = [&exact_paint_parts](const ModelVolume* v) {
+        return std::find(exact_paint_parts.begin(), exact_paint_parts.end(), v) != exact_paint_parts.end();
+    };
+
     // Before the loop below resets every part's painting.
-    const SavedPaintings saved_paintings = save_paintings(mo);
+    const SavedPaintings saved_paintings = save_paintings(mo, exact_paint_parts);
 
     // Clone the object to duplicate instances, materials etc.
     ModelObject* upper{ nullptr };
@@ -2175,7 +2335,11 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
         curved_cut_thickness_faces(thickness, offset, kerf_face_lo, kerf_face_hi);
 
     for (ModelVolume* volume : mo->volumes) {
-        volume->reset_extra_facets();
+        // A part painted by exact provenance keeps its painting until its pieces have it (mo is
+        // this Cut's own copy of the object).
+        const bool exact = is_exact(volume);
+        if (!exact)
+            volume->reset_extra_facets();
 
         if (!volume->is_model_part()) {
             if (volume->cut_info.is_processed)
@@ -2185,6 +2349,9 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
         }
         else if (!volume->mesh().empty())
             process_solid_part_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, std::max(0.0, thickness), offset);
+
+        if (exact)
+            volume->reset_extra_facets();
     }
 
     // Post-process cut parts
@@ -2221,6 +2388,9 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
         delete_extra_modifiers(upper);
         delete_extra_modifiers(lower);
 
+        if (upper && !m_attributes.has(ModelObjectCutAttribute::PlaceOnCutUpper) && !m_attributes.has(ModelObjectCutAttribute::FlipUpper) &&
+            size_t(m_instance) < m_src_bboxes.size())
+            shift_upper_layer_ranges(upper, m_instance, m_cut_matrix, m_src_bboxes[m_instance]);
     }
     if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
         add_separate_parts(dowels, cut_object_ptrs);
@@ -2668,6 +2838,75 @@ float Cut::calculate_groove_width(const Cut::Groove& groove, const float plane_r
     const double slot_outer_x_max       = std::max(slot_mouth_half_width + flap_taper_offset, slot_neck_half_width + flap_taper_offset);
 
     return float(2.0 * slot_outer_x_max);
+}
+
+
+// ---------------------------------------------------------------------------
+// Decisions of the Cut gizmo, kept here so they can be tested without the GUI.
+// ---------------------------------------------------------------------------
+
+ModelVolume* add_cut_connector_volume(ModelObject& mo, indexed_triangle_set unit_mesh, const CutConnector& connector)
+{
+    // Centre the height only. Letting add_volume() centre the mesh on its bounding box moved a
+    // triangle a quarter of its radius off the point placed, the box being off its axis.
+    if (!unit_mesh.vertices.empty())
+        its_translate(unit_mesh, Vec3f(0.f, 0.f, -float(bounding_box(unit_mesh).center().z())));
+    ModelVolume* volume = mo.add_volume(TriangleMesh(std::move(unit_mesh)), ModelVolumeType::NEGATIVE_VOLUME, false);
+    // Transform the new modifier to be aligned inside the instance
+    volume->set_transformation(Geometry::translation_transform(connector.pos) * connector.rotation_m *
+                               Geometry::rotation_transform(-connector.z_angle * Vec3d::UnitZ()) *
+                               Geometry::scale_transform(Vec3f(connector.radius, connector.radius, connector.height).cast<double>()));
+    return volume;
+}
+
+std::vector<Vec3f> cut_connector_outline(const CutConnector& connector)
+{
+    const CutConnectorShape shape        = CutConnectorShape(connector.attribs.shape);
+    const int               sector_count = shape == CutConnectorShape::Triangle ? 3 :
+                                           shape == CutConnectorShape::Square   ? 4 :
+                                           shape == CutConnectorShape::Circle   ? 60 : // supposably, 60 points are enough for conflict detection
+                                           shape == CutConnectorShape::Hexagon  ? 6 : 1;
+    std::vector<Vec3f> vertices;
+    vertices.reserve(sector_count + 1);
+    // Turned by the connector's Rotation, as render_connectors() draws it.
+    const Eigen::Rotation2Df turn(-connector.z_angle);
+    const float              fa  = 2 * PI / sector_count;
+    const Vec2f              vec = Eigen::Vector2f(0, connector.radius);
+    for (int i = 0; i < sector_count; ++i) {
+        const Vec2f p = turn * (Eigen::Rotation2Df(fa * i) * vec);
+        vertices.emplace_back(Vec3f(p(0), p(1), 0.f));
+    }
+    return vertices;
+}
+
+float cut_groove_default_depth(const BoundingBoxf3& bb)
+{
+    return std::max(1.f, float((bb.size().x() + bb.size().y() + bb.size().z()) / 60.));
+}
+
+std::vector<size_t> edit_cut_objects(const ModelObjectPtrs& objects, size_t selected)
+{
+    if (selected >= objects.size())
+        return {};
+    std::vector<size_t> out;
+    const ModelObject* src = objects[selected];
+    if (src->is_cut()) {
+        for (size_t i = 0; i < objects.size(); ++i)
+            if (objects[i] == src || (objects[i]->is_cut() && objects[i]->cut_id.id() == src->cut_id.id()))
+                out.push_back(i);
+        return out;
+    }
+    // A plain cut: its halves are linked by nothing but the recipe they both carry.
+    std::vector<size_t> others;
+    if (src->has_cut_recipe())
+        for (size_t i = 0; i < objects.size(); ++i)
+            if (i != selected && !objects[i]->is_cut() && objects[i]->has_cut_recipe() && *objects[i]->cut_recipe == *src->cut_recipe)
+                others.push_back(i);
+    out.push_back(selected);
+    if (others.size() == 1)
+        out.push_back(others.front());
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 } // namespace Slic3r

@@ -1,0 +1,98 @@
+# Phase 7 — Out-of-process plugin host
+
+Revision: Edge `feature/plugins-p7-ipc-host`.
+Plan: plugins plan section 6 (sandbox workloads, Out-of-process host and IPC) and Phase 7 in
+section 10. Catalog publishing is Phase 11. Printer-agent hooks stay unwired. OS sandbox
+profiles are Phase 8 (`docs/plugins/phase8-os-sandbox.md`).
+
+All of this is compiled only when `EDGE_PYTHON_PLUGINS` is ON (default OFF). `libslic3r` is
+not given that define. With it OFF, or ON with no pipeline plugin enabled, G-code is
+byte-identical to today and the empty plugin config keys are still skipped in the G-code dump
+(the Phase 6 B1 fix). Startup never spawns `edge-plugin-host` in golden or CI runs: the helper
+is launched on the first script or `psGCodePostProcess` execute only. Phase 8
+(`docs/plugins/phase8-os-sandbox.md`) wraps this child in an OS sandbox; this document keeps
+the Phase 7 IPC contract.
+
+## What was built
+
+`edge-plugin-host` is a bundled helper next to EdgeSlicer. It embeds the same CPython runtime
+and the same `orca` module. Edge talks to it over a local socket (POSIX `socketpair`) or a
+Windows named pipe.
+
+| Workload | Where it runs |
+|---|---|
+| Import / `load_plugin` (capabilities, metadata) | **In-process** inside Edge. Only execute is out of process in this phase. |
+| Script execute | **Out of process** via the helper |
+| `psGCodePostProcess` execute | **Out of process** via the helper |
+| Early slicing steps (`posSlice` … `psSkirtBrim`) | **In-process**, unsandboxed, live `Print` / `PrintObject`. The Home card still says so. |
+
+## Protocol
+
+Versioned, length-prefixed JSON:
+
+- 4-byte little-endian payload length, then UTF-8 JSON object with a `type` field
+- protocol version **1**
+- max payload 16 MiB
+- handshake `hello` / `hello_ok`
+- `load` / `load_ok`, `execute` / `result` / `error`, `shutdown` / `shutdown_ok`
+- nested `host_call` / `host_result` and `audit_check` / `audit_result` during execute
+
+Every `orca.host.*` call in the child is an RPC back into Edge. Edge applies Phase 4
+permission grants and Phase 5 trust on the Edge side before performing it. The child never
+receives raw `Print*` / `PrintObject*` pointers, UltraNet `{data_dir}/plugins` paths, or
+secrets. Write-shaped filesystem events in the child are decided on the Edge side so the
+Phase 6 write root (the exported G-code's folder only) cannot be skipped by a modified
+child. Reads stay local so CPython can still import the bundled stdlib.
+
+## Crash isolation
+
+A child abort, segfault, hang, or kill does not take Edge down. Edge reports a clear failure
+for that run, plugin state stays recoverable, and the next run respawns the helper. Execute
+timeouts kill a hung child.
+
+The child dies with Edge:
+
+- Linux: `prctl(PR_SET_PDEATHSIG, SIGKILL)` **and** a parent-pipe EOF watchdog. PDEATHSIG
+  tracks the spawning *thread*, so spawn always happens on a process-lifetime worker thread.
+- Windows: Job object with `KILL_ON_JOB_CLOSE` and `ACTIVE_PROCESS=1`, no breakaway; create
+  suspended, assign, resume. The named-pipe client pid must match the child.
+- macOS / POSIX: extra parent-pipe EOF watchdog (plus the inherited IPC fd closing)
+
+Phase 8 adds AppContainer (Windows), a signed App Sandbox helper (macOS), and Landlock+seccomp
+(Linux) on top of this spawn path. See `docs/plugins/phase8-os-sandbox.md`.
+
+## Permission prompts
+
+Phase 4's worker-thread deny-first behaviour is unchanged. Host RPC and audit RPC run on the
+execute worker, so they cannot pop a permission dialog off the UI thread.
+
+## Known limitations
+
+- Plugin **import** (discovery, `load_plugin`, capability registration) still runs inside
+  Edge so the Home card and slicer can see capabilities. Only **execute** (script and
+  `psGCodePostProcess`) is out of process.
+- Phase 8 applies an OS sandbox to execute. A malicious child that skips its own Python audit
+  hook is then still constrained by Landlock/AppContainer/App Sandbox. Edge-side host RPC and
+  FS `audit_check` cover the `orca.host` surface and audited `open()` events. Without Phase 8
+  the child has the process's ambient filesystem.
+- Early slicing-pipeline steps remain in-process and unsandboxed.
+- `host.preset_bundle` / `host.plater` are not snapshotted over IPC in this phase (they throw
+  in the child the same way they throw without a GUI). Script and post-process fixtures do not
+  need them.
+- Printer-agent hooks stay unwired. No catalog and no pages.
+
+## Missing helper
+
+Landing change (review H4, 2026-11-18): there is no in-process fallback. If
+`edge-plugin-host` is missing, or (Windows) not signed although EdgeSlicer is, or cannot
+start, the run fails with a message that plugins do not run and to reinstall. The Home >
+Plugins card shows the same reason (`PluginHostClient::host_unavailable_reason()`). The env
+overrides `EDGE_PLUGIN_HOST` and `EDGE_PLUGIN_HOST_IN_PROCESS` are ignored in production;
+tests may enable them through `PluginHostClient::set_allow_env_overrides_for_testing`.
+
+## Smoke tests owed at merge
+
+Linux IPC sequential (same host pid) + concurrent (script + post-process). Mac GUI (script
+runs via the host, kill the host mid-run). Windows Job object with a non-ASCII install path.
+Linux pkg, Flatpak, macOS sign/notarize with the helper. U1 prints are still required for
+pipeline plugins.

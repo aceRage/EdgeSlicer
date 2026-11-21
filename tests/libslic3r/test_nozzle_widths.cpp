@@ -178,6 +178,8 @@ TEST_CASE("Mixed nozzle sizes resolve every filament's widths", "[NozzleWidths][
     region.wall_filament.value          = 3;
     region.sparse_infill_filament.value = 1;
     region.solid_infill_filament.value  = 4;
+    // The top surface follows the outer wall by default (EdgeSlicer surface filaments): put it on 4 too.
+    region.top_surface_filament.value   = 4;
     stamp_nozzle_line_widths(region);
     CHECK(near(region.outer_wall_line_width.value, 0.63));
     CHECK(near(region.inner_wall_line_width.value, 0.675));

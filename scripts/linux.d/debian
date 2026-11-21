@@ -27,6 +27,20 @@ REQUIRED_DEV_PACKAGES=(
     wget
 )
 
+# CPython 3.12 (deps/python3) when EDGE_PYTHON_PLUGINS=ON. libseccomp-dev is Phase 8, not here.
+if [[ "${EDGE_PYTHON_PLUGINS}" == "ON" || "${EDGE_PYTHON_PLUGINS}" == "1" || "${EDGE_PYTHON_PLUGINS}" == "true" ]]; then
+    REQUIRED_DEV_PACKAGES+=(
+        libffi-dev
+        libbz2-dev
+        liblzma-dev
+        libsqlite3-dev
+        libncurses-dev
+        libreadline-dev
+        uuid-dev
+        libgdbm-dev
+    )
+fi
+
 if [[ -n "$UPDATE_LIB" ]]
 then
     # shellcheck source=/dev/null

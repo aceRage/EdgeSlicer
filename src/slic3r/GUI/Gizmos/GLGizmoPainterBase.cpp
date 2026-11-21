@@ -1085,10 +1085,26 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
             shift_down = m_spread->erase;
             m_spread.reset();
         }
-        // Take snapshot and update ModelVolume data.
-        wxString action_name = this->handle_snapshot_action_name(shift_down, m_button_down);
-        Plater::TakeSnapshot snapshot(wxGetApp().plater(), std::string(action_name.ToUTF8().data()), UndoRedo::SnapshotType::GizmoAction);
-        update_model_object();
+        // Triangle, Smart fill and Fill paint at each press or drag event what the event before marked, and then
+        // mark what is under the pointer now. The release is the last event of the stroke: paint what the last
+        // drag marked, or the triangle (patch) under the pointer at the release stayed marked but unpainted.
+        if (m_tool_type == ToolType::SMART_FILL || m_tool_type == ToolType::BUCKET_FILL ||
+            (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)) {
+            const EnforcerBlockerType new_state = shift_down ? EnforcerBlockerType::NONE :
+                                                  m_button_down == Button::Left ? this->get_left_button_state_type() :
+                                                                                  this->get_right_button_state_type();
+            for (auto &triangle_selector : m_triangle_selectors) {
+                triangle_selector->seed_fill_apply_on_triangles(new_state);
+                triangle_selector->request_update_render_data(true);
+            }
+        }
+        // Take snapshot and update ModelVolume data. A stroke that changed nothing (painting over the same
+        // colour, erasing where there is no paint) takes no undo step: it used to add one that undid nothing.
+        if (this->paint_differs_from_model()) {
+            wxString action_name = this->handle_snapshot_action_name(shift_down, m_button_down);
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), std::string(action_name.ToUTF8().data()), UndoRedo::SnapshotType::GizmoAction);
+            update_model_object();
+        }
 
         m_button_down = Button::None;
         m_last_mouse_click = Vec2d::Zero();
@@ -1096,6 +1112,25 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
     }
 
     return false;
+}
+
+bool GLGizmoPainterBase::paint_differs_from_model() const
+{
+    const ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (mo == nullptr)
+        return true;
+    size_t idx = 0;
+    for (const ModelVolume *mv : mo->volumes) {
+        if (!mv->is_model_part())
+            continue;
+        const FacetsAnnotation *facets = this->painted_facets(*mv);
+        if (facets == nullptr || idx >= m_triangle_selectors.size())
+            return true;
+        if (m_triangle_selectors[idx]->serialize() != facets->get_data())
+            return true;
+        ++idx;
+    }
+    return idx != m_triangle_selectors.size();
 }
 
 bool GLGizmoPainterBase::on_mouse(const wxMouseEvent &mouse_event)

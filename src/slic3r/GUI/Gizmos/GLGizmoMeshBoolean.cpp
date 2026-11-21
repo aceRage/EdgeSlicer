@@ -3,6 +3,7 @@
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "libslic3r/MeshBoolean.hpp"
+#include "libslic3r/PaintTransfer.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Camera.hpp"
@@ -11,10 +12,13 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #endif
 #include <imgui/imgui_internal.h>
+#include <memory>
+#include <wx/utils.h>
 namespace Slic3r {
 namespace GUI {
 
 static const std::string warning_text = _u8L("Unable to perform boolean operation on selected parts");
+static const std::string empty_text   = _u8L("The boolean operation leaves nothing of the selected parts: they do not overlap, or the tool covers the whole part");
 
 GLGizmoMeshBoolean::GLGizmoMeshBoolean(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoBase(parent, icon_filename, sprite_id)
@@ -384,14 +388,24 @@ void GLGizmoMeshBoolean::on_render_input_window(float x, float y, float bottom_l
         TriangleMesh temp_tool_mesh = m_tool.mv->mesh();
         temp_tool_mesh.transform(m_tool.trafo, true);
         std::vector<TriangleMesh> temp_mesh_resuls;
-        if (!Slic3r::MeshBoolean::mfd::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, op))
-            Slic3r::MeshBoolean::mcut::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, op);
-        if (temp_mesh_resuls.size() != 0) {
+        // An empty result (an intersection of parts that do not meet) is not a failure: say so
+        // rather than "unable to perform". A Manifold boolean that fails part way goes on to mcut.
+        auto *notifications = wxGetApp().notification_manager();
+        switch (Slic3r::MeshBoolean::make_boolean_with_fallback(temp_src_mesh, temp_tool_mesh, op, temp_mesh_resuls,
+                                                                "Mesh Boolean gizmo")) {
+        case Slic3r::MeshBoolean::BooleanOutcome::Done:
             generate_new_volume(delete_input, *temp_mesh_resuls.begin());
-            wxGetApp().notification_manager()->close_plater_warning_notification(warning_text);
-        }
-        else {
-            wxGetApp().notification_manager()->push_plater_warning_notification(warning_text);
+            notifications->close_plater_warning_notification(warning_text);
+            notifications->close_plater_warning_notification(empty_text);
+            break;
+        case Slic3r::MeshBoolean::BooleanOutcome::Empty:
+            notifications->close_plater_warning_notification(warning_text);
+            notifications->push_plater_warning_notification(empty_text);
+            break;
+        case Slic3r::MeshBoolean::BooleanOutcome::Failed:
+            notifications->close_plater_warning_notification(empty_text);
+            notifications->push_plater_warning_notification(warning_text);
+            break;
         }
     };
 
@@ -459,8 +473,6 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
     if (m_src.volume_idx < 0 || m_tool.volume_idx < 0)
         return;
 
-    wxGetApp().plater()->take_snapshot("Mesh Boolean");
-
     std::string suffix;
     switch (m_operation_mode)
     {
@@ -474,14 +486,33 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
         suffix = "intersection";
         break;
     }
-    // The new volume replaces the source volume in its slot (libslic3r, unit-tested).
-    ModelVolume* new_volume = curr_model_object->replace_volume_with_object_mesh(size_t(m_src.volume_idx), TriangleMesh(mesh_result), suffix);
+    // Keep paint v2: the inputs the result is painted from, in object coordinates (the boolean ran on
+    // each volume's mesh transformed by its own matrix). A Difference's tool only leaves the wall
+    // of its cut, which stays plain.
+    const std::vector<PaintTransfer::Source> paint_sources =
+        PaintTransfer::part_boolean_sources(*m_src.mv, *m_tool.mv, m_operation_mode == MeshBooleanOperation::Difference);
+    std::unique_ptr<wxBusyCursor> busy;
+    if (PaintTransfer::worth_transferring(paint_sources))
+        busy = std::make_unique<wxBusyCursor>();
 
-    if (delete_input) {
-        std::vector<ItemForDelete> items;
-        auto obj_idx = m_parent.get_selection().get_object_idx();
-        items.emplace_back(ItemType::itVolume, obj_idx, m_tool.volume_idx);
-        wxGetApp().obj_list()->delete_from_model_and_list(items);
+    ModelVolume* new_volume = nullptr;
+    {
+        // One undo step for the boolean and the tool part's deletion: TakeSnapshot holds
+        // back the "Delete part" snapshot the object list would take in between, which
+        // made the first undo bring the tool part back over the result.
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Mesh Boolean");
+
+        // The new volume replaces the source volume in its slot (libslic3r, unit-tested), painted
+        // from both inputs while they still exist.
+        new_volume = curr_model_object->replace_volume_with_object_mesh(size_t(m_src.volume_idx), TriangleMesh(mesh_result), suffix,
+                                                                        &paint_sources);
+
+        if (delete_input) {
+            std::vector<ItemForDelete> items;
+            auto obj_idx = m_parent.get_selection().get_object_idx();
+            items.emplace_back(ItemType::itVolume, obj_idx, m_tool.volume_idx);
+            wxGetApp().obj_list()->delete_from_model_and_list(items);
+        }
     }
 
     //bool sinking = curr_model_object->bounding_box().min.z() < SINKING_Z_THRESHOLD;

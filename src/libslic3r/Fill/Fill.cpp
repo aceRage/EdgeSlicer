@@ -1400,7 +1400,7 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 		        const PrintRegionConfig &region_config = layerm.region().config();
 		        FlowRole extrusion_role = surface.is_top() ? frTopSolidInfill : (surface.is_solid() ? frSolidInfill : frInfill);
 		        bool     is_bridge 	    = layer.id() > 0 && surface.is_bridge();
-                const unsigned int effective_extruder = layerm.extruder(extrusion_role);
+                unsigned int effective_extruder = layerm.extruder(extrusion_role);
 		        params.extruder 	 = effective_extruder;
 		        params.pattern 		 = region_config.sparse_infill_pattern.value;
 		        params.density       = float(region_config.sparse_infill_density);
@@ -1473,6 +1473,14 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                     } else {
                         params.extrusion_role = erSolidInfill;
                     }
+                }
+                // EdgeSlicer surface filaments: a bottom skin (bottom surface, bottom over support, bottom
+                // bridge) prints with bottom_surface_filament (0 = the outer wall's filament), and its flow
+                // below takes that filament's nozzle. The top skin already did through frTopSolidInfill.
+                const ExtrusionRole surface_fill_role = is_bottom_surface_filament_role(params.extrusion_role) ? params.extrusion_role : erNone;
+                if (surface_fill_role != erNone) {
+                    effective_extruder = layerm.extruder(extrusion_role, surface_fill_role);
+                    params.extruder    = effective_extruder;
                 }
                 // Phase 3 (image row): see this field's own comment above - 0 for every print that
                 // does not use the feature. Phase 5a keys EVERY solid role, not only the top: a
@@ -1547,8 +1555,8 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                 const bool is_thick_bridge = surface.is_bridge() && (surface.is_internal_bridge() ? object_config.thick_internal_bridges : object_config.thick_bridges);
 				params.flow   = params.bridge ?
 					//Orca: enable thick bridge based on config
-					layerm.bridging_flow(extrusion_role, is_thick_bridge) :
-					layerm.flow(extrusion_role, (surface.thickness == -1) ? layer.height : surface.thickness);
+					layerm.bridging_flow(extrusion_role, is_thick_bridge, surface_fill_role) :
+					layerm.flow(extrusion_role, (surface.thickness == -1) ? layer.height : surface.thickness, layer.id() == 0, surface_fill_role);
 				// record speed params: the speed GCode::_extrude will use for this role (flow variant
 				// slot of the fill's filament), so two regions with different speeds are never merged.
                 const PrintConfig  &print_config = layer.object()->print()->config();
@@ -2373,6 +2381,11 @@ static void extrusion_entities_append_calib_ironing_paths(ExtrusionEntitiesPtr &
     }
 }
 
+// EdgeSlicer: the surfaces one ironing entry covers (Layer::make_ironing).
+static constexpr uint8_t IRON_TOP    = 1;
+static constexpr uint8_t IRON_BOTTOM = 2;
+static constexpr uint8_t IRON_SOLID  = 4;
+
 // Create ironing extrusions over top surfaces.
 void Layer::make_ironing()
 {
@@ -2445,6 +2458,9 @@ void Layer::make_ironing()
 		}
 
 		LayerRegion *layerm		= nullptr;
+		// EdgeSlicer: the surfaces of `layerm` this entry irons (IRON_TOP | IRON_BOTTOM | IRON_SOLID), the ones
+		// whose ironing filament is `extruder`. Not part of the grouping: entries of one filament iron together.
+		uint8_t      surfaces   = 0;
 
 		// IdeaMaker: ironing
 		// ironing flowrate (5% percent)
@@ -2473,60 +2489,71 @@ void Layer::make_ironing()
 
 	for (LayerRegion *layerm : m_regions)
 		if (! layerm->slices.empty()) {
-			IroningParams ironing_params;
 			const PrintRegionConfig &config = layerm->region().config();
 			if (config.ironing_type != IroningType::NoIroning &&
 			    (config.ironing_type == IroningType::AllSolid ||
 				    ((config.top_shell_layers > 0 || (this->object()->print()->config().spiral_mode && config.bottom_shell_layers > 1)) &&
 					    (config.ironing_type == IroningType::TopSurfaces ||
 					        (config.ironing_type == IroningType::TopmostOnly && layerm->layer()->upper_layer == nullptr))))) {
-				if (config.wall_filament == config.solid_infill_filament || config.wall_loops == 0) {
-					// Iron the whole face.
-					ironing_params.extruder = config.solid_infill_filament;
-				} else {
-					// Iron just the infill.
-					ironing_params.extruder = config.solid_infill_filament;
-				}
+				// EdgeSlicer: ironing follows the filament of the surface it irons (ironing_filament_1based(): the
+				// ironing filament when one is set, else the top surface filament on top surfaces, the bottom
+				// surface filament on bottom surfaces and the solid infill's on internal solid infill). One entry
+				// per filament; with one filament for all of them this is the single entry it always was.
 				// PHASE 4, step 3: ironing IS now split per image, so ironing_params.extruder's
 				// virtual id is only the fallback for the case the split declines (see the
-				// split site further down in this function). Phase 3 left ironing on the row's
-				// per-layer colour cycle, which on an image surface meant the ironed skin -
-				// the layer you actually SEE - was a single flat colour smeared over a
-				// correctly dithered surface, hiding the feature it was meant to finish.
-				(void)config;
-			}
-			if (ironing_params.extruder != -1) {
-				//TODO just_infill is currently not used.
-				ironing_params.just_infill 	= false;
-				// Orca #11194: filament-specific overrides if configured, otherwise the process values.
-				const int iron_filament = ironing_params.extruder;
-				ironing_params.line_spacing = std::max(IRONING_SPACING_MIN,
-					ironing_filament_override(config.filament_ironing_spacing, iron_filament, double(config.ironing_spacing)));
-                ironing_params.inset 		= ironing_filament_override(config.filament_ironing_inset, iron_filament, double(config.ironing_inset));
-				ironing_params.height 		= default_layer_height * 0.01 *
-					ironing_filament_override(config.filament_ironing_flow, iron_filament, double(config.ironing_flow));
-				// Only a grouping key here; GCode resolves the printed speed (flow variant / filament override).
-				ironing_params.speed 		= ironing_filament_override(config.filament_ironing_speed, iron_filament, config.ironing_speed.values.front());
-                // Orca #10841: ironing_angle is an offset from the top surface (solid infill) direction,
-                // including its rotation template, instead of an absolute angle / the sparse infill direction.
-                // Orca #11195: ironing_angle_fixed makes ironing_angle an absolute angle that does not alternate.
-                // Orca #13631: a set top_layer_direction is the base direction instead of the solid infill direction.
-                const bool   top_layer_direction_set = config.top_layer_direction.value >= 0.;
-                const double top_layer_base_angle    = top_layer_direction_set ?
-                    Geometry::deg2rad(config.top_layer_direction.value) :
-                    calculate_infill_rotation_angle(this->object(), this->id(), config.solid_infill_direction.value,
-                                                    config.solid_infill_rotate_template.value);
-                double ironing_angle = (config.ironing_angle_fixed ? 0. : top_layer_base_angle) + config.ironing_angle * M_PI / 180.;
-                // ORCA: Align ironing angle with model
-                if (config.align_infill_direction_to_model) {
-                    auto m = this->object()->trafo().matrix();
-                    ironing_angle += atan2((double)m(1, 0), (double)m(0, 0));
-                }
-                ironing_params.angle        = ironing_angle;
-                ironing_params.is_using_template_angle = config.ironing_angle_fixed || top_layer_direction_set || !config.solid_infill_rotate_template.value.empty();
-				ironing_params.pattern      = config.ironing_pattern;
-				ironing_params.layerm 		= layerm;
-				by_extruder.emplace_back(ironing_params);
+				// split site further down in this function).
+				std::vector<std::pair<int, uint8_t>> filament_surfaces;
+				auto add_surface = [&config, &filament_surfaces](IronedSurface surface, uint8_t bit) {
+					const int filament = ironing_filament_1based(config, surface);
+					auto it = std::find_if(filament_surfaces.begin(), filament_surfaces.end(),
+					                       [filament](const std::pair<int, uint8_t> &e) { return e.first == filament; });
+					if (it == filament_surfaces.end())
+						filament_surfaces.emplace_back(filament, bit);
+					else
+						it->second |= bit;
+				};
+				add_surface(IronedSurface::Top, IRON_TOP);
+				if (config.ironing_type == IroningType::AllSolid) {
+					add_surface(IronedSurface::Bottom, IRON_BOTTOM);
+					add_surface(IronedSurface::Solid, IRON_SOLID);
+				}
+				for (const auto &[filament, surfaces] : filament_surfaces) {
+					IroningParams ironing_params;
+					ironing_params.extruder = filament;
+					ironing_params.surfaces = surfaces;
+					//TODO just_infill is currently not used.
+					ironing_params.just_infill 	= false;
+					// Orca #11194: filament-specific overrides if configured, otherwise the process values.
+					const int iron_filament = ironing_params.extruder;
+					ironing_params.line_spacing = std::max(IRONING_SPACING_MIN,
+						ironing_filament_override(config.filament_ironing_spacing, iron_filament, double(config.ironing_spacing)));
+	                ironing_params.inset 		= ironing_filament_override(config.filament_ironing_inset, iron_filament, double(config.ironing_inset));
+					ironing_params.height 		= default_layer_height * 0.01 *
+						ironing_filament_override(config.filament_ironing_flow, iron_filament, double(config.ironing_flow));
+					// Only a grouping key here; GCode resolves the printed speed (flow variant / filament override).
+					ironing_params.speed 		= ironing_filament_override(config.filament_ironing_speed, iron_filament, config.ironing_speed.values.front());
+	                // Orca #10841: ironing_angle is an offset from the top surface (solid infill) direction,
+	                // including its rotation template, instead of an absolute angle / the sparse infill direction.
+	                // Orca #11195: ironing_angle_fixed makes ironing_angle an absolute angle that does not alternate.
+	                // Orca #13631: a set top_layer_direction is the base direction instead of the solid infill direction.
+	                const bool   top_layer_direction_set = config.top_layer_direction.value >= 0.;
+	                const double top_layer_base_angle    = top_layer_direction_set ?
+	                    Geometry::deg2rad(config.top_layer_direction.value) :
+	                    calculate_infill_rotation_angle(this->object(), this->id(), config.solid_infill_direction.value,
+	                                                    config.solid_infill_rotate_template.value);
+	                double ironing_angle = (config.ironing_angle_fixed ? 0. : top_layer_base_angle) + config.ironing_angle * M_PI / 180.;
+	                // ORCA: Align ironing angle with model
+	                if (config.align_infill_direction_to_model) {
+	                    auto m = this->object()->trafo().matrix();
+	                    ironing_angle += atan2((double)m(1, 0), (double)m(0, 0));
+	                }
+	                ironing_params.angle        = ironing_angle;
+	                ironing_params.is_using_template_angle = config.ironing_angle_fixed || top_layer_direction_set || !config.solid_infill_rotate_template.value.empty();
+					ironing_params.pattern      = config.ironing_pattern;
+					ironing_params.layerm 		= layerm;
+
+					by_extruder.emplace_back(ironing_params);
+				}
 			}
 		}
 	std::sort(by_extruder.begin(), by_extruder.end());
@@ -2573,6 +2600,14 @@ void Layer::make_ironing()
 				const PrintRegionConfig  &region_config   = ironing_params.layerm->region().config();
 				bool					  iron_everything = region_config.ironing_type == IroningType::AllSolid;
 				bool					  iron_completely = iron_everything;
+				// EdgeSlicer: this entry irons only the surfaces whose filament it is. All of them (one filament
+				// for the whole region, always the case outside "All solid layers"): exactly as before.
+				const uint8_t             surfaces        = ironing_params.surfaces;
+				const bool                all_surfaces    = ! iron_everything || surfaces == (IRON_TOP | IRON_BOTTOM | IRON_SOLID);
+				auto                      ironed_bit      = [](SurfaceType type) -> uint8_t {
+					return type == stTop ? IRON_TOP :
+					       (type == stBottom || type == stBottomOverSupport || type == stBottomBridge) ? IRON_BOTTOM : IRON_SOLID;
+				};
 				if (iron_everything) {
 					// Check whether there is any non-solid hole in the regions.
 					bool internal_infill_solid = region_config.sparse_infill_density.value > 95.;
@@ -2586,14 +2621,18 @@ void Layer::make_ironing()
 				if (iron_completely) {
 					// Iron everything. This is likely only good for solid transparent objects.
 					for (const Surface &surface : ironing_params.layerm->slices.surfaces)
-						polygons_append(polys, surface.expolygon);
+						if (all_surfaces || (surfaces & ironed_bit(surface.surface_type)) != 0)
+							polygons_append(polys, surface.expolygon);
 				} else {
 					for (const Surface &surface : ironing_params.layerm->slices.surfaces)
-						if ((surface.surface_type == stTop && (region_config.top_shell_layers > 0 || this->object()->print()->config().spiral_mode)) || (iron_everything && (surface.surface_type == stBottom || surface.surface_type == stBottomOverSupport) && region_config.bottom_shell_layers > 0))
+						if ((surface.surface_type == stTop && (region_config.top_shell_layers > 0 || this->object()->print()->config().spiral_mode) &&
+						     (all_surfaces || (surfaces & IRON_TOP) != 0)) ||
+						    (iron_everything && (surface.surface_type == stBottom || surface.surface_type == stBottomOverSupport) && region_config.bottom_shell_layers > 0 &&
+						     (all_surfaces || (surfaces & IRON_BOTTOM) != 0)))
 							// stBottomBridge is not being ironed on purpose, as it would likely destroy the bridges.
 							polygons_append(polys, surface.expolygon);
 				}
-				if (iron_everything && ! iron_completely) {
+				if (iron_everything && ! iron_completely && (all_surfaces || (surfaces & IRON_SOLID) != 0)) {
 					// Add solid fill surfaces. This may not be ideal, as one will not iron perimeters touching these
 					// solid fill surfaces, but it is likely better than nothing.
 					for (const Surface &surface : ironing_params.layerm->fill_surfaces.surfaces)
@@ -2656,6 +2695,11 @@ void Layer::make_ironing()
 		        ironing_params.layerm->fills.entities.push_back(eec = new ExtrusionEntityCollection());
 		        // Don't sort the ironing infill lines as they are monotonicly ordered.
 				eec->no_sort = true;
+				// EdgeSlicer: which surface this irons, so that the G-code prints it with that surface's filament
+				// (fill_filament_source()). The group's entries share one filament; any surface of the first
+				// entry (whose region owns the collection) names it.
+				eec->ironed_surface = (ironing_params.surfaces & IRON_TOP) != 0 ? IronedSurface::Top :
+				                      (ironing_params.surfaces & IRON_BOTTOM) != 0 ? IronedSurface::Bottom : IronedSurface::Solid;
 				if (calib_ironing_flow) {
 					// Iron from left to right.
 					for (Polyline &polyline : polylines)
@@ -2693,11 +2737,14 @@ void Layer::make_ironing()
 		                if (split.empty()) {
 		                    auto *solo = new ExtrusionEntityCollection();
 		                    solo->no_sort = true;
+		                    solo->ironed_surface = eec->ironed_surface;
 		                    solo->entities.push_back(child->clone());
 		                    replacement.push_back(solo);
 		                } else {
-		                    for (auto &c : split)
+		                    for (auto &c : split) {
+		                        c->ironed_surface = eec->ironed_surface;
 		                        replacement.push_back(c.release());
+		                    }
 		                }
 		            }
 		            if (!replacement.empty()) {

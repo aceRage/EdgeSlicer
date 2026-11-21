@@ -125,6 +125,35 @@ bool looks_like_ipv4(const std::string &host)
 
 const char *const MODEL_EXTENSIONS[] = {".3mf", ".stl", ".step", ".stp", ".obj", ".zip"};
 
+// Windows reserved device names, including with an extension: "nul.txt" opens the null device.
+// Superscript digits ¹ ² ³ (U+00B9/B2/B3) are the same as 1/2/3: COM¹ is COM1.
+bool is_windows_reserved_device_name(const std::string &seg)
+{
+    const std::string stem = seg.substr(0, seg.find('.'));
+    std::string       upper;
+    upper.reserve(stem.size());
+    for (size_t i = 0; i < stem.size();) {
+        const unsigned char c = static_cast<unsigned char>(stem[i]);
+        if (c == 0xC2 && i + 1 < stem.size()) {
+            const unsigned char n = static_cast<unsigned char>(stem[i + 1]);
+            if (n == 0xB9) { upper.push_back('1'); i += 2; continue; } // ¹
+            if (n == 0xB2) { upper.push_back('2'); i += 2; continue; } // ²
+            if (n == 0xB3) { upper.push_back('3'); i += 2; continue; } // ³
+        }
+        upper.push_back(char(std::toupper(c)));
+        ++i;
+    }
+    while (!upper.empty() && upper.back() == ' ')
+        upper.pop_back();
+    static const char *const reserved[] = {"CON",  "PRN",  "AUX",  "NUL",  "CONIN$", "CONOUT$", "COM1", "COM2", "COM3",
+                                           "COM4", "COM5", "COM6", "COM7", "COM8",   "COM9",    "LPT1", "LPT2", "LPT3",
+                                           "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",   "LPT9"};
+    for (const char *r : reserved)
+        if (upper == r)
+            return true;
+    return false;
+}
+
 } // namespace
 
 // ---- URLs ------------------------------------------------------------------------------------
@@ -536,20 +565,8 @@ std::string sanitize_download_filename(const std::string &name_in)
         return std::string();
 
     // Device names are reserved with any extension: "NUL.3mf" opens the null device.
-    std::string stem = out.substr(0, out.find('.'));
-    std::string upper;
-    for (char c : stem)
-        upper.push_back(char(std::toupper((unsigned char)c)));
-    while (!upper.empty() && upper.back() == ' ')
-        upper.pop_back();
-    static const char *const reserved[] = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
-                                           "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-                                           "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"};
-    for (const char *r : reserved)
-        if (upper == r) {
-            out = "_" + out;
-            break;
-        }
+    if (is_windows_reserved_device_name(out))
+        out = "_" + out;
 
     // Cap the length, keeping the extension.
     const size_t max_len = 150;
@@ -906,6 +923,9 @@ bool is_safe_archive_relative_path(const std::string &path)
         if (seg.empty() || seg == "." || seg == "..")
             return false;
         // Windows strips trailing dots/spaces, so "..." or ".. " would still climb.
+        // (Reserved device names and a trailing dot/space on an ordinary name are not refused
+        // here: ZIP extraction renames them in sanitize_zip_extract_segment, and 3MF entries such
+        // as Auxiliaries/aux.png must keep loading.)
         if (seg.find_first_not_of(". ") == std::string::npos)
             return false;
         if (slash == std::string::npos)
@@ -981,18 +1001,65 @@ boost::filesystem::path strip_trailing_separators_path(boost::filesystem::path p
 // valid dest and must be followed (plain weakly_canonical).
 boost::filesystem::path weakly_canonical_for_confine(const boost::filesystem::path &p)
 {
-    const boost::filesystem::path stripped = strip_trailing_separators_path(p);
+    // Drop a trailing separator without round-tripping through generic_string, which would
+    // rewrite an already-prefixed "\\?\" path into a look-alike that is not extended.
+    boost::filesystem::path stripped = p;
+    while (stripped.has_relative_path() && stripped.filename() == ".")
+        stripped = stripped.parent_path();
+    const boost::filesystem::path io = extended_path(stripped);
     boost::system::error_code     ec;
-    if (boost::filesystem::is_symlink(boost::filesystem::symlink_status(stripped, ec))) {
+    if (boost::filesystem::is_symlink(boost::filesystem::symlink_status(io, ec))) {
         const boost::filesystem::path parent = stripped.parent_path();
         if (parent.empty())
-            return stripped;
-        return boost::filesystem::weakly_canonical(parent) / stripped.filename();
+            return io;
+        return boost::filesystem::weakly_canonical(extended_path(parent)) / stripped.filename();
     }
-    return boost::filesystem::weakly_canonical(stripped);
+    return boost::filesystem::weakly_canonical(io);
 }
 
 bool skip_dot_or_empty(const boost::filesystem::path &comp) { return comp.empty() || comp == "."; }
+
+// A canonical path is compared without its "\\?\" / "\\?\UNC\" prefix: following a junction from a
+// prefixed path yields the target's plain spelling ("C:\..."), while a path with no link on it
+// keeps the prefix, so the same folder would otherwise compare unequal. Both sides are already
+// absolute and normalised here, so the prefix carries no location of its own.
+boost::filesystem::path without_extended_prefix(const boost::filesystem::path &p)
+{
+#ifdef _WIN32
+    boost::filesystem::path pref = p;
+    const std::wstring      s    = pref.make_preferred().wstring();
+    if (s.rfind(L"\\\\?\\UNC\\", 0) == 0)
+        return boost::filesystem::path(L"\\\\" + s.substr(8));
+    if (s.rfind(L"\\\\?\\", 0) == 0)
+        return boost::filesystem::path(s.substr(4));
+#endif
+    return p;
+}
+
+// Win32 (unprefixed) path parsing drops trailing dots and spaces from a name, so "root\.. "
+// or "root\..." can open root or its parent, while the extended-length form used by the confine
+// check below takes the name literally. Refuse an element made only of dots and spaces (other
+// than the "." and ".." the lexical normalisation already resolves) so the check cannot pass a
+// path that unprefixed I/O would resolve elsewhere. "name." / "name " only lose their tail and
+// stay in the same folder, so they are left alone (preset names may end in a space). A stream
+// suffix ("..:x", "...:$DATA") is not resolved lexically either, so it is judged on the name part.
+bool has_win32_trimmed_element(const boost::filesystem::path &p)
+{
+#ifdef _WIN32
+    for (const boost::filesystem::path &elem : p.relative_path()) {
+        const std::wstring s     = elem.wstring();
+        const size_t       colon = s.find(L':');
+        if (colon == std::wstring::npos && (s.empty() || s == L"." || s == L".."))
+            continue;
+        const std::wstring name = s.substr(0, colon);
+        if (!name.empty() && name.find_first_not_of(L". ") == std::wstring::npos)
+            return true;
+    }
+#else
+    (void) p;
+#endif
+    return false;
+}
 
 } // namespace
 
@@ -1001,8 +1068,13 @@ bool is_path_within_root(const boost::filesystem::path &root, const boost::files
     try {
         if (has_embedded_nul(root) || has_embedded_nul(candidate))
             return false;
-        const boost::filesystem::path root_c = boost::filesystem::weakly_canonical(strip_trailing_separators_path(root));
-        const boost::filesystem::path cand_c = weakly_canonical_for_confine(candidate);
+        if (has_win32_trimmed_element(candidate))
+            return false;
+        // Prefixed I/O follows a junction past MAX_PATH; canonicalise the same way so the
+        // confine check sees the real target instead of the unresolved long path.
+        const boost::filesystem::path root_c =
+            without_extended_prefix(boost::filesystem::weakly_canonical(extended_path(strip_trailing_separators_path(root))));
+        const boost::filesystem::path cand_c = without_extended_prefix(weakly_canonical_for_confine(extended_path(candidate)));
         if (has_embedded_nul(root_c) || has_embedded_nul(cand_c))
             return false;
         auto r = root_c.begin();
@@ -1127,6 +1199,32 @@ const std::vector<std::string> &network_endpoint_keys()
     return keys;
 }
 
+const std::vector<std::string> &plugin_selection_keys()
+{
+    static const std::vector<std::string> keys = {"slicing_pipeline_plugin", "print_plugin_config_overrides",
+                                                  "printer_plugin_config_overrides", "filament_plugin_config_overrides"};
+    return keys;
+}
+
+std::string plugin_selection_value(const DynamicPrintConfig &cfg, const std::string &key)
+{
+    std::string out;
+    auto add = [&out](const std::string &v) {
+        const std::string t = trim(v);
+        if (t.empty())
+            return;
+        if (!out.empty())
+            out.push_back('\n');
+        out += t;
+    };
+    if (const auto *s = cfg.option<ConfigOptionString>(key))
+        add(s->value);
+    else if (const auto *v = cfg.option<ConfigOptionStrings>(key))
+        for (const std::string &e : v->values)
+            add(e);
+    return out;
+}
+
 // A bed texture or model path that reaches over the network (UNC share, URL, device path):
 // Windows would contact the host - and send the user's credentials to an SMB server - just to
 // draw the bed.
@@ -1147,6 +1245,14 @@ std::vector<UntrustedSetting> find_untrusted_settings(const DynamicPrintConfig &
     if (const auto *ff = cfg.option<ConfigOptionString>("filename_format"))
         if (filename_format_leaves_folder(ff->value) && trusted.filename_format.count(ff->value) == 0)
             found.push_back({"filename_format", source, ff->value, SettingRisk::WritesOutsideOutputFolder});
+
+    // A file may name a slicing pipeline plugin (Python code that runs while slicing and edits the
+    // G-code) and hand it settings. Never take that over silently from a file we did not write.
+    for (const std::string &key : plugin_selection_keys()) {
+        const std::string v = plugin_selection_value(cfg, key);
+        if (!v.empty() && trusted.plugin_values.count(key + "=" + v) == 0)
+            found.push_back({key, source, v, SettingRisk::RunsPlugins});
+    }
 
     for (const std::string &key : network_endpoint_keys())
         if (const auto *opt = cfg.option<ConfigOptionString>(key))

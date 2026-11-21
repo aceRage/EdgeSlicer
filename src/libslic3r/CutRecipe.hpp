@@ -639,6 +639,15 @@ inline std::pair<double, double> cut_plane_center_range(double tbb_min_z, double
     return { tbb_min_z - limit, tbb_max_z + limit };
 }
 
+// The instance matrix "Edit cut" puts its stand-in (the recipe's uncut mesh, in the object frame)
+// back with, given the instance matrix of the half it takes the place of. The recipe's plane is in
+// the cut instance's frame less its offset, so the stand-in takes that instance's turn and size
+// (instance_linear) at the half's offset. A cut leaves the halves' instances neither (only the
+// offset, and the place-on-cut turn), so the half's own matrix showed the uncut part unturned
+// under a turned plane, and re-cut it in the wrong place. A recipe that did not record the
+// instance (version <= 4) keeps the half's matrix.
+Transform3d cut_recipe_stand_in_matrix(const CutRecipe& recipe, const Transform3d& half_instance_matrix);
+
 } // namespace Slic3r
 
 #endif // slic3r_CutRecipe_hpp_

@@ -7,10 +7,16 @@
 #include <wx/simplebook.h>
 #include <wx/dialog.h>
 #include <wx/timer.h>
+#include <wx/sizer.h>
+#include <wx/stattext.h>
 #include <vector>
 #include <functional>
 #include <list>
 #include <map>
+#include <deque>
+#include <string>
+#include <utility>
+#include "Widgets/Button.hpp"
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/CheckBox.hpp"
 #include "Widgets/TextInput.hpp"
@@ -88,7 +94,6 @@ public:
 
     void      create();
     wxWindow *create_tab_button(int id, wxString text);
-    wxWindow *create_ultra_page();
 
     // debug mode
     ::CheckBox * m_developer_mode_ckeckbox   = {nullptr};
@@ -148,7 +153,59 @@ public:
     wxBoxSizer* create_item_link_association(wxWindow* parent, wxString url_prefix, wxString website_name);
 #endif // WIN32
 
-    wxWindow* create_general_page();
+    // Layout: tabs -> collapsible sections -> table rows. A page is built from sections; each
+    // setting is one row: add_row(sec, create_item_...(..., row(sec), ...)).
+    struct PrefSection
+    {
+        std::string   id;                // key of the remembered open / collapsed state
+        size_t        index{0};
+        wxWindow *    page{nullptr};
+        wxWindow *    header{nullptr};
+        wxWindow *    body{nullptr};
+        wxStaticText *chevron{nullptr};
+        wxBoxSizer *  sizer{nullptr};
+        wxWindow *    pending{nullptr};  // the row panel handed out by row(), until add_row() takes it
+        int           rows{0};
+        bool          open{true};
+    };
+    struct PrefRow
+    {
+        wxWindow *panel{nullptr};
+        wxString  text;                  // labels and tooltips, lower case, for the search box
+        size_t    section{0};
+    };
+    wxWindow *   new_page();
+    PrefSection *begin_section(wxWindow *page, const std::string &id, const wxString &title, bool open_by_default = true);
+    // The parent for the next row's controls.
+    wxWindow *   row(PrefSection *sec);
+    // indent: the row depends on the one above it.
+    void         add_row(PrefSection *sec, wxSizer *item, bool indent = false);
+    void         add_row(PrefSection *sec, wxWindow *item, bool indent = false);
+    void         finish_row(PrefSection *sec, wxSizer *content, bool indent);
+    void         tabulate_row(wxSizer *sizer);
+    void         set_section_open(PrefSection &sec, bool open, bool remember);
+    void         set_page_sections_open(bool open);
+    void         load_section_states();
+    void         save_section_states();
+    void         select_page(size_t index);
+    void         apply_search(const wxString &query);
+    void         relayout();
+
+    std::deque<PrefSection>                      m_sections; // deque: begin_section() hands out stable pointers
+    std::vector<PrefRow>                         m_rows;
+    std::vector<std::pair<wxString, wxWindow *>> m_pages;
+    std::vector<Button *>                        m_tab_buttons;
+    std::map<std::string, bool>                  m_section_open;
+    size_t                                       m_current_page{0};
+    ::TextInput *                                m_search_input{nullptr};
+    wxStaticText *                               m_no_results{nullptr};
+
+    wxWindow* create_page_general();
+    wxWindow* create_page_view();
+    wxWindow* create_page_projects();
+    wxWindow* create_page_slicing();
+    wxWindow* create_page_devices();
+    wxWindow* create_page_advanced();
     void create_gui_page();
     void create_sync_page();
     void create_shortcuts_page();

@@ -58,6 +58,9 @@
 #include "EditGCodeDialog.hpp"
 #include "MsgDialog.hpp"
 #include "Notebook.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "PluginWarnings.hpp"
+#endif
 
 #include "Widgets/Label.hpp"
 #include "Widgets/TabCtrl.hpp"
@@ -4038,6 +4041,11 @@ void TabPrint::build()
         optgroup->append_single_option_line("outer_wall_filament", "multimaterial_settings_filament_for_features#walls");
         optgroup->append_single_option_line("sparse_infill_filament", "multimaterial_settings_filament_for_features#infill");
         optgroup->append_single_option_line("solid_infill_filament", "multimaterial_settings_filament_for_features#solid-infill");
+        // EdgeSlicer surface filaments (0 = "Same as walls").
+        optgroup->append_single_option_line("top_surface_filament", "multimaterial_settings_filament_for_features#solid-infill");
+        optgroup->append_single_option_line("bottom_surface_filament", "multimaterial_settings_filament_for_features#solid-infill");
+        // EdgeSlicer: 0 = "Same as the ironed surface".
+        optgroup->append_single_option_line("ironing_filament", "multimaterial_settings_filament_for_features#solid-infill");
         optgroup->append_single_option_line("wipe_tower_filament", "multimaterial_settings_filament_for_features#wipe-tower");
 
         optgroup = page->new_optgroup(L("Ooze prevention"), L"param_ooze_prevention");
@@ -5358,6 +5366,14 @@ static DynamicPrintConfig resolved_model_config_for_tab(const DynamicPrintConfig
             resolved.set_key_value("sparse_infill_filament", new ConfigOptionInt(extruder));
         if (!resolved.has("solid_infill_filament"))
             resolved.set_key_value("solid_infill_filament", new ConfigOptionInt(extruder));
+        // EdgeSlicer surface filaments: the object's filament resets them to "Same as walls"
+        // (apply_to_print_region_config(), PrintObject.cpp).
+        if (!resolved.has("top_surface_filament"))
+            resolved.set_key_value("top_surface_filament", new ConfigOptionInt(0));
+        if (!resolved.has("bottom_surface_filament"))
+            resolved.set_key_value("bottom_surface_filament", new ConfigOptionInt(0));
+        if (!resolved.has("ironing_filament"))
+            resolved.set_key_value("ironing_filament", new ConfigOptionInt(0));
     }
 
     if (!resolved.has("solid_infill_filament") && resolved.has("sparse_infill_filament"))
@@ -9597,24 +9613,19 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
             // Obtain compatible filament and process presets for printers
             if (m_preset_bundle && m_presets->get_preset_base(current_preset) == &current_preset && printer_tab && !current_preset.is_system) {
                 delete_third_printer = true;
-                for (const Preset &preset : m_preset_bundle->filaments.get_presets()) {
-                    if (preset.is_compatible && !preset.is_default) {
-                        if (preset.inherits() != "")
-                            filament_presets.push_front(preset);
+                // Only the user presets made for this printer alone go with it: not the vendor's presets, nor
+                // the person's presets shared with other printers or made for every printer.
+                auto collect = [&current_preset](PresetCollection &presets, std::deque<Preset> &collected) {
+                    for (const Preset *preset : presets.get_user_presets_for_printer(current_preset.name)) {
+                        if (preset->inherits() != "")
+                            collected.push_front(*preset);
                         else
-                            filament_presets.push_back(preset);
-                        if (!preset.setting_id.empty()) { m_preset_bundle->filaments.set_sync_info_and_save(preset.name, preset.setting_id, "delete", 0); }
+                            collected.push_back(*preset);
+                        if (!preset->setting_id.empty()) { presets.set_sync_info_and_save(preset->name, preset->setting_id, "delete", 0); }
                     }
-                }
-                for (const Preset &preset : m_preset_bundle->prints.get_presets()) {
-                    if (preset.is_compatible && !preset.is_default) {
-                        if (preset.inherits() != "")
-                            process_presets.push_front(preset);
-                        else
-                            process_presets.push_back(preset);
-                        if (!preset.setting_id.empty()) { m_preset_bundle->filaments.set_sync_info_and_save(preset.name, preset.setting_id, "delete", 0); }
-                    }
-                }
+                };
+                collect(m_preset_bundle->filaments, filament_presets);
+                collect(m_preset_bundle->prints, process_presets);
             }
             if (!current_preset.setting_id.empty()) {
                 m_presets->set_sync_info_and_save(current_preset.name, current_preset.setting_id, "delete", 0);
@@ -10328,6 +10339,12 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
         detach           = detach || dlg.get_detach_value(m_type);
     }
 
+#ifdef EDGE_PYTHON_PLUGINS
+    m_presets->get_edited_preset().config.update_plugin_manifest();
+    if (!confirm_save_with_unresolved_plugins(this, m_presets->get_edited_preset().config))
+        return;
+#endif
+
     //BBS record current preset name
     std::string curr_preset_name = m_presets->get_edited_preset().name;
 
@@ -10504,22 +10521,20 @@ void Tab::delete_preset(bool confirmed)
         is_base_preset = true;
         if (current_preset.type == Preset::Type::TYPE_PRINTER && !current_preset.is_system) { //Customize third-party printers
             Preset &current_preset = m_presets->get_selected_preset();
-            int filament_preset_num    = 0;
-            int process_preset_num     = 0;
-            for (const Preset &preset : m_preset_bundle->filaments.get_presets()) {
-                if (preset.is_compatible && !preset.is_default) { filament_preset_num++; }
-            }
-            for (const Preset &preset : m_preset_bundle->prints.get_presets()) {
-                if (preset.is_compatible && !preset.is_default) { process_preset_num++; }
-            }
+            // The same presets select_preset() deletes along with the printer.
+            const int filament_preset_num = int(m_preset_bundle->filaments.get_user_presets_for_printer(current_preset.name).size());
+            const int process_preset_num  = int(m_preset_bundle->prints.get_user_presets_for_printer(current_preset.name).size());
 
-            DeleteConfirmDialog
-                dlg(parent(), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Delete"),
-                    wxString::Format(_L("%d Filament Preset and %d Process Preset is attached to this printer. Those presets would be deleted if the printer is deleted."),
-                                     filament_preset_num, process_preset_num));
-            int res = dlg.ShowModal();
-            if (res != wxID_OK) return;
-            confirm_delete_third_party_printer = true;
+            // With nothing attached, the plain delete confirmation below is asked instead.
+            if (filament_preset_num + process_preset_num > 0) {
+                DeleteConfirmDialog
+                    dlg(parent(), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Delete"),
+                        wxString::Format(_L("%d Filament Preset and %d Process Preset is attached to this printer. Those presets would be deleted if the printer is deleted."),
+                                         filament_preset_num, process_preset_num));
+                int res = dlg.ShowModal();
+                if (res != wxID_OK) return;
+                confirm_delete_third_party_printer = true;
+            }
         }
         int count = 0;
         wxString presets;

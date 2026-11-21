@@ -170,6 +170,16 @@ if (NOT WIN32 AND NOT APPLE)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/unix/build_linux_image.sh.in ${CMAKE_CURRENT_BINARY_DIR}/build_linux_image.sh USE_SOURCE_PERMISSIONS @ONLY)
 endif ()
 
+if (EDGE_PYTHON_PLUGINS)
+    if (APPLE)
+        target_link_options(Snapmaker_Orca PRIVATE "LINKER:-rpath,@executable_path/python/lib")
+    elseif (UNIX AND NOT WIN32)
+        set_target_properties(Snapmaker_Orca PROPERTIES
+            BUILD_RPATH "$ORIGIN/python/lib;$ORIGIN/../lib/python/lib"
+            INSTALL_RPATH "$ORIGIN/../libpython/lib")
+    endif ()
+endif ()
+
 target_link_libraries(Snapmaker_Orca libslic3r cereal::cereal)
 # target_include_directories(OrcaSlicer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/slic3r)
 if (APPLE)
@@ -384,6 +394,51 @@ else ()
     endif()
 endif ()
 
+if (EDGE_PYTHON_PLUGINS)
+    set(_edge_python_bin_dir "$<TARGET_FILE_DIR:Snapmaker_Orca>")
+    add_dependencies(Snapmaker_Orca edge-plugin-host)
+    # Helper-rebuild copy lives on edge-plugin-host POST_BUILD in src/slic3r/CMakeLists.txt
+    # (CMake only allows that command in the directory that created the target). The helper
+    # copies via a generate-time script so TARGET_FILE_DIR:Snapmaker_Orca does not cycle.
+    add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:edge-plugin-host>"
+            "${_edge_python_bin_dir}/$<TARGET_FILE_NAME:edge-plugin-host>"
+        COMMENT "Copying edge-plugin-host next to EdgeSlicer"
+        VERBATIM)
+    if (APPLE)
+        add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+            COMMAND sh -c "codesign --force --sign - --entitlements '${CMAKE_SOURCE_DIR}/scripts/edge-plugin-host.entitlements' '${_edge_python_bin_dir}/$<TARGET_FILE_NAME:edge-plugin-host>' 2>/dev/null || true"
+            COMMENT "Signing edge-plugin-host with App Sandbox entitlements"
+            VERBATIM)
+    endif ()
+    add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${_edge_python_bin_dir}/python"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "${_edge_python_bin_dir}/python"
+        COMMENT "Copying bundled Python runtime next to EdgeSlicer"
+        VERBATIM)
+    if (WIN32)
+        add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_PREFIX_PATH}/libpython/python${_bundled_python_abi}.dll"
+                "${_edge_python_bin_dir}"
+            COMMENT "Copying Python DLL next to EdgeSlicer"
+            VERBATIM)
+    endif ()
+    if (ORCA_BUNDLED_UV_EXECUTABLE AND EXISTS "${ORCA_BUNDLED_UV_EXECUTABLE}")
+        add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_edge_python_bin_dir}/tools/uv"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORCA_BUNDLED_UV_EXECUTABLE}" "${_edge_python_bin_dir}/tools/uv/${ORCA_BUNDLED_UV_FILENAME}"
+            COMMENT "Copying bundled uv next to EdgeSlicer"
+            VERBATIM)
+        if (UNIX)
+            add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+                COMMAND chmod +x "${_edge_python_bin_dir}/tools/uv/${ORCA_BUNDLED_UV_FILENAME}"
+                VERBATIM)
+        endif ()
+    endif ()
+endif ()
+
 # Slic3r binary install target. Default build type is release in case no CMAKE_BUILD_TYPE is provided.
 if( ("${CMAKE_BUILD_TYPE}" STREQUAL "Release") OR ("${CMAKE_BUILD_TYPE}" STREQUAL "") )
     set (build_type "Release")
@@ -403,6 +458,20 @@ if (WIN32)
         install(TARGETS Snapmaker_Orca_app_gui RUNTIME DESTINATION ".")
     endif ()
     install(FILES ${output_dlls_${build_type}} DESTINATION ".")
+    if (EDGE_PYTHON_PLUGINS)
+        install(TARGETS edge-plugin-host RUNTIME DESTINATION ".")
+    endif ()
 else ()
     install(TARGETS Snapmaker_Orca RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" BUNDLE DESTINATION ${CMAKE_INSTALL_BINDIR})
+    if (EDGE_PYTHON_PLUGINS)
+        if (APPLE)
+            install(TARGETS edge-plugin-host RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}/EdgeSlicer.app/Contents/MacOS")
+        else ()
+            install(TARGETS edge-plugin-host RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+            # Isolated component so CTest can `cmake --install --component plugin-host`
+            # without copying the rest of the package. Same bindir as the default install.
+            install(TARGETS edge-plugin-host RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+                    COMPONENT plugin-host)
+        endif ()
+    endif ()
 endif ()

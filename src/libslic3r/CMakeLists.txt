@@ -95,6 +95,8 @@ set(lisbslic3r_sources
     BrimFilament.hpp
     PaintDepth.cpp
     PaintDepth.hpp
+    PaintTransfer.cpp
+    PaintTransfer.hpp
     PaintWire.cpp
     PaintWire.hpp
     ColorSplit.cpp
@@ -483,6 +485,7 @@ set(lisbslic3r_sources
     LayOnFace.hpp
     libslic3r.cpp
     libslic3r.h
+    LifecycleEvents.hpp
     Line.cpp
     Line.hpp
     LocalesUtils.cpp
@@ -516,6 +519,7 @@ set(lisbslic3r_sources
     CliNamedPresets.hpp
     CliPresetSlots.cpp
     CliPresetSlots.hpp
+    CliAmfInch.hpp
     CliOutput.cpp
     CliOutput.hpp
     BambuExtruderMap.cpp

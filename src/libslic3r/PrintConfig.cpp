@@ -7181,6 +7181,34 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionStrings());
 
+    def = this->add("plugins", coStrings);
+    def->label = L("Plugins Used");
+    def->tooltip = L("Plugin capabilities referenced by this preset, stored as name;uuid;capability.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings());
+
+    def = this->add("slicing_pipeline_plugin", coStrings);
+    def->label = L("Slicing Pipeline Plugin");
+    def->tooltip = L("Python plugins invoked at each slicing pipeline step to read and modify intermediate slicing data, "
+                   "including a final G-code post-processing step. Early steps run unsandboxed in-process.");
+    def->gui_type = ConfigOptionDef::GUIType::plugin_picker;
+    def->plugin_type = "slicing-pipeline";
+    def->full_width = true;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionStrings());
+
+    for (const char* key : {"print_plugin_config_overrides", "printer_plugin_config_overrides", "filament_plugin_config_overrides"}) {
+        def = this->add(key, coString);
+        def->label = L("Capabilities");
+        def->tooltip = L("Configuration for the plugin capabilities this preset uses, overriding the global "
+                         "Capabilities configuration. Stored as a raw JSON array and edited through the dialog "
+                         "behind the button, never typed in directly.");
+        def->gui_type = ConfigOptionDef::GUIType::plugin_config;
+        def->mode = comAdvanced;
+        def->cli = ConfigOptionDef::nocli;
+        def->set_default_value(new ConfigOptionString(""));
+    }
+
     def = this->add("mixed_color_layer_height_a", coFloat);
     def->label = L("Dithering cadence height A");
     def->category = L("Others");
@@ -8051,6 +8079,42 @@ void PrintConfigDef::init_fff_params()
     def->min = 1;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(1));
+
+    // EdgeSlicer surface filaments: the visible top and bottom skins. 0 (Default) follows the outer wall
+    // (outer_wall_filament, or wall_filament when that is 0 too), so the skins match the walls around them.
+    // The solid layers under the top skin and above the bottom skin keep solid_infill_filament.
+    def = this->add("top_surface_filament", coInt);
+    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
+    def->label = L("Top surface");
+    def->category = L("Extruders");
+    def->tooltip = L("Filament to print the top surface (the topmost skin; ironing on it follows it unless the Ironing filament is set). \"Same as walls\" uses the outer wall filament. "
+                     "The solid infill layers under the top surface keep the solid infill filament.");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("bottom_surface_filament", coInt);
+    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
+    def->label = L("Bottom surface");
+    def->category = L("Extruders");
+    def->tooltip = L("Filament to print the bottom surface (the bottommost skin, including bottom surfaces bridged over air or "
+                     "printed on support). \"Same as walls\" uses the outer wall filament. The solid infill layers above the bottom "
+                     "surface keep the solid infill filament.");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    // EdgeSlicer: 0 (Default) irons with the filament of the surface being ironed (top / bottom surface filament,
+    // solid infill filament for internal solid layers).
+    def = this->add("ironing_filament", coInt);
+    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
+    def->label = L("Ironing");
+    def->category = L("Extruders");
+    def->tooltip = L("Filament to iron with. \"Same as the ironed surface\" irons each surface with the filament that printed it: the top "
+                     "surface filament on top surfaces, the solid infill filament on other solid layers.");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
 
     def = this->add("internal_solid_infill_line_width", coFloatOrPercent);
     def->label = L("Internal solid infill");
@@ -12629,6 +12693,25 @@ const std::set<std::string>& visual_only_option_keys()
         "filament_glow_intensity",
         "filament_gradient_dwell",
         "filament_gradient_transition",
+    };
+    return s_keys;
+}
+
+const std::set<std::string_view>& gcode_full_config_banned_keys()
+{
+    // OrcaSlicer #13507: filament_colour_type crashes the Anycubic Kobra 3 config parser. This fork
+    // has no such option yet; the ban keeps the block safe once a profile sync or port brings it in.
+    static const std::set<std::string_view> s_keys{
+        "compatible_printers",
+        "compatible_prints",
+        "filament_colour_type",
+        "print_host",
+        "print_host_webui",
+        "printhost_apikey",
+        "printhost_cafile",
+        "printhost_user",
+        "printhost_password",
+        "printhost_port",
     };
     return s_keys;
 }

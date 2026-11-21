@@ -4,6 +4,8 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
 	test_model_rotate_center.cpp
+	test_orient.cpp
+	test_plugin_preset_3mf.cpp
 	test_plate_print_history.cpp
 	test_bambu_3mf_export.cpp
 	test_multicolour_filament.cpp
@@ -85,8 +87,12 @@ add_executable(${_TEST_NAME}_tests
 	test_height_colour_pattern.cpp
 	test_height_pattern_input.cpp
 	test_cut_paint.cpp
+	test_paint_transfer_cut.cpp
+	test_paint_transfer_boolean.cpp
 	test_cut_groove.cpp
 	test_cut.cpp
+	test_cut_mesh_caps.cpp
+	test_cut_halves.cpp
 	test_config_include.cpp
 	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
@@ -145,6 +151,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_filament_cli_gates.cpp
 	test_mixed_sublayer.cpp
 	test_cli_preset_slots.cpp
+	test_cli_amf_inch.cpp
 	test_cli_output.cpp
 	test_preset_compat_and_cli.cpp
 	test_mixed_nozzle.cpp
@@ -188,12 +195,14 @@ add_executable(${_TEST_NAME}_tests
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
+	test_preset_printer_clone_names.cpp
 	test_process_preset_export.cpp
 	test_preset_import_order.cpp
 	test_preset_manager_model.cpp
 	test_preset_rename.cpp
 	test_project_preset_switch.cpp
 	test_project_preset_state.cpp
+	test_preset_printer_own_presets.cpp
 	test_project_preset_roundtrip.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp

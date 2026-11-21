@@ -1,0 +1,362 @@
+#ifndef slic3r_PluginAuditManager_hpp_
+#define slic3r_PluginAuditManager_hpp_
+
+// Via pybind11 so this file requests the same python3xx.lib as everything else.
+#include <boost/filesystem/path.hpp>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
+#include <functional>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include <boost/filesystem.hpp>
+
+namespace Slic3r {
+
+struct PluginPermissions;
+
+// Thread creation exposes no user-supplied target, so the runtime audit event reports this fixed
+// target. Legacy sidecars also stored it as the sole entry of their threading target list; the
+// reader maps that form onto the boolean permission.
+inline constexpr const char* kThreadPermissionTarget = "thread";
+
+struct AuditDecision
+{
+    bool        allowed = true;
+    std::string reason;
+};
+
+struct AuditViolation
+{
+    std::string plugin_key;
+    std::string event_name;
+    std::string reason;
+};
+
+// A filesystem root a plugin may access while an audit context is active. allow_write is
+// false for a root that only grants reads (e.g. the bundled, shared resources folder) --
+// a write-shaped event never matches such a root, even though a read-shaped one does.
+struct AllowedRoot
+{
+    boost::filesystem::path path;
+    bool                    allow_write = true;
+};
+
+// The set of CPython audit events PluginAuditManager recognizes, grouped by the kind of
+// operation they represent. None means the event isn't one audit_hook() acts on at all.
+enum class AuditEventCategory {
+    None,
+    FsRead,
+    FsReadWrite,
+    FsCreate,
+    FsDelete,
+    Http,
+    Socket,
+    ProcessCreate,
+    ProcessReplace,
+    Threading,
+};
+
+// Returns true if candidate resolves to a path inside allowed_root.
+// Uses weakly_canonical and component-wise comparison to reject traversal attacks. A candidate
+// whose final component is a dangling symlink is never inside: containment fails closed rather
+// than authorizing the destination a write through it would create.
+bool is_inside_allowed_root(const boost::filesystem::path& candidate, const boost::filesystem::path& allowed_root);
+
+class PluginAuditManager
+{
+public:
+    static PluginAuditManager& instance();
+
+    // Call once after Py_Initialize to install the global audit hook.
+    void install_hook();
+
+    // --- current-plugin context (thread_local) ---
+    void        set_current_plugin(const std::string& plugin_key);
+    std::string current_plugin() const;
+    void        clear_current_plugin();
+
+    // --- current-capability context (thread_local) ---
+    // The capability whose method is currently executing, within the current plugin. Empty
+    // while a plugin-wide call runs, and during capture (get_name/get_type), where the
+    // capability has no cached name yet.
+    void        set_current_capability(const std::string& capability_name);
+    std::string current_capability() const;
+    void        clear_current_capability();
+
+    // --- allowed-roots registry ---
+    // allow_write = false registers a read-only root: a read-shaped event inside it is allowed,
+    // but a write/create/delete-shaped event is not, so it falls through to the normal
+    // prompt-or-deny path instead.
+    void add_global_allowed_root(const boost::filesystem::path& root, bool allow_write = true);
+    void add_scoped_allowed_root(const boost::filesystem::path& root, bool allow_write = true);
+    // Hosted post-process: deny writes outside `root` even when a wider global root (data_dir)
+    // would allow them. `reason` is the PermissionError suffix and should name ctx.gcode_path.
+    void pin_writes_to(const boost::filesystem::path& root, const std::string& reason);
+    void clear_write_pin();
+
+    // --- denied-filenames registry ---
+    // Filenames a plugin may never touch, in any directory, regardless of the enclosing allowed
+    // root.  A candidate is denied when its filename starts with a
+    // registered name, so .bak/.tmp companions are covered by the same entry.
+    //
+    // The comparison is case-insensitive on every platform, unlike the _WIN32-only iequals
+    // in is_inside_allowed_root: the default macOS APFS configuration is case-insensitive
+    // too, so `orcaslicer.conf` reaches the real file there.  Over-blocking a genuinely
+    // distinct name on Linux is the fail-safe direction and costs nothing real.
+    void add_denied_filename(const std::string& filename);
+
+    // The list install_hook() seeds into the deny registry: the app config (both app keys and
+    // both extensions) and the cloud refresh token. Exposed so tests seed the exact same set
+    // without a live interpreter, so the test and production seeding cannot drift apart.
+    static std::vector<std::string> default_denied_filenames();
+
+    // True when candidate's base name starts with a denied name (case-insensitive). No path
+    // resolution: laundering a denied file through a symlink, hardlink, subprocess, or Windows
+    // 8.3 short name is out of scope (see the design doc). This blocks direct access only.
+    bool is_denied_filename(const boost::filesystem::path& candidate) const;
+
+    // --- denied-path-keyword registry ---
+    // Keywords that categorically deny a path when a component matches one case-insensitively --
+    // e.g. a "secrets" subfolder, a "certificates" folder, a "conf"/"config" directory, or a
+    // .conf/.ini file anywhere the plugin can otherwise reach, including inside an allowed root.
+    // The components above the app's data_dir() are not considered (see below). This is broader
+    // than the exact-name is_denied_filename registry, but it is not a substring match:
+    // importable modules such as numpy/__config__.py, configparser.py, sysconfig.py, or user
+    // folders such as "Conference" and "Concert" are unrelated names and must stay promptable.
+    void add_denied_path_keyword(const std::string& keyword);
+
+    // The list install_hook() seeds into the keyword registry. Exposed so tests seed the exact
+    // same set without a live interpreter.
+    static std::vector<std::string> default_denied_path_keywords();
+
+    // True when any component of candidate's (canonicalized) path matches a registered keyword,
+    // case-insensitively. Inside data_dir(), only the components below data_dir() are checked:
+    // the app's own data folder may itself sit under a component named like a keyword (Flatpak
+    // keeps it under .../config/OrcaSlicer), which must not deny everything inside it. A
+    // registered "conf" keyword also blocks .conf/.ini file components.
+    bool is_denied_path_keyword(const boost::filesystem::path& candidate) const;
+
+    // is_denied_filename(candidate) || is_denied_path_keyword(candidate) ||
+    // is_ultranet_plugins_path(candidate) || is_secret_store_path(candidate). Convenience for call
+    // sites that only need to know whether a path is categorically off-limits, not which specific
+    // rule fired.
+    bool is_denied_path(const boost::filesystem::path& candidate) const;
+
+    // H5: EdgeSlicer's own secret stores, found by reading the code that writes them:
+    //   {data_dir}/hub              phone hub: hub.json and settings.json (hub and relay tokens,
+    //                               the relay identity), printers.json, print_host_devices.json,
+    //                               snapmaker_keys.json, u1_lan_auth.json (LAN access), go2rtc.yaml
+    //   {data_dir}/plugins          UltraNet / Bambu network plug-in and its cloud session
+    //   {data_dir}/<app>.conf/.ini  app config (LAN access codes, cloud user, preferences)
+    //   {data_dir}/orca_plugins/trust.json   the plugin trust list
+    //   {data_dir}/plugin_host_acl  the Windows sandbox ACL journal
+    //   {data_dir}/go2rtc.yaml, simplyprint_oauth.json, FlashNetwork, cameratools
+    //   the crash-report folder (Windows %LOCALAPPDATA%/<app>, macOS .../<app>/SentryData)
+    // (Vendor and vault connector secrets are in the OS keychain via wxSecretStore.) No plugin may
+    // read or write them under any grant, Full access included: the audit hook denies them, and
+    // OS grants that would reach them are narrowed or dropped (make_sandbox_spec).
+    static std::vector<boost::filesystem::path> secret_store_paths();
+    bool                                        is_secret_store_path(const boost::filesystem::path& candidate) const;
+    // True when a grant root is a secret store, lies inside one, or contains one.
+    static bool grant_reaches_secret_store(const boost::filesystem::path& root);
+    // True when `root` contains one but is not itself inside one (it can be narrowed to its children).
+    static bool grant_contains_secret_store(const boost::filesystem::path& root);
+
+    // UltraNet's native network plug-ins live in {data_dir}/plugins. Python plugin grants and
+    // audited filesystem events must never reach that folder, even under full access or a
+    // data_dir() allowed root. A trailing "/*" tree marker is stripped before the comparison.
+    // Matching is case-insensitive on every platform (APFS/NTFS aliases and a Linux folder
+    // named Plugins are both denied), NFC-normalizes data_dir spellings, uses equivalent()
+    // from the nearest existing ancestor so a not-yet-existing file is covered, and resolves
+    // dangling symlinks lexically. Fail closed when Unicode normalize or symlink read fails.
+    bool is_ultranet_plugins_path(const boost::filesystem::path& candidate) const;
+
+    // --- policy checks ---
+    // Shared core for every audited filesystem event.  The deny checks are consulted above the
+    // allowed roots, so a denied path is blocked even when it sits inside an allowed root (e.g.
+    // data_dir(), which is a global allowed root). Sidecar fs_read / fs_readwrite are not
+    // consulted here: in-process audit_plugin_event falls through to decide_audited_event
+    // so a covering grant can still record a root frame.
+    AuditDecision check_path_access(const boost::filesystem::path& candidate, bool is_write);
+    AuditDecision check_open(const std::string& path, const std::string& mode);
+
+    // Parent handler for the helper's audit_check RPC. Denied paths stay denied. In-memory
+    // allowed roots still shortcut. A miss with "outside allowed root" then consults the
+    // sidecar the same way decide_audited_event does (fs_read vs fs_readwrite, including
+    // <dir>/*), without prompting — a grant that is not already stored is denied.
+    AuditDecision check_hosted_path_access(const boost::filesystem::path& candidate, bool is_write);
+
+    // Ask the user to grant the requested permissions. The request may originate on a plugin
+    // load worker, so the implementation marshals the modal dialog to the wx main thread.
+    // Targets already persisted for the plugin are not shown or asked for again. Returns true
+    // only when every missing target was granted and persisted; denial aborts the plugin load
+    // without adding a permission. A plugin with full access stored in its sidecar is never
+    // prompted: the declaration is accepted and no grant is added.
+    //
+    // A filesystem target may name a directory tree: a trailing "/*" (e.g. "/path/to/folder/*")
+    // grants the folder itself and every path beneath it, at any depth. "*" is the only wildcard
+    // and is only recognized as the final path component; elsewhere it is an ordinary character.
+    // The wildcard applies to fs_read and fs_readwrite only, never to event grants or the other
+    // buckets, and a read grant still never authorizes a write (or the reverse). Denied paths
+    // stay denied regardless of a covering wildcard.
+    //
+    // A relative tree grant is resolved against the working directory when the request is made:
+    // the prompt shows, and the sidecar stores, the absolute scope it covers. Exact grants and
+    // the non-filesystem buckets are stored as requested.
+    //
+    // Tree grants are matched on canonical paths: a symlink below the granted folder does not
+    // extend the grant outside it, and a grant whose root is a symlink applies to its target. A
+    // target whose final component is a dangling symlink is never covered, since a write through
+    // it would create the link's target rather than the path the grant describes. Exact grants
+    // match verbatim; absolute exact grants also match canonical-equivalent paths, including
+    // relative targets resolved against the working directory at the time of the check.
+    bool request_permissions(const std::string& plugin_key, const PluginPermissions& requested);
+
+    // Ask the user to grant network access to the given http(s) URLs. Each URL is reduced to its
+    // scheme and host before prompting and persisting, so one approval covers every path, query
+    // and port on that host. The grant is recorded as an HTTP grant; network_permission_matches
+    // applies it to raw socket events for the same host too. Like request_permissions, the request
+    // may originate on a plugin load worker; denial aborts the plugin load without adding a
+    // permission.
+    bool request_network_permissions(const std::string& plugin_key, const std::vector<std::string>& urls);
+
+    // Canonical scheme://host form used to store and match network permissions. Returns an empty
+    // string unless `url` is an absolute http(s) URL with a host. The path, query, fragment,
+    // userinfo and port are discarded; scheme and host are lowercased.
+    static std::string normalize_network_url(const std::string& url);
+
+    // True when a granted scheme://host entry covers `target`. `target` is a URL (urllib.Request),
+    // a bare host (http.client.connect, socket.getaddrinfo) or an address as exposed by the audit
+    // event (a hostname, a host:port pair, or a legacy persisted tuple such as "('host', 443)").
+    // URL targets must match both scheme and host. Canonical scheme://host grants cover all paths;
+    // older full-URL grants remain exact. A bare host carries no scheme, so it matches the host of
+    // a canonical scheme://host grant only; a full-URL grant does not authorize raw sockets to its
+    // host, and a bare host never matches a different host.
+    static bool network_permission_matches(const std::vector<std::string>& granted, const std::string& target);
+
+    void report_violation(const AuditViolation& violation);
+    bool audit_denial_pending() const;
+    void clear_audit_denial();
+    void clear_last_violation();
+    bool last_violation(AuditViolation& violation) const;
+
+    // --- operation-root frames ---
+    // One stdlib operation fires several nested audit events as it passes through lower layers:
+    // urlopen() raises urllib.Request, then http.client and socket events. When an operation's
+    // own root event is granted (by a saved grant or the user), the stdlib frame that raised it
+    // is held, and a later event whose stack reaches that frame through stdlib frames only is
+    // part of the same operation, so it is allowed without a prompt of its own. Plugin or
+    // library code the operation calls back into is judged on its own. A frame is let go once it
+    // returns, a suspended generator's (os.walk) when the audit scope ends. Letting a frame go may
+    // run finalizers of objects its locals held; they are judged as the plugin and never prompt.
+    void record_root_frame();
+    bool covered_by_root_frame() const;
+    bool releasing_frames() const;
+
+    // True when code from `filename` (a code object's co_filename) is the interpreter's own
+    // stdlib: the only code a root frame's coverage passes through. Valid after install_hook().
+    static bool is_stdlib_file(const std::string& filename);
+
+    // Answers permission prompts in place of the dialog, for tests. Production never sets it.
+    using PermissionPrompt = std::function<bool(const std::string& event_name, const std::vector<std::string>& targets)>;
+    static void set_permission_prompt_for_testing(PermissionPrompt prompt);
+
+    // Answers the combined permission-request prompt in place of the dialog, receiving the message
+    // it would show. Tests run without a wxApp, so this seam also stands in for the app check.
+    // Production never sets it.
+    using PermissionMessagePrompt = std::function<bool(const std::string& message)>;
+    static void set_permission_message_prompt_for_testing(PermissionMessagePrompt prompt);
+
+    // Answers the Full access confirmation in place of the native dialog. Production never sets it.
+    using FullAccessPrompt = std::function<bool(const std::string& plugin_name)>;
+    static void set_full_access_prompt_for_testing(FullAccessPrompt prompt);
+
+    // Native Full access confirmation. "No" is the default button. Tests use the seam above.
+    static bool prompt_enable_full_access(const std::string& plugin_name);
+
+    bool verbose_events = true;
+
+private:
+    friend class ScopedPluginAuditContext;
+
+    PluginAuditManager() = default;
+
+    static int audit_hook(const char* event, PyObject* args, void* user_data);
+
+    // True for paths inside the interpreter's stdlib, excluding site-packages. Unlike
+    // is_stdlib_file(), this query is not cached because filesystem paths may resolve through
+    // symlinks that can change.
+    static bool is_stdlib_path(const boost::filesystem::path& path);
+
+    // Sidecar fs_read (reads) or fs_readwrite (writes), exact and <dir>/*. A write grant
+    // never covers a read, or the reverse. Used by check_hosted_path_access.
+    bool sidecar_covers_path(const boost::filesystem::path& path, bool is_write) const;
+
+    // Drops the references in `frames`, keeping the caller's error and denial state intact.
+    void release_frames(std::vector<PyObject*>& frames);
+
+    static thread_local std::string              m_current_plugin_key;
+    static thread_local std::string              m_current_capability_name;
+    static thread_local std::vector<AllowedRoot> m_scoped_allowed_roots;
+    static thread_local boost::filesystem::path  m_write_pin;
+    static thread_local std::string              m_write_pin_reason;
+    static thread_local std::vector<PyObject*>   m_root_frames; // strong references
+    static thread_local int                      m_releasing_frames;
+    static thread_local bool                     m_audit_denial_pending;
+    static thread_local bool                     m_has_last_violation;
+    static thread_local AuditViolation           m_last_violation;
+
+    // mutable: is_denied_filename() is a const query that must lock.
+    mutable std::mutex m_mutex;
+
+    std::vector<AllowedRoot> m_global_allowed_roots;
+    std::vector<std::string> m_denied_filenames;
+    std::vector<std::string> m_denied_path_keywords;
+};
+
+// RAII guard that sets the current plugin key and capability name, restoring the previous
+// pair on scope exit. `capability_name` may be empty for calls that are not scoped to a
+// single capability.
+//
+// Each scope owns the root frames recorded inside it and lets them go, as its own plugin, before
+// restoring the outer context. That needs the GIL whenever a frame is still held, so construct
+// the scope after the GIL guard, to be destroyed before it.
+// While constructing a host-owned asyncio loop: POSIX permits only socket.__new__
+// (socketpair). Windows additionally permits AF_INET/AF_INET6 SOCK_STREAM sockets,
+// bind to 127.0.0.1/::1 port 0, and connect only to a sockname bound inside this
+// same permit. Everything else stays audited. The plugin's audit scope stays in place.
+class ScopedEventLoopSocketPermit
+{
+public:
+    ScopedEventLoopSocketPermit();
+    ~ScopedEventLoopSocketPermit();
+
+    ScopedEventLoopSocketPermit(const ScopedEventLoopSocketPermit&)            = delete;
+    ScopedEventLoopSocketPermit& operator=(const ScopedEventLoopSocketPermit&) = delete;
+
+    static bool active();
+};
+
+class ScopedPluginAuditContext
+{
+public:
+    explicit ScopedPluginAuditContext(const std::string& plugin_key, const std::string& capability_name = {});
+
+    ~ScopedPluginAuditContext();
+
+    ScopedPluginAuditContext(const ScopedPluginAuditContext&)            = delete;
+    ScopedPluginAuditContext& operator=(const ScopedPluginAuditContext&) = delete;
+
+private:
+    std::string              m_plugin_key;
+    std::string              m_capability;
+    std::string              m_previous_id;
+    std::string              m_previous_capability;
+    std::vector<AllowedRoot> m_previous_scoped_roots;
+    std::vector<PyObject*>   m_previous_root_frames;
+};
+
+} // namespace Slic3r
+
+#endif // slic3r_PluginAuditManager_hpp_

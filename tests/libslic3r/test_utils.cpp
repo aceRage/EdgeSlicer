@@ -1171,3 +1171,72 @@ TEST_CASE("copy_file reports the OS error when the destination cannot be written
     REQUIRE(std::all_of(code.begin(), code.end(), [](unsigned char c) { return std::isdigit(c) != 0; }));
 #endif // _WIN32
 }
+
+TEST_CASE("set_data_dir_tolerant creates a path whose parents do not exist", "[utils]")
+{
+    const boost::filesystem::path scratch = boost::filesystem::temp_directory_path() /
+                                            boost::filesystem::unique_path("edgeslicer_set_data_dir_%%%%%%%%");
+    const boost::filesystem::path nested = scratch / "missing_parent" / "data";
+    REQUIRE_FALSE(boost::filesystem::exists(scratch));
+
+    struct RestoreDataDir
+    {
+        std::string prev;
+        RestoreDataDir() : prev(data_dir()) {}
+        ~RestoreDataDir() { set_data_dir(prev); }
+    } restore;
+
+    set_data_dir_tolerant(nested.string());
+    CHECK(data_dir() == nested.string());
+    CHECK(boost::filesystem::is_directory(nested));
+
+    boost::system::error_code ec;
+    boost::filesystem::remove_all(scratch, ec);
+}
+
+TEST_CASE("extended_path turns a Windows path into its long-path form", "[Utils]")
+{
+#ifdef _WIN32
+    namespace fs = boost::filesystem;
+
+    SECTION("a normal absolute drive path is prefixed") {
+        CHECK(extended_path(fs::path(R"(C:\models\model.3mf)")).wstring() == LR"(\\?\C:\models\model.3mf)");
+    }
+    SECTION("separators are made native") {
+        CHECK(extended_path(fs::path("C:/models/model.3mf")).wstring() == LR"(\\?\C:\models\model.3mf)");
+    }
+    SECTION("dot segments are collapsed before prefixing") {
+        // The "\\?\" prefix disables Win32 normalisation, so "." and ".." must be gone beforehand.
+        CHECK(extended_path(fs::path(R"(C:\models\..\model.3mf)")).wstring() == LR"(\\?\C:\model.3mf)");
+    }
+    SECTION("a trailing separator is dropped, not turned into a dot element") {
+        CHECK(extended_path(fs::path(R"(C:\models\)")).wstring() == LR"(\\?\C:\models)");
+    }
+    SECTION("a UNC path becomes an extended UNC path") {
+        CHECK(extended_path(fs::path(R"(\\server\share\model.3mf)")).wstring() == LR"(\\?\UNC\server\share\model.3mf)");
+    }
+    SECTION("an already extended path is returned unchanged") {
+        const fs::path extended(R"(\\?\C:\models\model.3mf)");
+        CHECK(extended_path(extended) == extended);
+    }
+    SECTION("a device path is returned unchanged") {
+        const fs::path device(R"(\\.\C:\models\model.3mf)");
+        CHECK(extended_path(device) == device);
+    }
+    SECTION("a bare device path without a root directory is returned unchanged") {
+        // Not "absolute" by Boost's rules, so it must be recognized before absolutizing.
+        const fs::path device(R"(\\.\PhysicalDrive0)");
+        CHECK(extended_path(device) == device);
+    }
+    SECTION("a relative path is completed against the working directory") {
+        const fs::path result = extended_path(fs::path("model.3mf"));
+        CHECK(result.wstring().rfind(L"\\\\?\\", 0) == 0);
+        CHECK(result.filename() == fs::path("model.3mf"));
+    }
+#else
+    SECTION("non-Windows returns the path unchanged") {
+        const boost::filesystem::path p = boost::filesystem::temp_directory_path() / "model.3mf";
+        CHECK(extended_path(p) == p);
+    }
+#endif
+}

@@ -16,6 +16,7 @@
 #include "Tab.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PaintTransfer.hpp"
 #include "libslic3r/MeshRepair.hpp"
 #include "libslic3r/MeshRemesh.hpp"
 #include "libslic3r/Airbrush/AirbrushBake.hpp"
@@ -787,6 +788,7 @@ void ObjectList::update_filament_values_for_items(const size_t filaments_count)
         m_objects_model->SetExtruder(extruder, item);
 
         static const char *keys[] = {"wall_filament", "sparse_infill_filament", "solid_infill_filament",
+                                     "top_surface_filament", "bottom_surface_filament", "ironing_filament",
                                      "support_filament", "support_interface_filament"};
         for (auto key : keys)
             if (object->config.has(key) && object->config.opt_int(key) > filaments_count)
@@ -979,6 +981,7 @@ void ObjectList::update_filament_values_for_items_when_delete_filament(const siz
         m_objects_model->SetExtruder(extruder, item);
 
         static const char* keys[] = {"wall_filament", "sparse_infill_filament", "solid_infill_filament",
+                                     "top_surface_filament", "bottom_surface_filament", "ironing_filament",
                                      "support_filament", "support_interface_filament"};
         for (auto key : keys) {
             if (object->config.has(key)) {
@@ -3393,22 +3396,35 @@ void ObjectList::boolean()
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "boolean");
 
     ModelObject* object = (*m_objects)[obj_idxs.front()];
-    TriangleMesh mesh = Plater::combine_mesh_fff(*object, -1, [this](const std::string& msg) {return wxGetApp().notification_manager()->push_plater_error_notification(msg); });
+    // The parts in the object's own coordinates: combine_mesh_fff() applies no instance's
+    // matrix for an id that is neither -1 (every copy merged into one mesh) nor a copy's.
+    // The copies are kept as copies below; merged, they became one body of one copy.
+    TriangleMesh mesh = Plater::combine_mesh_fff(*object, -2, [this](const std::string& msg) {return wxGetApp().notification_manager()->push_plater_error_notification(msg); });
 
-    // add mesh to model as a new object, keep the original object's name and config
+    // add mesh to model as a new object, keep the original object's name, config and copies
     Model* model = object->get_model();
     ModelObject* new_object = model->add_object();
     new_object->name = object->name;
     new_object->config.assign_config(object->config);
+    // Centred on its own volume, whose offset keeps it where the parts were in the object.
+    ModelVolume* new_volume = new_object->add_volume(mesh);
+    // Keep paint v2 (re-port of PR #605): paint the result from every part, in the object's own
+    // coordinates like the mesh, while the parts still exist (inside this one undo step). The skin
+    // of a part with another filament keeps it; what is left of a negative part's skin is the wall
+    // of its cut and stays plain. An airbrushed part's colour is not carried (as before).
+    {
+        const std::vector<PaintTransfer::Source> sources = PaintTransfer::object_boolean_sources(*object);
+        if (PaintTransfer::worth_transferring(sources)) {
+            wxBusyCursor wait;
+            PaintTransfer::paint_boolean_result(sources, *new_volume);
+        }
+    }
+    for (const ModelInstance* instance : object->instances)
+        new_object->add_instance(*instance);
     if (new_object->instances.empty())
         new_object->add_instance();
-    ModelVolume* new_volume = new_object->add_volume(mesh);
 
-    // BBS: ensure on bed but no need to ensure locate in the center around origin
     new_object->ensure_on_bed();
-    new_object->center_around_origin();
-    new_object->translate_instances(-new_object->origin_translation);
-    new_object->origin_translation = Vec3d::Zero();
 
     // BBS: notify it before move
     notify_instance_updated(m_objects->size() - 1);
@@ -3610,16 +3626,12 @@ void ObjectList::edit_cut()
     const ModelObject *src    = object(src_idx);
     const CutRecipe    recipe = *src->cut_recipe;
 
-    // Every object of the same cut. When only one is left the re-edit still runs;
+    // Every object of the same cut, the halves of a plain cut (which carry no cut_id)
+    // included: see edit_cut_objects(). When only one is left the re-edit still runs;
     // the gizmo notices and warns that cutting again brings back both halves.
     std::vector<ObjectID> ids;
-    for (size_t i = 0; i < m_objects->size(); ++i) {
-        const ModelObject *o = (*m_objects)[i];
-        // CutObjectBase::has_same_id() is not const-qualified, and these are const
-        // ModelObjects, so compare the ids directly - which is exactly what it does.
-        if (o == src || (o->is_cut() && src->is_cut() && o->cut_id.id() == src->cut_id.id()))
-            ids.push_back(o->id());
-    }
+    for (size_t i : edit_cut_objects(*m_objects, size_t(src_idx)))
+        ids.push_back((*m_objects)[i]->id());
     if (ids.empty())
         ids.push_back(src->id());
 

@@ -381,6 +381,9 @@ public:
     static const std::vector<std::string>&  filament_options();
     // Printer options contain the nozzle options.
     static const std::vector<std::string>&  printer_options();
+    // Option key holding this preset type's plugin capability overrides. The keys are unused
+    // until Phase 6 adds them to PrintConfig; option() then returns nullptr and callers no-op.
+    static const char*                      plugin_overrides_key(Type type);
     // Nozzle options of the printer options.
     static const std::vector<std::string>&  nozzle_options();
     // Printer machine limits, those are contained in printer_options().
@@ -608,6 +611,9 @@ public:
     // spool a printer reports that no preset matches (FilamentSyncMatch::third_party_preset_name).
     const Preset*   create_inherited_user_preset(const Preset &parent, const std::string &name, const DynamicPrintConfig &overrides);
     bool clone_presets(std::vector<Preset const *> const &presets, std::vector<std::string> &failures, std::function<void(Preset &, Preset::Type &)> modifier, bool force_rewritten = false);
+    // The name clone_presets_for_printer() gives the copy of a preset named template_name for printer:
+    // the name up to the first " @" ("/" written "-"), then " @" and the printer's name.
+    static std::string name_for_printer_clone(const std::string &template_name, const std::string &printer);
     bool clone_presets_for_printer(
         std::vector<Preset const *> const &templates, std::vector<std::string> &failures, std::string const &printer, std::function <std::string(std::string)> create_filament_id, bool force_rewritten = false);
     bool clone_presets_for_filament(Preset const *const &     preset,
@@ -672,6 +678,12 @@ public:
     bool            rename_user_preset(const std::string &old_name, const std::string &new_name, std::string *error = nullptr);
     // The user presets whose "inherits" names the preset.
     std::vector<std::string> user_presets_inheriting(const std::string &name) const;
+    // The user presets made for one printer alone, as clone_presets_for_printer() makes them: every entry
+    // of their compatible_printers is that printer. These are counted and deleted with that printer when
+    // it is a stand-alone user printer. A system preset, a preset that also lists another printer, and one
+    // not limited by printer name (an empty list, or a compatible_printers_condition only) are kept, and so
+    // is every preset that a kept preset inherits from (a preset whose parent is gone does not load).
+    std::vector<Preset const *> get_user_presets_for_printer(const std::string &printer_name) const;
 
     // Enable / disable the "- default -" preset.
     void            set_default_suppressed(bool default_suppressed);
