@@ -227,6 +227,26 @@ TEST_CASE("The first layer expansion widens every layer of a tree support raft o
         CHECK_THAT(second_wide - second_narrow, Catch::Matchers::WithinAbs(8., 0.5));
 }
 
+// Ported from OrcaSlicer #17680 (8d1bfae6e1).
+// A plate on a column overhangs a slab that covers the whole bed, so support could only land on the slab.
+TEST_CASE("Tree support on the build plate only leaves out branches that land on the first layer of the model", "[TreeSupport][Regression]")
+{
+    const double slab_height = GENERATE(0.2, 0.6);
+    CAPTURE(slab_height);
+    TriangleMesh mesh   = make_cube(80, 80, slab_height);
+    TriangleMesh column = make_cube(6, 6, 5.1 - slab_height);
+    TriangleMesh plate  = make_cube(30, 30, 1);
+    // Each part overlaps the one below rather than resting on it; a coplanar join slices ambiguously.
+    column.translate(37.f, 37.f, float(slab_height) - 0.05f);
+    plate.translate(25.f, 25.f, 5.f);
+    mesh.merge(column);
+    mesh.merge(plate);
+
+    Slic3r::Print print;
+    slice_with_tree_support(mesh, print, "tree_slim", 30, 1);
+    CHECK(support_points(print).empty());
+}
+
 // drop_nodes() decides the node merges and spawns the next layer's nodes in parallel. Every one of
 // those decisions has to be applied in a fixed order, or the same model gives different branches on
 // each slice.
