@@ -718,6 +718,25 @@ bool PythonInterpreter::initialize()
         // Isolated config in the helper: AppContainer cannot probe %APPDATA%, the registry, or
         // the user site. Explicit module_search_paths so encodings is found without those probes.
         const bool in_helper = plugin_ipc::in_child_process();
+        // The first PyConfig_Set*String call pre-initializes Python, and the non-isolated config
+        // pre-initializes with configure_locale=1: the process's LC_CTYPE becomes the user locale.
+        // That changes isalnum() & co. for all of EdgeSlicer's C++ (URL encoding passed non-ASCII
+        // bytes through raw). Put the app's LC_CTYPE back once Python is up, or on any failure.
+        struct CtypeGuard
+        {
+            std::string saved;
+            CtypeGuard()
+            {
+                if (const char* now = std::setlocale(LC_CTYPE, nullptr))
+                    saved = now;
+            }
+            void restore()
+            {
+                if (!saved.empty())
+                    std::setlocale(LC_CTYPE, saved.c_str());
+            }
+            ~CtypeGuard() { restore(); }
+        } ctype_guard;
         PyConfig   config;
         if (in_helper)
             PyConfig_InitIsolatedConfig(&config);
@@ -808,25 +827,15 @@ bool PythonInterpreter::initialize()
         // pybind11 internals for multi-threaded use — raw Py_InitializeFromConfig
         // does not set up thread state tracking that pybind11 requires.
         BOOST_LOG_TRIVIAL(debug) << "Creating py::scoped_interpreter with PyConfig...";
-        // The non-isolated config pre-initializes with configure_locale=1, which sets the process's
-        // LC_CTYPE to the user locale. That changes isalnum() & co. for all of EdgeSlicer's C++
-        // (e.g. URL encoding passed non-ASCII bytes through raw). Put the app's LC_CTYPE back.
-        const char*       ctype_now = std::setlocale(LC_CTYPE, nullptr);
-        const std::string saved_ctype = ctype_now ? ctype_now : "";
-        const auto        restore_ctype = [&saved_ctype] {
-            if (!saved_ctype.empty())
-                std::setlocale(LC_CTYPE, saved_ctype.c_str());
-        };
         try {
             m_interpreter = std::make_unique<pybind11::scoped_interpreter>(&config);
         } catch (const std::exception& ex) {
-            restore_ctype();
             m_last_error = std::string("Python initialization failed: ") + ex.what();
             BOOST_LOG_TRIVIAL(error) << m_last_error;
             PyConfig_Clear(&config);
             return false;
         }
-        restore_ctype();
+        ctype_guard.restore();
         // PyConfig is cleared by pybind11's initialize_interpreter() internally.
         BOOST_LOG_TRIVIAL(debug) << "py::scoped_interpreter initialized successfully";
         pyconfig_child_log(std::string("Py init end home=") + python_home);
