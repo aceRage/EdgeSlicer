@@ -17,6 +17,7 @@
 
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Channel.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 #include "MoonRaker.hpp"
 #include "OctoPrint.hpp"
 #include "Duet.hpp"
@@ -674,6 +675,13 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
             BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: sent " << script;
     }
 
+    // Captured before upload() takes upload_data.
+    EDGE_LIFECYCLE_ONLY(const std::string upload_filename = the_job.upload_data.source_path.filename().string();
+                        std::string       upload_error;)
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::UploadStarted,
+        ctx.name = upload_filename;
+        ctx.code = LifecycleEvtCode::Ok;);
+
     bool success = false;
     try {
         success = the_job.printhost->upload(std::move(the_job.upload_data),
@@ -683,12 +691,21 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     } catch (const std::exception &e) {
         if (!error_emitted.load())
             error_fn(wxstring_from_exception(e));
+        EDGE_LIFECYCLE_ONLY(upload_error = e.what();)
         success = false;
     } catch (...) {
         if (!error_emitted.load())
             error_fn(_L("Unknown error"));
+        EDGE_LIFECYCLE_ONLY(upload_error = "Unknown error";)
         success = false;
     }
+
+    // As in Orca, msg carries only an exception's text (an error the host reported through
+    // error_fn is not repeated); unlike Orca, URL credentials and query strings are masked.
+    EDGE_LIFECYCLE_FIRE(LifecycleEvent::UploadFinished,
+        ctx.name = upload_filename;
+        ctx.code = success ? LifecycleEvtCode::Ok : LifecycleEvtCode::Error;
+        ctx.msg  = ::Slic3r::detail::lifecycle_mask_url_secrets(upload_error););
 
     if (success) {
         emit_progress(100);

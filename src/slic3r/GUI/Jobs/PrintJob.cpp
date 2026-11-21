@@ -1,4 +1,5 @@
 #include "PrintJob.hpp"
+#include "libslic3r/LifecycleFire.hpp"
 #include "libslic3r/MTUtils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -159,6 +160,17 @@ void PrintJob::process(Ctl &ctl)
 
     int result = -1;
     std::string http_body;
+
+    // PrintJobStarted fires once, just before the first attempt to hand the job to the printer.
+    EDGE_LIFECYCLE_ONLY(const auto mark_lifecycle_started = [this]() {
+        if (m_lifecycle_started)
+            return;
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::PrintJobStarted,
+            ctx.name      = m_project_name;
+            ctx.device_id = m_dev_id;
+            ctx.source    = "print_job";);
+        m_lifecycle_started = true;
+    };)
 
     int total_plate_num = plate_data.plate_count;
     if (!plate_data.is_valid) {
@@ -598,6 +610,7 @@ void PrintJob::process(Ctl &ctl)
         if (m_print_type == "from_sdcard_view") {
             BOOST_LOG_TRIVIAL(info) << "print_job: try to send with cloud, model is sdcard view";
             ctl.update_status(curr_percent, _u8L("Sending print job through cloud service"));
+            EDGE_LIFECYCLE_ONLY(mark_lifecycle_started();)
             result = m_agent->start_sdcard_print(params, update_fn, cancel_fn);
         }
         else if (!wxGetApp().app_config->get("lan_mode_only").empty() && wxGetApp().app_config->get("lan_mode_only") == "1") {
@@ -613,6 +626,7 @@ void PrintJob::process(Ctl &ctl)
                 BOOST_LOG_TRIVIAL(info) << "print_job: use ftp send print only";
                 ctl.update_status(curr_percent, _u8L("Sending print job over LAN"));
                 is_try_lan_mode = true;
+                EDGE_LIFECYCLE_ONLY(mark_lifecycle_started();)
                 result = m_agent->start_local_print_with_record(params, update_fn, cancel_fn, wait_fn);
                 if (result < 0) {
                     // try to send with cloud
@@ -629,6 +643,7 @@ void PrintJob::process(Ctl &ctl)
                 // try to send local with record
                 BOOST_LOG_TRIVIAL(info) << "print_job: try to start local print with record";
                 ctl.update_status(curr_percent, _u8L("Sending print job over LAN"));
+                EDGE_LIFECYCLE_ONLY(mark_lifecycle_started();)
                 result = m_agent->start_local_print_with_record(params, update_fn, cancel_fn, wait_fn);
                 if (result == 0) {
                     params.comments = "";
@@ -664,6 +679,7 @@ void PrintJob::process(Ctl &ctl)
             else if (diag.cloud_supported) {
                 BOOST_LOG_TRIVIAL(info) << "print_job: skipped LAN: " << params.comments << ", send with cloud";
                 ctl.update_status(curr_percent, _u8L("Sending print job through cloud service"));
+                EDGE_LIFECYCLE_ONLY(mark_lifecycle_started();)
                 result            = m_agent->start_print(params, update_fn, cancel_fn, wait_fn);
                 diag.lan_skip     = lan_skip;
                 diag.cloud_tried  = true;
@@ -689,6 +705,7 @@ void PrintJob::process(Ctl &ctl)
             const std::string job_id_before       = obj ? obj->job_id_ : std::string();
             const bool        was_printing_before = obj && obj->is_in_printing_status(obj->print_status);
             const bool        was_reporting       = obj && obj->is_connected();
+            EDGE_LIFECYCLE_ONLY(mark_lifecycle_started();)
             if (m_print_type == "from_sdcard_view") {
                 // Ultra: "Print" on a file in the Device tab's storage. The file is already on the
                 // printer, so this is start_sdcard_print in LAN mode too, as in Bambu Studio;
@@ -803,6 +820,7 @@ void PrintJob::process(Ctl &ctl)
         }
         wxQueueEvent(m_plater, evt);
         m_job_finished = true;
+        EDGE_LIFECYCLE_ONLY(m_lifecycle_success = true;)
     }
 }
 
@@ -814,6 +832,17 @@ void PrintJob::finalize(bool canceled, std::exception_ptr &eptr) {
     } catch (...) {
         eptr = std::current_exception();
     }
+
+    EDGE_LIFECYCLE_ONLY(
+    if (m_lifecycle_started && !m_lifecycle_finished) {
+        EDGE_LIFECYCLE_FIRE(LifecycleEvent::PrintJobFinished,
+            ctx.name      = m_project_name;
+            ctx.device_id = m_dev_id;
+            ctx.source    = "print_job";
+            ctx.code      = canceled ? LifecycleEvtCode::Warn : (eptr || !m_lifecycle_success ? LifecycleEvtCode::Error : LifecycleEvtCode::Ok);
+            ctx.msg       = canceled ? "cancelled" : (eptr ? "exception" : (m_lifecycle_success ? "" : "failed")););
+        m_lifecycle_finished = true;
+    })
 
     if (canceled || eptr)
         return;

@@ -1,5 +1,6 @@
 #include "TaskManager.hpp"
 
+#include "libslic3r/LifecycleFire.hpp"
 #include "libslic3r/Thread.hpp"
 #include "nlohmann/json.hpp"
 #include "MainFrame.hpp"
@@ -220,6 +221,12 @@ int TaskManager::schedule(TaskStateInfo* task)
                 return;
             }
             assert(m_agent);
+            // As in Orca, Started and Finished of one task both fire on this per-task worker thread.
+            EDGE_LIFECYCLE_FIRE(LifecycleEvent::PrintJobStarted,
+                ctx.name      = task->params().project_name;
+                ctx.device_id = task->params().dev_id;
+                ctx.job_id    = std::to_string(task->task_info_id);
+                ctx.source    = "task_manager";);
 // DEBUG FOR TEST
 #if 0
             int result = start_print_test(task->get_params(), task->update_status_fn, task->cancel_fn, task->wait_fn);
@@ -251,6 +258,14 @@ int TaskManager::schedule(TaskStateInfo* task)
                     task->set_state(TaskState::TS_SEND_CANCELED);
                 }
             }
+
+            EDGE_LIFECYCLE_FIRE(LifecycleEvent::PrintJobFinished,
+                ctx.name      = task->params().project_name;
+                ctx.device_id = task->params().dev_id;
+                ctx.job_id    = std::to_string(task->task_info_id);
+                ctx.source    = "task_manager";
+                ctx.code      = result == 0 ? LifecycleEvtCode::Ok : (task->is_canceled() ? LifecycleEvtCode::Warn : LifecycleEvtCode::Error);
+                ctx.msg       = result == 0 ? "" : (task->is_canceled() ? "cancelled" : "failed"););
      
             /* remove from sending task list */
             m_scedule_mutex.lock();

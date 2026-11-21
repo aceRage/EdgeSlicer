@@ -42,6 +42,12 @@ class PrintJob : public Job
     std::function<void()> m_success_fun{nullptr};
     std::string         m_dev_id;
     bool                m_job_finished{ false };
+#ifdef EDGE_PYTHON_PLUGINS
+    // Plugin lifecycle events (PrintJobStarted / PrintJobFinished), as in OrcaSlicer.
+    bool                m_lifecycle_started{ false };
+    bool                m_lifecycle_finished{ false };
+    bool                m_lifecycle_success{ false };
+#endif
     int                 m_print_job_completed_id = 0;
     wxString            m_completed_evt_data;
     std::function<void()> m_enter_ip_address_fun_fail{ nullptr };

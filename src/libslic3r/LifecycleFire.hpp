@@ -33,6 +33,7 @@
 #include "LifecycleEvents.hpp"
 
 #include <mutex>
+#include <string>
 
 namespace Slic3r {
 namespace detail {
@@ -44,6 +45,40 @@ namespace detail {
         LifecycleHookState&         state = lifecycle_hook_state();
         std::lock_guard<std::mutex> lock(state.mutex);
         return state.accepting && static_cast<bool>(state.fn);
+    }
+
+    // Upload / send error texts can quote the printer's URL. Before such a text goes into a payload,
+    // drop URL user info (user:password@) and query strings (?apikey=...): plugins never see a
+    // credential that rode inside a URL. Plain text without "://" is returned unchanged.
+    inline std::string lifecycle_mask_url_secrets(const std::string &text)
+    {
+        static const char *const k_url_end = " \t\r\n\"'<>()[]{},;";
+        std::string out;
+        out.reserve(text.size());
+        size_t pos = 0;
+        while (pos < text.size()) {
+            const size_t scheme = text.find("://", pos);
+            if (scheme == std::string::npos) {
+                out.append(text, pos, std::string::npos);
+                break;
+            }
+            const size_t authority = scheme + 3;
+            out.append(text, pos, authority - pos);
+            size_t url_end = text.find_first_of(k_url_end, authority);
+            if (url_end == std::string::npos)
+                url_end = text.size();
+            std::string url = text.substr(authority, url_end - authority);
+            const size_t host_end = url.find_first_of("/?#");
+            const size_t at       = url.rfind('@', host_end == std::string::npos ? std::string::npos : host_end);
+            if (at != std::string::npos && (host_end == std::string::npos || at < host_end))
+                url = "***" + url.substr(at);
+            const size_t query = url.find_first_of("?#");
+            if (query != std::string::npos)
+                url.erase(query);
+            out += url;
+            pos = url_end;
+        }
+        return out;
     }
 
     template<class Fill>
