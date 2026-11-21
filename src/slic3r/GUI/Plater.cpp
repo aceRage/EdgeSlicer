@@ -19422,6 +19422,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     if (is_finished)
     {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":finished, reload print soon");
+        m_slice_all = false;
         m_is_slicing = false;
         // Refresh the button after m_is_slicing clears: the cancelled branch
         // above still sees m_is_slicing == true and would keep Slice disabled.
@@ -19448,6 +19449,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         m_cur_slice_plate = q->find_next_sliceable_plate_for_slice_all(m_cur_slice_plate + 1);
         if (m_cur_slice_plate < 0)
         {
+            m_slice_all = false;
             m_is_slicing = false;
             return;
         }
@@ -19458,6 +19460,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         int ret = q->start_next_slice();
         if (ret) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":slicing all, plate %1% can not be sliced, will stop")%m_cur_slice_plate;
+            m_slice_all = false;
             m_is_slicing = false;
         }
         //not the last plate
