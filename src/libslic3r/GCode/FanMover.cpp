@@ -467,6 +467,8 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
                 // get the type of the next extrusions
                 std::string extrusion_string = line.raw().substr(6, line.raw().size() - 6);
                 current_role = ExtrusionEntity::string_to_role(extrusion_string);
+                // The slicer's own moves follow, in absolute positioning, also where custom G-code left G91 through a macro.
+                reader.set_relative_xyz(false);
             }
             // Orca #15904: upstream brackets the tool change G-code with these internal markers (only when
             // FanMover runs) and drops them here. We write the visible "; custom gcode start/end" markers

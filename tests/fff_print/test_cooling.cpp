@@ -252,6 +252,24 @@ TEST_CASE("Fan mover does not split a move in relative mode", "[FanMover]")
     CHECK(fan < lift);
 }
 
+TEST_CASE("Fan mover reads the moves after a role tag as absolute, also where custom G-code left G91 through a macro", "[FanMover]")
+{
+    // RESTORE_GCODE_STATE ends G91 out of the reader's sight. The slicer's next move follows a role tag, in absolute positioning.
+    const std::string gcode = fan_mover_output(1.f, ";TYPE:Outer wall\nG1 F600\nG1 Z10\n"
+                                                    "SAVE_GCODE_STATE NAME=lift\nG91\nG1 Z2\nRESTORE_GCODE_STATE NAME=lift\n"
+                                                    ";TYPE:Inner wall\nG1 Z10 F60\nM106 S255\n");
+    INFO(gcode);
+    // The fan command moves 1 s back, splitting the 2 s move from 12 mm down to 10 mm in the middle.
+    std::vector<float> heights;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&heights](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("G1") && line.has_z())
+            heights.push_back(line.z());
+    });
+    REQUIRE(heights.size() == 4);
+    CHECK(heights[2] == Approx(11.).margin(1e-4));
+}
+
 namespace {
 
 // A 20 mm cube printed as a single outer wall (no infill, no shells), so every layer starts and ends
