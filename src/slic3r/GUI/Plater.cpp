@@ -272,6 +272,7 @@
 #include <wx/filename.h>
 #include "ImageTraceDialog.hpp"
 #include "CloneDialog.hpp"
+#include "ApplyTransformDialog.hpp"
 #include "WebPreprintDialog.hpp"
 #include "SSWCP.hpp" // Ultra: the U1 send leaves its end-of-print unload choice for sw_SendGCodes
 
@@ -30237,15 +30238,30 @@ bool Plater::can_apply_transformation(bool position) const
     return false;
 }
 
+void Plater::apply_transformation_dialog(bool position, bool rotation, bool scale)
+{
+    if (!can_apply_transformation(false))
+        return;
+    ApplyTransformDialog dlg(this, can_apply_transformation(true), position, rotation, scale);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    // The selection can not change under a modal dialog, but the checks are cheap.
+    apply_transformation(dlg.position(), dlg.rotation(), dlg.scale());
+}
+
 void Plater::apply_transformation(bool position, bool rotation, bool scale)
 {
-    if (!can_apply_transformation(position))
+    if (!can_apply_transformation(false))
         return;
 
     // What to apply, read before the model changes under the selection.
     const Selection &selection = get_selection();
     std::set<std::pair<int, int>> targets; // object + instance, or object + volume
     const bool parts = selection.get_mode() == Selection::Volume;
+    // An object has no place of its own to bake.
+    position = position && parts;
+    if (!position && !rotation && !scale)
+        return;
     for (unsigned int idx : selection.get_volume_idxs()) {
         const GLVolume *gl_volume = selection.get_volume(idx);
         if (gl_volume == nullptr)
@@ -30267,7 +30283,8 @@ void Plater::apply_transformation(bool position, bool rotation, bool scale)
     if (targets.empty())
         return;
 
-    const std::string name = position ? "Apply position" : rotation && scale ? "Apply rotation and scale" : rotation ? "Apply rotation" : "Apply scale";
+    const std::string name = position && (rotation || scale) ? "Apply transform" : position ? "Apply position" :
+                             rotation && scale ? "Apply rotation and scale" : rotation ? "Apply rotation" : "Apply scale";
     Plater::TakeSnapshot snapshot(this, name);
 
     std::set<int> changed;

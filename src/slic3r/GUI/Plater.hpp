@@ -957,6 +957,8 @@ public:
     // zero rotation / 100% scale / zero offset afterwards) and nothing moves. Objects when objects are selected,
     // parts when parts are; a position can only be applied to parts.
     void apply_transformation(bool position, bool rotation, bool scale);
+    // Asks which ones in a small dialog (the arguments are the boxes ticked at first), then applies them.
+    void apply_transformation_dialog(bool position, bool rotation, bool scale);
     bool can_apply_transformation(bool position) const;
     void split_object();
     void split_volume();

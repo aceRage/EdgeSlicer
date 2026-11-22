@@ -2044,25 +2044,10 @@ void MenuFactory::append_menu_items_mirror(wxMenu* menu)
 
 void MenuFactory::append_menu_items_apply_transform(wxMenu* menu)
 {
-    wxMenu* apply_menu = new wxMenu();
-    if (!apply_menu)
-        return;
-
-    append_menu_item(apply_menu, wxID_ANY, _L("Rotation"), _L("Make the current rotation the new zero rotation"),
-        [](wxCommandEvent&) { plater()->apply_transformation(false, true, false); }, "", menu,
-        []() { return plater()->can_apply_transformation(false); }, m_parent);
-    append_menu_item(apply_menu, wxID_ANY, _L("Scale"), _L("Make the current size the new 100% scale"),
-        [](wxCommandEvent&) { plater()->apply_transformation(false, false, true); }, "", menu,
-        []() { return plater()->can_apply_transformation(false); }, m_parent);
-    append_menu_item(apply_menu, wxID_ANY, _L("Rotation and scale"), _L("Make the current rotation and size the new zero rotation and 100% scale"),
-        [](wxCommandEvent&) { plater()->apply_transformation(false, true, true); }, "", menu,
-        []() { return plater()->can_apply_transformation(false); }, m_parent);
-    append_menu_item(apply_menu, wxID_ANY, _L("Position"), _L("Make the part's current place inside its object its new zero position"),
-        [](wxCommandEvent&) { plater()->apply_transformation(true, false, false); }, "", menu,
-        []() { return plater()->can_apply_transformation(true); }, m_parent);
-
-    append_submenu(menu, apply_menu, wxID_ANY, _L("Apply transform"),
-        _L("Make the current rotation, scale or position the new baseline, without moving anything"), "",
+    // One item that opens a small dialog with a box for each of rotation, scale and position.
+    append_menu_item(menu, wxID_ANY, _L("Apply Transform") + dots,
+        _L("Make the current rotation, scale or position the new baseline, without moving anything"),
+        [](wxCommandEvent&) { plater()->apply_transformation_dialog(false, true, true); }, "", menu,
         []() { return plater()->can_apply_transformation(false); }, m_parent);
 }
 
