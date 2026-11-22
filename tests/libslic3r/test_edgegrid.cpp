@@ -83,6 +83,19 @@ TEST_CASE("EdgeGrid painted-line walk stays inside the grid", "[EdgeGrid][PaintO
     SECTION("max-edge vertical") {
         walk(Point{bbox.max.x(), bbox.min.y()}, bbox.max);
     }
+
+#ifdef NDEBUG
+    // OrcaSlicer #17682: the first cell of the line was visited without a bounds check, so a
+    // line starting on the closed bbox.max handed the visitor a cell outside the grid.
+    // (A debug build asserts on such a start point before it gets that far.)
+    SECTION("line starting on the closed bbox.max") {
+        InBoundsVisitor visitor;
+        visitor.grid = &grid;
+        REQUIRE_NOTHROW(grid.visit_cells_intersecting_line(bbox.max, bbox.min, visitor));
+        CHECK_FALSE(visitor.out_of_bounds);
+        CHECK(visitor.visits > 0);
+    }
+#endif
 }
 
 // Orca #16626: Danielsson propagation used `addr_delta << 1` on signed neighbour
