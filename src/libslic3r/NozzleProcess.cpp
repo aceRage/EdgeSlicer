@@ -266,7 +266,8 @@ size_t nozzle_for_filament(const ConfigBase &config, unsigned int filament_id)
     static const std::vector<int> none;
     const size_t nozzle_count = nozzles != nullptr ? nozzles->size() : 0;
     return physical_extruder_for_filament(nozzle_count, filaments != nullptr ? filaments->size() : nozzle_count,
-                                          fmap != nullptr ? fmap->values : none, filament_id, assign != nullptr ? assign->values : none);
+                                          fmap != nullptr ? fmap->values : none, filament_id, assign != nullptr ? assign->values : none,
+                                          filament_map_decides_extruder(config, nozzle_count));
 }
 
 bool fill_nozzle_line_widths(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources,

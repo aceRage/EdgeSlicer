@@ -198,7 +198,7 @@ size_t physical_extruder_of(const ConfigBase &config, unsigned int filament_id)
     filament_id = nozzle_filament_of_impl(config, filament_id);
     const std::vector<double> nozzles = floats_of(config, "nozzle_diameter");
     return physical_extruder_for_filament(nozzles.size(), filament_count_of(config), ints_of(config, "filament_map"), filament_id,
-                                          ints_of(config, "filament_nozzle_assignment"));
+                                          ints_of(config, "filament_nozzle_assignment"), filament_map_decides_extruder(config, nozzles.size()));
 }
 
 // Per-nozzle process P9: extruder `e`'s rack text, the project's (extruder_rack_nozzle_override) when it sets one for that

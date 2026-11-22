@@ -106,7 +106,8 @@ SupportOverhangRule support_overhang_rule(const ConfigBase &cfg)
         static const std::vector<int> no_map;
         const auto *assign = cfg.option<ConfigOptionInts>("filament_nozzle_assignment");
         nozzle_wall = nozzles->get_at(physical_extruder_for_filament(nozzle_count, filament_count, fmap ? fmap->values : no_map,
-                                                                     (unsigned int) wall, assign ? assign->values : no_map));
+                                                                     (unsigned int) wall, assign ? assign->values : no_map,
+                                                                     filament_map_decides_extruder(cfg, nozzle_count)));
     }
 
     ConfigOptionFloatOrPercent width(0., false);
