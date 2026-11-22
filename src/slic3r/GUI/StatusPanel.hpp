@@ -26,6 +26,7 @@
 #include "Widgets/AxisCtrlButton.hpp"
 #include "Widgets/TextInput.hpp"
 #include "Widgets/TempInput.hpp"
+#include "Widgets/ToolTempList.hpp"
 #include "Widgets/StaticLine.hpp"
 #include "Widgets/ProgressBar.hpp"
 #include "Widgets/ImageSwitchButton.hpp"
@@ -360,6 +361,9 @@ protected:
     bool            m_nozzle_dual_layout{ false };
     int             m_nozzle_ctrl_extruder_id{ 0 };        // extruder shown by m_tempCtrl_nozzle
     int             m_nozzle_deputy_ctrl_extruder_id{ 1 }; // extruder shown by m_tempCtrl_nozzle_deputy
+    // 3+ tools and the H3C rack strip (Widgets/ToolTempList). Empty and hidden for one or two
+    // tools, which keep the two rows above exactly as they were.
+    std::unique_ptr<ToolTempList> m_tool_temps;
     TempInput *     m_tempCtrl_bed;
     int             m_temp_bed_timeout {0};
     TempInput *     m_tempCtrl_chamber;
@@ -644,6 +648,9 @@ protected:
     static wxString device_page_stage_text(MachineObject *obj);
     void update_temp_ctrl(MachineObject *obj);
     void set_nozzle_temp_layout(bool dual);
+    void set_tool_list_layout(bool list_carries_tools, bool column_empty);
+    bool m_tool_list_layout{ false };   // the fixed nozzle rows are hidden, the list shows the tools
+    bool m_tool_column_empty{ false };  // 9+ tools: nothing above the bed row but the strip
     void update_misc_ctrl(MachineObject *obj);
     void update_ams(MachineObject* obj);
     void update_ams_insert_material(MachineObject* obj);

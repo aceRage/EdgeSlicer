@@ -474,17 +474,25 @@ public:
         // UNDER the airbrush and Cut::finalize() / restore_painting() re-bake the field on top.
         std::shared_ptr<const Airbrush::AirbrushField> airbrush_field;
         Transform3d                                    field_to_saved = Transform3d::Identity();
+        // Orca #17679: the mesh was mirrored without reordering the vertices the paint is recorded
+        // against, so it faces inward.
+        bool                                           inside_out { false };
+
+        // Moves the mesh, keeping the vertex order the paint needs.
+        void transform(const Transform3d &trafo);
     };
 
     // Remap painting data from source mesh to target mesh using spatial mapping.
     // `target_transform` should transform the target mesh into source's coordinate space.
     // If `existing_painting` is present, the result will be a combine of `existing_painting` and remapped `source_painting`.
+    // `source_inside_out` is set when the source mesh faces inward, see SavedPainting::inside_out.
     static TriangleSplittingData remap_painting(
         const indexed_triangle_set& source_its,
         const TriangleSplittingData& source_painting,
         const indexed_triangle_set& target_its,
         const Transform3d& target_transform,
-        const std::optional<std::reference_wrapper<const TriangleSplittingData>>& existing_painting);
+        const std::optional<std::reference_wrapper<const TriangleSplittingData>>& existing_painting,
+        bool source_inside_out = false);
 
 protected:
     // Triangle and info about how it's split.

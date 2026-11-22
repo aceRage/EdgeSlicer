@@ -147,8 +147,10 @@ add_executable(${_TEST_NAME}_tests
     stream_page_icon_tests.cpp
     dual_nozzle_layout_tests.cpp
     nozzle_temp_rows_tests.cpp
+    tool_temp_layout_tests.cpp
     nozzle_info_tests.cpp
     device_controls_tests.cpp
+    bambu_rack_temps_tests.cpp
     bambu_fans_tests.cpp
     bambu_ams_report_tests.cpp
     printer_timelapse_tests.cpp

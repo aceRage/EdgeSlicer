@@ -2966,6 +2966,31 @@ TEST_CASE("Spiral vase still refuses an Edge mixed filament", "[Print][SpiralVas
 }
 
 // Orca #16900: a finished export is reused, so a renamed plate needs the export step invalidated.
+// Orca #17680: tree supports are clipped to the bed shape at the first instance, normal supports are not.
+TEST_CASE("Moving an object regenerates its supports only where they depend on the position", "[Print][Support][Regression]")
+{
+    const std::string support_type = GENERATE(as<std::string>{}, "tree(auto)", "normal(auto)");
+    CAPTURE(support_type);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // init_print may turn gcode_comments on in its own copy, so the re-apply below differs in the position only.
+    config.set_deserialize_strict({ { "enable_support", 1 }, { "support_type", support_type }, { "gcode_comments", 1 } });
+    Print print;
+    Model model;
+    init_print({ TestMesh::overhang }, print, model, config);
+    print.process();
+    REQUIRE(print.objects().front()->is_step_done(posSupportMaterial));
+
+    // Tree supports follow the first instance only, so a copy beside it keeps them.
+    ModelInstance &instance = *model.objects.front()->instances.front();
+    model.objects.front()->add_instance(instance)->set_offset(instance.get_offset() + Vec3d(60., 0., 0.));
+    print.apply(model, config);
+    CHECK(print.objects().front()->is_step_done(posSupportMaterial));
+
+    instance.set_offset(instance.get_offset() + Vec3d(10., 0., 0.));
+    print.apply(model, config);
+    CHECK(print.objects().front()->is_step_done(posSupportMaterial) == (support_type == "normal(auto)"));
+}
+
 TEST_CASE("Plate name reaches the G-code once G-code export is invalidated", "[Print][PlateName]")
 {
     Print print;
@@ -3412,4 +3437,28 @@ TEST_CASE("Print validation rejects a zero layer height", "[Print]")
     const StringObjectException result = print.validate();
     CHECK_FALSE(result.string.empty());
     CHECK(result.opt_key == "layer_height");
+}
+
+// Orca #17681: supports printed with the object's filament list it twice before the filaments are deduplicated,
+// and two entries were taken for two filaments.
+TEST_CASE("A plate that prints a single filament leaves out the prime tower filament", "[Print][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "nozzle_diameter",            "0.4,0.4" },
+        { "filament_diameter",          "1.75,1.75" },
+        { "enable_prime_tower",         "1" },
+        { "wipe_tower_filament",        "2" },
+        { "enable_support",             "1" },
+        { "support_filament",           "0" },
+        { "support_interface_filament", "0" },
+    });
+    config.option<ConfigOptionStrings>("filament_colour")->values = { "#FF0000", "#00FF00" };
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    REQUIRE(print.objects().front()->has_support_material());
+    CHECK(print.extruders() == std::vector<unsigned int>{ 0 });
 }

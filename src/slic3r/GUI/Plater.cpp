@@ -271,6 +271,7 @@
 #include "ImageFillDialog.hpp"
 #include <wx/filename.h>
 #include "ImageTraceDialog.hpp"
+#include "ImageToObjectDialog.hpp"
 #include "CloneDialog.hpp"
 #include "ApplyTransformDialog.hpp"
 #include "WebPreprintDialog.hpp"
@@ -12541,7 +12542,9 @@ bool drop_image(Plater &plater, const wxString &image_file, const Vec2d &mouse_d
         hovered_object = -1;
 
     bool can_color_fill = hovered_object >= 0 || plater.can_apply_image_fill();
-    switch (ask_image_drop_action(nullptr, wxFileName(image_file).GetFullName(), can_color_fill)) {
+    switch (ask_image_drop_action(nullptr, wxFileName(image_file).GetFullName(), can_color_fill, plater.can_add_model())) {
+    case ImageDropAction::Object:
+        return create_object_from_image(image_file);
     case ImageDropAction::Trace:
         // the question took the mouse out of the canvas
         refresh_hover();
@@ -17693,7 +17696,8 @@ void Plater::priv::replace_with_stl()
 
     wxString title = _L("Select a new file");
     title += ":";
-    wxFileDialog dialog(q, title, "", from_u8(input_path.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    const wxString start_dir = input_path.has_parent_path() ? from_u8(input_path.parent_path().string()) : from_u8(wxGetApp().app_config->get_last_dir());
+    wxFileDialog dialog(q, title, start_dir, from_u8(input_path.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK)
         return;
 
@@ -17859,7 +17863,8 @@ void Plater::priv::reload_from_disk()
         title += " (" + from_u8(search.filename().string()) + ")";
 #endif // __APPLE__
         title += ":";
-        wxFileDialog dialog(q, title, "", from_u8(search.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        const wxString start_dir = search.has_parent_path() ? from_u8(search.parent_path().string()) : from_u8(wxGetApp().app_config->get_last_dir());
+        wxFileDialog dialog(q, title, start_dir, from_u8(search.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK)
             return;
 
@@ -19423,6 +19428,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     if (is_finished)
     {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":finished, reload print soon");
+        m_slice_all = false;
         m_is_slicing = false;
         // Refresh the button after m_is_slicing clears: the cancelled branch
         // above still sees m_is_slicing == true and would keep Slice disabled.
@@ -19449,6 +19455,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         m_cur_slice_plate = q->find_next_sliceable_plate_for_slice_all(m_cur_slice_plate + 1);
         if (m_cur_slice_plate < 0)
         {
+            m_slice_all = false;
             m_is_slicing = false;
             return;
         }
@@ -19459,6 +19466,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         int ret = q->start_next_slice();
         if (ret) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":slicing all, plate %1% can not be sliced, will stop")%m_cur_slice_plate;
+            m_slice_all = false;
             m_is_slicing = false;
         }
         //not the last plate
@@ -21386,7 +21394,6 @@ void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator 
                     tower_x_opt->set_at(&tower_x_new, plate_idx, 0);
                     tower_y_opt->set_at(&tower_y_new, plate_idx, 0);
                     need_update = true;
-                    break;
                 }
             }
 
@@ -24122,6 +24129,18 @@ void Plater::load_gcode(const wxString& filename)
     // Same breakdown as a sliced plate, machine time included. Prices come only from the file: one
     // exported without filament prices shows "not in file" rather than today's preset prices.
     current_print.print_statistics().total_cost = compute_cost(*current_result).total;
+    // Orca #17679: the legend shows the filament length and weight too, and subtracts the support and
+    // tower filament from them, so an opened file read 0 in total and a negative model filament.
+    double total_used_filament = 0.;
+    double total_weight        = 0.;
+    for (const auto &[extruder_id, volume] : current_result->print_statistics.total_volumes_per_extruder) {
+        if (extruder_id < current_result->filament_diameters.size() && current_result->filament_diameters[extruder_id] > 0.f)
+            total_used_filament += volume / (PI * sqr(0.5 * double(current_result->filament_diameters[extruder_id])));
+        if (extruder_id < current_result->filament_densities.size())
+            total_weight += volume * double(current_result->filament_densities[extruder_id]) * 0.001;
+    }
+    current_print.print_statistics().total_used_filament = total_used_filament;
+    current_print.print_statistics().total_weight        = total_weight;
 
     current_print.set_gcode_file_ready();
 

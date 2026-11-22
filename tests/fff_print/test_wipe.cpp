@@ -1230,3 +1230,201 @@ TEST_CASE("A filament with wipe off is not wiped inward beside one with it on", 
     CHECK(second[0] == 0);
     CHECK(second[1] == both[1]);
 }
+
+namespace {
+
+// A 20 mm cube in filament 1 at `cube_pos` and a pillar in filament 2, both relative to the plate at `plate_origin`.
+// Positions are instance offsets, as in load_tall_and_plate().
+void load_cube_and_pillar(Print &print, Model &model, const DynamicPrintConfig &config, const Vec3d &plate_origin, const Vec3d &cube_pos)
+{
+    ModelObject *cube = model.add_object();
+    cube->name        = "cube.stl";
+    cube->add_volume(make_cube(20., 20., 10.));
+    cube->add_instance()->set_offset(plate_origin + cube_pos);
+    cube->ensure_on_bed();
+
+    ModelObject *pillar = model.add_object();
+    pillar->name        = "pillar.stl";
+    pillar->add_volume(make_cube(6., 6., 10.));
+    pillar->add_instance()->set_offset(plate_origin + Vec3d(150., 185., 0.));
+    pillar->ensure_on_bed();
+    pillar->volumes.front()->config.set("extruder", 2);
+
+    print.set_plate_origin(plate_origin);
+    print.apply(model, config);
+    print.set_status_silent();
+}
+
+} // namespace
+
+// Orca #17681: the Type 2 tower's stand-in for the conflict check stayed on the first plate.
+TEST_CASE("The conflict check finds a Type 2 tower under an object on every plate", "[Wipe][WipeTower][Regression]")
+{
+    for (const double plate_offset : { 0., 300. }) {
+        INFO("plate offset " << plate_offset);
+        const DynamicPrintConfig config = cone_reservation_config("rectangle", "0");
+        Print print;
+        Model model;
+        // The tower is at (30, 80) on the plate and 35 mm wide; the cube stands on it.
+        load_cube_and_pillar(print, model, config, Vec3d(plate_offset, plate_offset, 0.), Vec3d(35., 85., 0.));
+        print.process();
+        REQUIRE(print.has_wipe_tower());
+        REQUIRE(print.wipe_tower_type() == WipeTowerType::Type2);
+        CHECK(print.get_conflict_result().has_value());
+    }
+}
+
+namespace {
+
+// The points of the first wipe after each prime tower region, in G-code coordinates.
+std::vector<Vec2d> wipes_after_tower(const std::string &gcode)
+{
+    const std::string &tower_start = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start);
+    const std::string &tower_end   = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End);
+    const std::string &wipe_start  = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Start);
+    const std::string &wipe_end    = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_End);
+    std::vector<Vec2d> points;
+    for (size_t pos = gcode.find(tower_end); pos != std::string::npos; pos = gcode.find(tower_end, pos + 1)) {
+        const size_t start = gcode.find(wipe_start, pos);
+        if (start == std::string::npos)
+            break;
+        const size_t end = gcode.find(wipe_end, start);
+        if (end == std::string::npos || gcode.find(tower_start, pos) < start)
+            continue;
+        GCodeReader reader;
+        reader.parse_buffer(gcode.substr(start, end - start), [&points](GCodeReader &, const GCodeReader::GCodeLine &line) {
+            if (line.has_x() && line.has_y())
+                points.emplace_back(double(line.x()), double(line.y()));
+        });
+    }
+    return points;
+}
+
+} // namespace
+
+// Orca #17681: the wipe path kept after a toolchange was in the frame of the first plate, so on a later plate
+// the first wipe after the tower ran towards the first plate.
+TEST_CASE("The first wipe after the prime tower is the same on every plate", "[Wipe][WipeTower][Regression]")
+{
+    for (const char *tower_type : { "type1", "type2" }) {
+        INFO("tower " << tower_type);
+        DynamicPrintConfig config = cone_reservation_config("rectangle", "0");
+        config.set_deserialize_strict({ { "wipe_tower_type", tower_type }, { "wipe", "1,1" }, { "wipe_distance", "2,2" } });
+        auto tower_wipes = [&config](const Vec3d &plate_origin) {
+            Print print;
+            Model model;
+            // The objects and the tower are placed relative to the plate, so the G-code is the same on every plate.
+            load_cube_and_pillar(print, model, config, plate_origin, Vec3d(150., 100., 0.));
+            return wipes_after_tower(Test::gcode(print));
+        };
+        const std::vector<Vec2d> first_plate = tower_wipes(Vec3d::Zero());
+        const std::vector<Vec2d> other_plate = tower_wipes(Vec3d(300., 300., 0.));
+        REQUIRE_FALSE(first_plate.empty());
+        REQUIRE(other_plate.size() == first_plate.size());
+        for (size_t i = 0; i < first_plate.size(); ++i) {
+            INFO("wipe point " << i);
+            CHECK(other_plate[i].x() == Approx(first_plate[i].x()).margin(0.01));
+            CHECK(other_plate[i].y() == Approx(first_plate[i].y()).margin(0.01));
+        }
+    }
+}
+
+// Orca #17681: a Hilbert curve bottom surface skips the retraction of a travel on the first layer. That also
+// skipped the part of the retraction left for after a wipe, so the wipe retracted only what it did on the way.
+TEST_CASE("A wipe retracts the full length on a first layer with Hilbert curve bottom surfaces", "[Wipe][RetractionSplit][Regression]")
+{
+    DynamicPrintConfig config = wipe_config("classic", false);
+    config.set_deserialize_strict({
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", "1"},
+        {"bottom_surface_pattern", "hilbertcurve"},
+        {"retraction_minimum_travel", "0"},
+        {"retraction_length", "0.8"},
+        {"retract_before_wipe", "0%"},
+        {"retract_after_wipe", "50%"},
+        {"retraction_speed", "25.5"},
+        {"role_based_wipe_speed", "0"},
+        {"wipe_speed", "100"},
+        {"wipe_distance", "2"},
+    });
+    // Two cubes, so each layer travels between them and retracts with a wipe.
+    const std::string output = slice({make_cube(10., 10., 1.), make_cube(10., 10., 1.)}, config);
+    const std::string &start_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Start);
+    bool   wipe_seen = false;
+    double retracted = 0.;
+    size_t wipes = 0;
+    size_t first_layer_wipes = 0;
+    GCodeReader parser;
+    parser.apply_config(config);
+    parser.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.comment().find(start_tag) == 0) {
+            wipe_seen = true;
+        } else if (line.retracting(self)) {
+            retracted -= line.dist_E(self);
+        } else if (line.extruding(self) && line.dist_XY(self) > EPSILON) {
+            if (wipe_seen) {
+                INFO("z " << self.z());
+                // The 50% left for after the wipe counts too.
+                CHECK(retracted == Approx(0.8).margin(0.0001));
+                ++wipes;
+                if (self.z() < 0.2 + EPSILON)
+                    ++first_layer_wipes;
+            }
+            retracted = 0.;
+            wipe_seen = false;
+        }
+    });
+    REQUIRE(first_layer_wipes > 0);
+    REQUIRE(wipes > first_layer_wipes);
+}
+
+// Orca #17681: the same skip also dropped the retraction of a toolchange.
+TEST_CASE("A toolchange retracts on a first layer with Hilbert curve bottom surfaces", "[Wipe][Regression]")
+{
+    // Without a wipe or a prime tower, GCode::set_extruder() retracts for the toolchange.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#0000FF"};
+    config.set_deserialize_strict({
+        {"nozzle_diameter", "0.4,0.4"},
+        {"filament_diameter", "1.75,1.75"},
+        {"single_extruder_multi_material", "0"},
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", "1"},
+        {"bottom_surface_pattern", "hilbertcurve"},
+        {"wipe", "0,0"},
+        {"retraction_length", "0.8,0.8"},
+        {"retract_length_toolchange", "5,5"},
+        {"enable_prime_tower", "0"},
+        {"skirt_loops", "0"},
+        {"brim_type", "no_brim"},
+        {"enable_support", "0"},
+    });
+    Print print;
+    Model model;
+    // The pillar prints with the second filament, so the first layer changes filaments.
+    load_cube_and_pillar(print, model, config, Vec3d::Zero(), Vec3d(150., 100., 0.));
+    const std::string gcode = Test::gcode(print);
+
+    double retracted = 0.;
+    bool   extruded  = false;
+    bool   changed   = false;
+    GCodeReader parser;
+    parser.apply_config(config);
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view cmd = line.cmd();
+        if (extruded && cmd.size() > 1 && cmd[0] == 'T' && cmd[1] >= '0' && cmd[1] <= '9') {
+            changed = true;
+            self.quit_parsing();
+        } else if (line.retracting(self)) {
+            retracted -= line.dist_E(self);
+        } else if (line.extruding(self) && line.dist_XY(self) > EPSILON) {
+            extruded  = true;
+            retracted = 0.;
+        }
+    });
+    REQUIRE(changed);
+    REQUIRE(parser.z() < 0.3);
+    CHECK(retracted == Approx(5.).margin(1e-4));
+}

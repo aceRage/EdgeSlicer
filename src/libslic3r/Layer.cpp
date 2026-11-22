@@ -242,6 +242,15 @@ bool Layer::is_perimeter_compatible(const PrintRegion& a, const PrintRegion& b)
 		&& config.over_support_flow     == other_config.over_support_flow
 		&& config.over_support_speed    == other_config.over_support_speed
 		&& config.small_perimeter_speed    == other_config.small_perimeter_speed
+        // Orca #17680: overhang walls print at the bridge speed, and partly overhanging walls at the
+        // overhang speeds, so a part or modifier with its own gets walls of its own.
+        && config.bridge_speed                   == other_config.bridge_speed
+        && config.enable_overhang_speed          == other_config.enable_overhang_speed
+        && config.overhang_1_4_speed             == other_config.overhang_1_4_speed
+        && config.overhang_2_4_speed             == other_config.overhang_2_4_speed
+        && config.overhang_3_4_speed             == other_config.overhang_3_4_speed
+        && config.overhang_4_4_speed             == other_config.overhang_4_4_speed
+        && config.slowdown_for_curled_perimeters == other_config.slowdown_for_curled_perimeters
         && config.gap_infill_speed.values.front() == other_config.gap_infill_speed.values.front()
         && config.filter_out_gap_fill.value == other_config.filter_out_gap_fill.value
 		&& config.detect_overhang_wall                   == other_config.detect_overhang_wall
@@ -373,6 +382,8 @@ void Layer::make_perimeters()
 	        
 	        if (layerms.size() == 1) {  // optimization
 	            (*layerm)->fill_surfaces.surfaces.clear();
+                // Only appended to below, so an older run's area must go first.
+                (*layerm)->fill_no_overlap_expolygons.clear();
                 (*layerm)->make_perimeters((*layerm)->slices, {*layerm}, &(*layerm)->fill_surfaces, &(*layerm)->fill_no_overlap_expolygons);
 	            (*layerm)->fill_expolygons = to_expolygons((*layerm)->fill_surfaces.surfaces);
 	        } else {

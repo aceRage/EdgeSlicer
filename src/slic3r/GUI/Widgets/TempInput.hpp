@@ -35,6 +35,27 @@ class TempInput : public wxNavigationEnabled<StaticBox>
     wxString m_badge;
     bool     m_badge_highlight{false};
 
+public:
+    // How the row is drawn. Normal is the Device tab's row as it always was (bed, chamber, the
+    // one or two nozzle rows). Compact and Cell are used only by ToolTempList for 3+ tools:
+    //   Compact - one line, no degree glyph, tighter gaps (FromDIP), fits 122 DIP with a badge;
+    //   Cell    - two lines (badge + current / "/" + target + small heater icon), for the grid and
+    //             the strip; its badge widens to a pill for two-digit numbers.
+    enum class RowMode { Normal, Compact, Cell };
+
+private:
+    RowMode        m_mode{RowMode::Normal};
+    wxString       m_active_icon_name;
+    ScalableBitmap small_active_icon; // Cell mode heater icon (12 DIP)
+
+    int      icon_gap() const;       // heater icon to badge / label
+    int      sep_gap() const;        // label to "/"
+    int      degree_width() const;   // 0 when the degree glyph is not drawn
+    wxString field_sample() const;   // text that sizes the target field
+    void     cell_layout();
+    void     cell_render(wxDC &dc);
+    wxSize   cell_content_size(wxDC &dc);
+
     static const int TempInputWidth  = 200;
     static const int TempInputHeight = 50;
 public:
@@ -93,6 +114,9 @@ public:
     void SetBadge(const wxString &badge, bool highlight = false);
     const wxString &GetBadge() const { return m_badge; }
     bool IsBadgeHighlighted() const { return m_badge_highlight; }
+
+    void    SetRowMode(RowMode mode);
+    RowMode GetRowMode() const { return m_mode; }
 
     void SetMaxTemp(int temp);
     void SetMinTemp(int temp);

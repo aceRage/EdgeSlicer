@@ -143,7 +143,12 @@ PrintBase::ApplyStatus PrintObject::set_instances(PrintInstances &&instances)
     	[](const PrintInstance& lhs, const PrintInstance& rhs) { return lhs.model_instance == rhs.model_instance && lhs.shift == rhs.shift; });
     if (! equal) {
         status = PrintBase::APPLY_STATUS_CHANGED;
-        if (m_print->invalidate_steps({ psSkirtBrim, psGCodeExport }) ||
+        // Orca #17680: tree supports stay inside the bed shape, which they place at the first instance,
+        // so after that one moved they kept the old position until a setting changed.
+        const bool first_moved = instances.empty() || m_instances.empty() || instances.front().shift != m_instances.front().shift;
+        const bool support_follows_instances = this->has_support_material() && is_tree(m_config.support_type.value) && first_moved;
+        if ((support_follows_instances && this->invalidate_step(posSupportMaterial)) ||
+            m_print->invalidate_steps({ psSkirtBrim, psGCodeExport }) ||
             (! equal_length && m_print->invalidate_step(psWipeTower)))
             status = PrintBase::APPLY_STATUS_INVALIDATED;
         m_instances = std::move(instances);
@@ -4124,6 +4129,15 @@ void PrintObject::bridge_over_infill()
                 total_fill_area   = closing(total_fill_area, float(SCALED_EPSILON));
                 expansion_area    = closing(expansion_area, float(SCALED_EPSILON));
                 expansion_area    = intersection(expansion_area, deep_infill_area);
+                // A bridge reaching into a region of another filament would print that region's area in its own filament.
+                std::map<unsigned int, Polygons> fill_area_by_filament;
+                for (const LayerRegion *region : layer->regions())
+                    append(fill_area_by_filament[region->region().extruder(frSolidInfill)], to_polygons(region->fill_expolygons));
+                if (fill_area_by_filament.size() > 1) {
+                    for (auto &filament_area : fill_area_by_filament)
+                        filament_area.second = closing(filament_area.second, float(SCALED_EPSILON));
+                } else
+                    fill_area_by_filament.clear();
                 // Orca: Preserve the real lower-layer anchors for every candidate in this
                 // layer. Replacing this shared set for one pattern also changes later regions,
                 // and synthetic straight lines can claim support where no infill is printed.
@@ -4260,6 +4274,8 @@ void PrintObject::bridge_over_infill()
                     bridging_area          = closing(bridging_area, flow.scaled_spacing());
                     bridging_area          = intersection(bridging_area, limiting_area);
                     bridging_area          = intersection(bridging_area, total_fill_area);
+                    if (!fill_area_by_filament.empty())
+                        bridging_area      = intersection(bridging_area, fill_area_by_filament.at(candidate.region->region().extruder(frSolidInfill)));
                     bridging_area          = diff(bridging_area, total_top_area);
                     expansion_area         = diff(expansion_area, bridging_area);
 

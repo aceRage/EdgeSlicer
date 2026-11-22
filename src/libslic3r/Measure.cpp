@@ -1012,6 +1012,18 @@ const indexed_triangle_set& Measuring::get_its() const
     return priv->get_its();
 }
 
+Transform3d detection_stretch(const Transform3d& world)
+{
+    const Eigen::Matrix3d              linear = world.linear();
+    const Eigen::JacobiSVD<Eigen::Matrix3d> svd(linear, Eigen::ComputeFullV);
+    const Eigen::Vector3d              sv = svd.singularValues(); // sorted, largest first
+    Transform3d                        stretch = Transform3d::Identity();
+    if (!(sv(2) > 1e-9) || sv(0) - sv(2) <= 1e-6 * sv(0))
+        return stretch; // degenerate or uniform scale
+    stretch.linear() = svd.matrixV() * sv.asDiagonal() * svd.matrixV().transpose();
+    return stretch;
+}
+
 const AngleAndEdges AngleAndEdges::Dummy = { 0.0, Vec3d::Zero(), { Vec3d::Zero(), Vec3d::Zero() }, { Vec3d::Zero(), Vec3d::Zero() }, 0.0, true };
 
 static AngleAndEdges angle_edge_edge(const std::pair<Vec3d, Vec3d>& e1, const std::pair<Vec3d, Vec3d>& e2)
@@ -1752,10 +1764,9 @@ void SurfaceFeature::translate(const Transform3d &tran)
     case Measure::SurfaceFeatureType::Curve:
     case Measure::SurfaceFeatureType::Plane: {
         // m_pt1 is normal;
-        Vec3d temp_pt1 = m_pt2 + m_pt1;
-        temp_pt1       = tran * temp_pt1;
+        // Orca #17549: a normal follows the inverse transpose, or it leans off the surface after nonuniform scaling.
+        m_pt1          = (tran.linear().inverse().transpose() * m_pt1).normalized();
         m_pt2          = tran * m_pt2;
-        m_pt1          = (temp_pt1 - m_pt2).normalized();
         break;
     }
     case Measure::SurfaceFeatureType::Circle: {

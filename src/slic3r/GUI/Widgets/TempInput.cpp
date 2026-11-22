@@ -3,6 +3,7 @@
 #include "PopupWindow.hpp"
 #include "../I18N.hpp"
 #include <wx/dcgraph.h>
+#include <algorithm>
 #include "../GUI.hpp"
 #include "../GUI_App.hpp"
 #include "../BambuDevicePalette.hpp"
@@ -121,6 +122,7 @@ void TempInput::Create(wxWindow *parent, wxString text, wxString label, wxString
     text_ctrl->SetForegroundColour(StateColor::darkModeColorFor(*wxBLACK));
     if (!normal_icon.IsEmpty()) { this->normal_icon = ScalableBitmap(this, normal_icon.ToStdString(), 16); }
     if (!actice_icon.IsEmpty()) { this->actice_icon = ScalableBitmap(this, actice_icon.ToStdString(), 16); }
+    m_active_icon_name = actice_icon;
     this->degree_icon = ScalableBitmap(this, "degree", 16);
     messureSize();
 }
@@ -277,10 +279,105 @@ void TempInput::SetBadge(const wxString &badge, bool highlight)
     Refresh();
 }
 
+void TempInput::SetRowMode(RowMode mode)
+{
+    if (mode == m_mode) return;
+    m_mode = mode;
+    if (m_mode == RowMode::Cell && !small_active_icon.bmp().IsOk() && !m_active_icon_name.IsEmpty())
+        small_active_icon = ScalableBitmap(this, m_active_icon_name.ToStdString(), 12);
+    messureMiniSize();
+    messureSize();
+    wxSize sz = GetSize();
+    DoSetSize(-1, -1, sz.x, sz.y, wxSIZE_AUTO);
+    Refresh();
+}
+
+// Normal mode keeps the raw pixel gaps it always had (9 and 10) so the existing rows stay
+// pixel-identical; the new modes scale theirs.
+int TempInput::icon_gap() const { return m_mode == RowMode::Normal ? 9 : FromDIP(6); }
+int TempInput::sep_gap() const { return m_mode == RowMode::Normal ? 10 : FromDIP(4); }
+int TempInput::degree_width() const { return m_mode == RowMode::Normal ? degree_icon.GetBmpSize().x : 0; }
+wxString TempInput::field_sample() const { return m_mode == RowMode::Cell ? wxString("000") : wxString("0000"); }
+
+// Two-line cell (ToolTempList grid and strip):  [badge] 220
+//                                                / [220] (heater)
+wxSize TempInput::cell_content_size(wxDC &dc)
+{
+    dc.SetFont(::Label::Head_14);
+    labelSize        = dc.GetMultiLineTextExtent(wxWindow::GetLabel());
+    const int line1w = badge_extent() + labelSize.x;
+    const int line1h = std::max(m_badge.IsEmpty() ? 0 : FromDIP(16), labelSize.y);
+
+    dc.SetFont(::Label::Body_12);
+    const wxSize sep      = dc.GetMultiLineTextExtent(wxString("/"));
+    const wxSize field    = text_ctrl->GetTextExtent(field_sample());
+    const int    icon_w   = small_active_icon.bmp().IsOk() ? small_active_icon.GetBmpSize().x + FromDIP(2) : 0;
+    const int    line2w   = sep.x + FromDIP(4) + field.x + icon_w;
+    const int    line2h   = std::max(sep.y, field.y);
+    return wxSize(std::max(line1w, line2w), line1h + FromDIP(1) + line2h);
+}
+
+void TempInput::cell_layout()
+{
+    wxClientDC   dc(this);
+    const wxSize content = cell_content_size(dc);
+    const wxSize size    = GetSize();
+    padding_left         = std::max(0, (size.x - content.x) / 2);
+
+    dc.SetFont(::Label::Body_12);
+    const wxSize sep   = dc.GetMultiLineTextExtent(wxString("/"));
+    const wxSize field = text_ctrl->GetTextExtent(field_sample());
+    const int    top   = std::max(0, (size.y - content.y) / 2);
+    const int    line1h = content.y - FromDIP(1) - std::max(sep.y, field.y);
+    text_ctrl->SetSize(field);
+    text_ctrl->SetPosition({padding_left + sep.x + FromDIP(4), top + line1h + FromDIP(1)});
+}
+
+void TempInput::cell_render(wxDC &dc)
+{
+    const int    states = state_handler.states();
+    const wxSize size   = GetSize();
+    const wxSize content = cell_content_size(dc);
+    const int    top     = std::max(0, (size.y - content.y) / 2);
+
+    dc.SetFont(::Label::Body_12);
+    const wxSize sep    = dc.GetMultiLineTextExtent(wxString("/"));
+    const int    line2h = std::max(sep.y, text_ctrl->GetSize().y);
+    const int    line1h = content.y - FromDIP(1) - line2h;
+
+    // line 1: badge + current temperature
+    wxPoint pt(padding_left, top);
+    if (!m_badge.IsEmpty()) {
+        draw_badge(dc, wxPoint(pt.x, top + (line1h - FromDIP(16)) / 2));
+        pt.x += badge_extent();
+    }
+    dc.SetFont(::Label::Head_14);
+    dc.SetTextForeground(IsEnabled() ? StateColor::darkModeColorFor("#323A3C") : StateColor::darkModeColorFor(wxColour(0xAC, 0xAC, 0xAC)));
+    dc.SetTextBackground(background_color.colorForStates(states));
+    dc.DrawText(wxWindow::GetLabel(), pt.x, top + (line1h - labelSize.y) / 2);
+
+    // line 2: "/" + the target field (a child window) + the heater icon while heating
+    const int y2 = top + line1h + FromDIP(1);
+    dc.SetFont(::Label::Body_12);
+    dc.SetTextForeground(text_color.colorForStates(states));
+    dc.DrawText(wxString("/"), padding_left, y2 + (line2h - sep.y) / 2);
+    if (actice && small_active_icon.bmp().IsOk()) {
+        const wxPoint fpos = text_ctrl->GetPosition();
+        const wxSize  isz  = small_active_icon.GetBmpSize();
+        dc.DrawBitmap(small_active_icon.bmp(), fpos.x + text_ctrl->GetSize().x + FromDIP(2), y2 + (line2h - isz.y) / 2);
+    }
+}
+
 int TempInput::badge_extent() const
 {
     if (m_badge.IsEmpty()) return 0;
-    return FromDIP(16) + FromDIP(4);
+    int d = FromDIP(16);
+    if (m_mode == RowMode::Cell) {
+        // A pill for two digits ("10".."16"); one character keeps the 16 DIP disc.
+        const int w = GetTextExtent(m_badge).x + FromDIP(6);
+        if (w > d) d = w;
+    }
+    return d + FromDIP(4);
 }
 
 void TempInput::draw_badge(wxDC &dc, const wxPoint &pt)
@@ -288,7 +385,8 @@ void TempInput::draw_badge(wxDC &dc, const wxPoint &pt)
     if (m_badge.IsEmpty()) return;
 
     const int     d = FromDIP(16);
-    const wxPoint at(pt.x, (GetSize().y - d) / 2);
+    const int     w = badge_extent() - FromDIP(4); // == d except for a Cell mode pill
+    const wxPoint at(pt.x, m_mode == RowMode::Cell ? pt.y : (GetSize().y - d) / 2);
 
     // Same look as Bambu Studio's "round" badge (#262E30 disc, white letter; inverted in dark
     // mode), with the active extruder in the accent colour.
@@ -307,21 +405,24 @@ void TempInput::draw_badge(wxDC &dc, const wxPoint &pt)
     auto paint = [&](wxDC &gdc, const wxPoint &o) {
         gdc.SetPen(*wxTRANSPARENT_PEN);
         gdc.SetBrush(wxBrush(fill));
-        gdc.DrawEllipse(o, wxSize(d, d));
+        if (w > d)
+            gdc.DrawRoundedRectangle(o, wxSize(w, d), d / 2.0);
+        else
+            gdc.DrawEllipse(o, wxSize(d, d));
         gdc.SetFont(::Label::Body_12);
         gdc.SetTextForeground(letter);
         gdc.SetBackgroundMode(wxBRUSHSTYLE_TRANSPARENT);
         const wxSize ts = gdc.GetTextExtent(m_badge);
-        gdc.DrawText(m_badge, o.x + (d - ts.x) / 2, o.y + (d - ts.y) / 2);
+        gdc.DrawText(m_badge, o.x + (w - ts.x) / 2, o.y + (d - ts.y) / 2);
     };
 
 #ifdef __WXMSW__
     // GDI draws aliased circles; paint through a GC on a copy of the background instead
     // (the same trick AMSextruderImage uses).
     wxMemoryDC memdc;
-    wxBitmap   bmp(d, d);
+    wxBitmap   bmp(w, d);
     memdc.SelectObject(bmp);
-    memdc.Blit({0, 0}, {d, d}, &dc, at);
+    memdc.Blit({0, 0}, {w, d}, &dc, at);
     {
         wxGCDC gcdc(memdc);
         paint(gcdc, {0, 0});
@@ -357,6 +458,7 @@ void TempInput::Rescale()
     if (this->normal_icon.bmp().IsOk()) this->normal_icon.msw_rescale();
     if (this->actice_icon.bmp().IsOk()) this->actice_icon.msw_rescale();
     if (this->degree_icon.bmp().IsOk()) this->degree_icon.msw_rescale();
+    if (this->small_active_icon.bmp().IsOk()) this->small_active_icon.msw_rescale();
     messureSize();
 }
 
@@ -388,6 +490,10 @@ void TempInput::DoSetSize(int x, int y, int width, int height, int sizeFlags)
 {
     wxWindow::DoSetSize(x, y, width, height, sizeFlags);
     if (sizeFlags & wxSIZE_USE_EXISTING) return;
+    if (m_mode == RowMode::Cell) {
+        cell_layout();
+        return;
+    }
 
     auto       left = padding_left;
     wxClientDC dc(this);
@@ -397,7 +503,7 @@ void TempInput::DoSetSize(int x, int y, int width, int height, int sizeFlags)
     }
 
     // interval
-    left += 9;
+    left += icon_gap();
 
     // extruder badge
     left += badge_extent();
@@ -408,7 +514,7 @@ void TempInput::DoSetSize(int x, int y, int width, int height, int sizeFlags)
     left += labelSize.x;
 
     // interval
-    left += 10;
+    left += sep_gap();
 
     // separator
     dc.SetFont(::Label::Body_12);
@@ -416,7 +522,7 @@ void TempInput::DoSetSize(int x, int y, int width, int height, int sizeFlags)
     left += sepSize.x;
 
     // text text
-    auto textSize = text_ctrl->GetTextExtent(wxString("0000"));
+    auto textSize = text_ctrl->GetTextExtent(field_sample());
     text_ctrl->SetSize(textSize);
     text_ctrl->SetPosition({left, (GetSize().y - text_ctrl->GetSize().y) / 2});
 }
@@ -454,13 +560,18 @@ void TempInput::render(wxDC &dc)
     }
 
     dc.SetBrush(*wxTRANSPARENT_BRUSH);
+    if (m_mode == RowMode::Cell) {
+        if (!actice_icon.bmp().IsOk()) actice = false;
+        cell_render(dc);
+        return;
+    }
     // start draw
     wxPoint pt = {padding_left, 0};
     if (actice_icon.bmp().IsOk() && actice) {
         wxSize szIcon = actice_icon.GetBmpSize();
         pt.y          = (size.y - szIcon.y) / 2;
         dc.DrawBitmap(actice_icon.bmp(), pt);
-        pt.x += szIcon.x + 9;
+        pt.x += szIcon.x + icon_gap();
     } else {
         actice = false;
     }
@@ -469,7 +580,7 @@ void TempInput::render(wxDC &dc)
         wxSize szIcon = normal_icon.GetBmpSize();
         pt.y          = (size.y - szIcon.y) / 2;
         dc.DrawBitmap(normal_icon.bmp(), pt);
-        pt.x += szIcon.x + 9;
+        pt.x += szIcon.x + icon_gap();
     }
 
     // extruder badge
@@ -512,12 +623,12 @@ void TempInput::render(wxDC &dc)
     auto sepSize = dc.GetMultiLineTextExtent(wxString("/"));
     dc.SetTextForeground(text_color.colorForStates(states));
     dc.SetTextBackground(background_color.colorForStates(states));
-    pt.x += labelSize.x + 10;
+    pt.x += labelSize.x + sep_gap();
     pt.y = (size.y - sepSize.y) / 2;
     dc.DrawText(wxString("/"), pt);
 
     // flag
-    if (degree_icon.bmp().IsOk()) {
+    if (degree_icon.bmp().IsOk() && m_mode == RowMode::Normal) {
         auto   pos    = text_ctrl->GetPosition();
         wxSize szIcon = degree_icon.GetBmpSize();
         pt.y          = (size.y - szIcon.y) / 2;
@@ -542,7 +653,7 @@ void TempInput::messureMiniSize()
     }
 
     // interval
-    width += 9;
+    width += icon_gap();
 
     // extruder badge
     width += badge_extent();
@@ -554,7 +665,7 @@ void TempInput::messureMiniSize()
     height = labelSize.y > height ? labelSize.y : height;
 
     // interval
-    width += 10;
+    width += sep_gap();
 
     // separator
     dc.SetFont(::Label::Body_12);
@@ -563,14 +674,20 @@ void TempInput::messureMiniSize()
     height = sepSize.y > height ? sepSize.y : height;
 
     // text text
-    auto textSize = text_ctrl->GetTextExtent(wxString("0000"));
+    auto textSize = text_ctrl->GetTextExtent(field_sample());
     width += textSize.x;
     height = textSize.y > height ? textSize.y : height;
 
     // flag flag
     auto flagSize = degree_icon.GetBmpSize();
-    width += flagSize.x;
-    height = flagSize.y > height ? flagSize.y : height;
+    width += degree_width();
+    if (m_mode == RowMode::Normal) height = flagSize.y > height ? flagSize.y : height;
+
+    if (m_mode == RowMode::Cell) {
+        const wxSize cell = cell_content_size(dc);
+        width             = cell.x;
+        height            = cell.y;
+    }
 
     if (size.x < width) {
         size.x = width;
@@ -605,7 +722,7 @@ void TempInput::messureSize()
     }
 
     // interval
-    width += 9;
+    width += icon_gap();
 
     // extruder badge
     width += badge_extent();
@@ -617,7 +734,7 @@ void TempInput::messureSize()
     height = labelSize.y > height ? labelSize.y : height;
 
     // interval
-    width += 10;
+    width += sep_gap();
 
     // separator
     dc.SetFont(::Label::Body_12);
@@ -626,14 +743,20 @@ void TempInput::messureSize()
     height = sepSize.y > height ? sepSize.y : height;
 
     // text text
-    auto textSize = text_ctrl->GetTextExtent(wxString("0000"));
+    auto textSize = text_ctrl->GetTextExtent(field_sample());
     width += textSize.x;
     height = textSize.y > height ? textSize.y : height;
 
     // flag flag
     auto flagSize = degree_icon.GetBmpSize();
-    width += flagSize.x;
-    height = flagSize.y > height ? flagSize.y : height;
+    width += degree_width();
+    if (m_mode == RowMode::Normal) height = flagSize.y > height ? flagSize.y : height;
+
+    if (m_mode == RowMode::Cell) {
+        const wxSize cell = cell_content_size(dc);
+        width             = cell.x;
+        height            = cell.y;
+    }
 
     if (size.x < width) {
         size.x = width;

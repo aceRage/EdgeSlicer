@@ -129,6 +129,38 @@
         return out;
     }
 
+    // A nozzle rack's positions (controls.rack[], the H3C), read-only. Each entry: label, what it
+    // holds and its reading. `value` is what the device page shows; `warm` counts toward the card's
+    // one "Rack" chip (D12): a nozzle in the rack that has a target or says it is heating / holding.
+    // The mounted one is the extruder's row in heaters[], so it is listed but never counted as warm.
+    var RACK_STATES = { heating: 'heating', holding: 'holding', cooling: 'cooling', idle: 'idle' };
+    function rack(p) {
+        var rs = p.controls && Array.isArray(p.controls.rack) ? p.controls.rack : [];
+        var out = [];
+        rs.forEach(function(r) {
+            if (!r || typeof r !== 'object') return;
+            var label = str(r.label) || str(r.id);
+            var kind = str(r.kind) || 'nozzle';
+            var reading = isNum(r.temp);
+            var state = RACK_STATES[str(r.state)] || '';
+            var value;
+            if (r.present === false) value = 'Empty';
+            else if (r.mounted === true) value = 'On the extruder';
+            else if (kind !== 'nozzle') value = kind.charAt(0).toUpperCase() + kind.slice(1);
+            else if (!reading) value = '–';
+            else value = Math.round(r.temp) + '°C' + (isNum(r.target) && r.target > 0 ? ' → ' + Math.round(r.target) + '°C' : '') +
+                         (state ? ' · ' + state : '');
+            var warm = r.present !== false && r.mounted !== true && kind === 'nozzle' && reading &&
+                       ((isNum(r.target) && r.target > 0) || state === 'heating' || state === 'holding');
+            out.push({ label: label, value: value, warm: warm, mounted: r.mounted === true, present: r.present !== false });
+        });
+        return out;
+    }
+    function rackSummary(p) {
+        var rk = rack(p);
+        return { positions: rk.length, warm: rk.filter(function(r) { return r.warm; }).length };
+    }
+
     // Fans by their short names ("Part", "Aux", "Chamber"): they sit in one group labelled Fans.
     var FAN_NAMES = { part: 'Part', aux: 'Aux', chamber: 'Chamber', cavity: 'Cavity' };
     function fanName(f) {
@@ -274,8 +306,8 @@
         }
 
         if (p.online !== false) {
-            var ts = temps(p), fs = fans(p);
-            if (ts.length) {
+            var ts = temps(p), fs = fans(p), rk = rackSummary(p);
+            if (ts.length || rk.positions) {
                 var tg = group('ptemps', 'Temperatures');
                 var tl = el('ul', 'pitems');
                 ts.forEach(function(h) {
@@ -284,6 +316,14 @@
                     li.appendChild(el('span', 'v', Math.round(h.temp) + '\u00b0' + (h.target > 0 ? ' / ' + Math.round(h.target) + '\u00b0' : '')));
                     tl.appendChild(li);
                 });
+                // The rack as one chip, not one reading per position (D12); the device page lists them.
+                if (rk.positions) {
+                    var rli = el('li', 'pitem prack');
+                    rli.appendChild(el('span', 'k', 'Rack'));
+                    rli.appendChild(el('span', 'v', rk.warm + '/' + rk.positions + ' warm'));
+                    rli.setAttribute('title', rk.warm + ' of ' + rk.positions + ' rack positions warm');
+                    tl.appendChild(rli);
+                }
                 tg.appendChild(tl);
                 c.appendChild(tg);
             }
@@ -560,6 +600,16 @@
                     tsec.appendChild(el('div', 'dnote', 'Readings only: this printer takes no temperature from here.'));
                 right.appendChild(tsec);
             }
+            // ---- nozzle rack (H3C), read-only ----
+            var rks = rack(p);
+            if (rks.length) {
+                var rsec = section('drack', 'Nozzle rack');
+                var rl = el('ul', 'dlist');
+                rks.forEach(function(r) { kv(rl, r.label, r.value, r.present ? (r.mounted ? 'mounted' : '') : 'empty'); });
+                rsec.appendChild(rl);
+                rsec.appendChild(el('div', 'dnote', 'Readings only: rack nozzle temperatures cannot be set from here yet.'));
+                right.appendChild(rsec);
+            }
             // ---- fans and light ----
             var fs = fans(p);
             var light = p.controls && p.controls.light && typeof p.controls.light === 'object' ? p.controls.light : null;
@@ -639,6 +689,6 @@
     }
 
     root.PrinterCards = { render: render, card: card, sortRows: sortRows, stateOf: stateOf, summary: summary,
-                          temps: temps, fans: fans, filaments: filaments, fmtTime: fmtTime, whyNot: whyNot, errorKey: errorKey,
+                          temps: temps, rack: rack, fans: fans, filaments: filaments, fmtTime: fmtTime, whyNot: whyNot, errorKey: errorKey,
                           device: device, renderDevice: renderDevice };
 })(typeof window !== 'undefined' ? window : this);
