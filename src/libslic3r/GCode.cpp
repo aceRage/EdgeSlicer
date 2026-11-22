@@ -5284,6 +5284,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     // Write the custom start G-code
     file.writeln(machine_start_gcode);
+    // Orca #17540: the layer cooling times the layers with the motion limits the start G-code sets.
+    m_cooling_buffer->remember_motion_settings(machine_start_gcode);
     // BBS: mark the end of the machine start G-code for the idle-nozzle pre-cooling (BambuStudio
     // GCode.cpp:2991). Written only when it applies, so no other printer's G-code changes.
     m_pre_cooling_markers = PreCooling::pre_cooling_active(print);

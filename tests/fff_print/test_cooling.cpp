@@ -1377,6 +1377,25 @@ double layer_time_from_first_extrusion(const std::string &gcode)
     return time;
 }
 
+// Orca #17540: the time a layer's G-code takes as the cooling times it now, with acceleration, as the preview
+// estimates it: the whole layer from a standstill at the origin, relative E, without the printer's fixed times.
+double estimated_layer_time(const DynamicPrintConfig &config, const std::string &layer_gcode)
+{
+    PrintConfig print_config;
+    print_config.apply(config, true);
+    print_config.machine_load_filament_time.value   = 0.;
+    print_config.machine_unload_filament_time.value = 0.;
+    print_config.machine_tool_change_time.value     = 0.;
+    print_config.machine_prepare_time.value         = 0.;
+    print_config.machine_switch_extruder_time.value = 0.;
+    GCodeProcessor timer;
+    timer.initialize(std::string());
+    timer.apply_config(print_config);
+    // The millisecond dwell makes the processor plan the last moves to a stop.
+    timer.process_buffer("T0\nM83\nG92 X0 Y0 Z0 E0\n" + layer_gcode + "\nG4 P1\n");
+    return double(timer.get_time(PrintEstimatedStatistics::ETimeMode::Normal)) - 0.001;
+}
+
 // One layer through a CoolingBuffer set up from `config`, as layer `layer_id`, flushed. Relative E.
 std::string cool_one_layer(const DynamicPrintConfig &config, const std::string &layer_gcode, size_t layer_id)
 {
@@ -1435,17 +1454,26 @@ TEST_CASE("The cooling slowdown counts no extruder move on a line without E", "[
     SECTION("a layer slowed for cooling takes the time asked") {
         config.set_deserialize_strict({{"slow_down_layer_time", "10"}, {"fan_cooling_layer_time", "20"}});
         const std::string out  = cool_one_layer(config, known_layer, 5);
-        const double      time = layer_time_from_first_extrusion(out);
+        const double      time = estimated_layer_time(config, out);
         INFO(out);
-        INFO("layer time after the slowdown " << time << " s, asked 10 s");
-        // CoolingBuffer aims at 1.001 times the time asked; the F words are rounded. On main 9.86 s.
-        CHECK(time >= 10. * 0.999);
-        CHECK(time <= 10. * 1.002);
+        INFO("estimated layer time after the slowdown " << time << " s, asked 10 s; at the feed rates "
+                                                        << layer_time_from_first_extrusion(out) << " s");
+        // Orca #17540: the slowdown aims at the estimated time, accepted from 0.2% short to 1% past 1.001 times
+        // the time asked. At the feed rates the layer takes less.
+        CHECK(time >= 10. * 0.998);
+        CHECK(time <= 10. * 1.05);
+        CHECK(layer_time_from_first_extrusion(out) <= time);
     }
 
     SECTION("the fan is set from the time the layer takes") {
-        // Not slowed (3.5 s asked): the fan runs between full at 3.5 s and off at 4.5 s, 1 % for each 0.01 s.
-        config.set_deserialize_strict({{"slow_down_layer_time", "3.5"}, {"fan_cooling_layer_time", "4.5"}});
+        // Orca #17540: the layer is timed whole and with acceleration. Not slowed: the thresholds are put 0.3 s
+        // below and 0.7 s above that time, so the fan runs at 70 %, 1 % for each 0.01 s.
+        const double estimated = estimated_layer_time(config, known_layer);
+        INFO("estimated layer time " << estimated << " s, at the feed rates from the first extrusion " << known_layer_time << " s");
+        REQUIRE(estimated > known_layer_time);
+        REQUIRE(estimated < known_layer_time + 3.);
+        config.set_key_value("slow_down_layer_time", new ConfigOptionFloats({ estimated - 0.3 }));
+        config.set_key_value("fan_cooling_layer_time", new ConfigOptionFloats({ estimated + 0.7 }));
         const std::string out = cool_one_layer(config, known_layer, 5);
         INFO(out);
         REQUIRE_THAT(layer_time_from_first_extrusion(out), Catch::Matchers::WithinRel(known_layer_time, 1e-4));
@@ -1455,10 +1483,9 @@ TEST_CASE("The cooling slowdown counts no extruder move on a line without E", "[
         while (std::getline(in, line))
             if (const int v = part_fan_value(line); v >= 0)
                 fan = v;
-        // CoolingBuffer takes the whole percent below: 3.8202 s gives 67 % (M106 S171); on main 3.8902 s, 60 % (S153).
-        const int expected_percent = int(std::floor((1. - (known_layer_time - 3.5)) * 100.));
-        REQUIRE(expected_percent == 67);
-        CHECK(fan == int(255.5 * expected_percent / 100.));
+        // CoolingBuffer takes the whole percent below; the thresholds are floats, so 69 % or 70 %.
+        CHECK(fan >= int(255.5 * 69 / 100.));
+        CHECK(fan <= int(255.5 * 70 / 100.));
     }
 }
 
@@ -1481,34 +1508,150 @@ TEST_CASE("Layers slowed for cooling take the time asked", "[Cooling][CoolingBuf
         {"machine_start_gcode", ""},
         {"machine_end_gcode", ""},
     });
-    const std::string gcode = dumped("cooling_layer_time", slice({TestMesh::cube_20x20x20}, config));
+    // Orca #17540: the time asked is the layer time as the preview estimates it, with acceleration.
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, config);
+    GCodeProcessorResult result;
+    const std::string    gcode = dumped("cooling_layer_time", Slic3r::Test::gcode(print, result));
+    const std::vector<float> &times =
+        result.print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].layers_times;
+    REQUIRE(times.size() == 100);
 
-    // The G-code of each layer, from one ";LAYER_CHANGE" to the next.
-    std::vector<std::string> layers;
-    std::istringstream       in(gcode);
-    std::string              line;
-    while (std::getline(in, line)) {
-        if (line.rfind(";LAYER_CHANGE", 0) == 0)
-            layers.emplace_back();
-        if (!layers.empty())
-            layers.back() += line + "\n";
-    }
-    REQUIRE(layers.size() == 100);
-
-    // The last layer runs on into the end of the print; leave it out. The cube's sparse infill layers take about
-    // 14 s at their own speeds and are slowed; its first and solid layers take longer.
+    // The last layer runs on into the end of the print; leave it out. The cube's sparse infill layers are
+    // quicker than the time asked at their own speeds and are slowed; its first and solid layers take longer.
     double shortest = DBL_MAX, longest = 0., total = 0.;
     size_t shortest_layer = 0;
-    for (size_t i = 0; i + 1 < layers.size(); ++i) {
-        const double time = layer_time_from_first_extrusion(layers[i]);
+    for (size_t i = 0; i + 1 < times.size(); ++i) {
+        const double time = times[i];
         total += time;
         longest = std::max(longest, time);
         if (time < shortest)
             shortest = time, shortest_layer = i;
     }
     INFO("layers 0 to 98: shortest (layer " << shortest_layer << ") " << shortest << " s, longest " << longest << " s, mean "
-                                            << total / double(layers.size() - 1) << " s; asked 20 s");
-    CHECK(shortest >= 20. * 0.999);
+                                            << total / double(times.size() - 1) << " s; asked 20 s");
+    // The cooling times a layer from a standstill, the preview in one run: within 1 %.
+    CHECK(shortest >= 20. * 0.99);
+}
+
+namespace {
+
+// Per layer: its time as the G-code preview estimates it, with acceleration, and the part cooling fan speed of its
+// first extrusion, in percent.
+struct EstimatedLayer
+{
+    double time = 0.;
+    float  fan  = -1.f;
+};
+
+std::vector<EstimatedLayer> estimated_layers(const TriangleMesh &mesh, const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_print({ mesh }, print, model, config);
+    GCodeProcessorResult result;
+    Slic3r::Test::gcode(print, result);
+    std::vector<EstimatedLayer> layers;
+    for (const GCodeProcessorResult::MoveVertex &move : result.moves) {
+        if (move.layer_id >= layers.size())
+            layers.resize(move.layer_id + 1);
+        EstimatedLayer &layer = layers[move.layer_id];
+        layer.time += move.time[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)];
+        if (layer.fan < 0.f && move.type == EMoveType::Extrude)
+            layer.fan = move.fan_speed;
+    }
+    return layers;
+}
+
+// Print speeds that a low acceleration never reaches on a small part, so its layers take several times their time
+// at the feed rates.
+DynamicPrintConfig slowly_accelerating_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "filament_max_volumetric_speed",      "100" },
+        { "initial_layer_print_height",         0.3 },
+        { "inner_wall_speed",                   "200" },
+        { "internal_solid_infill_speed",        "200" },
+        { "layer_height",                       0.3 },
+        { "machine_max_acceleration_extruding", "300,300" },
+        { "outer_wall_speed",                   "200" },
+        { "sparse_infill_speed",                "200" },
+        { "top_surface_speed",                  "200" },
+    });
+    return config;
+}
+
+} // namespace
+
+// Orca #17540 (upstream's tests).
+TEST_CASE("Layer cooling slowdown reaches the minimum layer time with acceleration", "[Cooling][Orca17540]")
+{
+    // A little longer than most layers of the cube take, so they slow down just a little and still accelerate a lot.
+    constexpr double minimum_layer_time = 8.;
+    DynamicPrintConfig config = slowly_accelerating_config();
+    config.set_deserialize_strict({
+        { "slow_down_for_layer_cooling", "0" },
+        { "slow_down_layer_time",        "8" },
+        { "slow_down_min_speed",         "1" },
+    });
+    const std::vector<EstimatedLayer> unslowed = estimated_layers(make_cube(10., 10., 10.), config);
+    config.set_deserialize_strict({ { "slow_down_for_layer_cooling", "1" } });
+    const std::vector<EstimatedLayer> slowed = estimated_layers(make_cube(10., 10., 10.), config);
+    REQUIRE(slowed.size() == unslowed.size());
+    REQUIRE(slowed.size() > 12);
+
+    // Layer 0 holds the start G-code, and the last layer the end G-code.
+    const size_t quick = std::count_if(unslowed.begin() + 1, unslowed.end() - 1,
+                                       [](const EstimatedLayer &layer) { return layer.time < minimum_layer_time; });
+    REQUIRE(quick > 10);
+    for (size_t i = 1; i + 1 < slowed.size(); ++i) {
+        CAPTURE(i, unslowed[i].time, slowed[i].time);
+        if (unslowed[i].time < minimum_layer_time) {
+            CHECK(slowed[i].time > 0.99 * minimum_layer_time);
+            CHECK(slowed[i].time < 1.03 * minimum_layer_time);
+        } else
+            CHECK_THAT(slowed[i].time, Catch::Matchers::WithinRel(unslowed[i].time, 0.001));
+    }
+}
+
+TEST_CASE("Fan speed follows the layer time with acceleration", "[Cooling][Orca17540]")
+{
+    constexpr double full_fan_time    = 2.;
+    constexpr double minimum_fan_time = 100.;
+    constexpr double full_fan         = 100.;
+    constexpr double minimum_fan      = 20.;
+    DynamicPrintConfig config = slowly_accelerating_config();
+    config.set_deserialize_strict({
+        { "close_fan_the_first_x_layers", "0" },
+        { "fan_cooling_layer_time",       "100" },
+        { "fan_max_speed",                "100" },
+        { "fan_min_speed",                "20" },
+        { "full_fan_speed_layer",         "0" },
+        // A pause before the first extrusion of each layer, which counts as in the Preview.
+        { "layer_change_gcode",           "G4 S3" },
+        { "slow_down_for_layer_cooling",  "0" },
+        { "slow_down_layer_time",         "2" },
+        { "part_cooling_fan_min_pwm",     0 },
+    });
+    // The low acceleration is the machine limit, or the one the start G-code sets when the layers set none of their own.
+    if (GENERATE(false, true))
+        config.set_deserialize_strict({
+            { "default_acceleration",               "0" },
+            { "machine_max_acceleration_extruding", "20000,20000" },
+            { "machine_start_gcode",                "G90\n  M204 S300 ; indented\nG92 E0" },
+        });
+    const std::vector<EstimatedLayer> layers = estimated_layers(make_cube(20., 20., 20.), config);
+    REQUIRE(layers.size() > 4);
+    for (size_t i = 1; i + 1 < layers.size(); ++i) {
+        CAPTURE(i, layers[i].time, layers[i].fan);
+        REQUIRE(layers[i].time > full_fan_time);
+        REQUIRE(layers[i].time < minimum_fan_time);
+        const double t = (layers[i].time - full_fan_time) / (minimum_fan_time - full_fan_time);
+        // The cooling rounds the speed down to a whole percent, and M106 takes it in 1/255 steps.
+        CHECK_THAT(layers[i].fan, Catch::Matchers::WithinAbs(t * minimum_fan + (1. - t) * full_fan, 1.5));
+    }
 }
 
 // A move that repeats the one before it is kept, only its F word goes. The H2D tool change repeats the moves to the
@@ -1652,7 +1795,9 @@ TEST_CASE("Layer cooling slowdown keeps outer walls out of the resonance avoidan
         const auto it = with.extrusion_time.find(z);
         REQUIRE(it != with.extrusion_time.end());
         CAPTURE(z);
-        CHECK(it->second > 0.98 * time);
+        // Orca #17540: both runs reach the same estimated time; at the feed rates they differ by what the
+        // acceleration takes in each.
+        CHECK(it->second > 0.9 * time);
     }
 }
 
