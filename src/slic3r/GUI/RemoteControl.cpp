@@ -1717,10 +1717,9 @@ static void fill_from_heaters(const json& status, json& p)
         p["bed_target"] = target;
     }
     json nozzles = json::array();
-    for (int i = 0; i < 4; ++i) {
-        const std::string ex = i == 0 ? "extruder" : ("extruder" + std::to_string(i));
-        if (!status.contains(ex) || !num_of(status[ex], "temperature", temp) || !num_of(status[ex], "target", target)) continue;
-        nozzles.push_back(json { { "temp", temp }, { "target", target } });
+    for (const DeviceControls::KlipperTool& t : DeviceControls::klipper_extruders(status)) {
+        if (!t.has_temp || !t.has_target) continue;
+        nozzles.push_back(json { { "temp", t.temp }, { "target", t.target } });
     }
     if (!nozzles.empty()) p["nozzles"] = nozzles;
 }
@@ -1839,10 +1838,10 @@ static void describe_moonraker_hosts(const std::vector<HostTarget>& targets, jso
                 return a;
             }
             // Read-only: what the printer says it is doing and how warm it is (the objects the LAN
-            // list asks a Snapmaker for; extruder1.. answer empty where there is no such nozzle).
-            // Never a command.
+            // list asks a Snapmaker for; extruder1.. answer empty where there is no such nozzle,
+            // up to DeviceControls::MAX_KLIPPER_TOOLS). Never a command.
             std::string body;
-            if (moonraker_http(t.base + "/printer/objects/query?print_stats&heater_bed&extruder&extruder1&extruder2&extruder3&" +
+            if (moonraker_http(t.base + "/printer/objects/query?print_stats&heater_bed&" + DeviceControls::klipper_extruders_query() + "&" +
                                    DeviceControls::moonraker_controls_query(),
                                false, body, a.error, 2)) {
                 const json j = parse_or_raw(body);
