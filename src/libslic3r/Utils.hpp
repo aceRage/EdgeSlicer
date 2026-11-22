@@ -165,6 +165,9 @@ const std::string& custom_gcodes_dir();
 
 // Set a path with preset files.
 void set_data_dir(const std::string &path);
+// As set_data_dir(), but creates missing parents and leaves the path set (no throw) when its
+// status is access denied. For the sandboxed plugin helper only.
+void set_data_dir_tolerant(const std::string &path);
 // Return a full path to the GUI resource files.
 const std::string& data_dir();
 

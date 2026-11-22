@@ -106,6 +106,9 @@ using namespace nlohmann;
 #include "slic3r/Utils/PaintCLI.hpp"
 #include "slic3r/Utils/WebView2Args.hpp"
 #include "slic3r/Utils/WinFirewall.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "slic3r/plugin/ipc/PluginSandbox.hpp"
+#endif
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
@@ -8052,6 +8055,12 @@ bool CLI::setup(int argc, char **argv)
             m_config.option(optdef.first, true);
 
     set_data_dir(m_config.opt_string("datadir"));
+#ifdef EDGE_PYTHON_PLUGINS
+    // CLI / headless slice never reaches GUI PluginManager::initialize. Sweep leftover
+    // AppContainer ACEs now that data_dir is known (data_dir journal plus the stable
+    // LocalAppData journal that covers python_home / helper / resources).
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+#endif
 
     //FIXME Validating at this stage most likely does not make sense, as the config is not fully initialized yet.
     if (!validity.empty()) {

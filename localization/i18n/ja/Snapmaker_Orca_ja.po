@@ -17728,3 +17728,111 @@ msgstr ""
 
 #~ msgid "Orient the model"
 #~ msgstr "モデルの向きを調整"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Click to collapse or expand this section"
+msgstr "クリックしてこのセクションを折りたたみ/展開"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Search all settings"
+msgstr "すべての設定を検索"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Expand all"
+msgstr "すべて展開"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Collapse all"
+msgstr "すべて折りたたむ"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "3D View"
+msgstr "3Dビュー"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Projects & Files"
+msgstr "プロジェクトとファイル"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Slicing & Presets"
+msgstr "スライスとプリセット"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Printers & Network"
+msgstr "プリンターとネットワーク"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Apps & Advanced"
+msgstr "アプリと詳細設定"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "No settings match that search."
+msgstr "検索に一致する設定はありません。"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Language and region"
+msgstr "言語と地域"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Startup"
+msgstr "起動"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Updates"
+msgstr "アップデート"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Appearance"
+msgstr "外観"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Camera and mouse"
+msgstr "カメラとマウス"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Selection and tool panels"
+msgstr "選択とツールパネル"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "G-code preview"
+msgstr "G-codeプレビュー"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Rendering quality"
+msgstr "レンダリング品質"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Opening projects"
+msgstr "プロジェクトを開く"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Warnings when loading"
+msgstr "読み込み時の警告"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Project strip and recent files"
+msgstr "プロジェクトバーと最近使ったファイル"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Saving and backup"
+msgstr "保存とバックアップ"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Folders"
+msgstr "フォルダー"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Bambu Studio presets"
+msgstr "Bambu Studioのプリセット"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Accounts and devices"
+msgstr "アカウントとデバイス"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "External apps"
+msgstr "外部アプリ"
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Optional tabs"
+msgstr "オプションのタブ"

@@ -207,6 +207,9 @@
 #include "RemovableDriveManager.hpp"
 #include "InstanceCheck.hpp"
 #include "NotificationManager.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "PluginWarnings.hpp"
+#endif
 #include "PresetComboBoxes.hpp"
 #include "FavoriteFilamentsUI.hpp"
 #include "MsgDialog.hpp"
@@ -14827,6 +14830,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             log_substitutions(preset_substitutions, path.string());
                         else if (!preset_substitutions.empty())
                             show_substitutions_info(preset_substitutions);
+#ifdef EDGE_PYTHON_PLUGINS
+                        warn_if_missing_plugins(q, preset_bundle);
+#endif
                     }
                     if (project_presets.size() > 0) {
                         for (unsigned int i = 0; i < project_presets.size(); i++) { delete project_presets[i]; }
@@ -15259,6 +15265,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     PresetBundle &             preset_bundle = *wxGetApp().preset_bundle;
                     preset_substitutions                     = preset_bundle.load_project_embedded_presets(project_presets, ForwardCompatibilitySubstitutionRule::Enable);
                     if (!preset_substitutions.empty()) show_substitutions_info(preset_substitutions);
+#ifdef EDGE_PYTHON_PLUGINS
+                    warn_if_missing_plugins(q, preset_bundle);
+#endif
 
                     for (unsigned int i = 0; i < project_presets.size(); i++) { delete project_presets[i]; }
                     project_presets.clear();
@@ -17686,7 +17695,8 @@ void Plater::priv::replace_with_stl()
 
     wxString title = _L("Select a new file");
     title += ":";
-    wxFileDialog dialog(q, title, "", from_u8(input_path.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    const wxString start_dir = input_path.has_parent_path() ? from_u8(input_path.parent_path().string()) : from_u8(wxGetApp().app_config->get_last_dir());
+    wxFileDialog dialog(q, title, start_dir, from_u8(input_path.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK)
         return;
 
@@ -17852,7 +17862,8 @@ void Plater::priv::reload_from_disk()
         title += " (" + from_u8(search.filename().string()) + ")";
 #endif // __APPLE__
         title += ":";
-        wxFileDialog dialog(q, title, "", from_u8(search.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        const wxString start_dir = search.has_parent_path() ? from_u8(search.parent_path().string()) : from_u8(wxGetApp().app_config->get_last_dir());
+        wxFileDialog dialog(q, title, start_dir, from_u8(search.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK)
             return;
 
@@ -19416,6 +19427,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     if (is_finished)
     {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":finished, reload print soon");
+        m_slice_all = false;
         m_is_slicing = false;
         // Refresh the button after m_is_slicing clears: the cancelled branch
         // above still sees m_is_slicing == true and would keep Slice disabled.
@@ -19442,6 +19454,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         m_cur_slice_plate = q->find_next_sliceable_plate_for_slice_all(m_cur_slice_plate + 1);
         if (m_cur_slice_plate < 0)
         {
+            m_slice_all = false;
             m_is_slicing = false;
             return;
         }
@@ -19452,6 +19465,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         int ret = q->start_next_slice();
         if (ret) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":slicing all, plate %1% can not be sliced, will stop")%m_cur_slice_plate;
+            m_slice_all = false;
             m_is_slicing = false;
         }
         //not the last plate
@@ -21379,7 +21393,6 @@ void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator 
                     tower_x_opt->set_at(&tower_x_new, plate_idx, 0);
                     tower_y_opt->set_at(&tower_y_new, plate_idx, 0);
                     need_update = true;
-                    break;
                 }
             }
 
@@ -23253,6 +23266,9 @@ void Plater::calib_max_vol_speed(const Calib_Params& params)
         return;
 
     if (!add_model(false, Slic3r::resources_dir() + "/calib/volumetric_speed/SpeedTestStructure.step"))
+        return;
+    // Snapmaker #1172: a STEP that loads empty leaves no object to configure below.
+    if (model().objects.empty())
         return;
 
     auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;

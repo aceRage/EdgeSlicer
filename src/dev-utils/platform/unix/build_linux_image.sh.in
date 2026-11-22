@@ -171,6 +171,17 @@ echo -n "[9/9] Generating Linux app..."
     fi
     cp -fl "${ORIGINAL_BINARY_LOCATION}" "$BIN_DIR/@SLIC3R_APP_CMD@"
 
+    # edge-plugin-host and the bundled CPython sit next to EdgeSlicer after POST_BUILD.
+    # Without this copy the AppImage silently falls back to in-process plugin execute.
+    BIN_SRC_DIR="$(dirname "${ORIGINAL_BINARY_LOCATION}")"
+    if [ -x "${BIN_SRC_DIR}/edge-plugin-host" ]; then
+        cp -fl "${BIN_SRC_DIR}/edge-plugin-host" "$BIN_DIR/edge-plugin-host"
+        chmod a+rx "$BIN_DIR/edge-plugin-host"
+    fi
+    if [ -d "${BIN_SRC_DIR}/python" ]; then
+        cp -a "${BIN_SRC_DIR}/python" "$BIN_DIR/python"
+    fi
+
     # EdgeSlicer: the bundled network plug-in (UltraNet, a private clean-room component that is
     # built separately - CI does it with a deploy key). Set ULTRANET_BIN_DIR to a folder holding
     # libbambu_networking.so (+ libBambuSource.so, ultranet.txt) to ship it; without it the package

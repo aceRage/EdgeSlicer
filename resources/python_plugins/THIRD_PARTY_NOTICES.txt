@@ -1,0 +1,62 @@
+EdgeSlicer - third-party components of the Python plugin runtime
+==================================================================
+
+This file ships only with builds made with EDGE_PYTHON_PLUGINS=ON. Builds without the plugin
+runtime contain none of the components below. EdgeSlicer itself is licensed under the GNU
+Affero General Public License v3 (LICENSE.txt). Every component below is under a licence that
+is compatible with it. Where a component ships its own licence file, that file is the
+authoritative text and is kept next to the component.
+
+Component                   Version            Licence                          Where it is
+--------------------------  -----------------  -------------------------------  ----------------------------------
+CPython (interpreter and    3.12.13            Python Software Foundation       python/ (LICENSE.txt or
+standard library)                              License Version 2 (PSF-2.0)      lib/python3.12/LICENSE.txt)
+OpenSSL (CPython's ssl and  3.0.16 (Windows    Apache License 2.0               python/DLLs (Windows) or linked
+hashlib modules)            cpython-bin-deps                                    into python/ (macOS, Linux)
+                            3.0.16.2)
+libffi (ctypes)             3.4.4              MIT                              python/
+bzip2 (bz2)                 1.0.8              bzip2 licence (BSD-style)        python/
+xz / liblzma (lzma)         5.2.5              public domain / 0BSD             python/
+SQLite (sqlite3)            3.49.1             public domain                    python/
+zlib                        1.3.1              zlib licence                     python/
+Expat (pyexpat, as bundled  as in CPython      MIT                              python/
+with CPython)               3.12.13
+pybind11 (headers, built    3.0.1              BSD-3-Clause                     compiled into EdgeSlicer and
+into EdgeSlicer)                                                                edge-plugin-host
+uv (installs plugin         0.11.21            MIT OR Apache-2.0 (dual)         resources/tools/uv
+dependencies)
+
+Versions are those pinned in deps/python3/python3.cmake and cmake/EdgePythonPlugins.cmake of
+the EdgeSlicer source tree; on macOS and Linux CPython is built from source against the
+OpenSSL, zlib and other libraries of EdgeSlicer's dependency build, on Windows the CPython
+"externals" of the same versions are used.
+
+Python packages that plugins install at run time (into the user's data folder) are chosen by
+the plugin and the user. They are not distributed with EdgeSlicer.
+
+Source code
+-----------
+CPython          https://www.python.org/downloads/release/python-31213/
+OpenSSL          https://www.openssl.org/source/
+libffi           https://github.com/libffi/libffi
+bzip2            https://sourceware.org/bzip2/
+xz               https://tukaani.org/xz/
+SQLite           https://sqlite.org/
+zlib             https://zlib.net/
+Expat            https://libexpat.github.io/
+pybind11         https://github.com/pybind/pybind11 (also deps_src/pybind11 in the EdgeSlicer
+                 source tree, with its LICENSE)
+uv               https://github.com/astral-sh/uv
+
+Licence texts
+-------------
+PSF-2.0, Apache-2.0, MIT, BSD-3-Clause, the zlib licence and the bzip2 licence permit
+redistribution provided their notices are kept. The full texts are reproduced by the
+components themselves (CPython's LICENSE file includes the licences of the libraries it
+bundles) and are available at:
+  PSF-2.0       https://docs.python.org/3.12/license.html
+  Apache-2.0    https://www.apache.org/licenses/LICENSE-2.0
+  MIT           https://opensource.org/license/mit
+  BSD-3-Clause  https://opensource.org/license/bsd-3-clause
+  zlib          https://zlib.net/zlib_license.html
+  bzip2         https://sourceware.org/bzip2/ (LICENSE in the source archive)
