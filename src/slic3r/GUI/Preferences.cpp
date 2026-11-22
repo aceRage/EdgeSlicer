@@ -41,6 +41,7 @@
 #include "libslic3r/ZipWorkCleaner.hpp"
 #include "ModelBrowserPanel.hpp"
 #include "LayerlingPanel.hpp"
+#include "slic3r/Utils/DiscordPresence.hpp"
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE
@@ -2395,7 +2396,7 @@ wxWindow* PreferencesDialog::create_page_general()
 
     // The "User Experience" section ("Join Customer Experience Improvement Program", linking to
     // Snapmaker's privacy policy) is gone: EdgeSlicer runs no such program. What replaced it is
-    // the one thing EdgeSlicer can send, opt-in crash reports (docs/privacy.md).
+    // what EdgeSlicer can send, all opt-in: crash reports and Discord activity (docs/privacy.md).
     sec = begin_section(page, "general.privacy", _L("Privacy"));
     const wxString crash_reports_what =
         _L("When EdgeSlicer crashes, send a crash report to its developers (via Sentry): the crash stack trace, "
@@ -2428,10 +2429,19 @@ wxWindow* PreferencesDialog::create_page_general()
     add_row(sec, crash_sizer);
 
     // Discord Rich Presence: talks only to the local Discord app (named pipe / unix socket).
-    add_row(sec, create_item_checkbox(_L("Show current activity on Discord"), row(sec),
+    auto item_discord = create_item_checkbox(_L("Show current activity on Discord"), row(sec),
         _L("Publish what you are working on to your Discord profile: the current project, slicing progress, "
            "and print progress when a printer is connected. Nothing is sent when Discord is not running."),
-        50, "discord_rich_presence"));
+        50, "discord_rich_presence");
+    if (Slic3r::discord_default_application_id().empty() && app_config->get("discord_rich_presence_app_id").empty()) {
+        // No Discord application to publish as: grey the switch out rather than offer one that does nothing.
+        // (Item 1 is the checkbox, as for the crash-report row above.)
+        if (wxSizerItem* cb = item_discord->GetItem(size_t(1)); cb != nullptr && cb->GetWindow() != nullptr) {
+            cb->GetWindow()->Disable();
+            cb->GetWindow()->SetToolTip(_L("This build has no Discord application id, so it cannot show activity on Discord."));
+        }
+    }
+    add_row(sec, item_discord);
     add_row(sec, create_item_checkbox(_L("Hide project and print job names on Discord"), row(sec),
         _L("Replace project and print job names with generic wording, while still showing progress and status."),
         50, "discord_rich_presence_hide_names"));
