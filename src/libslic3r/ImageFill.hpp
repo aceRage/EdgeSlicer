@@ -587,6 +587,10 @@ struct ImageRowRun
 // That is how a wall the image does not land on keeps the part's own colour instead of the
 // image's nearest edge colour. `fallback_id` takes part in the minimum-run folding like any
 // candidate. 0 keeps the behaviour above exactly.
+//
+// The carried error is kept within +-image_fill_dither_max_error per channel, so a long stretch of
+// a colour the candidates cannot reach does not go on changing the picks after it ends.
+constexpr float image_fill_dither_max_error = 1.f;
 std::vector<ImageRowRun> image_fill_dither_segment(const std::vector<ImageRowSample>       &samples,
                                                    const std::vector<std::array<float, 3>> &candidate_colors,
                                                    const std::vector<int>                  &candidate_ids,

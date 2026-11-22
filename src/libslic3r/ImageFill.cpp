@@ -1196,9 +1196,12 @@ std::vector<ImageRowRun> image_fill_dither_segment(const std::vector<ImageRowSam
                                           samples[i].color[2] + error[2]};
         const size_t idx = nearest_candidate_index(candidate_colors, target);
         assigned[i]      = candidate_ids[idx];
-        error[0]         = target[0] - candidate_colors[idx][0];
-        error[1]         = target[1] - candidate_colors[idx][1];
-        error[2]         = target[2] - candidate_colors[idx][2];
+        // The carried error is bounded. A colour the candidates cannot reach (darker than all of
+        // them, say) leaves the same error at every sample; unbounded, a long stretch of it built
+        // a debt that kept the wrong filaments printing for as long again after the colour changed.
+        // A colour the candidates can mix never carries this much, so its dither is unchanged.
+        for (size_t c = 0; c < 3; ++c)
+            error[c] = std::clamp(target[c] - candidate_colors[idx][c], -image_fill_dither_max_error, image_fill_dither_max_error);
         have_prev = true;
     }
 
