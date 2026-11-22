@@ -1605,7 +1605,7 @@ TEST_CASE("Layer cooling slowdown reaches the minimum layer time with accelerati
 
     // Layer 0 holds the start G-code, and the last layer the end G-code.
     const size_t quick = std::count_if(unslowed.begin() + 1, unslowed.end() - 1,
-                                       [](const EstimatedLayer &layer) { return layer.time < minimum_layer_time; });
+                                       [minimum_layer_time](const EstimatedLayer &layer) { return layer.time < minimum_layer_time; });
     REQUIRE(quick > 10);
     for (size_t i = 1; i + 1 < slowed.size(); ++i) {
         CAPTURE(i, unslowed[i].time, slowed[i].time);
