@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <iterator>
@@ -183,7 +184,13 @@ std::string win32_error_text(DWORD err)
 std::string host_connect_failure_message(DWORD exit_code)
 {
     std::string msg = "edge-plugin-host exited before connecting (exit code " + std::to_string(exit_code) + ")";
-    if (exit_code >= k_host_pipe_open_exit_base) {
+    if (exit_code >= 0xC0000000u) {
+        // An NTSTATUS from the loader / kernel (0xC0000142 = a DLL failed to initialize), not
+        // PluginHostMain's 1000 + GetLastError(): the child never reached the pipe.
+        char hex[16];
+        std::snprintf(hex, sizeof(hex), "0x%08lX", static_cast<unsigned long>(exit_code));
+        msg += std::string(": NTSTATUS ") + hex;
+    } else if (exit_code >= k_host_pipe_open_exit_base && exit_code < k_host_pipe_open_exit_base + 0x10000u) {
         const DWORD winerr = exit_code - k_host_pipe_open_exit_base;
         msg += ": pipe open failed";
         if (winerr == ERROR_ACCESS_DENIED)

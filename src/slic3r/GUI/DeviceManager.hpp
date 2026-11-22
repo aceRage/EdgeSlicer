@@ -178,6 +178,11 @@ struct Nozzle
     int              stat{0};
     std::string      fila_id;
     std::string      color_m;
+    // H3C rack nozzle temperature ("temp", "stat" bits 3-4; GUI::BambuRackTemps). Read-only.
+    int              temp{0};
+    int              target_temp{0};
+    bool             has_temp{false}; // "temp" was reported
+    int              temp_state{-1};  // 0 idle / 1 heating / 2 keeping / 3 cooling, -1 = no "stat"
     int              addr_id{-1}; // rack position 0..8 (H3C), -1 = not reported
     int              snow{-1};    // slot feeding it now: ams_id << 8 | slot_id, -1 = not reported
     bool             exist{true}; // its bit in device.nozzle.exist (bit n = report id n); true when not reported

@@ -4129,6 +4129,15 @@ void PrintObject::bridge_over_infill()
                 total_fill_area   = closing(total_fill_area, float(SCALED_EPSILON));
                 expansion_area    = closing(expansion_area, float(SCALED_EPSILON));
                 expansion_area    = intersection(expansion_area, deep_infill_area);
+                // A bridge reaching into a region of another filament would print that region's area in its own filament.
+                std::map<unsigned int, Polygons> fill_area_by_filament;
+                for (const LayerRegion *region : layer->regions())
+                    append(fill_area_by_filament[region->region().extruder(frSolidInfill)], to_polygons(region->fill_expolygons));
+                if (fill_area_by_filament.size() > 1) {
+                    for (auto &filament_area : fill_area_by_filament)
+                        filament_area.second = closing(filament_area.second, float(SCALED_EPSILON));
+                } else
+                    fill_area_by_filament.clear();
                 // Orca: Preserve the real lower-layer anchors for every candidate in this
                 // layer. Replacing this shared set for one pattern also changes later regions,
                 // and synthetic straight lines can claim support where no infill is printed.
@@ -4265,6 +4274,8 @@ void PrintObject::bridge_over_infill()
                     bridging_area          = closing(bridging_area, flow.scaled_spacing());
                     bridging_area          = intersection(bridging_area, limiting_area);
                     bridging_area          = intersection(bridging_area, total_fill_area);
+                    if (!fill_area_by_filament.empty())
+                        bridging_area      = intersection(bridging_area, fill_area_by_filament.at(candidate.region->region().extruder(frSolidInfill)));
                     bridging_area          = diff(bridging_area, total_top_area);
                     expansion_area         = diff(expansion_area, bridging_area);
 

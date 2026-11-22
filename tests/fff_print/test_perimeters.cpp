@@ -896,6 +896,39 @@ double max_difference(const std::vector<double> &a, const std::vector<double> &b
 
 } // namespace one_wall_top_14929
 
+// The area every layer of the object keeps clear of the walls for gap fill and concentric infill.
+static double no_overlap_fill_area(const Print &print)
+{
+    double sum = 0.;
+    for (const Layer *layer : print.objects().front()->layers())
+        for (const LayerRegion *region : layer->regions())
+            sum += area(region->fill_no_overlap_expolygons);
+    return sum;
+}
+
+// Ported from OrcaSlicer #17680 (c65ca740c1).
+TEST_CASE("Generating the walls again leaves the no-overlap fill area of a fresh slice", "[Perimeters][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "wall_loops", 2 } });
+    Print print;
+    Model model;
+    init_print({ make_cube(20, 20, 20) }, print, model, config);
+    print.process();
+
+    // Only the walls are generated again.
+    config.set_deserialize_strict({ { "wall_loops", 3 } });
+    print.apply(model, config);
+    print.process();
+
+    Print fresh;
+    Model fresh_model;
+    init_print({ make_cube(20, 20, 20) }, fresh, fresh_model, config);
+    fresh.process();
+    REQUIRE(no_overlap_fill_area(fresh) > 0.);
+    CHECK_THAT(no_overlap_fill_area(print), Catch::Matchers::WithinRel(no_overlap_fill_area(fresh), 1e-6));
+}
+
 // The expansion only retypes area as top solid infill, so it can do nothing where there is no top
 // fill to begin with: zero top shell layers retypes the top surfaces as internal, and a top surface
 // density of 0% leaves the top layer with walls only. The last section is the control - the same
