@@ -10,6 +10,8 @@
 #include <vector>
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/GCode/SpiralVase.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -103,6 +105,34 @@ Vase vase(const char *bottom_shell_thickness, const char *bottom_shell_layers = 
 }
 
 } // namespace
+
+// Orca #17681: the spiral read a relative lift in the layer change G-code as absolute heights, and rewrote it.
+TEST_CASE("Spiral vase leaves the moves of custom G-code in relative positioning as they are", "[SpiralVase][Regression]")
+{
+    PrintConfig config;
+    config.use_relative_e_distances.value = true;
+    config.spiral_mode_smooth.value       = false;
+    config.resolution.value               = 0.001;
+
+    SpiralVase vase(config);
+    vase.process_layer("G1 X0 Y0 Z0.2\n", false);
+
+    // Layer change G-code that lifts the nozzle by 2 mm and lowers it again, in relative positioning.
+    vase.enable(true);
+    const std::string gcode = vase.process_layer("G1 Z0.22\nG91\nG1 Z2\nG1 Z-2\nG90\nG1 X1 Y0 E0.001234 F3600\nG1 X1 Y2 E0.002468\n", false);
+    INFO(gcode);
+    CHECK(gcode.find("G91\nG1 Z2\nG1 Z-2\nG90\n") != std::string::npos);
+    // The spiral still ramps Z up from 0.2: a third of the way along, Z is 0.2 + 0.02 / 3.
+    std::vector<float> heights;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&heights](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("G1") && line.has_x() && line.has(E) && line.has_z())
+            heights.push_back(line.z());
+    });
+    REQUIRE(heights.size() == 2);
+    CHECK(heights.front() == Approx(0.2 + 0.02 / 3.).margin(0.001));
+    CHECK(heights.back() == Approx(0.22).margin(0.001));
+}
 
 TEST_CASE("A spiral vase's bottom is as thick as bottom_shell_thickness asks", "[SpiralVase]")
 {

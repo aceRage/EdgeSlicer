@@ -684,12 +684,13 @@ static std::vector<Toolhead> toolheads_of(const json& status_obj)
 
 std::vector<std::pair<double, double>> nozzle_temps_of(const json& status_obj)
 {
+    // The shared walk (DeviceControls::klipper_extruders), kept to the unbroken run from extruder 0:
+    // the list is positional, so a gap must end it rather than shift later toolheads down.
     std::vector<std::pair<double, double>> out;
-    for (int i = 0; i < TOOLHEAD_COUNT; ++i) {
-        const std::string ex = i == 0 ? "extruder" : ("extruder" + std::to_string(i));
-        if (!status_obj.contains(ex) || !status_obj[ex].is_object())
+    for (const DeviceControls::KlipperTool& t : DeviceControls::klipper_extruders(status_obj, TOOLHEAD_COUNT)) {
+        if (t.index != (int) out.size())
             break;
-        out.emplace_back(num_of(status_obj[ex], "temperature"), num_of(status_obj[ex], "target"));
+        out.emplace_back(t.has_temp ? t.temp : 0.0, t.has_target ? t.target : 0.0);
     }
     return out;
 }
@@ -799,8 +800,9 @@ static Probe probe(const Device& d, bool ask_access)
     json        q;
     std::string qerror;
     if (get_json(base_url(d) +
-                     "/printer/objects/query?print_stats&display_status&virtual_sdcard&heater_bed&extruder&extruder1&extruder2&extruder3&"
-                     "print_task_config&" + DeviceControls::moonraker_controls_query(),
+                     "/printer/objects/query?print_stats&display_status&virtual_sdcard&heater_bed&" +
+                     DeviceControls::klipper_extruders_query(TOOLHEAD_COUNT) + "&print_task_config&" +
+                     DeviceControls::moonraker_controls_query(),
                  q, qerror, 3, 2) &&
         q.contains("result") && q["result"].contains("status")) {
         r.queried      = true;

@@ -1428,6 +1428,8 @@ std::vector<unsigned int> Print::extruders(bool conside_custom_gcode) const
 
     if (conside_custom_gcode)
         this->append_tool_change_extruders(extruders);
+    // The supports list the object filaments again. Count each one once for the wipe tower filament.
+    sort_remove_duplicates(extruders);
     this->append_wipe_tower_extruder(extruders);
     sort_remove_duplicates(extruders);
     m_mixed_filament_mgr.expand_0based_extruder_ids(extruders, m_config.filament_diameter.size());
@@ -8354,7 +8356,7 @@ void Print::_make_wipe_tower()
             m_wipe_tower_data.used_filament         = wipe_tower.get_used_filament();
             m_wipe_tower_data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
         }
-        const Vec3d origin                      = Vec3d::Zero();
+        const Vec3d origin                      = this->get_plate_origin();
         m_fake_wipe_tower.set_fake_extrusion_data(wipe_tower.position(), wipe_tower.width(), wipe_tower.get_wipe_tower_height(),
                                                   config().initial_layer_print_height, m_wipe_tower_data.depth,
                                                   m_wipe_tower_data.z_and_depth_pairs, m_wipe_tower_data.brim_width,

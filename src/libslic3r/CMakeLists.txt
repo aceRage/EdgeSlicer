@@ -222,6 +222,8 @@ set(lisbslic3r_sources
     CodeEmboss.hpp
     ImageTrace.cpp
     ImageTrace.hpp
+    OutlineObjects.cpp
+    OutlineObjects.hpp
     SimpleShape.cpp
     SimpleShape.hpp
     enum_bitmask.hpp
