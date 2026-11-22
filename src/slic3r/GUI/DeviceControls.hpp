@@ -23,7 +23,14 @@
 //
 // Heater ids are one namespace for every printer: "bed", "chamber", and "nozzle<N>" where N is the
 // printer's own extruder index - Bambu's extruder id (0 = right/main, 1 = left/deputy on the
-// two-nozzle machines) or Klipper's extruder number (extruder, extruder1, ... on the U1).
+// two-nozzle machines) or Klipper's extruder number (extruder, extruder1, ... on the U1), and
+// "rack<P>" for a tool parked in a nozzle rack (P = rack position, 0-based; the H3C).
+//
+// Backward compatibility (tests/design_device_multi_tool_temps.md, D2): phone apps already
+// installed read controls.heaters[] by hand and ignore keys they do not know, but draw every entry
+// as a tappable tile. So heaters[] keeps exactly the entries it always had (bed, chamber, the tools
+// on the extruders) and only gains keys (kind, group, present, mounted, state); rack positions go
+// in a separate controls.rack[] those apps never read.
 
 #include "NozzleTempRows.hpp"
 
@@ -52,15 +59,28 @@ constexpr int DEFAULT_CHAMBER_MAX = 60;
 constexpr int SPEED_FACTOR_MIN = 10;
 constexpr int SPEED_FACTOR_MAX = 300;
 
+// Klipper printers: the most extruders (extruder, extruder1, ... extruder15) asked for and listed.
+// Only what the printer answers is ever listed; this is a sanity bound, not a model limit (D7).
+constexpr int MAX_KLIPPER_TOOLS = 16;
+
 struct Heater
 {
-    std::string id;     // bed | chamber | nozzle<N>
-    std::string label;  // "Bed", "Chamber", "Nozzle", "L", "R", "Nozzle 1".."Nozzle 4"
+    std::string id;     // bed | chamber | nozzle<N> | rack<P>
+    std::string label;  // "Bed", "Chamber", "Nozzle", "L", "R", "Nozzle 1".."Nozzle 16", "Rack 1".."Rack 9"
     double      temp { 0 };
     double      target { 0 };
     int         max { 0 };        // the highest target the printer accepts
     bool        settable { true }; // false: shown, but only read (an X1's chamber sensor)
     bool        active { false };  // the extruder the printer reports as current
+    // ---- added for multi-tool temperatures; old clients ignore them (see the note at the top) ----
+    // Empty kind / group are worked out from the id (heater_kind, heater_group), so the places that
+    // build a bed, chamber or nozzle row need not say them.
+    std::string kind;                 // nozzle | bed | chamber | cutter | pen | laser | fan | unknown
+    std::string group;                // tool (on an extruder / carriage) | rack | env (bed, chamber)
+    bool        present { true };     // false: an empty slot (no tool there)
+    bool        mounted { false };    // a rack position whose nozzle is on the extruder right now
+    std::string state;                // idle | heating | holding | cooling, when the printer says so; else empty
+    bool        has_temp { true };    // false: no reading (a tool that is not a heater, or not reported)
 };
 
 struct Fan
@@ -81,6 +101,10 @@ struct Speed
 struct Caps
 {
     std::vector<Heater> heaters;
+    // Rack positions (group "rack"), one per position the printer reports, in position order.
+    // Emitted as controls.rack[] only when not empty; never part of heaters[] (D2). Read-only until
+    // a rack target has been proven on hardware (D4): check_set_temp only looks in heaters.
+    std::vector<Heater> rack;
     bool                has_speed { false };
     Speed               speed;
     bool                has_light { false };
@@ -111,6 +135,44 @@ inline int nozzle_index_of(const std::string& heater_id)
     }
     return n;
 }
+
+// "rack3" -> 3; -1 for anything that is not a rack id.
+inline int rack_index_of(const std::string& heater_id)
+{
+    if (heater_id.size() < 5 || heater_id.compare(0, 4, "rack") != 0) return -1;
+    int n = 0;
+    for (size_t i = 4; i < heater_id.size(); ++i) {
+        const char c = heater_id[i];
+        if (c < '0' || c > '9') return -1;
+        n = n * 10 + (c - '0');
+        if (n > 63) return -1;
+    }
+    return n;
+}
+
+inline std::string rack_id(int position) { return "rack" + std::to_string(position); }
+
+// What a heater is, when the row did not say: worked out from its id.
+inline std::string heater_kind(const Heater& h)
+{
+    if (!h.kind.empty()) return h.kind;
+    if (h.id == "bed") return "bed";
+    if (h.id == "chamber") return "chamber";
+    if (nozzle_index_of(h.id) >= 0 || rack_index_of(h.id) >= 0) return "nozzle";
+    return "unknown";
+}
+
+inline std::string heater_group(const Heater& h)
+{
+    if (!h.group.empty()) return h.group;
+    if (h.id == "bed" || h.id == "chamber") return "env";
+    if (rack_index_of(h.id) >= 0) return "rack";
+    return "tool";
+}
+
+// Only these take a target. A cutter, pen, laser, fan or a tool not known is never heated (safety
+// rule 1 of the design note), whatever its settable flag says.
+inline bool kind_takes_temperature(const std::string& kind) { return kind == "nozzle" || kind == "bed" || kind == "chamber"; }
 
 inline const Heater* find_heater(const Caps& caps, const std::string& id)
 {
@@ -170,12 +232,59 @@ inline bool read_num(const nlohmann::json& obj, const char* key, double& out)
     return true;
 }
 
+// Klipper's object name for extruder n: extruder, extruder1, extruder2, ...
+inline std::string klipper_extruder_name(int n) { return n == 0 ? std::string("extruder") : "extruder" + std::to_string(n); }
+
+// "extruder&extruder1&...&extruder<count-1>" for a /printer/objects/query string. Klipper answers an
+// object it does not have with nothing usable (an empty object or no key), so asking for more than
+// the printer has lists nothing extra: klipper_extruders only keeps what answered.
+inline std::string klipper_extruders_query(int count = MAX_KLIPPER_TOOLS)
+{
+    std::string q;
+    for (int i = 0; i < count; ++i) q += (i ? "&" : "") + klipper_extruder_name(i);
+    return q;
+}
+
+// One extruder object a Klipper status answer carried.
+struct KlipperTool
+{
+    int    index { 0 };          // N of extruder<N> (0 for "extruder")
+    double temp { 0 }, target { 0 };
+    bool   has_temp { false };   // "temperature" was a number
+    bool   has_target { false }; // "target" was a number
+};
+
+// The one walk over a Klipper status answer's extruders that the U1 probe, the Moonraker host
+// probe and moonraker_caps share: every extruder<N> (N < max_tools, capped at MAX_KLIPPER_TOOLS)
+// that is in the answer as an object, in index order. Gaps are skipped, never filled in, and the
+// index is kept, so extruder2 after a missing extruder1 is still tool 2. A name is never guessed:
+// only objects the printer answered for are returned. Callers pick what they need (a reading, a
+// target, an unbroken run from 0).
+inline std::vector<KlipperTool> klipper_extruders(const nlohmann::json& status, int max_tools = MAX_KLIPPER_TOOLS)
+{
+    std::vector<KlipperTool> out;
+    if (!status.is_object()) return out;
+    if (max_tools > MAX_KLIPPER_TOOLS) max_tools = MAX_KLIPPER_TOOLS;
+    for (int i = 0; i < max_tools; ++i) {
+        const auto it = status.find(klipper_extruder_name(i));
+        if (it == status.end() || !it->is_object()) continue;
+        KlipperTool t;
+        t.index      = i;
+        t.has_temp   = read_num(*it, "temperature", t.temp);
+        t.has_target = read_num(*it, "target", t.target);
+        out.push_back(t);
+    }
+    return out;
+}
+
 // The controls of a Klipper printer, from one /printer/objects/query status object: the bed, every
-// extruder it answered for (extruder, extruder1, ...), the speed factor (gcode_move), the part
-// fan (fan), and - where the printer has them, as a Snapmaker U1 does - the cavity light
-// ("led cavity_led") and the cavity fan ("fan_generic cavity_fan"). Only what answered is listed.
+// extruder it answered for (extruder, extruder1, ... up to max_extruders, at most
+// MAX_KLIPPER_TOOLS), the speed factor (gcode_move), the part fan (fan), and - where the printer
+// has them, as a Snapmaker U1 does - the cavity light ("led cavity_led") and the cavity fan
+// ("fan_generic cavity_fan"). Only what answered is listed; an extruder missing from the middle is
+// left out and the ones after it keep their numbers.
 inline Caps moonraker_caps(const nlohmann::json& status, int bed_max = DEFAULT_BED_MAX, int nozzle_max = DEFAULT_NOZZLE_MAX,
-                           int max_extruders = 4)
+                           int max_extruders = MAX_KLIPPER_TOOLS)
 {
     Caps caps;
     if (!status.is_object()) return caps;
@@ -185,12 +294,9 @@ inline Caps moonraker_caps(const nlohmann::json& status, int bed_max = DEFAULT_B
         caps.heaters.push_back(Heater { "bed", "Bed", temp, target, bed_max, true, false });
     }
     std::vector<Heater> nozzles;
-    for (int i = 0; i < max_extruders; ++i) {
-        const std::string ex = i == 0 ? "extruder" : "extruder" + std::to_string(i);
-        if (!status.contains(ex) || !read_num(status[ex], "temperature", temp)) break;
-        target = 0;
-        read_num(status[ex], "target", target);
-        nozzles.push_back(Heater { nozzle_id(i), "", temp, target, nozzle_max, true, false });
+    for (const KlipperTool& t : klipper_extruders(status, max_extruders)) {
+        if (!t.has_temp) continue;
+        nozzles.push_back(Heater { nozzle_id(t.index), "", t.temp, t.has_target ? t.target : 0.0, nozzle_max, true, false });
     }
     for (Heater& h : nozzles) {
         h.label = nozzles.size() == 1 ? std::string("Nozzle") : "Nozzle " + std::to_string(nozzle_index_of(h.id) + 1);
@@ -223,14 +329,40 @@ inline Caps moonraker_caps(const nlohmann::json& status, int bed_max = DEFAULT_B
 // print state. Object names with a space are percent-encoded, as Moonraker expects them.
 inline std::string moonraker_controls_query() { return "gcode_move&fan&led%20cavity_led&fan_generic%20cavity_fan"; }
 
+// One heater as the `controls` JSON carries it. The first eight keys are the original shape and are
+// never renamed or dropped; the rest were added later and old clients ignore them. A tool that is
+// not a heater, or a reading not reported, has null temp / target and is never settable.
+inline nlohmann::json heater_json(const Heater& h)
+{
+    const std::string kind     = heater_kind(h);
+    const bool        readable = h.has_temp && kind_takes_temperature(kind);
+    nlohmann::json    j        = { { "id", h.id },
+                                   { "label", h.label },
+                                   { "temp", readable ? nlohmann::json(h.temp) : nlohmann::json(nullptr) },
+                                   { "target", readable ? nlohmann::json(h.target) : nlohmann::json(nullptr) },
+                                   { "min", 0 },
+                                   { "max", h.max },
+                                   { "settable", h.settable && kind_takes_temperature(kind) && h.present },
+                                   { "active", h.active },
+                                   { "kind", kind },
+                                   { "group", heater_group(h) },
+                                   { "present", h.present },
+                                   { "mounted", h.mounted } };
+    if (!h.state.empty()) j["state"] = h.state;
+    return j;
+}
+
 inline nlohmann::json to_json(const Caps& caps)
 {
     nlohmann::json j = nlohmann::json::object();
     nlohmann::json hs = nlohmann::json::array();
-    for (const Heater& h : caps.heaters)
-        hs.push_back({ { "id", h.id },         { "label", h.label }, { "temp", h.temp },     { "target", h.target },
-                       { "min", 0 },           { "max", h.max },     { "settable", h.settable }, { "active", h.active } });
+    for (const Heater& h : caps.heaters) hs.push_back(heater_json(h));
     j["heaters"] = hs;
+    if (!caps.rack.empty()) {
+        nlohmann::json rs = nlohmann::json::array();
+        for (const Heater& h : caps.rack) rs.push_back(heater_json(h));
+        j["rack"] = rs;
+    }
     if (caps.has_speed) {
         nlohmann::json s = { { "kind", caps.speed.kind }, { "value", caps.speed.value }, { "min", caps.speed.min },
                              { "max", caps.speed.max },   { "settable", caps.speed.settable } };
@@ -278,6 +410,14 @@ inline int check_set_temp(const Caps& caps, const std::string& heater, const std
         why = heater.empty() ? "heater is required (bed, chamber or nozzle<N>, as controls.heaters lists them)"
                              : "this printer has no heater called " + heater;
         return heater.empty() ? 400 : 404;
+    }
+    if (!kind_takes_temperature(heater_kind(*h))) {
+        why = "the " + h->label + " is not a heater";
+        return 409;
+    }
+    if (!h->present) {
+        why = "there is no tool in " + h->label;
+        return 409;
     }
     if (!h->settable) {
         why = "the " + h->label + " temperature can only be read on this printer";

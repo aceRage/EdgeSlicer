@@ -247,6 +247,20 @@ async function main() {
         const host = JSON.parse(await evalJs(`(function(c){ return JSON.stringify({ pill: c.querySelector('.ppill').textContent,
             pause: c.querySelector('[data-fk="act:ph:voron:pause"]').title }); })(${card('ph:voron')})`));
         check('Moonraker host: idle, Pause dimmed with the printer\'s state as the reason', host.pill === 'Idle' && /standby/.test(host.pause), JSON.stringify(host));
+        check('no card above has a rack chip', (await evalJs(`document.querySelectorAll('#grid .prack').length`)) === 0);
+        // An H3C card, drawn on its own (not added to the grid, so the counts above stay): the rack is
+        // one chip, "warm / positions" (D12), after the extruder's own rows.
+        const h3c = JSON.parse(await evalJs(`(function(){ var c = PrinterCards.card({ id: 'h3c', kind: 'bambu', name: 'H3C', model: 'O1E', online: true,
+            status: 'IDLE', print_status: 'IDLE', printing: false, can_pause: false, can_resume: false, can_stop: false, print_error: null,
+            controls: { heaters: [{ id: 'bed', label: 'Bed', temp: 25, target: 0 }, { id: 'nozzle0', label: 'Nozzle', temp: 220, target: 220 }],
+                        rack: [{ id: 'rack0', label: 'Rack 1', temp: null, target: null, present: true, mounted: true, kind: 'nozzle' },
+                               { id: 'rack1', label: 'Rack 2', temp: 181, target: 200, present: true, mounted: false, kind: 'nozzle', state: 'heating' },
+                               { id: 'rack2', label: 'Rack 3', temp: null, target: null, present: false, mounted: false, kind: 'nozzle' },
+                               { id: 'rack3', label: 'Rack 4', temp: 150, target: 0, present: true, mounted: false, kind: 'nozzle', state: 'holding' },
+                               { id: 'rack4', label: 'Rack 5', temp: 30, target: 0, present: true, mounted: false, kind: 'nozzle', state: 'cooling' }],
+                        fans: [] } }, {});
+            return JSON.stringify([].map.call(c.querySelectorAll('.ptemps .pitem'), x => x.textContent)); })()`));
+        check('H3C card: bed, nozzle, then one Rack chip "2/5 warm"', JSON.stringify(h3c) === JSON.stringify(['Bed25°', 'Nozzle220° / 220°', 'Rack2/5 warm']), h3c.join('|'));
 
         // ---- 3. Pause from the keyboard ---------------------------------------------------------
         await evalJs(`window.__sent = []; document.querySelector('[data-fk="act:01P00A111111111:pause"]').focus(); 1`);

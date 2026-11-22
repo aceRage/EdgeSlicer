@@ -10,6 +10,7 @@
 #include "BambuSendDiagnosis.hpp"
 #include "BambuNetInfo.hpp"
 #include "AmsMatch.hpp"
+#include "BambuRackTemps.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
@@ -6578,6 +6579,9 @@ void MachineObject::parse_new_info(json print)
                 nozzle_obj.stat         = njon.contains("stat") && njon["stat"].is_number() ? njon["stat"].get<int>() : 0;
                 if (njon.contains("fila_id") && njon["fila_id"].is_string()) nozzle_obj.fila_id = njon["fila_id"].get<std::string>();
                 if (njon.contains("color_m") && njon["color_m"].is_string()) nozzle_obj.color_m = njon["color_m"].get<std::string>();
+                // Its temperature and heating state where it reports them (an H3C rack nozzle); never throws.
+                GUI::BambuRackTemps::parse_nozzle_temp(njon, nozzle_obj.temp, nozzle_obj.target_temp, nozzle_obj.has_temp,
+                                                       nozzle_obj.temp_state);
                 // A rack nozzle's fixed position and the slot it is fed from now (ams << 8 | slot), used
                 // to pair the H3C's AMS 3H slots and spool holders with rack nozzles.
                 nozzle_obj.addr_id = njon.contains("addr_id") && njon["addr_id"].is_number_integer() ? njon["addr_id"].get<int>() : -1;

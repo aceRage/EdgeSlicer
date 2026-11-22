@@ -48,7 +48,9 @@
 #include <memory>
 #include <limits>
 #include <set>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <stdlib.h>
 #include <string>
 #include <utility>
@@ -1830,7 +1832,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         // Prepare a future wipe.
         gcodegen.m_wipe.reset_path();
         for (const Vec2f& wipe_pt : tcr.wipe_path)
-            gcodegen.m_wipe.path.points.emplace_back(wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(wipe_pt)));
+            gcodegen.m_wipe.path.points.emplace_back(wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(wipe_pt) + plate_origin_2d));
     }
 
     // Let the planner know we are traveling between objects.
@@ -2103,7 +2105,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         // Prepare a future wipe.
         gcodegen.m_wipe.reset_path();
         for (const Vec2f& wipe_pt : tcr.wipe_path)
-            gcodegen.m_wipe.path.points.emplace_back(wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(wipe_pt)));
+            gcodegen.m_wipe.path.points.emplace_back(wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(wipe_pt) + plate_origin_2d));
     }
 
     // Let the planner know we are traveling between objects.
@@ -3614,9 +3616,12 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
         this->_do_export(*print, file, thumbnail_cb);
         file.flush();
         if (file.is_error()) {
+            // Below the message, the system error says what went wrong.
+            const std::string os_error = file.last_error();
             file.close();
             boost::nowide::remove(path_tmp.c_str());
-            throw Slic3r::RuntimeError(std::string("G-code export to ") + path + " failed\nIs the disk full?\n");
+            throw Slic3r::RuntimeError(std::string("G-code export to ") + path + " failed\nIs the disk full?\n" +
+                                       (os_error.empty() ? std::string() : os_error + "\n"));
         }
     } catch (std::exception& /* ex */) {
         // Rethrow on any exception. std::runtime_exception and CanceledException are expected to be thrown.
@@ -4219,30 +4224,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         const Layer *top = layer->object()->layers().empty() ? nullptr : layer->object()->layers().back();
         return top != nullptr && top != layer && top->curved_tops_block && !layer->has_extrusions();
     };
-    if (print.config().print_sequence == PrintSequence::ByObject) {
-        // Add each of the object's layers separately.
-        for (auto object : print.objects()) {
-            std::vector<coordf_t> zs;
-            zs.reserve(object->layers().size() + object->support_layers().size());
-            for (auto layer : object->layers())
-                if (!curved_tops_emptied(layer))
-                    zs.push_back(layer->print_z);
-            for (auto layer : object->support_layers())
-                zs.push_back(layer->print_z);
-            std::sort(zs.begin(), zs.end());
-            // BBS: merge numerically very close Z values.
-            auto         end_it           = std::unique(zs.begin(), zs.end());
-            unsigned int temp_layer_count = (unsigned int) (end_it - zs.begin());
-            for (auto it = zs.begin(); it != end_it - 1; it++) {
-                if (abs(*it - *(it + 1)) < EPSILON)
-                    temp_layer_count--;
-            }
-            m_layer_count += (unsigned int) (object->instances().size() * temp_layer_count);
-        }
-    } else {
-        // Print all objects with the same print_z together.
+    // Orca #17681: counts the print_z that process_layer() prints. It skips a layer whose tool ordering has no
+    // extruder, such as the tip of a cone too thin for a wall. Called below, once the tool ordering is known.
+    const auto count_printed_layers = [&curved_tops_emptied](const auto &objects, const ToolOrdering &tool_ordering) {
         std::vector<coordf_t> zs;
-        for (auto object : print.objects()) {
+        for (const PrintObject *object : objects) {
             zs.reserve(zs.size() + object->layers().size() + object->support_layers().size());
             for (auto layer : object->layers())
                 if (!curved_tops_emptied(layer))
@@ -4250,17 +4236,28 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             for (auto layer : object->support_layers())
                 zs.push_back(layer->print_z);
         }
-        if (!zs.empty()) {
-            std::sort(zs.begin(), zs.end());
-            // BBS: merge numerically very close Z values.
-            auto end_it   = std::unique(zs.begin(), zs.end());
-            m_layer_count = (unsigned int) (end_it - zs.begin());
-            for (auto it = zs.begin(); it != end_it - 1; it++) {
-                if (abs(*it - *(it + 1)) < EPSILON)
-                    m_layer_count--;
-            }
+        zs.erase(std::remove_if(zs.begin(), zs.end(), [&tool_ordering](coordf_t z) {
+                     if (tool_ordering.empty())
+                         return true;
+                     // The lookup only asserts that z is in the tool ordering. A layer that is not is counted.
+                     if (z > (tool_ordering.end() - 1)->print_z + EPSILON)
+                         return false;
+                     const LayerTools &layer_tools = tool_ordering.tools_for_layer(z);
+                     return std::abs(layer_tools.print_z - z) < EPSILON && layer_tools.extruders.empty();
+                 }),
+                 zs.end());
+        if (zs.empty())
+            return 0u;
+        std::sort(zs.begin(), zs.end());
+        // BBS: merge numerically very close Z values.
+        auto         end_it      = std::unique(zs.begin(), zs.end());
+        unsigned int layer_count = (unsigned int) (end_it - zs.begin());
+        for (auto it = zs.begin(); it != end_it - 1; it++) {
+            if (abs(*it - *(it + 1)) < EPSILON)
+                layer_count--;
         }
-    }
+        return layer_count;
+    };
     print.throw_if_canceled();
 
     m_enable_cooling_markers = true;
@@ -4370,12 +4367,27 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         sort_remove_duplicates(extruder_ids);
         this->set_extruders(extruder_ids);
 
+        // Each instance prints the layers of its object separately.
+        {
+            std::map<const PrintObject *, unsigned int> printed_layers;
+            for (const PrintInstance *inst : print_object_instances_ordering) {
+                auto it = printed_layers.find(inst->print_object);
+                if (it == printed_layers.end())
+                    it = printed_layers.emplace(inst->print_object,
+                                                count_printed_layers(std::vector<const PrintObject *>{inst->print_object},
+                                                                     ToolOrdering(*inst->print_object, (unsigned int) -1))).first;
+                m_layer_count += it->second;
+            }
+        }
+
         has_wipe_tower = print.has_wipe_tower() && tool_ordering.has_wipe_tower();
     } else {
         // Find tool ordering for all the objects at once, and the initial extruder ID.
         // If the tool ordering has been pre-calculated by Print class for wipe tower already, reuse it.
         tool_ordering = print.tool_ordering();
         tool_ordering.assign_custom_gcodes(print);
+        // All objects with the same print_z print together.
+        m_layer_count = count_printed_layers(print.objects(), tool_ordering);
         if (tool_ordering.all_extruders().empty())
             // No object to print was found, cancel the G-code export.
             throw Slic3r::SlicingError(_(L("No object can be printed. Maybe too small")));
@@ -8241,8 +8253,6 @@ LayerResult GCode::process_layer(const Print& print,
                                                   &config) +
                  "\n";
     }
-    // BBS: set layer time fan speed after layer change gcode
-    gcode += ";_SET_FAN_SPEED_CHANGING_LAYER\n";
 
     // Calibration Layer-specific GCode
     switch (print.calib_mode()) {
@@ -11850,7 +11860,18 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fill
 
 bool GCode::GCodeOutputStream::is_error() const { return ::ferror(this->f); }
 
-void GCode::GCodeOutputStream::flush() { ::fflush(this->f); }
+std::string GCode::GCodeOutputStream::last_error() const
+{
+    return m_write_errno == 0 ? std::string() : std::string(::strerror(m_write_errno));
+}
+
+void GCode::GCodeOutputStream::flush()
+{
+    // Cleared first, so a failure that sets no error code does not report an older one.
+    errno = 0;
+    if (::fflush(this->f) != 0 && m_write_errno == 0)
+        m_write_errno = errno;
+}
 
 void GCode::GCodeOutputStream::close()
 {
@@ -11865,7 +11886,10 @@ void GCode::GCodeOutputStream::write(const char* what)
     if (what != nullptr) {
         const char* gcode = what;
         // writes string to file
-        fwrite(gcode, 1, ::strlen(gcode), this->f);
+        const size_t len = ::strlen(gcode);
+        errno = 0;
+        if (::fwrite(gcode, 1, len, this->f) != len && m_write_errno == 0)
+            m_write_errno = errno;
         // FIXME don't allocate a string, maybe process a batch of lines?
         m_processor.process_buffer(std::string(gcode));
     }
@@ -13682,7 +13706,8 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
         return gcode;
 
     // wipe (if it's enabled for this extruder and we have a stored wipe path and no-zero wipe distance)
-    if (EXTRUDER_CONFIG(wipe) && m_wipe.has_path() && scale_(EXTRUDER_CONFIG(wipe_distance)) > SCALED_EPSILON) {
+    const bool wiped = EXTRUDER_CONFIG(wipe) && m_wipe.has_path() && scale_(EXTRUDER_CONFIG(wipe_distance)) > SCALED_EPSILON;
+    if (wiped) {
         Wipe::RetractionValues wipeRetractions = m_wipe.calculateWipeRetractionLengths(*this, toolchange);
         gcode += toolchange ? m_writer.retract_for_toolchange(true, wipeRetractions.retraction_length_before_wipe) :
                               m_writer.retract(true, wipeRetractions.retraction_length_before_wipe);
@@ -13702,8 +13727,10 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
     // if (printer_model == "Snapmaker U1" && toolchange) {
     //     gcode += "M400\n";
     // }
-    if ((!this->on_first_layer() || this->config().bottom_surface_pattern != InfillPattern::ipHilbertCurve) &&
-        (role != erTopSolidInfill || this->config().top_surface_pattern != InfillPattern::ipHilbertCurve)) {
+    // Hilbert curve surfaces skip the retraction of a travel, but not a toolchange's, nor the rest of one a wipe has started.
+    if (wiped || toolchange ||
+        ((!this->on_first_layer() || this->config().bottom_surface_pattern != InfillPattern::ipHilbertCurve) &&
+         (role != erTopSolidInfill || this->config().top_surface_pattern != InfillPattern::ipHilbertCurve))) {
         gcode += toolchange ? m_writer.retract_for_toolchange() : m_writer.retract();
     }
 

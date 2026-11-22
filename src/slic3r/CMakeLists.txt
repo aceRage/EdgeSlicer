@@ -119,6 +119,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/SimpleShapeDialog.hpp
     GUI/ImageTraceDialog.cpp
     GUI/ImageTraceDialog.hpp
+    GUI/ImageToObjectDialog.cpp
+    GUI/ImageToObjectDialog.hpp
     GUI/SvgSplitDialog.cpp
     GUI/SvgSplitDialog.hpp
     GUI/ConfigManipulation.cpp
@@ -635,6 +637,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/DeviceModelCode.cpp
     GUI/NozzleInfo.hpp
     GUI/NozzleTempRows.hpp
+    GUI/BambuRackTemps.hpp
     GUI/DeviceControls.hpp
     GUI/BambuFans.hpp
     GUI/BambuCraftTools.hpp
@@ -1371,6 +1374,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/CodeEmbossDialog.cpp                      # CFG_SECTION also in other dialogs
     GUI/SimpleShapeDialog.cpp                     # filament_label() also in CodeEmbossDialog.cpp
     GUI/ImageTraceDialog.cpp                      # file-local preview helpers with common names
+    GUI/ImageToObjectDialog.cpp                   # file-local preview helpers, as ImageTraceDialog.cpp
     GUI/Gizmos/GLGizmoSVG.cpp                     # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/GLCanvas3D.cpp                            # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/ImGuiWrapper.cpp                          # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
