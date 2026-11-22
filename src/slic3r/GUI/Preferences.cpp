@@ -1514,6 +1514,12 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " sync_user_preset: " << (sync ? "true" : "false");
         }
 
+        if (param == "discord_rich_presence") {
+            // Takes effect immediately: enabling starts publishing, disabling
+            // clears the presence from the user's profile.
+            wxGetApp().apply_discord_presence_setting();
+        }
+
         // The Layerling tab appears or goes at once.
         if (param == "show_layerling_tab") {
             if (MainFrame* mf = wxGetApp().mainframe; mf != nullptr)
@@ -2420,6 +2426,15 @@ wxWindow* PreferencesDialog::create_page_general()
     crash_sizer->Add(crash_reports_link, 0, wxTOP, FromDIP(2));
     crash_sizer->Add(crash_reports_text, 0, wxTOP | wxBOTTOM, FromDIP(4));
     add_row(sec, crash_sizer);
+
+    // Discord Rich Presence: talks only to the local Discord app (named pipe / unix socket).
+    add_row(sec, create_item_checkbox(_L("Show current activity on Discord"), row(sec),
+        _L("Publish what you are working on to your Discord profile: the current project, slicing progress, "
+           "and print progress when a printer is connected. Nothing is sent when Discord is not running."),
+        50, "discord_rich_presence"));
+    add_row(sec, create_item_checkbox(_L("Hide project and print job names on Discord"), row(sec),
+        _L("Replace project and print job names with generic wording, while still showing progress and status."),
+        50, "discord_rich_presence_hide_names"));
 
     return page;
 }
