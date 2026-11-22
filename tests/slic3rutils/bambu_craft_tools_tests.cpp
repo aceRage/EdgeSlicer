@@ -222,7 +222,7 @@ TEST_CASE("Short, empty and odd types never throw and stay nozzles", "[BambuCraf
     json print = h2c_report("HS01");
     json& info = print["device"]["nozzle"]["info"];
     info[2]["type"] = 7;
-    info.push_back({ { "type", "CA00" } }); // no id: skipped
+    info.push_back(json::object({ { "type", "CA00" } })); // no id: skipped
     MachineObject obj { nullptr, "fake", "FAKECRAFT0002", "127.0.0.1" };
     REQUIRE_NOTHROW(obj.parse_new_info(print));
     CHECK(obj.m_nozzle_data.nozzles.size() == 5);
