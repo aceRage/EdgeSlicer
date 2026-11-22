@@ -141,7 +141,7 @@ TEST_CASE("Regions with different overhang wall speeds get walls of their own", 
     CAPTURE(option);
     Print print;
     Model model;
-    init_print({ cube(20) }, print, model);
+    init_print({ TestMesh::cube_20x20x20 }, print, model);
     const PrintRegionConfig &config = print.objects().front()->printing_region(0).config();
     PrintRegionConfig changed = config;
     if (option == "bridge_speed")
