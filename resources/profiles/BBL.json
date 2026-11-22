@@ -9882,10 +9882,6 @@
             "sub_path": "filament/PolyMax PC @BBL H2C.json"
         },
         {
-            "name": "PolyMax PETG @BBL H2C",
-            "sub_path": "filament/PolyMax PETG @BBL H2C.json"
-        },
-        {
             "name": "Generic PC @BBL H2C",
             "sub_path": "filament/Generic PC @BBL H2C.json"
         },
@@ -9920,6 +9916,10 @@
         {
             "name": "Generic PETG @BBL H2C 0.4 nozzle",
             "sub_path": "filament/Generic PETG @BBL H2C 0.4 nozzle.json"
+        },
+        {
+            "name": "PolyMax PETG @BBL H2C",
+            "sub_path": "filament/PolyMax PETG @BBL H2C.json"
         },
         {
             "name": "Fiberon PETG-ESD @BBL H2C",
