@@ -636,6 +636,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/NozzleInfo.hpp
     GUI/NozzleTempRows.hpp
     GUI/ToolTempLayout.hpp
+    GUI/BambuRackTemps.hpp
     GUI/DeviceControls.hpp
     GUI/BambuFans.hpp
     GUI/ChamberLights.hpp
