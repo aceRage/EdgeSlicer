@@ -17693,7 +17693,8 @@ void Plater::priv::replace_with_stl()
 
     wxString title = _L("Select a new file");
     title += ":";
-    wxFileDialog dialog(q, title, "", from_u8(input_path.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    const wxString start_dir = input_path.has_parent_path() ? from_u8(input_path.parent_path().string()) : from_u8(wxGetApp().app_config->get_last_dir());
+    wxFileDialog dialog(q, title, start_dir, from_u8(input_path.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK)
         return;
 
@@ -17859,7 +17860,8 @@ void Plater::priv::reload_from_disk()
         title += " (" + from_u8(search.filename().string()) + ")";
 #endif // __APPLE__
         title += ":";
-        wxFileDialog dialog(q, title, "", from_u8(search.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        const wxString start_dir = search.has_parent_path() ? from_u8(search.parent_path().string()) : from_u8(wxGetApp().app_config->get_last_dir());
+        wxFileDialog dialog(q, title, start_dir, from_u8(search.filename().string()), file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK)
             return;
 
@@ -19423,6 +19425,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     if (is_finished)
     {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":finished, reload print soon");
+        m_slice_all = false;
         m_is_slicing = false;
         // Refresh the button after m_is_slicing clears: the cancelled branch
         // above still sees m_is_slicing == true and would keep Slice disabled.
@@ -19449,6 +19452,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         m_cur_slice_plate = q->find_next_sliceable_plate_for_slice_all(m_cur_slice_plate + 1);
         if (m_cur_slice_plate < 0)
         {
+            m_slice_all = false;
             m_is_slicing = false;
             return;
         }
@@ -19459,6 +19463,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         int ret = q->start_next_slice();
         if (ret) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":slicing all, plate %1% can not be sliced, will stop")%m_cur_slice_plate;
+            m_slice_all = false;
             m_is_slicing = false;
         }
         //not the last plate
@@ -21386,7 +21391,6 @@ void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator 
                     tower_x_opt->set_at(&tower_x_new, plate_idx, 0);
                     tower_y_opt->set_at(&tower_y_new, plate_idx, 0);
                     need_update = true;
-                    break;
                 }
             }
 
