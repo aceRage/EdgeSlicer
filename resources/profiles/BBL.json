@@ -1,7 +1,7 @@
 {
     "name": "Bambulab",
     "url": "http://www.bambulab.com/Parameters/vendor/BBL.json",
-    "version": "02.00.00.87",
+    "version": "02.00.00.88",
     "force_update": "0",
     "description": "the initial version of BBL configurations",
     "machine_model_list": [
@@ -5618,8 +5618,20 @@
             "sub_path": "filament/Polymaker PETG Galaxy @BBL A2L.json"
         },
         {
+            "name": "Polymaker G-Flex PETG @BBL P1S",
+            "sub_path": "filament/Polymaker G-Flex PETG @BBL P1S.json"
+        },
+        {
+            "name": "Polymaker G-Flex PETG @BBL A1",
+            "sub_path": "filament/Polymaker G-Flex PETG @BBL A1.json"
+        },
+        {
             "name": "Polymaker PETG @BBL A2L",
             "sub_path": "filament/Polymaker PETG @BBL A2L.json"
+        },
+        {
+            "name": "Polymaker G-Flex PETG @BBL A2L",
+            "sub_path": "filament/Polymaker G-Flex PETG @BBL A2L.json"
         },
         {
             "name": "Polymaker PLA Pro Metallic @BBL A2L",
@@ -5808,6 +5820,10 @@
         {
             "name": "Polymaker PETG @BBL H2S",
             "sub_path": "filament/Polymaker PETG @BBL H2S.json"
+        },
+        {
+            "name": "Polymaker G-Flex PETG @BBL H2S",
+            "sub_path": "filament/Polymaker G-Flex PETG @BBL H2S.json"
         },
         {
             "name": "Polymaker PLA Pro Metallic @BBL H2S",
@@ -9866,10 +9882,6 @@
             "sub_path": "filament/PolyMax PC @BBL H2C.json"
         },
         {
-            "name": "PolyMax PETG @BBL H2C",
-            "sub_path": "filament/PolyMax PETG @BBL H2C.json"
-        },
-        {
             "name": "Generic PC @BBL H2C",
             "sub_path": "filament/Generic PC @BBL H2C.json"
         },
@@ -9906,6 +9918,10 @@
             "sub_path": "filament/Generic PETG @BBL H2C 0.4 nozzle.json"
         },
         {
+            "name": "PolyMax PETG @BBL H2C",
+            "sub_path": "filament/PolyMax PETG @BBL H2C.json"
+        },
+        {
             "name": "Fiberon PETG-ESD @BBL H2C",
             "sub_path": "filament/Fiberon PETG-ESD @BBL H2C.json"
         },
@@ -9924,6 +9940,10 @@
         {
             "name": "Polymaker PETG @BBL H2C",
             "sub_path": "filament/Polymaker PETG @BBL H2C.json"
+        },
+        {
+            "name": "Polymaker G-Flex PETG @BBL H2C",
+            "sub_path": "filament/Polymaker G-Flex PETG @BBL H2C.json"
         },
         {
             "name": "Polymaker PETG Galaxy @BBL H2C",
@@ -10080,6 +10100,10 @@
         {
             "name": "Panchroma PLA Starlight @BBL H2D",
             "sub_path": "filament/Panchroma PLA Starlight @BBL H2D.json"
+        },
+        {
+            "name": "Polymaker G-Flex PETG @BBL H2D",
+            "sub_path": "filament/Polymaker G-Flex PETG @BBL H2D.json"
         },
         {
             "name": "Panchroma PLA Translucent @BBL H2D",
@@ -11060,6 +11084,10 @@
         {
             "name": "Generic PETG @BBL X2D",
             "sub_path": "filament/Generic PETG @BBL X2D.json"
+        },
+        {
+            "name": "Polymaker G-Flex PETG @BBL X2D",
+            "sub_path": "filament/Polymaker G-Flex PETG @BBL X2D.json"
         },
         {
             "name": "Generic PETG HF @BBL X2D 0.2 nozzle",
@@ -12268,6 +12296,10 @@
         {
             "name": "Polymaker PETG @BBL H3C",
             "sub_path": "filament/Polymaker PETG @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker G-Flex PETG @BBL H3C",
+            "sub_path": "filament/Polymaker G-Flex PETG @BBL H3C.json"
         },
         {
             "name": "Polymaker PETG Galaxy @BBL H3C",

@@ -1,6 +1,6 @@
 {
 	"name": "Anycubic",
-	"version": "02.04.00.14",
+	"version": "02.04.00.15",
 	"force_update": "0",
 	"description": "Anycubic configurations",
 	"machine_model_list": [
@@ -963,6 +963,10 @@
 		{
 			"name": "Polymaker PLA Pro Metallic @Anycubic Kobra S1",
 			"sub_path": "filament/Polymaker/Polymaker PLA Pro Metallic @Anycubic Kobra S1.json"
+		},
+		{
+			"name": "Polymaker G-Flex PETG @Anycubic Kobra S1",
+			"sub_path": "filament/Polymaker/Polymaker G-Flex PETG @Anycubic Kobra S1.json"
 		},
 		{
 			"name": "Anycubic Generic PVA",
