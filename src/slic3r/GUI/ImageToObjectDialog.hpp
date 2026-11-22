@@ -4,10 +4,12 @@
 // "Image to object": a printable object from the outline of a PNG / JPG image.
 // Design: tests/design_image_to_objects.md. A cookie cutter, or a box with a lid in the shape
 // of the image, or a clicker around a keyboard switch. The geometry is created in
-// libslic3r/OutlineObjects.
+// libslic3r/OutlineObjects. The settings and a copy of the image are kept with the objects
+// (libslic3r/ImageObjectRecipe), so "Edit image object" opens the dialog again.
 
 #include "GUI_Utils.hpp"
 
+#include "libslic3r/ImageObjectRecipe.hpp"
 #include "libslic3r/ImageTrace.hpp"
 #include "libslic3r/OutlineObjects.hpp"
 
@@ -15,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include <wx/gdicmn.h>
 #include <wx/timer.h>
 
 class wxButton;
@@ -27,47 +30,28 @@ class wxStaticText;
 
 namespace Slic3r { namespace GUI {
 
-enum class ImageObjectType : int { CookieCutter = 0, Box, Clicker };
-
-// The picture on the lid has at most this many colours
-constexpr int IMAGE_OBJECT_MAX_COLORS = IMAGE_TRACE_MAX_COLORS;
-
-// Everything the user sets in the dialog
-struct ImageToObjectSettings
-{
-    ImageObjectType type = ImageObjectType::CookieCutter;
-
-    // How the shape is read from the image (when no picture is traced)
-    TraceShapeFrom shape_from     = TraceShapeFrom::Auto;
-    int            threshold      = 128;
-    bool           auto_threshold = true;
-    bool           invert         = false;
-    double         blur           = 1.;
-
-    SilhouetteParams   silhouette;
-    // A cookie cutter is turned over when used
-    bool               cutter_mirror = true;
-    CookieCutterParams cutter;
-
-    OutlineBoxParams box;
-    ClickerParams    clicker;
-    // Colours of the picture on the lid / cap: 0 = no picture, otherwise 2 .. IMAGE_OBJECT_MAX_COLORS
-    int picture_colors = 3;
-    // 0 .. default, otherwise 1 based filament
-    int                                      body_extruder = 0;
-    std::array<int, IMAGE_OBJECT_MAX_COLORS> level_extruders{};
-};
-
 class ImageToObjectDialog : public DPIDialog
 {
 public:
+    // source_png .. downscaled copy of the image which is kept with the objects for editing
     // image_name .. file name without extension, used in the names of the objects
-    ImageToObjectDialog(wxWindow *parent, const TraceImage &image, const std::string &image_name, const ImageToObjectSettings &settings);
+    // is_edit    .. the objects replace the ones the dialog was opened for
+    ImageToObjectDialog(wxWindow                    *parent,
+                        const TraceImage            &image,
+                        const std::string           &source_png,
+                        const std::string           &image_name,
+                        const ImageToObjectSettings &settings,
+                        bool                         is_edit = false);
     ~ImageToObjectDialog() override;
 
     // Valid after ShowModal() returns wxID_OK
     const std::vector<OutlineObject> &objects() const { return m_objects; }
     const std::vector<std::string>   &warnings() const { return m_warnings; }
+    const ImageToObjectSettings      &settings() const { return m_settings; }
+    const std::string                &source_png() const { return m_source_png; }
+    const std::string                &image_name() const { return m_image_name; }
+    // The result is the fit test piece, which is not made from the image
+    bool                              is_fit_test() const { return m_is_fit_test; }
     // 0 .. default, otherwise 1 based filament of the part
     int extruder(const OutlinePart &part) const;
 
@@ -100,6 +84,12 @@ private:
     void                  schedule_preview();
     void                  refresh_preview();
     void                  refresh_preview_unchecked();
+    // The objects of the shape. False with the error set when they could not be created.
+    bool                  generate(const Shape &shape, const ImageToObjectSettings &settings, std::vector<OutlineObject> &objects,
+                                   std::vector<std::string> &warnings, std::string &error) const;
+    bool                  view_3d() const;
+    // Draw the objects of the preview as they are turned now. False when there is nothing to draw.
+    bool                  render_3d();
     // The geometry failed in an unexpected way: say so in the dialog instead of ending the application
     void                  show_failure(const std::string &what);
     void                  refresh_source_preview();
@@ -116,6 +106,8 @@ private:
     std::string           filament_color(int extruder) const;
 
     TraceImage                 m_image;
+    std::string                m_source_png;
+    bool                       m_is_edit = false;
     TraceImage                 m_preview_image; // downscaled for fast preview
     std::string                m_image_name;
     ImageToObjectSettings      m_settings;
@@ -173,6 +165,17 @@ private:
     std::vector<std::array<uint8_t, 3>> m_level_colors;
 
     wxStaticBitmap *m_source_preview = nullptr;
+    // "from above" (cross-sections) or the objects in 3D
+    wxChoice       *m_view           = nullptr;
+    wxSlider       *m_turn           = nullptr;
+    wxStaticText   *m_turn_label     = nullptr;
+    // objects of the 3D preview, the colours of their parts and how they are turned [degrees]
+    std::vector<OutlineObject>          m_preview_objects;
+    std::vector<std::array<uint8_t, 3>> m_preview_colors;
+    double                              m_yaw      = -30.;
+    double                              m_pitch    = 35.;
+    bool                                m_dragging = false;
+    wxPoint                             m_drag_from;
     wxStaticBitmap *m_preview_bitmap = nullptr;
     wxStaticText   *m_info           = nullptr;
     wxStaticText   *m_warning        = nullptr;
@@ -191,6 +194,12 @@ private:
 // Ask for an image when the path is empty, show the dialog and add the objects to the plate.
 // False when canceled or failed.
 bool create_object_from_image(const wxString &image_path = wxEmptyString);
+
+// One object made by "Image to object" is selected
+bool can_edit_image_object();
+// Open the dialog with the settings of the selected object and replace the object (and the
+// other object made with it, e.g. the lid of a box) by the result. False when canceled or failed.
+bool edit_image_object();
 
 }} // namespace Slic3r::GUI
 
