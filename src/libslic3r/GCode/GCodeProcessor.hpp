@@ -387,6 +387,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         static const std::vector<std::string> Reserved_Tags_compatible;
         static const std::string Flush_Start_Tag;
         static const std::string Flush_End_Tag;
+        // The flush a Bambu printer's firmware does by itself (change_filament_gcode of the H2D, H2C, X2D, H2S, P2S, A2L,
+        // H3C): "; VFLUSH_START", virtual moves ";VG1 E<mm> F<mm/min>" and waits "SYNC T<s>", "; VFLUSH_END".
+        static const std::string VFlush_Start_Tag;
+        static const std::string VFlush_End_Tag;
         static const std::string External_Purge_Tag;
     public:
         enum class ETags : unsigned char
@@ -898,6 +902,8 @@ inline bool is_bbl_special_tool_command(int tool_number)
         CachedPosition m_cached_position;
         bool m_wiping;
         bool m_flushing;
+        // Between "; VFLUSH_START" and "; VFLUSH_END" (VFlush_Start_Tag).
+        bool m_virtual_flushing;
         bool m_wipe_tower;
         float m_remaining_volume;
         bool m_manual_filament_change{ false };
@@ -1244,6 +1250,15 @@ inline bool is_bbl_special_tool_command(int tool_number)
         // Orca #14663: Elegoo Centauri Carbon / Carbon 2 filament change (ElegooGCodeProcessorHelper.cpp).
         void process_M6211(const GCodeReader::GCodeLine& line);
         void process_elegoo_M6211(const GCodeReader::GCodeLine& line);
+
+        // The firmware flush of the Bambu printers that write "; VFLUSH_START" (VFlush_Start_Tag): a ";VG1 E<mm> F<mm/min>"
+        // comment is flushed filament and the time to extrude it, a "SYNC T<s>" line a wait of the flush. Outside the block
+        // both are ignored, as before.
+        void process_virtual_flush_move(const std::string_view comment);
+        void process_SYNC(const GCodeReader::GCodeLine& line);
+        // Books `volume` mm^3 flushed after a filament change: what is left of the previous filament in the nozzle first
+        // (m_remaining_volume, nozzle_volume after each change), the rest to the current filament.
+        void book_flush_volume(float volume);
 
         // Processes T line (Select Tool)
         void process_T(const GCodeReader::GCodeLine& line);

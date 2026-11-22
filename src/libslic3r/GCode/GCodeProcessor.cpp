@@ -128,6 +128,8 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags_compatible = {
 
 const std::string GCodeProcessor::Flush_Start_Tag = " FLUSH_START";
 const std::string GCodeProcessor::Flush_End_Tag = " FLUSH_END";
+const std::string GCodeProcessor::VFlush_Start_Tag = " VFLUSH_START";
+const std::string GCodeProcessor::VFlush_End_Tag = " VFLUSH_END";
 
 //Orca: External device purge tag
 const std::string GCodeProcessor::External_Purge_Tag = " EXTERNAL_PURGE";
@@ -1389,6 +1391,7 @@ void GCodeProcessor::reset()
     m_cached_position.reset();
     m_wiping = false;
     m_flushing = false;
+    m_virtual_flushing = false;
     m_wipe_tower = false;
     m_remaining_volume = 0.f;
 
@@ -2051,6 +2054,12 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
         case 'T':
             process_T(line); // Select Tool
             break;
+        case 's':
+        case 'S':
+            // A wait of a Bambu firmware flush ("SYNC T<s>" between "; VFLUSH_START" and "; VFLUSH_END").
+            if (m_virtual_flushing && ascii_iequals(cmd, "SYNC"))
+                process_SYNC(line);
+            break;
         default:
             break;
         }
@@ -2278,6 +2287,21 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     //BBS: flush end tag
     if (boost::starts_with(comment, GCodeProcessor::Flush_End_Tag)) {
         m_flushing = false;
+        return;
+    }
+
+    // The firmware flush of the H2D / H2C / X2D / H2S / P2S / A2L / H3C (VFlush_Start_Tag). Before, nothing here was read,
+    // so their flush was in neither the flushed filament nor the time.
+    if (boost::starts_with(comment, GCodeProcessor::VFlush_Start_Tag)) {
+        m_virtual_flushing = true;
+        return;
+    }
+    if (boost::starts_with(comment, GCodeProcessor::VFlush_End_Tag)) {
+        m_virtual_flushing = false;
+        return;
+    }
+    if (m_virtual_flushing && boost::starts_with(comment, "VG1 ")) {
+        process_virtual_flush_move(comment);
         return;
     }
     
@@ -3075,17 +3099,7 @@ void GCodeProcessor::process_G1(const std::array<std::optional<double>, 4>& axes
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
     }
     else if (type == EMoveType::Unretract && m_flushing) {
-        float volume_flushed_filament = area_filament_cross_section * delta_pos[E];
-        if (m_remaining_volume > volume_flushed_filament)
-        {
-            m_used_filaments.update_flush_per_filament(m_last_extruder_id, volume_flushed_filament);
-            m_remaining_volume -= volume_flushed_filament;
-        }
-        else {
-            m_used_filaments.update_flush_per_filament(m_last_extruder_id, m_remaining_volume);
-            m_used_filaments.update_flush_per_filament(m_extruder_id, volume_flushed_filament - m_remaining_volume);
-            m_remaining_volume = 0.f;
-        }
+        book_flush_volume(area_filament_cross_section * delta_pos[E]);
     }
 
     // time estimate section
@@ -5941,6 +5955,67 @@ void GCodeProcessor::process_custom_gcode_time(CustomGCode::Type code)
             gcode_time.times.push_back({ code, gcode_time.cache });
             gcode_time.cache = 0.0f;
         }
+    }
+}
+
+void GCodeProcessor::book_flush_volume(float volume)
+{
+    if (m_remaining_volume > volume) {
+        m_used_filaments.update_flush_per_filament(m_last_extruder_id, volume);
+        m_remaining_volume -= volume;
+    } else {
+        m_used_filaments.update_flush_per_filament(m_last_extruder_id, m_remaining_volume);
+        m_used_filaments.update_flush_per_filament(m_extruder_id, volume - m_remaining_volume);
+        m_remaining_volume = 0.f;
+    }
+}
+
+void GCodeProcessor::process_virtual_flush_move(const std::string_view comment)
+{
+    // ";VG1 E41.5 F623": the firmware pushes E mm of the new filament through the nozzle at F mm/min (the
+    // change_filament_gcode computes both from flush_length and the filaments' volumetric speeds). Nothing moves in
+    // X / Y / Z and the E axis of this file does not advance: the move is in the firmware.
+    float e = 0.f;
+    float f = 0.f;
+    size_t pos = comment.find(' ');
+    while (pos != std::string_view::npos) {
+        const size_t start = comment.find_first_not_of(' ', pos);
+        if (start == std::string_view::npos)
+            break;
+        pos = comment.find(' ', start);
+        const std::string_view word = comment.substr(start, pos == std::string_view::npos ? std::string_view::npos : pos - start);
+        if (word.size() < 2)
+            continue;
+        float value = 0.f;
+        if (!parse_number(word.substr(1), value))
+            continue;
+        if (word.front() == 'E' || word.front() == 'e')
+            e = value;
+        else if (word.front() == 'F' || word.front() == 'f')
+            f = value;
+    }
+    if (!(e > 0.f))
+        return;
+    const float filament_diameter = (static_cast<size_t>(m_extruder_id) < m_result.filament_diameters.size()) ?
+                                        m_result.filament_diameters[m_extruder_id] :
+                                        m_result.filament_diameters.back();
+    book_flush_volume(static_cast<float>(M_PI) * sqr(0.5f * filament_diameter) * e);
+    // The time of the flush, as a G4 of that length would be booked (process_G4).
+    if (f > 0.f) {
+        simulate_st_synchronize(0.f);
+        simulate_st_synchronize(e / f * 60.f);
+    }
+}
+
+void GCodeProcessor::process_SYNC(const GCodeReader::GCodeLine& line)
+{
+    // "SYNC T15": a wait of the flush in seconds, as the template estimates it (H2D: ceil(flush_length / 125) * 5, then
+    // the heating and cooling between the print and the flush temperature, "compensate for heating and cooling"). A
+    // negative or zero value (no flush, no temperature change) adds nothing.
+    float seconds = 0.f;
+    if (line.has_value('T', seconds) && seconds > 0.f) {
+        simulate_st_synchronize(0.f);
+        simulate_st_synchronize(seconds);
     }
 }
 
