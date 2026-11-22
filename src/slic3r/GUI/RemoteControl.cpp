@@ -166,7 +166,26 @@ static DeviceControls::Caps bambu_caps(MachineObject* m)
         for (const auto& n : m->m_nozzle_data.nozzles)
             rack.push_back({ n.id, n.addr_id, n.exist, n.has_temp, n.temp, n.target_temp, n.temp_state });
         caps.rack = BambuRackTemps::rack_heaters(rack, m->has_rack_ams(), m->nozzle_max_temperature);
+        // A rack position holding a cutter, pen, laser or fan (BambuCraftTools) is named as that tool, not a heater.
+        for (const auto& n : m->m_nozzle_data.nozzles) {
+            if (n.prints()) continue;
+            const int pos = BambuRackTemps::on_rack(n.id) ? (n.addr_id >= 0 ? n.addr_id : (n.id & 0xF)) : n.addr_id;
+            if (pos < 0) continue;
+            for (Heater& h : caps.rack)
+                if (h.id == rack_id(pos)) {
+                    h.kind     = BambuCraftTools::tool_kind_key(n.tool_kind);
+                    h.label    = "Rack " + std::to_string(pos + 1) + ": " + BambuCraftTools::tool_kind_name(n.tool_kind);
+                    h.has_temp = false;
+                    h.temp = h.target = 0;
+                    h.state.clear();
+                }
+        }
     }
+    // An extruder holding a craft tool: its row says which tool (kind), the temperature stays as reported.
+    for (const Extder& e : m->m_extder_data.extders)
+        if (BambuCraftTools::is_craft_tool(e.current_tool))
+            for (Heater& h : caps.heaters)
+                if (h.id == nozzle_id(e.id)) h.kind = BambuCraftTools::tool_kind_key(e.current_tool);
 
     caps.has_speed = true;
     caps.speed     = Speed { "level", (int) m->printing_speed_lvl, 1, 4, m->is_in_printing() };
