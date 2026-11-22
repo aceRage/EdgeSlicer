@@ -25,7 +25,6 @@
 #include <wx/mstream.h>
 #include <wx/sstream.h>
 #include <wx/zstream.h>
-#include <type_traits>
 #include "ToolTempLayout.hpp"
 
 
@@ -2522,32 +2521,11 @@ void StatusPanel::show_printing_status(bool ctrl_area, bool temp_area)
 
 namespace {
 
-// The rack temperature fields of struct Nozzle (has_temp / temp / target_temp) arrive with the
-// phase 4 parser (feat/tool-temps-p4-rack-readonly). Read them when they exist, so this adapter
-// works before and after that branch is merged; without them no rack reports a temperature and
-// rack_entries() returns no slots (no strip, the panel unchanged).
-template<class N, class = void> struct nozzle_has_rack_temp : std::false_type
-{};
-template<class N>
-struct nozzle_has_rack_temp<N, std::void_t<decltype(std::declval<const N &>().has_temp), decltype(std::declval<const N &>().temp),
-                                           decltype(std::declval<const N &>().target_temp)>> : std::true_type
-{};
-
-template<class N> void copy_rack_temp(const N &n, RackNozzleSample &s)
-{
-    if constexpr (nozzle_has_rack_temp<N>::value) {
-        s.has_temp = bool(n.has_temp);
-        s.temp     = int(n.temp);
-        s.target   = int(n.target_temp);
-    } else {
-        (void) n;
-        (void) s;
-    }
-}
-
 // MachineObject -> the strip's rack slots. Only a direct-connected rack (the H3C's kind, as
-// Bambu Studio shows rack temperatures only there); tool kinds come later (feat/craft-tool-kinds),
-// until then every slot is a nozzle.
+// Bambu Studio shows rack temperatures only there). The temperatures are the phase 4 fields of
+// struct Nozzle (BambuRackTemps::parse_nozzle_temp); a rack that reports none gives no slots, so
+// no strip and the panel as before. Tool kinds come later (feat/craft-tool-kinds); until then
+// every slot is a nozzle.
 RackEntries rack_entries_of(MachineObject *obj)
 {
     if (!obj || !obj->has_rack_ams()) return RackEntries();
@@ -2560,7 +2538,9 @@ RackEntries rack_entries_of(MachineObject *obj)
         s.diameter  = n.diameter;
         s.high_flow = n.volume_exact == NozzleVolumeType::nvtHighFlow || n.volume_exact == NozzleVolumeType::nvtTPUHighFlow ||
                       n.volume_exact == NozzleVolumeType::nvtE3DHighFlow;
-        copy_rack_temp(n, s);
+        s.has_temp  = n.has_temp;
+        s.temp      = n.temp;
+        s.target    = n.target_temp;
         samples.push_back(s);
     }
     return rack_entries(samples);
