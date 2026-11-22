@@ -3413,3 +3413,27 @@ TEST_CASE("Print validation rejects a zero layer height", "[Print]")
     CHECK_FALSE(result.string.empty());
     CHECK(result.opt_key == "layer_height");
 }
+
+// Orca #17681: supports printed with the object's filament list it twice before the filaments are deduplicated,
+// and two entries were taken for two filaments.
+TEST_CASE("A plate that prints a single filament leaves out the prime tower filament", "[Print][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "nozzle_diameter",            "0.4,0.4" },
+        { "filament_diameter",          "1.75,1.75" },
+        { "enable_prime_tower",         "1" },
+        { "wipe_tower_filament",        "2" },
+        { "enable_support",             "1" },
+        { "support_filament",           "0" },
+        { "support_interface_filament", "0" },
+    });
+    config.option<ConfigOptionStrings>("filament_colour")->values = { "#FF0000", "#00FF00" };
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    REQUIRE(print.objects().front()->has_support_material());
+    CHECK(print.extruders() == std::vector<unsigned int>{ 0 });
+}
