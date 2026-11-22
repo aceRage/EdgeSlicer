@@ -4569,7 +4569,7 @@ void MainFrame::load_config_file()
  //   if (!wxGetApp().check_and_save_current_preset_changes(_L("Loading profile file"), "", false))
  //       return;
     wxFileDialog dlg(this, _L("Select profile to load:"),
-        !m_last_config.IsEmpty() ? get_dir_name(m_last_config) : wxGetApp().app_config->get_last_dir(),
+        from_u8(!m_last_config.IsEmpty() ? get_dir_name(m_last_config) : wxGetApp().app_config->get_last_dir()),
         "config.json", "Config files (*.json;*.zip;*.orca_printer;*.orca_filament)|*.json;*.zip;*.orca_printer;*.orca_filament", wxFD_OPEN | wxFD_MULTIPLE | wxFD_FILE_MUST_EXIST);
      wxArrayString files;
     if (dlg.ShowModal() != wxID_OK)
@@ -4622,7 +4622,7 @@ void MainFrame::load_config_file()
 void MainFrame::import_config_from_gcode()
 {
     wxFileDialog dlg(this, _L("Select a sliced G-code file to import settings from:"),
-        wxGetApp().app_config->get_last_dir(), "",
+        from_u8(wxGetApp().app_config->get_last_dir()), "",
         "G-code files (*.gcode;*.g;*.ngc)|*.gcode;*.g;*.ngc", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dlg.ShowModal() != wxID_OK)
         return;
@@ -4697,7 +4697,7 @@ bool MainFrame::load_config_file(const std::string &path)
 {
     // Ask user for a file name.
     wxDirDialog dlg(this, _L("choose a directory"),
-        !m_last_config.IsEmpty() ? get_dir_name(m_last_config) : wxGetApp().app_config->get_last_dir(), wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+        from_u8(!m_last_config.IsEmpty() ? get_dir_name(m_last_config) : wxGetApp().app_config->get_last_dir()), wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
     wxString path;
     if (dlg.ShowModal() == wxID_OK)
         path = dlg.GetPath();
