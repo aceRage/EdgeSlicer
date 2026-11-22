@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
 	test_model_rotate_center.cpp
+	test_apply_transform.cpp
 	test_orient.cpp
 	test_plugin_preset_3mf.cpp
 	test_plate_print_history.cpp
