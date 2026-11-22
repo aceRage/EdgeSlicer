@@ -14,9 +14,12 @@
 #include <utility>
 #include <vector>
 
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCode/CoolingBuffer.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode/FanMover.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCodeWriter.hpp"
 
 #include "test_data.hpp"
@@ -161,6 +164,110 @@ TEST_CASE("FanMover keeps a fan command flushed at the end of a layer in its sta
     CHECK(out[0].find("M106 S229") != std::string::npos);
     // The restore to the layer speed survives.
     CHECK(out[1].find("M106 S76") != std::string::npos);
+}
+
+// Orca #17681: the reader took the X, Y and Z of a move after G91 for absolute coordinates.
+TEST_CASE("A G-code reader follows relative positioning", "[GCodeReader]")
+{
+    std::vector<float> targets, distances;
+    float height_after_lift = 0.f;
+    GCodeReader reader;
+    reader.parse_buffer("G1 Z10\nG91\nG1 Z2\nG90\nG1 X5\nG92 Z3\nG1 Z4\n",
+        [&](GCodeReader &reader, const GCodeReader::GCodeLine &line) {
+            if (line.cmd_is("G1") && line.has_z()) {
+                targets.push_back(line.new_Z(reader));
+                distances.push_back(line.dist_Z(reader));
+            } else if (line.has_x())
+                height_after_lift = reader.z();
+        });
+    // The lift is 2 mm up from 10 mm, and G92 then sets the height to 3 mm.
+    REQUIRE(targets.size() == 3);
+    CHECK(targets[0] == Approx(10.).margin(1e-4));
+    CHECK(targets[1] == Approx(12.).margin(1e-4));
+    CHECK(targets[2] == Approx(4.).margin(1e-4));
+    CHECK(distances[0] == Approx(10.).margin(1e-4));
+    CHECK(distances[1] == Approx(2.).margin(1e-4));
+    CHECK(distances[2] == Approx(1.).margin(1e-4));
+    CHECK(height_after_lift == Approx(12.).margin(1e-4));
+}
+
+namespace {
+
+// The heights the G1 moves of `gcode` go to, following G90 and G91.
+std::vector<float> move_heights(const std::string &gcode)
+{
+    std::vector<float> heights;
+    float z = 0.f;
+    bool relative = false;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("G90") || line.cmd_is("G91"))
+            relative = line.cmd_is("G91");
+        else if (line.cmd_is("G1") && line.has_z())
+            heights.push_back(z = relative ? z + line.z() : line.z());
+    });
+    return heights;
+}
+
+// One layer through a FanMover that moves every fan command `speedup_time` back.
+std::string fan_mover_output(float speedup_time, const std::string &gcode)
+{
+    GCodeWriter writer;
+    writer.config.gcode_flavor.value = gcfMarlinFirmware;
+    FanMover mover(writer, speedup_time, false, true, false, 0.f);
+    return mover.process_gcode(gcode, true);
+}
+
+} // namespace
+
+// Orca #17681: after custom G-code that lifts the nozzle in relative mode the fan mover had the wrong height,
+// and a move it split to put a fan command in the middle went to that wrong height first.
+TEST_CASE("Fan mover keeps the height after custom G-code that lifts the nozzle in relative mode", "[FanMover][Regression]")
+{
+    // The fan command moves 1 s back, to the middle of the 2 s move from the lifted 12 mm back down to 10 mm.
+    const std::string gcode = fan_mover_output(1.f, ";TYPE:Outer wall\nG1 F600\nG1 Z10\n"
+                                                    ";_FAN_MOVER_SKIP_START\nG91\nG1 Z2\nG90\n;_FAN_MOVER_SKIP_END\n"
+                                                    "G1 Z10 F60\nM106 S255\n");
+    INFO(gcode);
+    const std::vector<float> heights = move_heights(gcode);
+    REQUIRE(heights.size() == 4);
+    CHECK(heights[1] == Approx(12.).margin(1e-4));
+    CHECK(heights[2] == Approx(11.).margin(1e-4));
+    CHECK(heights[3] == Approx(10.).margin(1e-4));
+}
+
+TEST_CASE("Fan mover does not split a move in relative mode", "[FanMover]")
+{
+    const std::string gcode = fan_mover_output(0.5f, ";TYPE:Outer wall\nG1 F60\nG1 Z10\nG91\nG1 Z2\nM106 S255\nG90\n");
+    INFO(gcode);
+    const std::vector<float> heights = move_heights(gcode);
+    REQUIRE(heights.size() == 2);
+    CHECK(heights[0] == Approx(10.).margin(1e-4));
+    CHECK(heights[1] == Approx(12.).margin(1e-4));
+    // The fan command goes in front of the whole move.
+    const size_t fan = gcode.find("M106 S255");
+    const size_t lift = gcode.find("G1 Z2");
+    REQUIRE(fan != std::string::npos);
+    REQUIRE(lift != std::string::npos);
+    CHECK(fan < lift);
+}
+
+TEST_CASE("Fan mover reads the moves after a role tag as absolute, also where custom G-code left G91 through a macro", "[FanMover]")
+{
+    // RESTORE_GCODE_STATE ends G91 out of the reader's sight. The slicer's next move follows a role tag, in absolute positioning.
+    const std::string gcode = fan_mover_output(1.f, ";TYPE:Outer wall\nG1 F600\nG1 Z10\n"
+                                                    "SAVE_GCODE_STATE NAME=lift\nG91\nG1 Z2\nRESTORE_GCODE_STATE NAME=lift\n"
+                                                    ";TYPE:Inner wall\nG1 Z10 F60\nM106 S255\n");
+    INFO(gcode);
+    // The fan command moves 1 s back, splitting the 2 s move from 12 mm down to 10 mm in the middle.
+    std::vector<float> heights;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&heights](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("G1") && line.has_z())
+            heights.push_back(line.z());
+    });
+    REQUIRE(heights.size() == 4);
+    CHECK(heights[2] == Approx(11.).margin(1e-4));
 }
 
 namespace {
@@ -614,6 +721,25 @@ TEST_CASE("Walls without an overhang fan transition keep their arcs", "[Cooling]
 // Upstream's test for Orca #16297 (tests/fff_print/test_cooling.cpp), on Catch2 v2 and our config API. The
 // sphere's lower half overhangs all round, so its walls are cooled along their whole length: the path-wide
 // marker carries that, and they keep their arcs.
+// Orca #17681: a raft prints support interface while the fan is held off, which ignores the interface fan. The
+// end marker of such a region was then left in the G-code.
+TEST_CASE("Cooling consumes the support interface fan markers while the fan is held off", "[Cooling][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"enable_support", "1"},
+        {"raft_layers", "3"},
+        {"support_material_interface_fan_speed", "50"},
+        {"close_fan_the_first_x_layers", "5"},
+    });
+    const std::string gcode = slice({TestMesh::cube_20x20x20}, config);
+    REQUIRE(gcode.find(GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) + ExtrusionEntity::role_to_string(erSupportMaterialInterface)) !=
+            std::string::npos);
+    CHECK(gcode.find(";_SUPP_INTERFACE_FAN") == std::string::npos);
+}
+
 TEST_CASE("Arc fitting remains active with overhang fan control", "[Cooling][Regression][Orca16297]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();

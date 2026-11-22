@@ -142,11 +142,13 @@ private:
 };
 
 // What to do with an image dropped onto the 3D scene
-enum class ImageDropAction { Cancel, Trace, Relief, ColorFill };
+// Object .. make a printable object from the outline of the image (ImageToObjectDialog)
+enum class ImageDropAction { Cancel, Trace, Relief, ColorFill, Object };
 
 // Ask the user what to do with dropped image
 // can_color_fill .. there is an object to apply Image Fill to
-ImageDropAction ask_image_drop_action(wxWindow *parent, const wxString &file_name, bool can_color_fill);
+// can_make_object .. a new object can be added to the plate now
+ImageDropAction ask_image_drop_action(wxWindow *parent, const wxString &file_name, bool can_color_fill, bool can_make_object = true);
 
 }} // namespace Slic3r::GUI
 
