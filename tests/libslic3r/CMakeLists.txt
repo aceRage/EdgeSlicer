@@ -140,6 +140,7 @@ add_executable(${_TEST_NAME}_tests
 	test_fuzzy_skin.cpp
 	test_arc_fitting.cpp
 	test_geometry.cpp
+	test_measure.cpp
 	test_h2c_rack_nozzle_change.cpp
 	test_h2c_rack_park_preheat.cpp
 	test_h2d_byobject_toolchange.cpp
