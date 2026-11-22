@@ -75,6 +75,17 @@ const ROWS = [
       cc2: { protocol: 'mqtt', live: false, age_s: 200, stale: false, firmware: '1.0.0.37', canvas_attached: false } },
     { id: '01P00A111111111', kind: 'bambu', name: 'X1C Garage', model: 'O1C2', online: true, status: 'RUNNING', print_status: 'RUNNING',
       printing: true, percent: 10, can_pause: true, can_resume: false, can_stop: true },
+    // An H3C as RemoteControl::bambu_caps writes it once its rack nozzles report "temp" (phase 4 of
+    // tests/design_device_multi_tool_temps.md; the fields are from Bambu Studio's parser, not a capture).
+    { id: '31B8BP000000001', kind: 'bambu', name: 'H3C Bench', model: 'O1E', online: true, status: 'IDLE', print_status: 'IDLE',
+      printing: false, can_pause: false, can_resume: false, can_stop: false, print_error: null,
+      controls: { heaters: [{ id: 'bed', label: 'Bed', temp: 25, target: 0, settable: true, kind: 'bed', group: 'env', present: true, mounted: false },
+                            { id: 'nozzle0', label: 'Nozzle', temp: 219.6, target: 220, settable: true, kind: 'nozzle', group: 'tool', present: true, mounted: false }],
+                  rack: [{ id: 'rack0', label: 'Rack 1', temp: null, target: null, settable: false, kind: 'nozzle', group: 'rack', present: true, mounted: true },
+                         { id: 'rack1', label: 'Rack 2', temp: 181.4, target: 200, settable: false, kind: 'nozzle', group: 'rack', present: true, mounted: false, state: 'heating' },
+                         { id: 'rack2', label: 'Rack 3', temp: null, target: null, settable: false, kind: 'nozzle', group: 'rack', present: false, mounted: false },
+                         { id: 'rack3', label: 'Rack 4', temp: 26, target: 0, settable: false, kind: 'nozzle', group: 'rack', present: true, mounted: false, state: 'idle' }],
+                  fans: [] } },
 ];
 
 const PNG1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
@@ -282,6 +293,20 @@ async function main() {
         await evalJs(`window.__printersActive(true)`);
         await sleep(200);
         check('shown again: reads at once', await evalJs(`window.__sent.filter(s => s === 'printers_get').length`) >= 1);
+        // ---- 7. an H3C: the nozzle rack, read-only ------------------------------------------
+        await open('31B8BP000000001');
+        const h3 = JSON.parse(await evalJs(`(function(){ var p = document.querySelector('.dpage'); return JSON.stringify({
+            sections: [].map.call(p.querySelectorAll('.dsec-title'), x => x.textContent),
+            temps: [].map.call(p.querySelectorAll('.dtemps .dkv'), x => x.textContent),
+            rack: [].map.call(p.querySelectorAll('.drack .dkv'), x => x.textContent), note: (p.querySelector('.drack .dnote') || {}).textContent,
+            inputs: p.querySelectorAll('.drack input, .drack button').length }); })()`));
+        check('H3C: a Nozzle rack section after Temperatures', h3.sections.indexOf('Nozzle rack') === h3.sections.indexOf('Temperatures') + 1, h3.sections.join());
+        check('H3C: the extruder rows stay in Temperatures, the rack is not mixed in', h3.temps.length === 2 && !h3.temps.some(t => /Rack/.test(t)), JSON.stringify(h3.temps));
+        check('H3C: every rack position, mounted / heating / empty / idle', JSON.stringify(h3.rack) === JSON.stringify(
+            ['Rack 1On the extruder', 'Rack 2181°C → 200°C · heating', 'Rack 3Empty', 'Rack 426°C · idle']), JSON.stringify(h3.rack));
+        check('H3C: the rack is readings only, with no control', /Readings only/.test(h3.note || '') && h3.inputs === 0, h3.note + ' ' + h3.inputs);
+        check('the CC2 pages have no rack section', d.sections.indexOf('Nozzle rack') < 0 && pl.sections.indexOf('Nozzle rack') < 0);
+
         check('no uncaught exception at the end', exceptions().length === 0, JSON.stringify(exceptions().map(e => e.params.exceptionDetails.text)));
     } finally {
         try { br.kill(); } catch (e) {}

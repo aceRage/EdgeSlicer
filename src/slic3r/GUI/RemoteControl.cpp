@@ -1,6 +1,7 @@
 #include "RemoteControl.hpp"
 
 #include "AmsTypes.hpp"
+#include "BambuRackTemps.hpp"
 #include "DeviceControls.hpp"
 #include "FilamentCommands.hpp"
 #include "DeviceManager.hpp"
@@ -158,6 +159,14 @@ static DeviceControls::Caps bambu_caps(MachineObject* m)
         caps.heaters.push_back(Heater { "chamber", "Chamber", m->chamber_temp, m->chamber_temp_target, DEFAULT_CHAMBER_MAX, true, false });
     else if (m->get_printer_series() == PrinterSeries::SERIES_X1)
         caps.heaters.push_back(Heater { "chamber", "Chamber", m->chamber_temp, 0, DEFAULT_CHAMBER_MAX, false, false });
+    // The nozzle rack's positions, read-only (controls.rack[], never heaters[]: D2, D4). Empty, and
+    // so left out of the JSON, unless a rack nozzle reports a temperature (the H3C).
+    {
+        std::vector<BambuRackTemps::NozzleSample> rack;
+        for (const auto& n : m->m_nozzle_data.nozzles)
+            rack.push_back({ n.id, n.addr_id, n.exist, n.has_temp, n.temp, n.target_temp, n.temp_state });
+        caps.rack = BambuRackTemps::rack_heaters(rack, m->has_rack_ams(), m->nozzle_max_temperature);
+    }
 
     caps.has_speed = true;
     caps.speed     = Speed { "level", (int) m->printing_speed_lvl, 1, 4, m->is_in_printing() };
