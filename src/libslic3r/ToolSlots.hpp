@@ -21,6 +21,7 @@
 
 #include "PrintConfig.hpp"
 
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -141,7 +142,12 @@ bool rack_nozzle_groups(const ConfigBase &config, size_t extruder, std::vector<s
 std::vector<MultiNozzleUtils::NozzleInfo> grouping_nozzle_list(const ConfigBase &config, const std::vector<MultiNozzleUtils::NozzleGroupInfo> &nozzle_groups);
 // Makes a filament -> nozzle map (0-based nozzle ids into `nozzle_list`) honour the rack sizes: a used filament on a
 // nozzle of another diameter than nozzle_diameter_for_filament() moves to a nozzle of its extruder with that
-// diameter (the same volume type when there is one). Returns the number of filaments moved.
+// diameter (the same volume type when there is one). A filament pinned to a size (filament_rack_pin) moves to a nozzle
+// of that size no other used filament is on, when there is one (rule S, owner 2026-11-22: two filaments pinned to the
+// 0.6 shared one 0.6 and flushed into each other while a second 0.6 stood unused); only when every nozzle of that size
+// is taken does it share the first. A size-pinned filament the grouping put on a nozzle of its size stays there, unless a
+// lower-numbered size-pinned filament stays on it too and a free one exists. Slot pins keep their slot. Returns the number
+// of filaments moved.
 int pin_rack_nozzle_diameters(const PrintConfig &config, const std::vector<MultiNozzleUtils::NozzleInfo> &nozzle_list,
                               const std::vector<unsigned int> &used_filaments, std::vector<int> &filament_nozzle_map);
 // Per layer, whether every filament prints on a nozzle of the diameter it was sliced for. Empty when it does,
@@ -152,6 +158,24 @@ std::string check_rack_nozzle_diameters(const PrintConfig &config, const MultiNo
 // in-job swap between rack hotends of different diameters ("Hotend type mismatch detected during printing"). A single-extruder
 // rack (H3C), a machine without a rack and a plate with one diameter per extruder give false.
 bool rack_group_mixes_nozzle_diameters(const PrintConfig &config, const MultiNozzleUtils::LayeredNozzleGroupResult &group);
+// Rule P (owner 2026-11-22): on an automatic filament map (filament_map_mode other than Manual) of a two-extruder machine
+// with a nozzle rack (H2C) the grouping decides the extruder, so a rack pin is honoured there, not read from the saved
+// filament_map. Whether that applies to `config`.
+bool rack_pins_follow_grouping(const ConfigBase &config);
+// The extruders (0-based, one flag per extruder) that can take 1-based `filament_id`'s rack pin; empty when it has none.
+// A size pin: every extruder with a nozzle of that size (its rack, or its own nozzle when it has no rack). A slot pin k:
+// `map_extruder` when it shows k rack slots, else the lowest extruder that does (a slot belongs to one extruder).
+std::vector<bool> rack_pin_extruders(const ConfigBase &config, unsigned int filament_id, size_t map_extruder);
+// The extruder 1-based `filament_id` prints its rack pin on when the filament map puts it on `map_extruder`: that one,
+// except under rack_pins_follow_grouping() when it cannot take the pin and another extruder can (the lowest such).
+size_t rack_pin_extruder(const ConfigBase &config, unsigned int filament_id, size_t map_extruder);
+// Rules P and P2, before the automatic grouping: bars each used (0-based) pinned filament from the extruders that cannot take
+// its pin (adds it to `unprintable[extruder]`); then, on an extruder its pins put on exactly one size, bars every other used
+// filament that would print there with another size, unless that leaves it no extruder. Returns a message when some
+// pinned filament is left no extruder, else empty. Does nothing unless rack_pins_follow_grouping(). `map_extruders`
+// (0-based extruder per filament) stands for the saved filament_map when given.
+std::string bar_rack_pin_extruders(const ConfigBase &config, const std::vector<unsigned int> &used_filaments,
+                                   std::vector<std::set<int>> &unprintable, const std::vector<int> *map_extruders = nullptr);
 // Configuration errors of the rack keys (an extruder's nozzle_diameter missing from its rack, a pin no rack nozzle
 // has, a slot pin past the end of the rack), or empty.
 std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std::vector<unsigned int> &used_filaments);

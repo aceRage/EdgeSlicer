@@ -2007,10 +2007,36 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
 
     if (has_multiple_extruder || has_multiple_nozzle) {
         auto context = build_filament_group_context(print, layer_filaments, physical_unprintables, geometric_unprintables, unprintable_volumes, mode, nozzle_status);
+        // Rule P (owner 2026-11-22): on an automatic map the grouping decides the extruder, so a rack-pinned filament may only
+        // go to an extruder that can take its pin (a nozzle of its size, or its slot's extruder); pin_rack_nozzle_diameters
+        // below then puts it on such a nozzle. A no-op on a manual map, without pins and on printers without a rack.
+        if (has_multiple_nozzle && mode != FilamentMapMode::fmmManual)
+            if (const std::string error = bar_rack_pin_extruders(print_config, used_filaments, context.model_info.unprintable_filaments); !error.empty())
+                throw Slic3r::SlicingError(error);
 
         if (has_multiple_nozzle && mode == FilamentMapMode::fmmManual) {
             auto manual_filament_map = print->filament_map_input();
             std::transform(manual_filament_map.begin(), manual_filament_map.end(), manual_filament_map.begin(), [](int v) { return v - 1; });
+            // Rules P and P2: a by-object plate of an automatic map is grouped on its saved map (group_by_plate_map); a filament
+            // the rack pins bar from its extruder there goes to the lowest extruder not barred for it. A no-op on a manual map,
+            // without pins and on printers without a rack.
+            if (rack_pins_follow_grouping(print_config)) {
+                const std::vector<std::set<int>> &limits = context.model_info.unprintable_filaments;
+                std::vector<std::set<int>>        barred = limits;
+                if (bar_rack_pin_extruders(print_config, used_filaments, barred, &manual_filament_map).empty())
+                    for (auto fid : used_filaments) {
+                        // Only a filament the pin rules (not the existing limits) bar from its map extruder moves.
+                        if (fid >= manual_filament_map.size() || manual_filament_map[fid] < 0 || size_t(manual_filament_map[fid]) >= barred.size() ||
+                            barred[size_t(manual_filament_map[fid])].count(int(fid)) == 0 ||
+                            (size_t(manual_filament_map[fid]) < limits.size() && limits[size_t(manual_filament_map[fid])].count(int(fid)) != 0))
+                            continue;
+                        for (size_t e = 0; e < barred.size(); ++e)
+                            if (barred[e].count(int(fid)) == 0) {
+                                manual_filament_map[fid] = int(e);
+                                break;
+                            }
+                    }
+            }
             {
                 std::string map_str, used_str;
                 for (int v : manual_filament_map) map_str += std::to_string(v) + " ";
