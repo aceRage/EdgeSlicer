@@ -3356,6 +3356,9 @@ int GUI_App::OnExit()
     RemoteAccess::get().stop();
 
     stop_sync_user_preset();
+    // Orca #17682: its threads read the app config and the plater, which ~GUI_App deletes before the updater.
+    if (preset_updater != nullptr)
+        preset_updater->stop();
     // A Bambu Studio preset mirror started by a printer switch may still be writing.
     join_preset_mirror_worker();
 

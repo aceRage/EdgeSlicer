@@ -243,6 +243,13 @@ struct MeasurementResult {
 
 // Returns distance/angle between two SurfaceFeatures.
 MeasurementResult get_measurement(const SurfaceFeature& a, const SurfaceFeature& b,bool deal_circle_result =false);
+
+// Orca #17549 (Edge form): the stretch part S of a mesh -> world transform W = R * S (polar
+// decomposition, S symmetric positive definite). Features are detected on the mesh with S applied, so
+// a circle scaled into an ellipse is no longer read as a circle; W * S^-1 is then rigid (or a mirror).
+// S does not change when the part is later moved or rotated. Returns identity for a uniform scale,
+// where the mesh's own frame already measures correctly.
+Transform3d detection_stretch(const Transform3d& world);
 bool              can_set_xyz_distance(const SurfaceFeature &a, const SurfaceFeature &b);
 
 struct AssemblyAction
