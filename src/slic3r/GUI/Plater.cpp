@@ -10977,7 +10977,8 @@ static void remember_ams_snapshot(const std::string &dev_id, MachineObject *obj,
     for (const Extder &e : obj->m_extder_data.extders) {
         BambuConnectStatus::ExtruderSnap x;
         x.id          = e.id;
-        x.has_nozzle  = !dual || e.nozzle_id != 0xff;
+        // A cutter, pen, laser or fan on it (BambuCraftTools) is no nozzle: its flow type is not remembered.
+        x.has_nozzle  = (!dual || e.nozzle_id != 0xff) && !GUI::BambuCraftTools::is_craft_tool(e.current_tool);
         x.volume_type = int(e.current_nozzle_flow);
         x.diameter    = e.current_nozzle_diameter;
         snap.extruders.push_back(x);
@@ -27298,8 +27299,8 @@ bool Plater::reslice()
                     for (int logical = 0; logical < 2; ++logical) {
                         const int physical = BambuExtruderMap::logical_to_physical(pem, logical);
                         for (const Extder& e : obj->m_extder_data.extders)
-                            if (e.id == physical && e.nozzle_id != 0xff)
-                                want[size_t(logical)] = int(e.current_nozzle_flow);
+                            if (e.id == physical && e.nozzle_id != 0xff && !GUI::BambuCraftTools::is_craft_tool(e.current_tool))
+                                want[size_t(logical)] = int(e.current_nozzle_flow); // a craft tool keeps the project's
                     }
                     // Through FlowType so the sidebar's Flow combos, the per-printer memory and the
                     // per-filament flow types (owner decision D2) follow the printer instead of
@@ -27309,7 +27310,9 @@ bool Plater::reslice()
                                                 << want[0] << "," << want[1];
                         CallAfter([this]() { sidebar().sync_nozzle_flow_combos(); });
                     }
-                } else if (obj->is_connected() && !obj->m_extder_data.extders.empty()) {
+                } else if (obj->is_connected() && !obj->m_extder_data.extders.empty() &&
+                           !GUI::BambuCraftTools::is_craft_tool(obj->m_extder_data.extders[0].current_tool)) {
+                    // (A cutter, pen, laser or fan on the extruder has no flow type: the project's is kept.)
                     NozzleVolumeType flow = obj->m_extder_data.extders[0].current_nozzle_flow;
                     // Ultra: nozzle_volume_type is now per-extruder (coEnums). This single-nozzle
                     // auto-match sets the first extruder's value; dual-nozzle per-extruder matching

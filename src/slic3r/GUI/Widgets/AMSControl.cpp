@@ -719,6 +719,15 @@ void AMSControl::UpdateDual(MachineObject *obj)
                 ev.colour = AmsTray::decode_color(tray->color);
             }
         }
+        // A cutter, pen, laser or fan in place of the nozzle; on the main extruder also an extension tool
+        // fitted beside the toolhead (device.ext_tool, BambuCraftTools).
+        if (GUI::BambuCraftTools::is_craft_tool(e.current_tool))
+            ev.tool = craft_tool_label(e.current_tool);
+        if (e.id == AmsDual::MAIN_EXTRUDER && obj->m_ext_tool.mounted()) {
+            const wxString ext = craft_tool_label(GUI::BambuCraftTools::ext_tool_display_kind(obj->m_ext_tool.kind));
+            if (!ext.empty())
+                ev.tool = ev.tool.empty() ? ext : ev.tool + ", " + ext;
+        }
         model.extruders.push_back(ev);
     }
 

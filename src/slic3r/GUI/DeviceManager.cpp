@@ -4937,7 +4937,13 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                                             // convention used for the nozzle.info parse ("00"=stainless,"01"=hardened).
                                             NozzleType nt = NozzleType::ntUndefine;
                                             auto itnt = NozzleTypeStrToEumn.find(nozzle_type);
-                                            if (itnt != NozzleTypeStrToEumn.end()) {
+                                            const auto tool = GUI::BambuCraftTools::tool_kind_of(nozzle_type);
+                                            m_extder_data.extders[MAIN_NOZZLE_ID].current_tool = tool;
+                                            if (GUI::BambuCraftTools::is_craft_tool(tool)) {
+                                                // A cutter, pen, laser or fan code (BambuCraftTools): no nozzle to compare.
+                                                m_extder_data.extders[MAIN_NOZZLE_ID].current_nozzle_type     = NozzleType::ntUndefine;
+                                                m_extder_data.extders[MAIN_NOZZLE_ID].current_nozzle_diameter = 0.0f;
+                                            } else if (itnt != NozzleTypeStrToEumn.end()) {
                                                 nt = itnt->second;
                                             } else if (nozzle_type.length() >= 4) {
                                                 std::string hw = nozzle_type.substr(2, 2);
@@ -4951,7 +4957,8 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                                             NozzleVolumeType nflow = NozzleVolumeType::nvtStandard;
                                             if (nozzle_type.length() >= 2)
                                                 nflow = BambuFlowSupport::nozzle_flow_from_device_code(nozzle_type[1]);
-                                            m_extder_data.extders[MAIN_NOZZLE_ID].current_nozzle_flow = nflow;
+                                            if (!GUI::BambuCraftTools::is_craft_tool(tool))
+                                                m_extder_data.extders[MAIN_NOZZLE_ID].current_nozzle_flow = nflow;
                                         }
                                     }
                                 }
@@ -6516,17 +6523,31 @@ void MachineObject::parse_new_info(json print)
 
             m_nozzle_data = NozzleData();
 
-            m_nozzle_data.extder_exist      = get_flag_bits(nozzle["exist"].get<int>(), 0, 16);
-            m_nozzle_data.cut_exist         = get_flag_bits(nozzle["exist"].get<int>(), 16, 16);
-            m_nozzle_data.state             = get_flag_bits(nozzle["state"].get<int>(), 0, 4);
+            const int exist_bits = nozzle.contains("exist") && nozzle["exist"].is_number_integer() ? nozzle["exist"].get<int>() : 0;
+            const int state_bits = nozzle.contains("state") && nozzle["state"].is_number_integer() ? nozzle["state"].get<int>() : 0;
+            m_nozzle_data.extder_exist      = get_flag_bits(exist_bits, 0, 16);
+            m_nozzle_data.cut_exist         = get_flag_bits(exist_bits, 16, 16);
+            m_nozzle_data.state             = get_flag_bits(state_bits, 0, 4);
 
-            for (auto it = nozzle["info"].begin(); it != nozzle["info"].end(); it++) {
+            const json no_info = json::array();
+            const json& infos  = nozzle.contains("info") && nozzle["info"].is_array() ? nozzle["info"] : no_info;
+            for (auto it = infos.begin(); it != infos.end(); it++) {
                 Nozzle nozzle_obj;
                 auto   njon = it.value();
-                std::string type = njon["type"].get<std::string>();
+                // An entry without a numeric id is skipped; a missing or non-string type reads as "" (a nozzle).
+                if (!njon.is_object() || !njon.contains("id") || !njon["id"].is_number_integer())
+                    continue;
+                std::string type = njon.contains("type") && njon["type"].is_string() ? njon["type"].get<std::string>() : std::string();
                 nozzle_obj.id           = njon["id"].get<int>();
+                // A cutter, pen, laser or fan in place of a hotend (BambuCraftTools: the codes are read from Bambu
+                // Studio's source, not seen from a printer yet). It gets no steel type, flow or diameter below.
+                nozzle_obj.type_code = type;
+                nozzle_obj.tool_kind = GUI::BambuCraftTools::tool_kind_of(type);
+                const bool craft     = GUI::BambuCraftTools::is_craft_tool(nozzle_obj.tool_kind);
 
-                if (type.length() >= 4) {
+                if (craft) {
+                    nozzle_obj.nozzle_type = NozzleType::ntUndefine;
+                } else if (type.length() >= 4) {
                     if (type.substr(2, 2) == std::string("00")) {
                         nozzle_obj.nozzle_type = NozzleType::ntStainlessSteel;
                     } else if (type.substr(2, 2) == std::string("01")) {
@@ -6536,10 +6557,10 @@ void MachineObject::parse_new_info(json print)
                     nozzle_obj.nozzle_type = NozzleType::ntUndefine;
                 }
                 // Ultra: flow variant from the 2nd char (owner decision D6: 'H'/'E' High Flow, else Standard).
-                if (type.length() >= 2)
+                if (!craft && type.length() >= 2)
                     nozzle_obj.nozzle_flow = BambuFlowSupport::nozzle_flow_from_device_code(type[1]);
 
-                if (type.length() >= 2) {
+                if (!craft && type.length() >= 2) {
                     switch ((char) std::toupper((unsigned char) type[1])) {
                     case 'H': nozzle_obj.volume_exact = NozzleVolumeType::nvtHighFlow; break;
                     case 'U': nozzle_obj.volume_exact = NozzleVolumeType::nvtTPUHighFlow; break;
@@ -6568,7 +6589,11 @@ void MachineObject::parse_new_info(json print)
                 // Bambu Studio DevNozzleSystemParser: bit <id> of "exist" says whether the nozzle is there (IsEmpty otherwise).
                 if (nozzle.contains("exist") && nozzle["exist"].is_number_integer() && nozzle_obj.id >= 0 && nozzle_obj.id < 31)
                     nozzle_obj.exist = ((nozzle["exist"].get<long long>() >> nozzle_obj.id) & 1) != 0;
-                if (nozzle_obj.diameter == 0.0f) {nozzle_obj.diameter = 0.4f;}
+                // A nozzle that does not say its size is taken as 0.4 mm, as before; a craft tool has none.
+                if (craft)
+                    nozzle_obj.diameter = 0.0f;
+                else if (nozzle_obj.diameter == 0.0f)
+                    nozzle_obj.diameter = 0.4f;
                 m_nozzle_data.nozzles.push_back(nozzle_obj);
             }
         }
@@ -6636,6 +6661,13 @@ void MachineObject::parse_new_info(json print)
                 } else {
                     for (auto i = 0; i < m_nozzle_data.nozzles.size(); i++) {
                         if (m_nozzle_data.nozzles[i].id == extder_obj.nozzle_id) {
+                            extder_obj.current_tool = m_nozzle_data.nozzles[i].tool_kind;
+                            if (!m_nozzle_data.nozzles[i].prints()) {
+                                // A cutter, pen, laser or fan on the extruder: no nozzle to compare, as with none mounted.
+                                extder_obj.current_nozzle_type     = NozzleType::ntUndefine;
+                                extder_obj.current_nozzle_diameter = 0.0f;
+                                continue;
+                            }
                             extder_obj.current_nozzle_type      = m_nozzle_data.nozzles[i].nozzle_type;
                             extder_obj.current_nozzle_diameter  = m_nozzle_data.nozzles[i].diameter;
                             extder_obj.current_nozzle_flow      = m_nozzle_data.nozzles[i].nozzle_flow; // Ultra
@@ -6656,6 +6688,10 @@ void MachineObject::parse_new_info(json print)
 
             m_extder_data = extder_data;
         }
+
+        // The extension tool beside the toolhead (cutting / laser module, enhanced cooling fan). Shown only.
+        if (device.contains("ext_tool"))
+            m_ext_tool = GUI::BambuCraftTools::parse_ext_tool(device["ext_tool"], m_ext_tool);
 
         if (device.contains("ctc")) {
             json const& ctc = device["ctc"];
@@ -6703,6 +6739,54 @@ bool MachineObject::has_nozzle_rack() const
         if (n.on_rack())
             return true;
     return false;
+}
+
+bool MachineObject::reports_craft_tools() const
+{
+    for (const Nozzle& n : m_nozzle_data.nozzles)
+        if (!n.prints())
+            return true;
+    return false;
+}
+
+GUI::BambuCraftTools::SendCheck MachineObject::craft_tool_send_check(const std::vector<int>& used_physical) const
+{
+    std::vector<GUI::BambuCraftTools::Tool> tools;
+    for (const Nozzle& n : m_nozzle_data.nozzles)
+        tools.push_back({ n.id, n.tool_kind, n.exist });
+    std::vector<std::pair<int, int>> mounted;
+    for (const Extder& e : m_extder_data.extders)
+        mounted.emplace_back(e.id, e.nozzle_id);
+    return GUI::BambuCraftTools::check_send(tools, mounted, used_physical);
+}
+
+wxString craft_tool_label(GUI::BambuCraftTools::ToolKind kind)
+{
+    using GUI::BambuCraftTools::ToolKind;
+    switch (kind) {
+    case ToolKind::Cutter: return _L("Cutter");
+    case ToolKind::Pen: return _L("Pen");
+    case ToolKind::Laser: return _L("Laser");
+    case ToolKind::Fan: return _L("Fan");
+    default: return wxEmptyString;
+    }
+}
+
+wxString craft_tool_send_block_message(const GUI::BambuCraftTools::SendCheck& check, bool two_extruders)
+{
+    using GUI::BambuCraftTools::SendBlock;
+    using GUI::BambuCraftTools::ToolKind;
+    if (check.block == SendBlock::NoHotend)
+        return _L("The printer reports no nozzle to print with, only tools such as a cutter or pen. Fit a nozzle and try again.");
+    if (check.block != SendBlock::ExtruderNoHotend)
+        return wxEmptyString;
+    const wxString tool = craft_tool_label(check.mounted);
+    if (!two_extruders)
+        return tool.empty() ? _L("The extruder has no nozzle to print with. Fit a nozzle before printing.") :
+                              wxString::Format(_L("The extruder holds a %s, not a nozzle, and the printer has no nozzle for it. Fit a nozzle before printing."), tool);
+    const wxString side = check.physical_extruder == 1 ? _L("left") : _L("right");
+    return tool.empty() ? wxString::Format(_L("The %s extruder has no nozzle to print with. Fit a nozzle there before printing."), side) :
+                          wxString::Format(_L("The %s extruder holds a %s, not a nozzle, and the printer has no nozzle for it. Fit a nozzle there before printing."), side, tool);
 }
 
 int MachineObject::get_flag_bits(std::string str, int start, int count) const
@@ -6914,6 +6998,10 @@ std::vector<std::pair<int, int>> MachineObject::rack_bound_slots() const
     auto exists = [this](int ams, int slot) { return slot_reported(ams, slot); };
     for (const Nozzle& n : m_nozzle_data.nozzles) {
         if (!n.on_rack() && n.addr_id < 0)
+            continue;
+        // A cutter, pen, laser or fan in a rack position takes no filament: no slot maps to it. It still counts
+        // in rack_size above, which is the number of rack positions.
+        if (!n.prints())
             continue;
         GUI::AmsTypes::RackNozzle rn;
         rn.addr     = n.addr_id >= 0 ? n.addr_id : (n.id & 0xF);

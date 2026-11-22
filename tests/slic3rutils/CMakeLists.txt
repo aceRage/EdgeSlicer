@@ -151,6 +151,7 @@ add_executable(${_TEST_NAME}_tests
     device_controls_tests.cpp
     bambu_rack_temps_tests.cpp
     bambu_fans_tests.cpp
+    bambu_craft_tools_tests.cpp
     bambu_ams_report_tests.cpp
     printer_timelapse_tests.cpp
     chamber_lights_tests.cpp

@@ -640,6 +640,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/BambuRackTemps.hpp
     GUI/DeviceControls.hpp
     GUI/BambuFans.hpp
+    GUI/BambuCraftTools.hpp
     GUI/ChamberLights.hpp
     GUI/FilamentCommands.hpp
     GUI/SnapmakerLan.hpp

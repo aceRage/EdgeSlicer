@@ -539,6 +539,10 @@ Evaluation evaluate(const Printer& pr, const Job& job, const Request& req, const
         return refuse(409, "this job was sliced for a " + std::string(job.dual() ? "two" : "one") + "-nozzle printer and " + name + " has " +
                                (pr.extruder_count > 1 ? "two" : "one"));
 
+    // --- the tools: a cutter, pen, laser or fan where the job needs a nozzle (the send dialog's
+    // PrintStatusCraftToolBlock); not something force can send past
+    if (!pr.tool_block.empty()) return refuse(409, name + ": " + pr.tool_block);
+
     // --- the nozzles: diameter per extruder, and hardness (the dialog's confirm-before-send checks)
     const size_t extruders = job.dual() ? 2 : 1;
     if (!req.force)
@@ -734,7 +738,7 @@ static std::vector<std::vector<double>> printer_diameters(MachineObject* obj, co
 {
     std::vector<std::vector<double>> out(extruders);
     for (const Nozzle& n : obj->m_nozzle_data.nozzles) {
-        if (!n.is_normal()) continue;
+        if (!n.is_normal() || !n.prints()) continue; // a cutter, pen, laser or fan has no nozzle size
         const int physical = n.on_rack() ? 0 : (n.id & 0xF);
         const int logical  = extruders > 1 ? BambuExtruderMap::physical_to_logical(pem, physical) : 0;
         if (logical >= 0 && logical < (int) extruders && n.diameter > 0.f) out[logical].push_back(n.diameter);
@@ -791,6 +795,18 @@ Printer snapshot(MachineObject* obj, const Job& job)
     pr.trays   = trays_of(obj, job.physical_extruder_map);
     pr.blocked_ams_ids = obj->mapping_blocked_ams_ids();
     pr.nozzles = DualNozzle::printer_state(obj).nozzles;
+    // The physical extruders the job prints with (every filament's own, for a two-extruder job).
+    std::vector<int> used_physical;
+    if (extruders > 1) {
+        for (const Filament& f : job.filaments) {
+            const int physical = f.extruder < 0 ? -1 : BambuExtruderMap::logical_to_physical(job.physical_extruder_map, f.extruder);
+            if (physical >= 0 && std::find(used_physical.begin(), used_physical.end(), physical) == used_physical.end())
+                used_physical.push_back(physical);
+        }
+    } else {
+        used_physical.push_back(0);
+    }
+    pr.tool_block = BambuCraftTools::send_block_text(obj->craft_tool_send_check(used_physical), extruders > 1);
     return pr;
 }
 
