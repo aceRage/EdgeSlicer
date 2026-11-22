@@ -606,8 +606,16 @@ std::vector<ImageRowRun> dwd_wall_runs(const ImageRowWallContext &ctx, const std
         auto q = [](float c) { return uint32_t(std::lround(std::min(1.f, std::max(0.f, c)) * 255.f)); };
         const uint32_t key = (q(s.color[0]) << 16) | (q(s.color[1]) << 8) | q(s.color[2]);
         auto it = nearest.find(key);
-        if (it == nearest.end())
-            it = nearest.emplace(key, dwd_nearest(table, s.color)).first;
+        if (it == nearest.end()) {
+            // A colour group the import dialog set to one filament prints that filament on both
+            // walls (kept as -2 - id); it has to be one this row may print.
+            const int solid = image_fill_color_choice(ctx.params.color_choices, s.color);
+            const bool usable = solid > 0 && (solid == ctx.base_filament ||
+                                              std::find(ctx.candidate_ids.begin(), ctx.candidate_ids.end(), solid) != ctx.candidate_ids.end());
+            it = nearest.emplace(key, usable ? -2 - solid : dwd_nearest(table, s.color)).first;
+        }
+        if (it->second <= -2)
+            return -2 - it->second;
         if (it->second < 0)
             return ctx.base_filament;
         const DwdPair              &pair = table[size_t(it->second)];

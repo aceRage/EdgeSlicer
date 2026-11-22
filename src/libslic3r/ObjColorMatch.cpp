@@ -43,6 +43,11 @@ float obj_color_distance(const RGBA &a, const RGBA &b)
                              (la[2] - lb[2]) * (la[2] - lb[2]));
 }
 
+bool obj_color_default_mix(const RGBA &group, const RGBA &mapped_filament, float tolerance)
+{
+    return obj_color_distance(group, mapped_filament) > tolerance;
+}
+
 bool obj_color_auto_match(const std::vector<RGBA> &input_colors,
                           bool                     is_single_color,
                           const std::vector<RGBA> &existing_colors,

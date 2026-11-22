@@ -466,3 +466,52 @@ TEST_CASE("Mesh UV walls: dual wall dithering reads the texture too", "[dwd][ima
     CHECK(sides.plus_x.count(3) == 0);
     CHECK(sides.minus_x.count(3) == 0);
 }
+
+// The colour import dialog's per-colour choice: a colour group set to one filament prints that
+// filament on the dithered walls; a group set to Mix is dithered as before.
+TEST_CASE("DwD walls: per-colour choices survive the params string", "[dwd][imagefill]")
+{
+    ImageFillParams p;
+    p.color_choices = {{{1.f, 0.f, 0.f}, 3}, {{0.f, 0.6f, 0.9f}, 0}};
+    ImageFillParams back;
+    REQUIRE(ImageFillParams::from_string(p.to_string(), back));
+    REQUIRE(back.color_choices.size() == 2);
+    CHECK(back.color_choices[0].filament == 3);
+    CHECK(back.color_choices[1].filament == 0);
+    CHECK_THAT(back.color_choices[1].color[1], Catch::Matchers::WithinAbs(0.6, 0.003));
+
+    // The nearest group decides; no groups means mix.
+    CHECK(image_fill_color_choice(back.color_choices, {0.9f, 0.1f, 0.1f}) == 3);
+    CHECK(image_fill_color_choice(back.color_choices, {0.1f, 0.5f, 0.8f}) == 0);
+    CHECK(image_fill_color_choice({}, {0.9f, 0.1f, 0.1f}) == 0);
+    CHECK(ImageFillParams().to_string().find("cl=") == std::string::npos);
+}
+
+TEST_CASE("Mesh UV walls: a colour set to one filament prints it instead of the mix", "[dwd][imagefill][walls][meshuv]")
+{
+    ImageFillParams p;
+    p.projection = ImageFillProjection::MeshUV;
+    p.faces      = ImageFillFaces::All;
+    // The +X side's colour (filament 1's) goes to filament 3 on purpose, so the choice shows and
+    // not the colour match; the -X side's colour stays a mix.
+    p.color_choices = {{MixedFilamentManager::hex_to_srgb01(kDwdColours[0]), 3},
+                       {MixedFilamentManager::hex_to_srgb01(kDwdColours[1]), 0},
+                       {MixedFilamentManager::hex_to_srgb01(kDwdColours[2]), 0}};
+
+    Model                model;
+    MixedFilamentManager mgr;
+    make_dwd_cube(model, mgr, IMAGE_FILL_WALL_DWD, p);
+    texture_cube_by_side(model);
+
+    DynamicPrintConfig config = dwd_test_config();
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+
+    GCodeProcessorResult result;
+    slice_dwd(model, config, result);
+    const SideExtruders sides = outer_wall_by_side(result);
+
+    REQUIRE(sides.plus_x.size() == 1);
+    CHECK(sides.plus_x.begin()->first == 2);
+    CHECK(sides.minus_x.count(1) == 1);
+    CHECK(sides.y_sides.count(2) == 1);
+}

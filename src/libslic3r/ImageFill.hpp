@@ -159,6 +159,19 @@ struct ImageFillGradient
 // Everything one application of Image Fill needs, and exactly what round-trips through the
 // `image_fill_params` config key. Serialised as `k=v;k=v` so it survives the 3MF's
 // <metadata key="image_fill_params" value="..."> without any new 3MF element.
+// Dual wall dithering on an imported textured model: one colour group the import dialog found, and
+// the filament it prints with. filament 0 = "Mix": the walls dither that colour from the row's
+// filaments. Otherwise both dithered walls print that 1-based filament wherever the texture's
+// colour belongs to this group.
+struct ImageFillColorChoice
+{
+    std::array<float, 3> color{0.f, 0.f, 0.f};   // sRGB 0..1, the group's centre
+    int                  filament = 0;
+};
+
+// The filament of the group `srgb` is nearest to (Oklab), 0 for a Mix group or an empty list.
+int image_fill_color_choice(const std::vector<ImageFillColorChoice> &choices, const std::array<float, 3> &srgb);
+
 struct ImageFillParams
 {
     std::string         asset = "";                              // sha256, or empty for a gradient
@@ -234,6 +247,10 @@ struct ImageFillParams
     // row whose projection is MeshUV can look the picture up along a wall. Empty for everything
     // that never had a UV layout.
     std::string         uv_asset;
+
+    // Dual wall dithering only (key `cl`): per colour group of the texture, print one filament or
+    // mix. Written by the colour import dialog; empty means every colour is mixed.
+    std::vector<ImageFillColorChoice> color_choices;
 
     // Phase 5c: the projection's own frame, so the picture stays where it was put when the part's
     // MESH is rewritten - a cut, which re-centres each half and bakes the instance's rotation into

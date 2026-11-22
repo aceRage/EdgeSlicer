@@ -6,6 +6,7 @@
 #include "PNGReadWrite.hpp"
 
 #include "ColorSolver.hpp"
+#include "DualWallDither.hpp"
 #include "AABBTreeIndirect.hpp"
 #include "miniz_extension.hpp"
 
@@ -424,12 +425,40 @@ std::string ImageFillParams::to_string() const
         os << ";f=";
         for (size_t i = 0; i < allowed.size(); ++i) os << (i ? "," : "") << allowed[i];
     }
+    if (!color_choices.empty()) {
+        os << ";cl=";
+        for (size_t i = 0; i < color_choices.size(); ++i) {
+            char buf[32];
+            auto q = [](float c) { return int(std::lround(std::min(1.f, std::max(0.f, c)) * 255.f)); };
+            std::snprintf(buf, sizeof(buf), "%02X%02X%02X:%d", q(color_choices[i].color[0]), q(color_choices[i].color[1]),
+                          q(color_choices[i].color[2]), std::max(0, color_choices[i].filament));
+            os << (i ? "," : "") << buf;
+        }
+    }
     if (gradient.enabled) {
         os << ";g=1;ga=" << rgb2s(gradient.stop_a) << ";gb=" << rgb2s(gradient.stop_b);
         if (gradient.three_stop) os << ";gc=" << rgb2s(gradient.stop_c) << ";g3=1";
         os << ";gd=" << gradient.direction;
     }
     return os.str();
+}
+
+int image_fill_color_choice(const std::vector<ImageFillColorChoice> &choices, const std::array<float, 3> &srgb)
+{
+    if (choices.empty())
+        return 0;
+    const std::array<float, 3> t = dwd_srgb_to_oklab(srgb);
+    float best_d   = std::numeric_limits<float>::max();
+    int   filament = 0;
+    for (const ImageFillColorChoice &c : choices) {
+        const std::array<float, 3> o = dwd_srgb_to_oklab(c.color);
+        const float d = (o[0] - t[0]) * (o[0] - t[0]) + (o[1] - t[1]) * (o[1] - t[1]) + (o[2] - t[2]) * (o[2] - t[2]);
+        if (d < best_d) {
+            best_d   = d;
+            filament = c.filament;
+        }
+    }
+    return filament;
 }
 
 bool ImageFillParams::from_string(const std::string &s, ImageFillParams &out)
@@ -495,6 +524,23 @@ bool ImageFillParams::from_string(const std::string &s, ImageFillParams &out)
         else if (k == "ga")    s2rgb(val, out.gradient.stop_a);
         else if (k == "gb")    s2rgb(val, out.gradient.stop_b);
         else if (k == "gc")    s2rgb(val, out.gradient.stop_c);
+        else if (k == "cl") {
+            size_t p = 0;
+            while (p <= val.size()) {
+                const size_t n = val.find(',', p);
+                const std::string one = val.substr(p, n == std::string::npos ? std::string::npos : n - p);
+                unsigned int rgb = 0;
+                int          filament = 0;
+                if (one.size() >= 8 && one[6] == ':' && std::sscanf(one.c_str(), "%6x:%d", &rgb, &filament) == 2) {
+                    ImageFillColorChoice c;
+                    c.color    = {float((rgb >> 16) & 0xFF) / 255.f, float((rgb >> 8) & 0xFF) / 255.f, float(rgb & 0xFF) / 255.f};
+                    c.filament = std::max(0, filament);
+                    out.color_choices.push_back(c);
+                }
+                if (n == std::string::npos) break;
+                p = n + 1;
+            }
+        }
         else if (k == "f") {
             size_t p = 0;
             while (p <= val.size()) {

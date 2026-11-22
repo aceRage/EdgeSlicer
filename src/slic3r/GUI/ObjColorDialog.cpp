@@ -138,7 +138,8 @@ ObjColorDialog::ObjColorDialog(wxWindow *                      parent,
                                bool                            is_single_color,
                                const std::vector<std::string> &extruder_colours,
                                std::vector<unsigned char> &    filament_ids,
-                               unsigned char &                 first_extruder_id)
+                               unsigned char &                 first_extruder_id,
+                               Slic3r::ObjColorMixChoice *     mix_choice)
     : DPIDialog(parent ? parent : static_cast<wxWindow *>(wxGetApp().mainframe),
                 wxID_ANY,
                 _(L("Obj file Import color")),
@@ -157,7 +158,7 @@ ObjColorDialog::ObjColorDialog(wxWindow *                      parent,
     this->SetBackgroundColour(*wxWHITE);
     this->SetMinSize(wxSize(MIN_OBJCOLOR_DIALOG_WIDTH, -1));
 
-    m_panel_ObjColor = new ObjColorPanel(this, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id);
+    m_panel_ObjColor = new ObjColorPanel(this, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id, mix_choice);
 
     auto main_sizer = new wxBoxSizer(wxVERTICAL);
     main_sizer->Add(m_line_top, 0, wxEXPAND, 0);
@@ -217,11 +218,13 @@ ObjColorPanel::ObjColorPanel(wxWindow *                       parent,
                              bool                             is_single_color,
                              const std::vector<std::string>&  extruder_colours,
                              std::vector<unsigned char> &    filament_ids,
-                             unsigned char &                 first_extruder_id)
+                             unsigned char &                 first_extruder_id,
+                             Slic3r::ObjColorMixChoice *     mix_choice)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize /*,wxBORDER_RAISED*/)
     , m_input_colors(input_colors)
     , m_filament_ids(filament_ids)
     , m_first_extruder_id(first_extruder_id)
+    , m_mix_choice(mix_choice)
 {
     if (input_colors.size() == 0) { return; }
     for (const std::string& color : extruder_colours) {
@@ -437,6 +440,17 @@ void ObjColorPanel::update_filament_ids()
         m_filament_ids.emplace_back(resolve_filament_id(m_cluster_map_filaments[label]));
     }
     m_first_extruder_id = resolve_filament_id(m_cluster_map_filaments[0]);
+
+    if (m_mix_choice != nullptr) {
+        *m_mix_choice = Slic3r::ObjColorMixChoice();
+        for (size_t i = 0; i < m_cluster_colors_from_algo.size() && i < m_cluster_map_filaments.size(); ++i) {
+            m_mix_choice->colors.push_back(m_cluster_colors_from_algo[i]);
+            m_mix_choice->filament_ids.push_back(resolve_filament_id(m_cluster_map_filaments[i]));
+            const bool mix = i < m_result_icon_list.size() && m_result_icon_list[i]->mix_box != nullptr &&
+                             m_result_icon_list[i]->mix_box->GetValue();
+            m_mix_choice->mix.push_back(mix);
+        }
+    }
 }
 
 bool obj_color_auto_match_headless(std::vector<Slic3r::RGBA> &      input_colors,
@@ -629,6 +643,7 @@ ComboBox *ObjColorPanel::CreateEditorCtrl(wxWindow *parent, int id) // wxRect la
         auto *com_box = static_cast<ComboBox *>(evt.GetEventObject());
         int   i       = atoi(com_box->GetName().c_str());
         if (i < m_cluster_map_filaments.size()) { m_cluster_map_filaments[i] = com_box->GetSelection(); }
+        update_mix_default(i);
         evt.StopPropagation();
     });
     return c_editor;
@@ -728,11 +743,47 @@ void ObjColorPanel::update_keep_color_buttons()
         item->keep_color_btn->Show(show_keep_color);
         item->keep_color_btn->Enable(show_keep_color);
     }
+    update_mix_defaults();
 
     if (m_scrolledWindow != nullptr) {
         m_scrolledWindow->Layout();
     }
     Layout();
+}
+
+// The colour of the filament row `id` is mapped to: a loaded one or one this dialog will add.
+bool ObjColorPanel::mapped_filament_colour(int id, wxColour &out) const
+{
+    if (id < 0 || id >= static_cast<int>(m_cluster_map_filaments.size()))
+        return false;
+    const int selection = m_cluster_map_filaments[id];
+    const int loaded    = static_cast<int>(m_colours.size());
+    if (selection >= 1 && selection <= loaded)
+        out = m_colours[selection - 1];
+    else if (selection > loaded && selection - loaded - 1 < static_cast<int>(m_new_add_colors.size()))
+        out = m_new_add_colors[selection - loaded - 1];
+    else
+        return false;
+    return true;
+}
+
+void ObjColorPanel::update_mix_default(int id)
+{
+    if (m_mix_choice == nullptr || id < 0 || id >= static_cast<int>(m_result_icon_list.size()) ||
+        id >= static_cast<int>(m_cluster_colours.size()))
+        return;
+    wxCheckBox *box = m_result_icon_list[id]->mix_box;
+    if (box == nullptr)
+        return;
+    wxColour mapped;
+    box->SetValue(mapped_filament_colour(id, mapped) &&
+                  Slic3r::obj_color_default_mix(convert_to_rgba(m_cluster_colours[id]), convert_to_rgba(mapped)));
+}
+
+void ObjColorPanel::update_mix_defaults()
+{
+    for (size_t i = 0; i < m_result_icon_list.size(); ++i)
+        update_mix_default(static_cast<int>(i));
 }
 
 void ObjColorPanel::deal_keep_color_btn(int id)
@@ -987,6 +1038,16 @@ wxBoxSizer *ObjColorPanel::create_result_button_sizer(wxWindow *parent, int id)
 
     result_sizer->AddSpacer(FromDIP(8));
     result_sizer->Add(keep_color_btn, 0, wxALIGN_CENTER_VERTICAL, 0);
+    if (m_mix_choice != nullptr) {
+        auto *mix_box = new wxCheckBox(parent, wxID_ANY, _L("Mix"));
+        mix_box->SetToolTip(_L("Textured models, dual wall dithering (experimental): print this colour by mixing filaments "
+                               "layer by layer on the two outer walls instead of with the mapped filament alone. Ticked by "
+                               "default where no filament is close to the colour. Used only if you choose dual wall "
+                               "dithering after the import."));
+        m_result_icon_list[id]->mix_box = mix_box;
+        result_sizer->AddSpacer(FromDIP(8));
+        result_sizer->Add(mix_box, 0, wxALIGN_CENTER_VERTICAL, 0);
+    }
     return result_sizer;
 }
 
