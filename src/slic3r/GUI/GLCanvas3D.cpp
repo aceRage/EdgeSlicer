@@ -3357,6 +3357,9 @@ BoundingBoxf3 GLCanvas3D::volumes_bounding_box(bool current_plate_only) const
     for (const GLVolume *volume : m_volumes.volumes) {
         if (!m_apply_zoom_to_volumes_filter || ((volume != nullptr) && volume->zoom_to_volumes)) {
             const auto v_bb     = volume->transformed_bounding_box();
+            // A broken transformation must not blow the box up and blank the view; 1e8 mm is 100 km.
+            if (!v_bb.min.allFinite() || !v_bb.max.allFinite() || v_bb.min.cwiseAbs().maxCoeff() > 1e8 || v_bb.max.cwiseAbs().maxCoeff() > 1e8)
+                continue;
             if (is_limit && !expand_part_plate_list_box.overlap(v_bb))
                 continue;
             bb.merge(v_bb);
@@ -13210,8 +13213,9 @@ void GLCanvas3D::_update_selection_from_hover()
     bool ctrl_pressed = wxGetKeyState(WXK_CONTROL);
 
     if (m_hover_volume_idxs.empty()) {
+        // As below for a rectangle that leaves nothing selected: close the gizmos and update the object list.
         if (!ctrl_pressed && (m_rectangle_selection.get_state() == GLSelectionRectangle::Select))
-            m_selection.remove_all();
+            deselect_all();
 
         return;
     }
