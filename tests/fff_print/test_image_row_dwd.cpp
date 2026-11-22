@@ -63,13 +63,15 @@ DynamicPrintConfig dwd_test_config()
 }
 
 // A 30 mm cube whose own filament is white (4), with an image row of C, M, Y on its walls.
-int make_dwd_cube(Model &model, MixedFilamentManager &mgr, int wall_method, ImageFillParams p)
+// `scale` shrinks the mesh and scales the instance back up, so the print is 30 mm either way.
+int make_dwd_cube(Model &model, MixedFilamentManager &mgr, int wall_method, ImageFillParams p, double scale = 1.)
 {
     ModelObject *object = model.add_object();
     object->name        = "dwd cube";
-    ModelVolume *volume = object->add_volume(make_cube(30., 30., 30.));
+    ModelVolume *volume = object->add_volume(make_cube(30. / scale, 30. / scale, 30. / scale));
     volume->name        = "cube";
     object->add_instance();
+    object->instances.front()->set_scaling_factor(Vec3d(scale, scale, scale));
     object->ensure_on_bed();
     volume->config.set_key_value("extruder", new ConfigOptionInt(4));
 
@@ -372,6 +374,34 @@ TEST_CASE("Mesh UV walls: each side of a textured cube prints its own texture co
     const SideExtruders sides = outer_wall_by_side(result);
 
     // Filaments 1, 2, 3 are extruders 0, 1, 2: one colour per side, and nothing else there.
+    REQUIRE(sides.plus_x.size() == 1);
+    CHECK(sides.plus_x.begin()->first == 0);
+    REQUIRE(sides.minus_x.size() == 1);
+    CHECK(sides.minus_x.begin()->first == 1);
+    REQUIRE(sides.y_sides.size() == 1);
+    CHECK(sides.y_sides.begin()->first == 2);
+}
+
+// A scaled part: the samplers measure along the wall in mesh space, the runs are cut along the wall
+// as printed. Mixing the two put every colour change at the wrong place on a scaled model.
+TEST_CASE("Mesh UV walls: a scaled textured cube still prints each side's own colour", "[dwd][imagefill][walls][meshuv]")
+{
+    ImageFillParams p;
+    p.projection = ImageFillProjection::MeshUV;
+    p.faces      = ImageFillFaces::All;
+
+    Model                model;
+    MixedFilamentManager mgr;
+    make_dwd_cube(model, mgr, IMAGE_FILL_WALL_RUNS, p, 3.);
+    texture_cube_by_side(model);
+
+    DynamicPrintConfig config = dwd_test_config();
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+
+    GCodeProcessorResult result;
+    slice_dwd(model, config, result);
+    const SideExtruders sides = outer_wall_by_side(result);
+
     REQUIRE(sides.plus_x.size() == 1);
     CHECK(sides.plus_x.begin()->first == 0);
     REQUIRE(sides.minus_x.size() == 1);

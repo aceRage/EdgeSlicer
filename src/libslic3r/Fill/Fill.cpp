@@ -1174,20 +1174,23 @@ std::vector<ImageRowRun> image_row_runs_for_path(const ImageAssetStore &assets, 
         const Vec3f p0_mesh = (ctx.mesh_from_print * p0_print).cast<float>();
         const Vec3f p1_mesh = (ctx.mesh_from_print * p1_print).cast<float>();
 
+        // A scaled part: sample at the printed spacing and keep arc length as printed (see
+        // image_fill_mesh_per_print()).
+        const float mesh_per_print = image_fill_mesh_per_print(p0_print, p1_print, p0_mesh, p1_mesh);
         std::vector<ImageRowSample> seg = image_fill_sample_segment(ctx.params, ctx.mesh_box, assets, p0_mesh, p1_mesh,
-                                                                     ctx.facet_normal_mesh, ctx.sample_spacing_mm);
+                                                                     ctx.facet_normal_mesh, ctx.sample_spacing_mm * mesh_per_print);
         // seg[0] duplicates the previous segment's last sample (same physical point) - skip it
         // past the first segment so a point shared by two consecutive fill segments is sampled
         // exactly once, at one arc-length position, not twice at the same position under two
         // different running error-diffusion states.
         for (size_t k = (i == 0 ? 0 : 1); k < seg.size(); ++k) {
             ImageRowSample s = seg[k];
-            s.s += cumulative;
+            s.s = s.s / mesh_per_print + cumulative;
             any_color = any_color || s.has_color;
             samples.push_back(s);
         }
         if (!seg.empty())
-            cumulative += seg.back().s;
+            cumulative += seg.back().s / mesh_per_print;
     }
     if (!any_color)
         return {};

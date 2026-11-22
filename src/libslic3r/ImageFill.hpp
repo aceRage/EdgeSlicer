@@ -21,6 +21,7 @@
 #include "TriangleSelector.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -628,6 +629,19 @@ std::vector<uint8_t> image_fill_encode_png(size_t width, size_t height, const ui
 // Per-face UVs (glTF convention: origin top-left, v down) as an asset blob. The blob remembers the
 // face count and a hash of `mesh`'s face indices, so it is refused for any other mesh - a cut, a
 // simplify or a repair renumbers the triangles, and the old numbering would map the texture wrong.
+// Length of a path piece in mesh space over its length as printed: 1 for a part that is not scaled
+// (exactly, so such a part's samples do not move), the inverse of the scale otherwise. The samplers
+// work in mesh space; sample spacing, run lengths and the cuts along a path are printed lengths.
+inline float image_fill_mesh_per_print(const Vec3d &p0_print, const Vec3d &p1_print, const Vec3f &p0_mesh, const Vec3f &p1_mesh)
+{
+    const double lp = (p1_print - p0_print).norm();
+    const double lm = double((p1_mesh - p0_mesh).norm());
+    if (lp < 1e-9 || lm < 1e-9)
+        return 1.f;
+    const double r = lm / lp;
+    return std::abs(r - 1.) < 1e-4 ? 1.f : float(r);
+}
+
 std::vector<uint8_t> image_fill_encode_uvs(const ImageFillUVs &uvs, const indexed_triangle_set &mesh);
 bool image_fill_decode_uvs(const std::vector<uint8_t> &bytes, const indexed_triangle_set &mesh, ImageFillUVs &out);
 

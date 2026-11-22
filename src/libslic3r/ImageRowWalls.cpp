@@ -455,11 +455,14 @@ bool point_seen_from_above(const Layer *layer, const Point &pt)
 // The image along one straight piece of a wall. A projection is asked per point; a textured model
 // (MeshUV) has no projection, so the sampler returns the points uncoloured and each takes the
 // texture's colour at the nearest point of the part's surface.
+// `mesh_per_print` is the length of the piece in mesh space over its length as printed (1 for a part
+// that is not scaled): the sample spacing is a printed length, the sampler works in mesh space.
 std::vector<ImageRowSample> sample_wall_segment(const ImageAssetStore &assets, const ImageRowWallContext &ctx,
-                                                const Vec3f &p0, const Vec3f &p1, const Vec3f &normal)
+                                                const Vec3f &p0, const Vec3f &p1, const Vec3f &normal,
+                                                float mesh_per_print = 1.f)
 {
     std::vector<ImageRowSample> seg =
-        image_fill_sample_segment(ctx.params, ctx.mesh_box, assets, p0, p1, normal, ctx.sample_spacing_mm);
+        image_fill_sample_segment(ctx.params, ctx.mesh_box, assets, p0, p1, normal, ctx.sample_spacing_mm * mesh_per_print);
     if (ctx.params.projection == ImageFillProjection::MeshUV && ctx.uv_lookup != nullptr && !ctx.params.asset.empty())
         if (const ImageAsset *img = assets.pixels(ctx.params.asset); img != nullptr)
             for (ImageRowSample &s : seg)
@@ -534,7 +537,10 @@ bool compute_wall_samples(const ImageAssetStore &assets, const ImageRowWallConte
             }
         }
 
-        std::vector<ImageRowSample> seg = sample_wall_segment(assets, ctx, p0_mesh, p1_mesh, n_mesh);
+        // A scaled part: the samples' arc length comes back in mesh space, the runs are cut along the
+        // wall as printed. Convert per segment (a non-uniform scale differs by direction).
+        const float mesh_per_print = image_fill_mesh_per_print(p0_print, p1_print, p0_mesh, p1_mesh);
+        std::vector<ImageRowSample> seg = sample_wall_segment(assets, ctx, p0_mesh, p1_mesh, n_mesh, mesh_per_print);
 
         // Phase 5a: where may the image land along this segment? (Only with a base filament to
         // fall back on - without one, phase 4's behaviour is kept exactly.)
@@ -570,12 +576,12 @@ bool compute_wall_samples(const ImageAssetStore &assets, const ImageRowWallConte
                     s.has_color = false;
                 }
             }
-            s.s += cumulative;
+            s.s = s.s / mesh_per_print + cumulative;
             any_color = any_color || s.has_color;
             samples.push_back(s);
         }
         if (!seg.empty())
-            cumulative += seg.back().s;
+            cumulative += seg.back().s / mesh_per_print;
     }
     return !samples.empty();
 }
