@@ -1234,6 +1234,28 @@ int SelectMachineDialog::filament_physical_extruder(int filament_id) const
     return BambuExtruderMap::logical_to_physical(printer_physical_extruder_map(), logical);
 }
 
+std::vector<int> SelectMachineDialog::used_physical_extruders(MachineObject* obj_) const
+{
+    std::vector<int> out;
+    if (!obj_ || obj_->m_extder_data.total_extder_count <= 1) {
+        out.push_back(0);
+        return out;
+    }
+    if (!m_plater || m_print_type != PrintFromType::FROM_NORMAL)
+        return out; // a file from the printer's storage: its extruders are not this plate's
+    PartPlate* plate = m_plater->get_partplate_list().get_curr_plate();
+    if (!plate)
+        return out;
+    for (int f : plate->get_extruders()) {
+        const int physical = f >= 1 ? filament_physical_extruder(f - 1) : -1;
+        if (physical < 0)
+            return {}; // a filament whose extruder is not known: only the whole-printer check
+        if (std::find(out.begin(), out.end(), physical) == out.end())
+            out.push_back(physical);
+    }
+    return out;
+}
+
 std::vector<int> SelectMachineDialog::printer_physical_extruder_map() const
 {
     if (PresetBundle* preset_bundle = wxGetApp().preset_bundle)
@@ -1876,6 +1898,10 @@ void SelectMachineDialog::show_status(PrintDialogStatus status, std::vector<wxSt
         else
             msg_text = _L("A filament's AMS slot feeds a different extruder than the one it was sliced for. Pick another slot or re-slice.");
         update_print_status_msg(msg_text, true, false);
+        Enable_Send_Button(false);
+        Enable_Refresh_Button(true);
+    } else if (status == PrintDialogStatus::PrintStatusCraftToolBlock) {
+        update_print_status_msg(params.empty() ? wxString() : params[0], true, true);
         Enable_Send_Button(false);
         Enable_Refresh_Button(true);
     } else if (status == PrintDialogStatus::PrintStatusAmsMappingByOrder) {
@@ -3418,6 +3444,17 @@ void SelectMachineDialog::update_show_status()
         }
     }
 
+    // A cutter, pen, laser or fan where the job needs a nozzle (the craft kit on the H2C / H3C / H2D). A printer
+    // that reports only nozzles always passes this.
+    if (obj_->reports_craft_tools()) {
+        const BambuCraftTools::SendCheck tools = obj_->craft_tool_send_check(used_physical_extruders(obj_));
+        if (!tools.ok()) {
+            show_status(PrintDialogStatus::PrintStatusCraftToolBlock,
+                        { craft_tool_send_block_message(tools, obj_->m_extder_data.total_extder_count > 1) });
+            return;
+        }
+    }
+
     // no ams
     if (!obj_->has_ams() || !m_checkbox_list["use_ams"]->GetValue()) {
         if (!has_tips(obj_)) {
@@ -4560,6 +4597,7 @@ std::string SelectMachineDialog::get_print_status_info(PrintDialogStatus status)
     case PrintStatusNotSupportedPrintAll: return "PrintStatusNotSupportedPrintAll";
     case PrintStatusNozzleMappingWaiting: return "PrintStatusNozzleMappingWaiting";
     case PrintStatusNozzleMappingFailed: return "PrintStatusNozzleMappingFailed";
+    case PrintStatusCraftToolBlock: return "PrintStatusCraftToolBlock";
     }
     return "unknown";
 }

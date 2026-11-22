@@ -51,6 +51,8 @@ struct DualExtruderView
     std::string ams_id;
     std::string slot_id;
     wxColour    colour{*wxWHITE};
+    // A cutter, pen, laser or fan on this extruder (or fitted beside the toolhead), drawn next to it.
+    wxString    tool;
 };
 
 struct DualModel

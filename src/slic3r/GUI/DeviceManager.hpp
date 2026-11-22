@@ -28,6 +28,7 @@
 #include "AmsTypes.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
+#include "BambuCraftTools.hpp"
 #include "NozzleInfo.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/Utils.hpp"
@@ -181,8 +182,14 @@ struct Nozzle
     int              addr_id{-1}; // rack position 0..8 (H3C), -1 = not reported
     int              snow{-1};    // slot feeding it now: ams_id << 8 | slot_id, -1 = not reported
     bool             exist{true}; // its bit in device.nozzle.exist (bit n = report id n); true when not reported
+    // What the entry is (BambuCraftTools::tool_kind_of its "type"): a rack position or an extruder can hold a
+    // cutter, pen, laser or fan instead of a hotend. Those carry no diameter (0) and no flow or steel type.
+    GUI::BambuCraftTools::ToolKind tool_kind{GUI::BambuCraftTools::ToolKind::Nozzle};
+    std::string      type_code; // "type" as reported ("HS01", ...)
     bool on_rack() const { return ((id >> 4) & 0xF) == 1; }
     bool is_normal() const { return ((stat >> 1) & 0x3) == 0; }
+    // A hotend (or a type not known, as before): may be matched to a filament or a nozzle size.
+    bool prints() const { return GUI::BambuCraftTools::prints(tool_kind); }
 };
 
 struct NozzleData
@@ -224,6 +231,9 @@ struct Extder
     // Ultra: reported nozzle flow variant (nvtStandard=Standard, nvtBigTraffic=High Flow),
     // used to auto-match the sliced nozzle_volume_type to the installed nozzle.
     NozzleVolumeType current_nozzle_flow{NozzleVolumeType::nvtStandard};
+    // The tool on the extruder (the nozzle entry whose id is nozzle_id). A cutter, pen, laser or fan leaves
+    // the current nozzle unknown (ntUndefine, diameter 0), as when no nozzle is mounted.
+    GUI::BambuCraftTools::ToolKind current_tool{GUI::BambuCraftTools::ToolKind::Nozzle};
 };
 
 struct ExtderData
@@ -233,6 +243,11 @@ struct ExtderData
     int total_extder_count {0};
     std::vector<Extder> extders;
 };
+
+// "Cutter" / "Pen" / "Laser" / "Fan", translated; empty for a nozzle or an unknown type.
+wxString craft_tool_label(GUI::BambuCraftTools::ToolKind kind);
+// The send dialog's refusal for a failed BambuCraftTools::check_send, translated; empty when it passed.
+wxString craft_tool_send_block_message(const GUI::BambuCraftTools::SendCheck& check, bool two_extruders);
 
 struct RatingInfo {
     bool        request_successful;
@@ -1347,6 +1362,13 @@ public:
 
     ExtderData                  m_extder_data;
     NozzleData                  m_nozzle_data;
+    // device.ext_tool: the extension tool fitted beside the toolhead (cutting / laser module, cooling fan).
+    GUI::BambuCraftTools::ExtTool m_ext_tool;
+    // Whether the nozzle list names a cutter, pen, laser or fan (BambuCraftTools).
+    bool reports_craft_tools() const;
+    // The send check for the tools (BambuCraftTools::check_send) over the reported nozzle list and the
+    // extruders' mounted tools; used_physical = the physical extruders the job prints with.
+    GUI::BambuCraftTools::SendCheck craft_tool_send_check(const std::vector<int>& used_physical) const;
 
     /*vi slot data*/
     AmsTray vt_tray;                        // virtual tray

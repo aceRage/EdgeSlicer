@@ -178,6 +178,9 @@ struct Printer
     std::vector<Tray>                trays;
     std::vector<DualNozzleSync::PrinterNozzle> nozzles; // for the nozzle-mapping request
     std::set<std::string>            blocked_ams_ids; // MachineObject::mapping_blocked_ams_ids (H3C AMS 3H)
+    // Non-empty: the printer has no nozzle for this job, only a cutter, pen, laser or fan where one is needed
+    // (BambuCraftTools::check_send / send_block_text). Refused even with force.
+    std::string                      tool_block;
 };
 
 // What the checks read from the app: the send dialog's remembered checkboxes and the hardness a

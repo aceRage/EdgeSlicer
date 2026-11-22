@@ -507,6 +507,13 @@ TEST_CASE("a Bambu reprint is refused in words when the printer cannot take it",
     }
     SECTION("no SD card") { pr.sdcard = 0; CHECK(refusal(409).find("SD card") != std::string::npos); }
     SECTION("a read-only SD card") { pr.sdcard = 3; CHECK(refusal(409).find("read-only") != std::string::npos); }
+    SECTION("a cutter where the job needs a nozzle (craft kit), even with force")
+    {
+        pr.tool_block = "the right extruder holds a cutter, not a nozzle, and the printer has no nozzle for it";
+        CHECK(refusal(409).find("holds a cutter") != std::string::npos);
+        req.force = true;
+        CHECK(BambuReprint::evaluate(pr, job, req, all_on(), auto_h2d(job)).status == 409);
+    }
     SECTION("a slot choice that makes no sense")
     {
         req.mapping = "1:0-3"; // the empty slot

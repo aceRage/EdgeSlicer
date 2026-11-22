@@ -85,6 +85,10 @@ static std::string diameter_string(float d)
 void add_reported_nozzles(DualNozzleSync::PrinterState &s, const MachineObject *obj)
 {
     for (const Nozzle &n : obj->m_nozzle_data.nozzles) {
+        // A cutter, pen, laser or fan (BambuCraftTools) is no nozzle: it is not synced into the project, matched
+        // to a filament or offered to the nozzle mapping. A positional rack (H3C) then shows that position empty.
+        if (!n.prints())
+            continue;
         DualNozzleSync::PrinterNozzle pn;
         pn.pos      = n.on_rack() ? (0x10 + (n.id & 0xF)) : (n.id & 0xF);
         // H3C: a rack nozzle names its rack position (addr_id, Bambu Studio DevNozzle::GetNozzlePosId), and one whose

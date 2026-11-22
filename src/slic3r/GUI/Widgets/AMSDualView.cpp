@@ -761,13 +761,31 @@ void AMSDualView::draw_extruders(wxDC &dc, const Palette &pal)
         const ScalableBitmap &rb = pick(m_ext_right, right);
         dc.DrawBitmap(lb.bmp(), mx - lb.GetBmpWidth(), top, true);
         dc.DrawBitmap(rb.bmp(), mx, top, true);
+        // The tool label beside each half: left of the left one, right of the right one.
+        dc.SetFont(Label::Body_12);
+        dc.SetTextForeground(pal.text_dim);
+        const int gap = FromDIP(6);
+        if (left && !left->tool.empty()) {
+            const wxSize te = dc.GetTextExtent(left->tool);
+            dc.DrawText(left->tool, mx - lb.GetBmpWidth() - gap - te.x, top + lb.GetBmpHeight() / 2 - te.y / 2);
+        }
+        if (right && !right->tool.empty()) {
+            const wxSize te = dc.GetTextExtent(right->tool);
+            dc.DrawText(right->tool, mx + rb.GetBmpWidth() + gap, top + rb.GetBmpHeight() / 2 - te.y / 2);
+        }
     } else {
         const DualExtruderView *ev = extruder_view(AmsDual::MAIN_EXTRUDER);
         const bool filled = ev && (ev->filled || ev->loaded);
         const ScalableBitmap &bmp = m_ext_right[1][filled ? 1 : 0];
-        dc.DrawBitmap(bmp.bmp(), mx - int(bmp.GetBmpWidth() * EXT_INLET_RIGHT + 0.5), top, true);
+        const int x0 = mx - int(bmp.GetBmpWidth() * EXT_INLET_RIGHT + 0.5);
+        dc.DrawBitmap(bmp.bmp(), x0, top, true);
+        if (ev && !ev->tool.empty()) {
+            dc.SetFont(Label::Body_12);
+            dc.SetTextForeground(pal.text_dim);
+            const wxSize te = dc.GetTextExtent(ev->tool);
+            dc.DrawText(ev->tool, x0 + bmp.GetBmpWidth() + FromDIP(6), top + bmp.GetBmpHeight() / 2 - te.y / 2);
+        }
     }
-    (void) pal;
 }
 
 void AMSDualView::on_left_down(wxMouseEvent &evt)

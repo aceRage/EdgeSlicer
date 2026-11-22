@@ -600,7 +600,12 @@ bool PrinterPartsDialog::Show(bool show)
 
         nozzle_diameter_checkbox->Clear();
 
-        if (type == NozzleType::ntUndefine) {
+        const wxString tool = craft_tool_label(obj->m_extder_data.extders[MAIN_NOZZLE_ID].current_tool);
+        if (!tool.empty()) {
+            // A cutter, pen, laser or fan on the extruder (BambuCraftTools): named, no size.
+            nozzle_type_checkbox->SetValue(tool);
+            nozzle_diameter_checkbox->SetValue(wxEmptyString);
+        } else if (type == NozzleType::ntUndefine) {
             nozzle_type_checkbox->SetValue(wxEmptyString);
             nozzle_diameter_checkbox->SetValue(wxEmptyString);
         } else {

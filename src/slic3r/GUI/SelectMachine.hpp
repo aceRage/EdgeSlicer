@@ -94,7 +94,10 @@ enum PrintDialogStatus {
     // Two-extruder Bambu jobs: waiting for / refused by the printer's get_auto_nozzle_mapping answer
     // (BambuStudio PrintStatusRackNozzleMappingWaiting / PrintStatusRackNozzleMappingError).
     PrintStatusNozzleMappingWaiting,
-    PrintStatusNozzleMappingFailed
+    PrintStatusNozzleMappingFailed,
+    // The printer has a cutter, pen, laser or fan where the job needs a nozzle (BambuCraftTools::check_send;
+    // Bambu Studio PrintStatusNoAvailableHotend). params[0] is the message.
+    PrintStatusCraftToolBlock
 };
 
 class Material
@@ -415,6 +418,8 @@ public:
      * physical_extruder_map; and the filaments whose mapped AMS tray feeds the other extruder. */
     std::vector<int> sliced_filament_map() const;
     std::vector<int> printer_physical_extruder_map() const;
+    // The physical extruders the plate prints with (0 on a one-extruder printer); empty when not known.
+    std::vector<int> used_physical_extruders(MachineObject* obj_) const;
     // Physical extruder the sliced plate prints this filament with; -1 on a one-extruder job.
     int filament_physical_extruder(int filament_id) const;
     std::vector<int> filaments_mapped_to_wrong_extruder(MachineObject* obj_) const;
