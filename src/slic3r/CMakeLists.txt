@@ -637,6 +637,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/DeviceModelCode.cpp
     GUI/NozzleInfo.hpp
     GUI/NozzleTempRows.hpp
+    GUI/ToolTempLayout.hpp
     GUI/BambuRackTemps.hpp
     GUI/DeviceControls.hpp
     GUI/BambuFans.hpp
@@ -950,6 +951,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/TabCtrl.hpp
     GUI/Widgets/TempInput.cpp
     GUI/Widgets/TempInput.hpp
+    GUI/Widgets/ToolTempList.cpp
+    GUI/Widgets/ToolTempList.hpp
     GUI/Widgets/TextInput.cpp
     GUI/Widgets/TextInput.hpp
     GUI/Widgets/WebView.cpp

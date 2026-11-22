@@ -8,6 +8,7 @@
 #include <cctype>
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <cstdlib>
@@ -717,6 +718,25 @@ bool PythonInterpreter::initialize()
         // Isolated config in the helper: AppContainer cannot probe %APPDATA%, the registry, or
         // the user site. Explicit module_search_paths so encodings is found without those probes.
         const bool in_helper = plugin_ipc::in_child_process();
+        // The first PyConfig_Set*String call pre-initializes Python, and the non-isolated config
+        // pre-initializes with configure_locale=1: the process's LC_CTYPE becomes the user locale.
+        // That changes isalnum() & co. for all of EdgeSlicer's C++ (URL encoding passed non-ASCII
+        // bytes through raw). Put the app's LC_CTYPE back once Python is up, or on any failure.
+        struct CtypeGuard
+        {
+            std::string saved;
+            CtypeGuard()
+            {
+                if (const char* now = std::setlocale(LC_CTYPE, nullptr))
+                    saved = now;
+            }
+            void restore()
+            {
+                if (!saved.empty())
+                    std::setlocale(LC_CTYPE, saved.c_str());
+            }
+            ~CtypeGuard() { restore(); }
+        } ctype_guard;
         PyConfig   config;
         if (in_helper)
             PyConfig_InitIsolatedConfig(&config);
@@ -815,6 +835,7 @@ bool PythonInterpreter::initialize()
             PyConfig_Clear(&config);
             return false;
         }
+        ctype_guard.restore();
         // PyConfig is cleared by pybind11's initialize_interpreter() internally.
         BOOST_LOG_TRIVIAL(debug) << "py::scoped_interpreter initialized successfully";
         pyconfig_child_log(std::string("Py init end home=") + python_home);
