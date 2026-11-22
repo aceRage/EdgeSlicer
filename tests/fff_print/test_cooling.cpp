@@ -9,8 +9,10 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -1552,6 +1554,108 @@ TEST_CASE("The cooling pass keeps a move that repeats the position, without its 
 
 // FanMover gave a duration to G0/G1 only, so an arc (G2/G3, written with arc fitting or as a spiral lift)
 // took no time and a fan command after arcs was moved back much further than fan_speedup_time asked.
+namespace {
+
+struct OuterWallRun
+{
+    // The speeds of the outer wall extrusions, in mm/s.
+    std::vector<double>    outer_wall_speeds;
+    // Time of the extrusions of each layer at their feed rates, by Z in microns.
+    std::map<long, double> extrusion_time;
+};
+
+OuterWallRun outer_wall_run(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_print({ make_cone(15., 15.) }, print, model, config);
+    const std::string text = Slic3r::Test::gcode(print);
+
+    OuterWallRun run;
+    bool         outer_wall = false;
+    GCodeReader  parser;
+    parser.apply_config(config);
+    parser.parse_buffer(text, [&run, &outer_wall](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.rfind("TYPE:", 0) == 0)
+            outer_wall = comment == "TYPE:Outer wall";
+        if (! line.extruding(self) || ! (line.dist_XY(self) > 0.f) || ! (line.new_F(self) > 0.f))
+            return;
+        const double speed = double(line.new_F(self)) / 60.;
+        if (outer_wall)
+            run.outer_wall_speeds.push_back(speed);
+        run.extrusion_time[std::lround(double(self.z()) * 1000.)] += double(line.dist_XY(self)) / speed;
+    });
+    return run;
+}
+
+} // namespace
+
+// Orca #17534, on Edge's slowdown (upstream's test rides on #17540's layer timing, which Edge does not have).
+TEST_CASE("Layer cooling slowdown keeps outer walls out of the resonance avoidance range", "[Cooling][Orca17534]")
+{
+    constexpr double min_speed = 40.;
+    constexpr double max_speed = 90.;
+    // With inner walls and infill to slow down instead, the outer walls stay at the top of the range. A lone outer
+    // wall cannot pass its time on, so it drops to the bottom; its layers are quick, hence the shorter layer time.
+    const bool   lone_wall          = GENERATE(false, true);
+    const double held_speed         = lone_wall ? min_speed : max_speed;
+    const double minimum_layer_time = lone_wall ? 2. : 10.;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "bottom_shell_layers",           lone_wall ? 0 : 3 },
+        { "dont_slow_down_outer_wall",     "0" },
+        { "enable_arc_fitting",            "0" },
+        { "enable_overhang_speed",         "0" },
+        { "filament_max_volumetric_speed", "100" },
+        { "initial_layer_print_height",    0.3 },
+        // Below the range, so resonance avoidance leaves it alone.
+        { "initial_layer_speed",           "30" },
+        { "layer_height",                  0.3 },
+        { "max_resonance_avoidance_speed", max_speed },
+        { "min_resonance_avoidance_speed", min_speed },
+        { "outer_wall_speed",              "200" },
+        { "slow_down_for_layer_cooling",   "1" },
+        { "slow_down_layer_time",          lone_wall ? "2" : "10" },
+        { "slow_down_layers",              "0" },
+        { "slow_down_min_speed",           "10" },
+        { "sparse_infill_density",         lone_wall ? "0%" : "15%" },
+        { "top_shell_layers",              lone_wall ? 0 : 3 },
+        { "wall_loops",                    lone_wall ? 1 : 3 },
+    });
+
+    // A cone's layers shrink upwards, so the slowdown deepens through the range.
+    config.set_deserialize_strict({ { "resonance_avoidance", false } });
+    const OuterWallRun without = outer_wall_run(config);
+    config.set_deserialize_strict({ { "resonance_avoidance", true } });
+    const OuterWallRun with = outer_wall_run(config);
+
+    size_t without_in_range = 0;
+    size_t with_in_range    = 0;
+    bool   held             = false;
+    for (double speed : without.outer_wall_speeds)
+        if (speed > min_speed + 0.5 && speed < max_speed - 0.5)
+            ++ without_in_range;
+    for (double speed : with.outer_wall_speeds) {
+        if (speed > min_speed + 0.5 && speed < max_speed - 0.5)
+            ++ with_in_range;
+        held |= std::abs(speed - held_speed) < 0.1;
+    }
+    REQUIRE(without_in_range > 0);
+    CHECK(with_in_range == 0);
+    CHECK(held);
+
+    // No layer prints quicker than the slowdown made it without resonance avoidance.
+    REQUIRE(with.extrusion_time.size() == without.extrusion_time.size());
+    (void) minimum_layer_time;
+    for (const auto &[z, time] : without.extrusion_time) {
+        const auto it = with.extrusion_time.find(z);
+        REQUIRE(it != with.extrusion_time.end());
+        CAPTURE(z);
+        CHECK(it->second > 0.98 * time);
+    }
+}
+
 TEST_CASE("FanMover counts the time of an arc", "[FanMover][Arc]")
 {
     // F600 is 10 mm/s. Speed-up 0.5 s. The fan increase comes after a 1 s move and an arc longer than
