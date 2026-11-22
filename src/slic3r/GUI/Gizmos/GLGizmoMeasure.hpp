@@ -157,6 +157,14 @@ protected:
     Measure::MeasurementResult m_measurement_result;
     Measure::AssemblyAction    m_assembly_action;
     std::map<GLVolume*, std::shared_ptr<Measure::Measuring>> m_mesh_measure_map;
+    // Orca #17549 (Edge form): m_mesh_measure_map detects features on the mesh with the volume's
+    // stretch applied (Measure::detection_stretch; identity unless nonuniformly scaled). Feature
+    // coordinates map to the view with world_tran * stretch^-1.
+    std::map<GLVolume*, Transform3d>                         m_mesh_measure_transform;
+    // The volume's own mesh, for code that pairs raw vertices or facet lists with world_tran.
+    std::map<GLVolume*, std::shared_ptr<const TriangleMesh>> m_mesh_local_map;
+    Transform3d                 measure_stretch(const void *volume) const;
+    const indexed_triangle_set *measure_local_its(GLVolume *v) const;
     std::shared_ptr<Measure::Measuring>                      m_curr_measuring{nullptr};
 
     //first feature
