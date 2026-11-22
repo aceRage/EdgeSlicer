@@ -503,9 +503,120 @@ void PrintObject::make_perimeters()
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, notice, PrintStateBase::SlicingThinFeatures);
     }
 
+    // EdgeSlicer, mixed filament wall patterns: a pattern with one group per wall, used where fewer walls print.
+    // Observation only (MixedPatternWalls.hpp); one notice per object.
+    m_mixed_pattern_wall_shortfalls = this->find_mixed_pattern_wall_shortfalls();
+    {
+        const std::string notice = mixed_pattern_walls_notice(m_mixed_pattern_wall_shortfalls, this->model_object()->name);
+        if (!notice.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, notice,
+                                          PrintStateBase::SlicingMixedPatternTooFewWalls);
+    }
+
     det_dump_surfaces(*this, "2_make_perimeters_surfaces");
     det_dump_extrusions(*this, "2_make_perimeters_extrusions");
     this->set_done(posPerimeters);
+}
+
+std::vector<MixedPatternWallShortfall> PrintObject::find_mixed_pattern_wall_shortfalls() const
+{
+    std::vector<MixedPatternWallShortfall> found;
+    const size_t num_physical = m_print->config().filament_diameter.size();
+    if (num_physical == 0)
+        return found;
+    const MixedFilamentManager &mixed_mgr = m_print->mixed_filament_manager();
+
+    // Per region: the mixed filament on its walls and the number of groups in that filament's pattern (0 = not grouped).
+    struct RegionUse { unsigned int filament_id{0}; int groups{0}; int wall_loops{0}; };
+    std::vector<RegionUse> uses(this->num_printing_regions());
+    bool                   any = false;
+    for (size_t region_id = 0; region_id < this->num_printing_regions(); ++region_id) {
+        const PrintRegionConfig &config = this->printing_region(region_id).config();
+        const unsigned int       id     = unsigned(std::max(0, config.wall_filament.value));
+        const MixedFilament     *row    = mixed_mgr.mixed_filament_from_id(id, num_physical);
+        if (row == nullptr || row->manual_pattern.empty())
+            continue;
+        const std::string norm = MixedFilamentManager::normalize_manual_pattern(row->manual_pattern);
+        if (norm.find(',') == std::string::npos)
+            continue;
+        const int groups = int(MixedFilamentManager::split_pattern_groups(norm).size());
+        if (groups < 2)
+            continue;
+        // Spiral vase prints one wall whatever the setting says.
+        uses[region_id] = { id, groups, m_print->config().spiral_mode.value ? 1 : config.wall_loops.value };
+        any             = true;
+    }
+    if (!any)
+        return found;
+
+    auto entry_for = [&found](const RegionUse &use) -> MixedPatternWallShortfall & {
+        for (MixedPatternWallShortfall &f : found)
+            if (f.filament_id == use.filament_id)
+                return f;
+        found.emplace_back();
+        found.back().filament_id  = use.filament_id;
+        found.back().walls_needed = use.groups;
+        return found.back();
+    };
+
+    // Thin areas, for the regions whose setting is enough. Per layer in parallel, merged below.
+    struct LayerThin { double area{0.}; };
+    std::vector<std::vector<LayerThin>> thin(m_layers.size(), std::vector<LayerThin>(uses.size()));
+    const bool arachne = m_config.wall_generator.value == PerimeterGeneratorType::Arachne;
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, m_layers.size()),
+        [this, &uses, &thin, arachne](const tbb::blocked_range<size_t> &range) {
+            for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++layer_idx) {
+                m_print->throw_if_canceled();
+                const Layer &layer = *m_layers[layer_idx];
+                for (size_t region_id = 0; region_id < uses.size(); ++region_id) {
+                    const RegionUse &use = uses[region_id];
+                    if (use.groups == 0 || use.wall_loops < use.groups || region_id >= layer.regions().size())
+                        continue;
+                    const LayerRegion &layerm = *layer.regions()[region_id];
+                    if (layerm.slices.empty())
+                        continue;
+                    const ExPolygons outline = to_expolygons(layerm.slices.surfaces);
+                    for (const ExPolygon &piece : areas_with_fewer_walls(outline, layerm.flow(frExternalPerimeter).scaled_width(),
+                                                                         layerm.flow(frPerimeter).scaled_spacing(), use.groups, arachne))
+                        thin[layer_idx][region_id].area += piece.area() * SCALING_FACTOR * SCALING_FACTOR;
+                }
+            }
+        });
+    m_print->throw_if_canceled();
+
+    for (size_t region_id = 0; region_id < uses.size(); ++region_id) {
+        const RegionUse &use = uses[region_id];
+        if (use.groups == 0)
+            continue;
+        if (use.wall_loops < use.groups) {
+            // Only where the region prints at all.
+            bool printed = false;
+            for (const Layer *layer : m_layers)
+                if (region_id < layer->regions().size() && !layer->regions()[region_id]->slices.empty()) {
+                    printed = true;
+                    break;
+                }
+            if (printed) {
+                MixedPatternWallShortfall &f = entry_for(use);
+                f.walls_set = f.walls_set == 0 ? std::max(1, use.wall_loops) : std::min(f.walls_set, std::max(1, use.wall_loops));
+            }
+            continue;
+        }
+        for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
+            const double area = thin[layer_idx][region_id].area;
+            if (area <= 0.)
+                continue;
+            MixedPatternWallShortfall &f = entry_for(use);
+            if (f.thin_layers == 0 || m_layers[layer_idx]->print_z < f.first_thin_z)
+                f.first_thin_z = m_layers[layer_idx]->print_z;
+            ++f.thin_layers;
+            f.thin_area += area;
+        }
+    }
+    // Several regions of one filament count a layer once each; cap at the layer count.
+    for (MixedPatternWallShortfall &f : found)
+        f.thin_layers = std::min(f.thin_layers, m_layers.size());
+    return found;
 }
 
 void PrintObject::prepare_infill()
