@@ -923,7 +923,7 @@ ImageDropAction ask_image_drop_action(wxWindow *parent, const wxString &file_nam
         {ImageDropAction::Trace, _L("Trace to shapes") + dots,
          _L("Trace the image into shapes (one part per colour) which are embossed like an SVG."), true},
         {ImageDropAction::Object, _L("Make an object") + dots,
-         _L("Make a printable object from the outline of the image: a cookie cutter or a box with a lid."), can_make_object},
+         _L("Make a printable object from the outline of the image: a cookie cutter, a box with a lid or a clicker."), can_make_object},
         {ImageDropAction::Relief, _L("Relief (coming soon)"), _L("Height map relief of the image is not available yet."), false},
         {ImageDropAction::ColorFill, _L("Colour fill (Image Fill)") + dots,
          can_color_fill ? _L("Paint the image onto the object with the loaded filaments.") :

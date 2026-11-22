@@ -2288,7 +2288,7 @@ void MenuFactory::create_default_menu()
         [](wxCommandEvent&) { plater()->add_file(); }, "menu_add_part", &m_default_menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
     append_menu_item(&m_default_menu, wxID_ANY, _L("Image to object") + dots,
-        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter or a box with a lid"),
+        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter, a box with a lid or a clicker"),
         [](wxCommandEvent&) { create_object_from_image(); }, "menu_add_part", &m_default_menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
 #else
@@ -2302,7 +2302,7 @@ void MenuFactory::create_default_menu()
         [](wxCommandEvent&) { plater()->add_file(); }, "", &m_default_menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
     append_menu_item(&m_default_menu, wxID_ANY, _L("Image to object") + dots,
-        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter or a box with a lid"),
+        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter, a box with a lid or a clicker"),
         [](wxCommandEvent&) { create_object_from_image(); }, "", &m_default_menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
 #endif
@@ -2939,7 +2939,7 @@ void MenuFactory::create_plate_menu()
         [](wxCommandEvent&) { plater()->add_file(); }, "menu_add_part", menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
     append_menu_item(menu, wxID_ANY, _L("Image to object") + dots,
-        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter or a box with a lid"),
+        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter, a box with a lid or a clicker"),
         [](wxCommandEvent&) { create_object_from_image(); }, "menu_add_part", menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
 #else
@@ -2953,7 +2953,7 @@ void MenuFactory::create_plate_menu()
         [](wxCommandEvent&) { plater()->add_file(); }, "", menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
     append_menu_item(menu, wxID_ANY, _L("Image to object") + dots,
-        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter or a box with a lid"),
+        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter, a box with a lid or a clicker"),
         [](wxCommandEvent&) { create_object_from_image(); }, "", menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
 #endif
