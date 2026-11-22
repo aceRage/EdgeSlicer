@@ -14330,12 +14330,26 @@ static void offer_texture_dual_wall(Plater *q, const std::vector<size_t> &obj_id
     if (num_physical < 2)
         return;
 
+    // What in the current process settings will spoil it, named before the user says yes.
+    wxString issues;
+    {
+        const DynamicPrintConfig &process = bundle->prints.get_edited_preset().config;
+        if (const auto *loops = process.option<ConfigOptionInt>("wall_loops"); loops != nullptr && loops->value < 2)
+            issues += "\n- " + _L("Wall loops is 1: it will print as plain colour runs until there are at least 2.");
+        if (const auto *gen = process.option<ConfigOptionEnum<PerimeterGeneratorType>>("wall_generator");
+            gen != nullptr && gen->value == PerimeterGeneratorType::Arachne)
+            issues += "\n- " + _L("The wall generator is Arachne: classic walls are safer.");
+        if (const auto *height = process.option<ConfigOptionFloat>("layer_height"); height != nullptr && height->value > 0.125)
+            issues += "\n- " + _L("The layer height is above 0.12 mm: the colour bands will be visible.");
+        if (!issues.empty())
+            issues = "\n\n" + _L("With the current settings") + ":" + issues;
+    }
     MessageDialog dlg(q,
                       _L("This model has a texture. Print its walls with dual wall dithering (experimental)?") + "\n\n" +
                           _L("The outer wall and the wall behind it change filament layer by layer, so their colours mix "
                              "into the texture's colours. It needs semi-translucent filaments, classic walls, at least 2 "
                              "wall loops and thin layers, and it adds many filament changes.") + "\n\n" +
-                          _L("The first four filaments are used. To change or remove this later, use Image fill on the part."),
+                          _L("The first four filaments are used. To change or remove this later, use Image fill on the part.") + issues,
                       _L("Dual wall dithering"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
     if (dlg.ShowModal() != wxID_YES)
         return;

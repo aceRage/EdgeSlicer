@@ -166,11 +166,11 @@ std::vector<uint8_t> densest(const std::vector<int> &counts)
     return best;
 }
 
-int distinct_filaments(const DwdPair &pair)
+int distinct_filaments(const std::vector<uint8_t> &outer, const std::vector<uint8_t> &inner, uint8_t backing)
 {
-    std::vector<uint8_t> all = pair.outer;
-    all.insert(all.end(), pair.inner.begin(), pair.inner.end());
-    all.push_back(pair.backing);
+    std::vector<uint8_t> all = outer;
+    all.insert(all.end(), inner.begin(), inner.end());
+    all.push_back(backing);
     std::sort(all.begin(), all.end());
     return int(std::unique(all.begin(), all.end()) - all.begin());
 }
@@ -233,64 +233,83 @@ std::vector<DwdPair> dwd_build_table(const std::vector<DwdFilament> &filaments, 
 
     const std::vector<Prepared> fils = prepare(filaments, model);
     const size_t n_seq = params.sequence_filaments == 0 ? n : std::min(n, params.sequence_filaments);
-    const auto outers = dwd_outer_sequences(n_seq, params.relaxed_outer);
+    auto       outers = dwd_outer_sequences(n_seq, params.relaxed_outer);
     const auto inners = dwd_inner_sequences(n_seq);
+    if (outers.empty() || inners.empty())
+        return table;
 
-    std::vector<DwdPair> all;
-    all.reserve(outers.size() * inners.size());
-    for (const auto &outer : outers)
-        for (const auto &inner : inners) {
-            DwdPair pair;
-            pair.outer   = outer;
-            pair.inner   = inner;
-            pair.backing = backing;
-            const Rgb lin = predict_linear(fils, outer, inner, backing);
-            pair.srgb  = { float(linear_to_srgb(lin[0])), float(linear_to_srgb(lin[1])), float(linear_to_srgb(lin[2])) };
-            pair.oklab = linear_to_oklab(lin);
-            pair.filaments_used = distinct_filaments(pair);
-            all.push_back(std::move(pair));
-        }
-
-    // Preference when two pairs give the same colour: the denser outer wall (shorter runs, then
-    // shorter period), then fewer filaments on the layer (fewer tool changes), then the shorter
-    // inner period. stable_sort keeps enumeration order for the rest, so the table is deterministic.
-    std::vector<int> outer_run(all.size());
-    for (size_t i = 0; i < all.size(); ++i)
-        outer_run[i] = all[i].outer.size() == 1 ? 1 : max_cyclic_run(all[i].outer);
-    std::vector<size_t> order(all.size());
-    std::iota(order.begin(), order.end(), size_t(0));
-    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-        if (outer_run[a] != outer_run[b])
-            return outer_run[a] < outer_run[b];
-        if (all[a].outer.size() != all[b].outer.size())
-            return all[a].outer.size() < all[b].outer.size();
-        if (all[a].filaments_used != all[b].filaments_used)
-            return all[a].filaments_used < all[b].filaments_used;
-        return all[a].inner.size() < all[b].inner.size();
+    // Denser outer walls first (shorter runs, then the shorter period): when two outer sequences
+    // have the same colour, the first one in the table wins the match.
+    std::stable_sort(outers.begin(), outers.end(), [](const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
+        const int run_a = a.size() == 1 ? 1 : max_cyclic_run(a), run_b = b.size() == 1 ? 1 : max_cyclic_run(b);
+        return run_a != run_b ? run_a < run_b : a.size() < b.size();
     });
 
-    double delta = std::max(params.min_delta, 1e-4);
-    for (;;) {
-        std::vector<size_t> kept;
-        const double        delta2 = delta * delta;
-        for (size_t idx : order) {
-            bool distinct = true;
-            for (size_t k : kept)
-                if (oklab_dist2(all[idx].oklab, all[k].oklab) < delta2) {
-                    distinct = false;
-                    break;
-                }
-            if (distinct)
-                kept.push_back(idx);
+    // Every outer sequence keeps its share of the table: the inner sequences that give it distinct
+    // colours. Preference when two give the same colour: fewer filaments on the layer (fewer tool
+    // changes), then the shorter inner period. stable_sort keeps enumeration order for the rest,
+    // so the table is deterministic.
+    struct Candidate
+    {
+        Rgb                  lin;
+        std::array<float, 3> oklab;
+        size_t               inner;
+        int                  used;
+    };
+    const size_t share = std::max<size_t>(1, params.max_pairs / outers.size());
+    std::vector<Candidate> candidates;
+    std::vector<size_t>    kept;
+    for (const std::vector<uint8_t> &outer : outers) {
+        Rgb outer_lin { 0., 0., 0. };
+        for (uint8_t f : outer)
+            for (int ch = 0; ch < 3; ++ch)
+                outer_lin[ch] += fils[f].linear[ch] / double(outer.size());
+
+        candidates.clear();
+        candidates.reserve(inners.size());
+        for (size_t i = 0; i < inners.size(); ++i) {
+            const Rgb lin = predict_linear(fils, outer, inners[i], backing);
+            candidates.push_back({ lin, linear_to_oklab(lin), i, distinct_filaments(outer, inners[i], backing) });
         }
-        if (kept.size() <= params.max_pairs) {
-            table.reserve(kept.size());
-            for (size_t k : kept)
-                table.push_back(all[k]);
-            return table;
+        std::stable_sort(candidates.begin(), candidates.end(), [&](const Candidate &a, const Candidate &b) {
+            if (a.used != b.used)
+                return a.used < b.used;
+            return inners[a.inner].size() < inners[b.inner].size();
+        });
+
+        double delta = std::max(params.min_delta, 1e-4);
+        for (;;) {
+            kept.clear();
+            const double delta2 = delta * delta;
+            for (size_t idx = 0; idx < candidates.size() && kept.size() <= share; ++idx) {
+                bool distinct = true;
+                for (size_t k : kept)
+                    if (oklab_dist2(candidates[idx].oklab, candidates[k].oklab) < delta2) {
+                        distinct = false;
+                        break;
+                    }
+                if (distinct)
+                    kept.push_back(idx);
+            }
+            if (kept.size() <= share)
+                break;
+            delta *= 1.15;
         }
-        delta *= 1.15;
+        for (size_t k : kept) {
+            const Candidate &cand = candidates[k];
+            DwdPair pair;
+            pair.outer   = outer;
+            pair.inner   = inners[cand.inner];
+            pair.backing = backing;
+            pair.srgb  = { float(linear_to_srgb(cand.lin[0])), float(linear_to_srgb(cand.lin[1])), float(linear_to_srgb(cand.lin[2])) };
+            pair.oklab = cand.oklab;
+            pair.outer_srgb  = { float(linear_to_srgb(outer_lin[0])), float(linear_to_srgb(outer_lin[1])), float(linear_to_srgb(outer_lin[2])) };
+            pair.outer_oklab = linear_to_oklab(outer_lin);
+            pair.filaments_used = cand.used;
+            table.push_back(std::move(pair));
+        }
     }
+    return table;
 }
 
 std::shared_ptr<const std::vector<DwdPair>> dwd_cached_table(const std::vector<DwdFilament> &filaments, uint8_t backing,
@@ -321,11 +340,20 @@ int dwd_nearest(const std::vector<DwdPair> &table, const std::array<float, 3> &t
     if (table.empty())
         return -1;
     const std::array<float, 3> target = dwd_srgb_to_oklab(target_srgb);
-    int    best = 0;
-    double best_d = oklab_dist2(table.front().oklab, target);
-    for (size_t i = 1; i < table.size(); ++i) {
+    // The outer wall first: the mix whose own colour is nearest.
+    double outer_d = oklab_dist2(table.front().outer_oklab, target);
+    for (size_t i = 1; i < table.size(); ++i)
+        outer_d = std::min(outer_d, oklab_dist2(table[i].outer_oklab, target));
+    // Then, of that outer wall's pairs, the nearest predicted colour.
+    int    best = -1;
+    double best_d = 0.;
+    for (size_t i = 0; i < table.size(); ++i) {
+        if (oklab_dist2(table[i].outer_oklab, target) > outer_d + 1e-12)
+            continue;
+        if (best >= 0 && table[i].outer != table[size_t(best)].outer)
+            continue; // an outer sequence of the same colour further down: the first one wins
         const double d = oklab_dist2(table[i].oklab, target);
-        if (d < best_d) {
+        if (best < 0 || d < best_d) {
             best_d = d;
             best = int(i);
         }

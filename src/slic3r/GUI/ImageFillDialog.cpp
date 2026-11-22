@@ -308,12 +308,19 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
         if (walls && m_wall_method->GetSelection() == 2 && wxGetApp().preset_bundle != nullptr) {
             const DynamicPrintConfig &process = wxGetApp().preset_bundle->prints.get_edited_preset().config;
             if (const auto *loops = process.option<ConfigOptionInt>("wall_loops"); loops != nullptr && loops->value < 2)
-                note += _L("Dual wall dithering needs at least 2 walls; 3 are better.") + "\n";
+                note += _L("With 1 wall this prints as colour runs. Dual wall dithering needs at least 2 walls; 3 are better.") + "\n";
             if (const auto *gen = process.option<ConfigOptionEnum<PerimeterGeneratorType>>("wall_generator");
                 gen != nullptr && gen->value == PerimeterGeneratorType::Arachne)
                 note += _L("Arachne varies the wall width, which shifts the colour. Classic walls are safer.") + "\n";
             if (const auto *height = process.option<ConfigOptionFloat>("layer_height"); height != nullptr && height->value > 0.125)
                 note += _L("Layers above 0.12 mm make the colour bands visible.") + "\n";
+            unsigned int checked = 0;
+            for (unsigned int i = 0; i < m_filament_list->GetCount(); ++i)
+                if (m_filament_list->IsChecked(i))
+                    ++checked;
+            if (checked > 8)
+                note += _L("Dual wall dithering takes at most 9 filaments, the part's own included. With more "
+                           "ticked it prints as colour runs.") + "\n";
             note.Trim();
         }
         if (m_dwd_note->GetLabel() != note) {
@@ -328,6 +335,7 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
     update_wall_controls();
     m_row_walls->Bind(wxEVT_CHECKBOX, [update_wall_controls](wxCommandEvent &evt) { update_wall_controls(); evt.Skip(); });
     m_wall_method->Bind(wxEVT_CHOICE, [update_wall_controls](wxCommandEvent &evt) { update_wall_controls(); evt.Skip(); });
+    m_filament_list->Bind(wxEVT_CHECKLISTBOX, [update_wall_controls](wxCommandEvent &evt) { update_wall_controls(); evt.Skip(); });
 
     cols->Add(left, 1, wxEXPAND | wxALL, FromDIP(10));
 

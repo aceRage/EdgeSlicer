@@ -342,6 +342,10 @@ bool build_context_for_row(const PrintObject &object, const PrintRegion &region,
     // Dual wall dithering: the pair table for the row's filaments, backed by the part's own
     // filament (what the deeper walls and the infill print with). A row that cannot have one
     // (too many filaments for the model) falls back to plain colour runs.
+    // With one wall there is nothing behind the outer wall to print the other half of a pair:
+    // the row prints as plain colour runs, which follow the picture on the one wall there is.
+    if (ctx.wall_method == IMAGE_FILL_WALL_DWD && region.config().wall_loops.value < 2)
+        ctx.wall_method = IMAGE_FILL_WALL_RUNS;
     if (ctx.wall_method == IMAGE_FILL_WALL_DWD) {
         const ConfigOptionFloats &tds = print->config().filament_transmission_distance;
         const float               width = flow_width_mm > 0.05f ? flow_width_mm : 0.45f;

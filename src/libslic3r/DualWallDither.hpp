@@ -19,6 +19,12 @@
 //   colour of one layer = outer_own + To^2 * (inner_own + Ti^2 * backing)
 //   the eye averages the layers of one full period, in linear light.
 // k and the widths are parameters; k is what a calibration print fits.
+//
+// Matching is OUTER FIRST (dwd_nearest): the outer wall's mix is the one whose own colour is
+// nearest the target, and the model only chooses the inner wall for that outer wall. The model is
+// not calibrated, and the first test print showed far less of the inner wall than it predicts; a
+// match on the predicted colour alone let it pick an outer wall of the wrong colour and count on
+// the inner wall to correct it. The outer wall is what is seen, so it follows the target.
 
 #include <array>
 #include <cstdint>
@@ -46,8 +52,10 @@ struct DwdTableParams
     // Strict: outer period <= 4 with at most 2 layers of one filament in a row. Relaxed also
     // allows 3:1 mixes (a run of three).
     bool   relaxed_outer = false;
-    // Largest table. Pairs closer than `min_delta` (Oklab distance) to one already kept are
-    // dropped; the threshold is raised until the table fits.
+    // Largest table. It is shared out evenly over the outer sequences, and every outer sequence
+    // keeps at least one pair, so a table is never smaller than the number of outer sequences.
+    // For one outer sequence, pairs closer than `min_delta` (Oklab distance) to one already kept
+    // are dropped; the threshold is raised until its share fits.
     size_t max_pairs = 256;
     double min_delta = 0.02;
     // How many of the filaments (the first n) may appear in the wall sequences. 0 = all of them.
@@ -62,6 +70,8 @@ struct DwdPair
     uint8_t              backing = 0; // 0-based filament index
     std::array<float, 3> srgb  {};    // predicted colour, 0..1
     std::array<float, 3> oklab {};
+    std::array<float, 3> outer_srgb  {}; // the outer wall's mix on its own, as if opaque
+    std::array<float, 3> outer_oklab {};
     int                  filaments_used = 0; // distinct filaments incl. backing: tool changes per layer <= this
 };
 
@@ -79,7 +89,8 @@ std::vector<std::vector<uint8_t>> dwd_outer_sequences(size_t n_filaments, bool r
 // Inner-wall sequences for n filaments: every mix of 8 layers (165 for n = 4), evenly spread.
 std::vector<std::vector<uint8_t>> dwd_inner_sequences(size_t n_filaments);
 
-// The reachable colours of a filament set over one backing filament, densest outer wall first.
+// The pairs of a filament set over one backing filament: every outer sequence (densest first),
+// each with the inner sequences that give it distinct colours.
 // Supports 2 to 9 filaments (the pattern token limit); returns empty otherwise.
 std::vector<DwdPair> dwd_build_table(const std::vector<DwdFilament> &filaments, uint8_t backing,
                                      const DwdModelParams &model, const DwdTableParams &params = {});
@@ -89,7 +100,9 @@ std::vector<DwdPair> dwd_build_table(const std::vector<DwdFilament> &filaments, 
 std::shared_ptr<const std::vector<DwdPair>> dwd_cached_table(const std::vector<DwdFilament> &filaments, uint8_t backing,
                                                              const DwdModelParams &model, const DwdTableParams &params = {});
 
-// Index of the table entry nearest the target colour (Oklab), or -1 for an empty table.
+// Index of the table entry for the target colour, or -1 for an empty table. Outer first: the outer
+// sequence whose own colour is nearest the target (Oklab), then, of its pairs, the one whose
+// predicted colour is nearest.
 int dwd_nearest(const std::vector<DwdPair> &table, const std::array<float, 3> &target_srgb);
 
 // The lightest filament: the natural backing (white in a CMY + W set).

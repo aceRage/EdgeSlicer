@@ -154,8 +154,8 @@ TEST_CASE("DwD walls: the wall method survives the params string", "[dwd][imagef
     CHECK(back.wall_method == IMAGE_FILL_WALL_DWD);
 }
 
-// The pair the test asks for: one whose outer wall alternates two filaments, and which sits far
-// from every other entry of the table, so the colour it predicts can only come back as itself.
+// The pair the test asks for: the one matched to the colour of an outer wall that alternates two
+// filaments. Matching is outer first, so that colour comes back with that outer wall.
 DwdPair isolated_alternating_pair()
 {
     std::vector<DwdFilament> filaments;
@@ -188,7 +188,10 @@ DwdPair isolated_alternating_pair()
         }
     }
     REQUIRE(best >= 0);
-    return table[size_t(best)];
+    const int match = dwd_nearest(table, table[size_t(best)].outer_srgb);
+    REQUIRE(match >= 0);
+    REQUIRE(table[size_t(match)].outer == table[size_t(best)].outer);
+    return table[size_t(match)];
 }
 
 TEST_CASE("DwD walls: a pair's sequences reach the two walls layer by layer", "[dwd][imagefill][walls]")
@@ -200,8 +203,8 @@ TEST_CASE("DwD walls: a pair's sequences reach the two walls layer by layer", "[
     // A "gradient" of one colour: every point of every wall asks for exactly this pair.
     ImageFillParams p;
     p.gradient.enabled = true;
-    p.gradient.stop_a  = pair.srgb;
-    p.gradient.stop_b  = pair.srgb;
+    p.gradient.stop_a  = pair.outer_srgb;
+    p.gradient.stop_b  = pair.outer_srgb;
     p.projection       = ImageFillProjection::Box;
 
     Model                model;

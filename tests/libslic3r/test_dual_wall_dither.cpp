@@ -135,26 +135,56 @@ TEST_CASE("DwD: the pair table", "[dwd]")
         CHECK(again[i].inner == table[i].inner);
     }
 
-    // Every entry is its own nearest match, and entries stay apart.
+    // Every outer sequence is in the table, and asked for its own colour it is the one chosen.
+    std::set<std::vector<uint8_t>> outers;
     for (size_t i = 0; i < table.size(); ++i) {
-        CHECK(dwd_nearest(table, table[i].srgb) == int(i));
+        outers.insert(table[i].outer);
+        const int match = dwd_nearest(table, table[i].outer_srgb);
+        REQUIRE(match >= 0);
+        CHECK(table[size_t(match)].outer == table[i].outer);
         CHECK(table[i].backing == 3);
         CHECK(table[i].filaments_used >= 1);
         CHECK(table[i].filaments_used <= 4);
     }
+    CHECK(outers.size() == dwd_outer_sequences(4, false).size());
 
-    // A smaller cap is honoured.
+    // A smaller cap is honoured, down to one pair per outer sequence.
     DwdTableParams small;
-    small.max_pairs = 16;
+    small.max_pairs = 46;
     const auto few = dwd_build_table(fils, 3, model, small);
     CHECK(!few.empty());
-    CHECK(few.size() <= 16);
+    CHECK(few.size() <= 46);
+    small.max_pairs = 1;
+    CHECK(dwd_build_table(fils, 3, model, small).size() == outers.size());
 
     // White is reachable and is the all-white pair.
     const int white = dwd_nearest(table, { 1.f, 1.f, 1.f });
     REQUIRE(white >= 0);
     CHECK(table[white].outer == std::vector<uint8_t>{ 3 });
     CHECK(table[white].inner == std::vector<uint8_t>{ 3 });
+
+    // Outer first: a filament's own colour takes that filament for the whole outer wall, and the
+    // even mix of two takes their alternation - whatever the model thinks the inner wall adds.
+    for (uint8_t f = 0; f < 4; ++f) {
+        const int match = dwd_nearest(table, fils[f].srgb);
+        REQUIRE(match >= 0);
+        CHECK(table[size_t(match)].outer == std::vector<uint8_t>{ f });
+    }
+    const auto cyan_magenta = dwd_predict({ { fils[0].srgb, 0. }, { fils[1].srgb, 0. } }, { 0, 1 }, { 0 }, 0, model);
+    const int  mix = dwd_nearest(table, cyan_magenta);
+    REQUIRE(mix >= 0);
+    CHECK(table[size_t(mix)].outer == std::vector<uint8_t>{ 0, 1 });
+    // The inner wall is then the model's choice for that outer wall: no pair of the same outer
+    // wall predicts a colour nearer the target.
+    {
+        const std::array<float, 3> target { 0.35f, 0.55f, 0.5f };
+        const int best = dwd_nearest(table, target);
+        REQUIRE(best >= 0);
+        const auto want = dwd_srgb_to_oklab(target);
+        for (const DwdPair &p : table)
+            if (p.outer == table[size_t(best)].outer)
+                CHECK(dist(p.oklab, want) >= dist(table[size_t(best)].oklab, want) - 1e-6);
+    }
 
     // Out of range: no table.
     CHECK(dwd_build_table(fils, 7, model).empty());
