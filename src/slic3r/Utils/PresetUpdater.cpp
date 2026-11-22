@@ -1,6 +1,7 @@
 #include "PresetUpdater.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <set>
 #include <boost/filesystem/operations.hpp>
@@ -306,13 +307,14 @@ struct PresetUpdater::priv
 	fs::path rsrc_path;
 	fs::path vendor_path;
 
-	bool cancel;
+	// Orca #17682: read by the sync threads while the main thread sets it.
+	std::atomic<bool> cancel;
 	std::thread thread;
 	// sync_bambu()'s worker: started at most once per session, joined in the destructor.
 	std::thread bambu_thread;
 	bool        bambu_started { false };
 
-    bool m_web_thread_cancel;
+    std::atomic<bool> m_web_thread_cancel { false };
     std::thread m_web_resource_thread;
 	bool has_waiting_updates { false };
 	Updates waiting_updates;
@@ -1253,6 +1255,8 @@ void PresetUpdater::priv::sync_printer_config(std::string http_url)
             result = true;
         }
     } catch (...) {}
+    // The app may be shutting down, so don't touch the GUI.
+    if (cancel) return;
     if (result) {
         BOOST_LOG_TRIVIAL(info) << format("[Orca Updater] found new printer config: %1%, prompt to update", cached_version);
         waiting_printer_updates = get_printer_config_updates(true);
@@ -1825,6 +1829,11 @@ PresetUpdater::PresetUpdater() :
 // Public
 
 PresetUpdater::~PresetUpdater()
+{
+	this->stop();
+}
+
+void PresetUpdater::stop()
 {
 	if (p && p->thread.joinable()) {
 		// This will stop transfers being done by the thread, if any.

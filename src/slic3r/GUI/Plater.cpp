@@ -24128,6 +24128,18 @@ void Plater::load_gcode(const wxString& filename)
     // Same breakdown as a sliced plate, machine time included. Prices come only from the file: one
     // exported without filament prices shows "not in file" rather than today's preset prices.
     current_print.print_statistics().total_cost = compute_cost(*current_result).total;
+    // Orca #17679: the legend shows the filament length and weight too, and subtracts the support and
+    // tower filament from them, so an opened file read 0 in total and a negative model filament.
+    double total_used_filament = 0.;
+    double total_weight        = 0.;
+    for (const auto &[extruder_id, volume] : current_result->print_statistics.total_volumes_per_extruder) {
+        if (extruder_id < current_result->filament_diameters.size() && current_result->filament_diameters[extruder_id] > 0.f)
+            total_used_filament += volume / (PI * sqr(0.5 * double(current_result->filament_diameters[extruder_id])));
+        if (extruder_id < current_result->filament_densities.size())
+            total_weight += volume * double(current_result->filament_densities[extruder_id]) * 0.001;
+    }
+    current_print.print_statistics().total_used_filament = total_used_filament;
+    current_print.print_statistics().total_weight        = total_weight;
 
     current_print.set_gcode_file_ready();
 
