@@ -2966,6 +2966,31 @@ TEST_CASE("Spiral vase still refuses an Edge mixed filament", "[Print][SpiralVas
 }
 
 // Orca #16900: a finished export is reused, so a renamed plate needs the export step invalidated.
+// Orca #17680: tree supports are clipped to the bed shape at the first instance, normal supports are not.
+TEST_CASE("Moving an object regenerates its supports only where they depend on the position", "[Print][Support][Regression]")
+{
+    const std::string support_type = GENERATE(as<std::string>{}, "tree(auto)", "normal(auto)");
+    CAPTURE(support_type);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // init_print may turn gcode_comments on in its own copy, so the re-apply below differs in the position only.
+    config.set_deserialize_strict({ { "enable_support", 1 }, { "support_type", support_type }, { "gcode_comments", 1 } });
+    Print print;
+    Model model;
+    init_print({ TestMesh::overhang }, print, model, config);
+    print.process();
+    REQUIRE(print.objects().front()->is_step_done(posSupportMaterial));
+
+    // Tree supports follow the first instance only, so a copy beside it keeps them.
+    ModelInstance &instance = *model.objects.front()->instances.front();
+    model.objects.front()->add_instance(instance)->set_offset(instance.get_offset() + Vec3d(60., 0., 0.));
+    print.apply(model, config);
+    CHECK(print.objects().front()->is_step_done(posSupportMaterial));
+
+    instance.set_offset(instance.get_offset() + Vec3d(10., 0., 0.));
+    print.apply(model, config);
+    CHECK(print.objects().front()->is_step_done(posSupportMaterial) == (support_type == "normal(auto)"));
+}
+
 TEST_CASE("Plate name reaches the G-code once G-code export is invalidated", "[Print][PlateName]")
 {
     Print print;

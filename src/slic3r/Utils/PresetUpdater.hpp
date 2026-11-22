@@ -23,6 +23,10 @@ public:
 	PresetUpdater &operator=(const PresetUpdater &) = delete;
 	~PresetUpdater();
 
+	// Orca #17682: stops the background threads and waits for them. To be called while the app they
+	// read from still exists.
+	void stop();
+
 	// If either version check or config updating is enabled, get the appropriate data in the background and cache it.
 	// Only the profile feed (no server by default): the Bambu Lab requests are sync_bambu()'s, and
 	// http_url / plugin_version are no longer used here.

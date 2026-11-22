@@ -134,6 +134,33 @@ double overhang_length_at(const Print &print, double print_z) { return role_leng
 
 } // namespace
 
+// Orca #17680: overhang walls print at the bridge and overhang speeds, so regions that differ in them can't share their walls.
+TEST_CASE("Regions with different overhang wall speeds get walls of their own", "[Perimeters][Regression]")
+{
+    const std::string option = GENERATE(as<std::string>{}, "bridge_speed", "enable_overhang_speed", "overhang_2_4_speed",
+                                        "slowdown_for_curled_perimeters");
+    CAPTURE(option);
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model);
+    const PrintRegionConfig &config = print.objects().front()->printing_region(0).config();
+    PrintRegionConfig changed = config;
+    if (option == "bridge_speed")
+        for (double &value : changed.bridge_speed.values)
+            value += 10.;
+    else if (option == "enable_overhang_speed")
+        for (unsigned char &value : changed.enable_overhang_speed.values)
+            value = ! value;
+    else if (option == "overhang_2_4_speed")
+        for (FloatOrPercent &value : changed.overhang_2_4_speed.values)
+            value.value += 10.;
+    else
+        for (unsigned char &value : changed.slowdown_for_curled_perimeters.values)
+            value = ! value;
+    CHECK(Layer::is_perimeter_compatible(PrintRegion(config), PrintRegion(config)));
+    CHECK_FALSE(Layer::is_perimeter_compatible(PrintRegion(config), PrintRegion(changed)));
+}
+
 // A sliver the wall generator prints nothing for holds nothing up, so it cannot be what decides that the
 // wall above it is not an overhang. The rib under the slab is the only thing that edge of the slab could
 // rest on: below the threshold of the active generator the slab has to come out exactly as it does with

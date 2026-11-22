@@ -398,6 +398,8 @@ size_t FillBedJob::run_grid_layout()
             ap.rotation    = cell.rotation;
             ap.bed_idx     = 0;
             ++placed;
+            // Orca #17679: numbers the copy in its object name, as the arranged copies are.
+            ap.itemid      = int(placed);
         } else {
             // finalize() skips anything not on bed 0, and the cloning setter only fires inside
             // the bed_idx == 0 branch, so a surplus clone simply never comes into existence.
