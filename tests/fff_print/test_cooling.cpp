@@ -1483,9 +1483,10 @@ TEST_CASE("The cooling slowdown counts no extruder move on a line without E", "[
         while (std::getline(in, line))
             if (const int v = part_fan_value(line); v >= 0)
                 fan = v;
-        // CoolingBuffer takes the whole percent below; the thresholds are floats, so 69 % or 70 %.
-        CHECK(fan >= int(255.5 * 69 / 100.));
-        CHECK(fan <= int(255.5 * 70 / 100.));
+        // CoolingBuffer takes the whole percent below; the thresholds are floats, so 69 % or 70 % (S175 to S179
+        // with either rounding of the M106 value).
+        CHECK(fan >= 175);
+        CHECK(fan <= 179);
     }
 }
 
@@ -1734,7 +1735,7 @@ OuterWallRun outer_wall_run(const DynamicPrintConfig &config)
 
 } // namespace
 
-// Orca #17534, on Edge's slowdown (upstream's test rides on #17540's layer timing, which Edge does not have).
+// Orca #17534. Measured at the feed rates, so it holds with and without #17540's layer timing.
 TEST_CASE("Layer cooling slowdown keeps outer walls out of the resonance avoidance range", "[Cooling][Orca17534]")
 {
     constexpr double min_speed = 40.;

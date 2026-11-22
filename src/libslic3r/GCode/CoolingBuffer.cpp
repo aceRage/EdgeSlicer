@@ -981,10 +981,8 @@ float CoolingBuffer::estimate_layer_time(const std::string &gcode, const std::ve
     for (const PerExtruderAdjustments &adj : per_extruder_adjustments)
         for (const CoolingLine &line : adj.lines)
             if (line.line_start >= m_timed_from &&
-                // Edge: a Z-contoured block keeps its own feed rates here, they follow the bead height.
-                ((line.slowdown && ! (line.type & CoolingLine::TYPE_ZAA_SCALED)) ||
-                 // Edge (min_layer_time_pause): the park-and-return block takes no time; its dwell is decided from this time.
-                 (line.type & CoolingLine::TYPE_MIN_LAYER_PAUSE)))
+                // Edge (min_layer_time_pause): the park-and-return block takes no time; its dwell is decided from this time.
+                (line.slowdown || (line.type & CoolingLine::TYPE_MIN_LAYER_PAUSE)))
                 edited.emplace_back(&line);
     std::sort(edited.begin(), edited.end(), [](const CoolingLine *l1, const CoolingLine *l2) { return l1->line_start < l2->line_start; });
 
@@ -992,9 +990,17 @@ float CoolingBuffer::estimate_layer_time(const std::string &gcode, const std::ve
     size_t      from  = m_timed_from;
     for (const CoolingLine *line : edited) {
         timed.append(gcode, from, line->line_start - from);
-        // A slowed line only sets the feed rate.
-        if (! (line->type & CoolingLine::TYPE_MIN_LAYER_PAUSE))
-            timed += "G1 F" + std::to_string(int(std::floor(60. * line->feedrate + 0.5))) + '\n';
+        if (! (line->type & CoolingLine::TYPE_MIN_LAYER_PAUSE)) {
+            // A slowed line gets its new feed rate, as apply_layer_cooldown() writes it: the F word is the
+            // last one before the comment. Edge: the line keeps its other words.
+            const std::string_view text(gcode.data() + line->line_start, line->line_end - line->line_start);
+            const std::string_view body = text.substr(0, std::min(text.find(';'), text.find('\n')));
+            const size_t           f    = body.find(" F");
+            if (f == std::string_view::npos)
+                timed.append(text);
+            else
+                (timed.append(body.substr(0, f)) += " F") += std::to_string(int(std::floor(60. * line->feedrate + 0.5))) + '\n';
+        }
         from = line->line_end;
     }
     timed.append(gcode, from, std::string::npos);
