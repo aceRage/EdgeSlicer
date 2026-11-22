@@ -608,6 +608,13 @@ std::string sandbox_unavailable_message(const std::string& plugin_key, const std
     return body;
 }
 
+bool unsandboxed_run_already_allowed(const std::string& plugin_key)
+{
+    if (sandbox_env_disable_requested())
+        return true;
+    return plugin_trust::is_unsandboxed(plugin_key, unsandboxed_bind_hash(plugin_key));
+}
+
 bool allow_unsandboxed_run(const std::string& plugin_key, const std::string& reason, bool& applied_out, std::string& error)
 {
     applied_out = false;

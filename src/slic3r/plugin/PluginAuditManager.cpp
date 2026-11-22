@@ -2334,6 +2334,12 @@ bool PluginAuditManager::request_permissions(const std::string& plugin_key, cons
     if (plugin_key.empty())
         return true;
 
+    // D3: in the helper the plugin is being imported for EdgeSlicer, which owns the sidecar and
+    // the prompt. The helper cannot write the sidecar (plugin_root is read-only to it) and has
+    // no UI, so the request goes to EdgeSlicer, which honours it only during that import.
+    if (plugin_ipc::in_child_process())
+        return plugin_ipc::rpc_request_permissions(plugin_key, requested);
+
     PluginDescriptor descriptor;
     if (!PluginManager::instance().try_get_plugin_descriptor(plugin_key, descriptor) || descriptor.plugin_root.empty())
         return false;

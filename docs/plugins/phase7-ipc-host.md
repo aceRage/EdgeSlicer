@@ -21,10 +21,10 @@ Windows named pipe.
 
 | Workload | Where it runs |
 |---|---|
-| Import / `load_plugin` (capabilities, metadata) | **In-process** inside Edge. Only execute is out of process in this phase. |
+| Import / `load_plugin` (capabilities, metadata) | **Out of process** since D3 (2026-11-20): the helper imports the plugin and returns its capability list; Edge keeps proxies. Exception: a plugin signed by a shipped publisher key, with the early slicing steps allowed, is imported in-process (`src/slic3r/plugin/HostedPluginImport.hpp`). |
 | Script execute | **Out of process** via the helper |
 | `psGCodePostProcess` execute | **Out of process** via the helper |
-| Early slicing steps (`posSlice` … `psSkirtBrim`) | **In-process**, unsandboxed, live `Print` / `PrintObject`. The Home card still says so. |
+| Early slicing steps (`posSlice` … `psSkirtBrim`) | **In-process**, unsandboxed, live `Print` / `PrintObject`, only for the signed in-process plugins above (D2). A hosted plugin is skipped on these steps. |
 
 ## Protocol
 
@@ -34,7 +34,8 @@ Versioned, length-prefixed JSON:
 - protocol version **1**
 - max payload 16 MiB
 - handshake `hello` / `hello_ok`
-- `load` / `load_ok`, `execute` / `result` / `error`, `shutdown` / `shutdown_ok`
+- `load` / `load_ok`, `execute` / `result` / `error`, `lifecycle_event` / `lifecycle_event_ok`,
+  `shutdown` / `shutdown_ok`
 - nested `host_call` / `host_result` and `audit_check` / `audit_result` during execute
 
 Every `orca.host.*` call in the child is an RPC back into Edge. Edge applies Phase 4
@@ -68,14 +69,29 @@ execute worker, so they cannot pop a permission dialog off the UI thread.
 
 ## Known limitations
 
-- Plugin **import** (discovery, `load_plugin`, capability registration) still runs inside
-  Edge so the Home card and slicer can see capabilities. Only **execute** (script and
-  `psGCodePostProcess`) is out of process.
+- Plugin **import** (`load_plugin`, `register_capabilities`, `on_load`) runs in the helper
+  (D3). Discovery (reading PEP 723 / wheel metadata, no plugin code) stays in Edge. The
+  helper's `load_ok` lists the capabilities (name, type, config HTML, default config); Edge
+  checks it strictly (`parse_hosted_capabilities`) and builds proxies. A load-time
+  `orca.request_permissions` is relayed to Edge as the `plugin.request_permissions` host call,
+  accepted only while Edge waits for that import. The helper is reset when another plugin
+  runs, so module state between runs is not guaranteed (the plugin is imported again).
+- **Lifecycle events** reach hosted plugins as `lifecycle_event` batches (acknowledged by
+  `lifecycle_event_ok`). `load_ok` flags each capability whose Python class overrides
+  `on_lifecycle_event`. `fire_lifecycle_event` only queues a plain-data snapshot per plugin
+  (strings cut to 4 KiB, credential-looking values redacted, no callables) and returns. Each
+  queue holds 64 events and drops the oldest when full (one log line per overflow). The
+  execute worker sends a plugin's queue in order, after checking that the plugin is still
+  loaded with an enabled listener and dropping events that name a path its grants do not
+  cover (secret stores never pass). A batch that is not acknowledged within 10 s, or any bad
+  reply, resets the helper; the batch is lost. Event batches never show the "Run anyway"
+  prompt. EdgeSlicer does not fire any lifecycle event yet (Orca's fire sites are not ported).
 - Phase 8 applies an OS sandbox to execute. A malicious child that skips its own Python audit
   hook is then still constrained by Landlock/AppContainer/App Sandbox. Edge-side host RPC and
   FS `audit_check` cover the `orca.host` surface and audited `open()` events. Without Phase 8
   the child has the process's ambient filesystem.
-- Early slicing-pipeline steps remain in-process and unsandboxed.
+- Early slicing-pipeline steps remain in-process and unsandboxed, for publisher-signed plugins
+  imported in-process only.
 - `host.preset_bundle` / `host.plater` are not snapshotted over IPC in this phase (they throw
   in the child the same way they throw without a GUI). Script and post-process fixtures do not
   need them.

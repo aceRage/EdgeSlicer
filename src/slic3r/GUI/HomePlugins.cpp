@@ -9,6 +9,7 @@
 
 #include "libslic3r/AppConfig.hpp"
 #include "slic3r/Utils/HomePluginsLogic.hpp"
+#include "slic3r/plugin/HostedPluginImport.hpp"
 #include "slic3r/plugin/PluginDescriptor.hpp"
 #include "slic3r/plugin/PluginFsUtils.hpp"
 #include "slic3r/plugin/PluginManager.hpp"
@@ -71,7 +72,8 @@ static HomeTab::PluginView view_of(PluginManager& mgr, const PluginDescriptor& d
             cv.type    = plugin_capability_type_to_string(cap->type());
             cv.enabled = cap->is_enabled();
             v.capabilities.push_back(std::move(cv));
-            if (cap->type() == PluginCapabilityType::SlicingPipeline)
+            // D3: a hosted plugin (imported in the helper) never runs on the in-process steps.
+            if (cap->type() == PluginCapabilityType::SlicingPipeline && plugin_import::as_hosted(cap.get()) == nullptr)
                 v.in_process_pipeline = true;
         }
     } else {
