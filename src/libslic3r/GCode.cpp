@@ -5426,6 +5426,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     if (this->m_objsWithBrim.empty())
         m_brim_done = true;
 
+    // Object instances printed one after the other (print by object without a wipe tower); 0 when the
+    // layers of all objects were printed together. Read before the end G-code.
+    size_t sequential_instances_printed = 0;
     // SoftFever: calib
     if (print.calib_params().mode == CalibMode::Calib_PA_Line) {
         std::string gcode;
@@ -5466,7 +5469,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         // Do all objects for each layer.
         if (print.config().print_sequence == PrintSequence::ByObject && !has_wipe_tower) {
-            size_t             finished_objects = 0;
+            size_t&            finished_objects = sequential_instances_printed;
             const PrintObject* prev_object      = (*print_object_instance_sequential_active)->print_object;
             for (; print_object_instance_sequential_active != print_object_instances_ordering.end();
                  ++print_object_instance_sequential_active) {
@@ -5632,6 +5635,23 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         std::string gcode;
         m_writer.add_object_change_labels(gcode);
         file.write(gcode);
+    }
+
+    // EDGE: printing by object, the last instance need not be the tallest. Its last layer is where the nozzle
+    // is when the end G-code starts, and end templates move in X/Y (the A2L's unloads the filament and runs
+    // the trash-bin macros) before they raise Z, so the head can hit an object printed earlier. Rise above
+    // the tallest object first, as the travel between objects does. Written after the object's end label,
+    // so it is not skipped with the object, and before the end G-code, so the time estimate counts it.
+    // The margin is the Z hop the travel between objects adds above the tallest top, at least 0.4 mm (what the
+    // Bambu end templates add to max_layer_z) for a filament with no hop.
+    if (sequential_instances_printed > 1 && m_last_layer_z < m_max_layer_z - EPSILON && m_writer.extruder() != nullptr) {
+        const double margin = std::max(EXTRUDER_CONFIG(z_hop), 0.4);
+        const double clear_z = std::min(double(m_max_layer_z) + m_config.z_offset.value + margin, print.config().printable_height.value);
+        if (clear_z > m_writer.get_position().z() + EPSILON) {
+            file.write(m_writer.travel_to_z(clear_z, "lift above the printed objects before the end G-code"));
+            // The pending Z hop of the last retraction is covered by this move.
+            m_writer.cancel_pending_lift();
+        }
     }
 
     file.write(m_writer.set_fan(0));

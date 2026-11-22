@@ -1533,6 +1533,149 @@ TEST_CASE("Between copies printed one by one the nozzle stays above the finished
     CHECK(last_extrusion_z == Approx(20.3));
     CHECK(lowest_after >= last_extrusion_z - EPSILON);
 }
+// Printing by object, the end G-code started at the last object's last layer. When an earlier object is taller,
+// an end template that moves in X/Y before it raises Z (the A2L's unloads the filament and runs its trash-bin
+// macros first) can hit it. The nozzle now rises above the tallest object before the end G-code.
+namespace {
+
+struct EndOfPrint
+{
+    double last_extrusion_z = -1.;  // Z of the last extrusion
+    double top_extrusion_z  = -1.;  // highest Z any extrusion was made at
+    double z_at_end_gcode   = -1.;  // Z when the first end-template line comes
+    int    z_moves_after    = 0;    // Z moves between the last extrusion and the end template
+    int    lift_comments    = 0;
+    bool   end_found        = false;
+};
+
+const char *const end_lift_comment = "lift above the printed objects before the end G-code";
+
+EndOfPrint end_of_print(const std::string &gcode)
+{
+    EndOfPrint out;
+    double z = 0.;
+    std::istringstream lines(gcode);
+    for (std::string line; std::getline(lines, line);) {
+        if (line.find(end_lift_comment) != std::string::npos)
+            ++out.lift_comments;
+        if (line.rfind(";FILAMENT_END_MARK", 0) == 0 || line.rfind(";MACHINE_END_MARK", 0) == 0) {
+            out.z_at_end_gcode = z;
+            out.end_found      = true;
+            break;
+        }
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.rfind("G1", 0) != 0 && code.rfind("G0", 0) != 0)
+            continue;
+        const auto word = [&code](char axis, double &value) {
+            const size_t at = code.find(std::string(" ") + axis);
+            if (at == std::string::npos)
+                return false;
+            value = std::atof(code.c_str() + at + 2);
+            return true;
+        };
+        double value = 0.;
+        if (word('Z', value)) {
+            z = value;
+            ++out.z_moves_after;
+        }
+        double xy = 0., e = 0.;
+        if ((word('X', xy) || word('Y', xy)) && word('E', e) && e > 0.) {
+            out.last_extrusion_z = z;
+            out.top_extrusion_z  = std::max(out.top_extrusion_z, z);
+            out.z_moves_after    = 0;
+        }
+    }
+    return out;
+}
+
+DynamicPrintConfig end_lift_config(const std::string &sequence)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"skirt_loops",         0},
+        {"brim_type",           "no_brim"},
+        {"print_sequence",      sequence},
+        {"gcode_comments",      1},
+        {"machine_start_gcode", ""},
+    });
+    config.set_key_value("machine_end_gcode", new ConfigOptionString(";MACHINE_END_MARK\nG1 X0 Y200 F3000\n"));
+    config.option<ConfigOptionStrings>("filament_end_gcode")->values = {";FILAMENT_END_MARK\n"};
+    return config;
+}
+
+EndOfPrint slice_end(std::vector<TriangleMesh> meshes, const DynamicPrintConfig &config, double *margin = nullptr)
+{
+    Print print;
+    Model model;
+    init_print(std::move(meshes), print, model, config);
+    if (margin != nullptr)
+        *margin = std::max(print.config().z_hop.get_at(0), 0.4);
+    return end_of_print(Test::gcode(print));
+}
+
+} // namespace
+
+TEST_CASE("By object, tall object first: the nozzle rises above it before the end G-code", "[GCode][ByObjectEndLift]")
+{
+    struct Variant { const char *name; std::vector<std::pair<std::string, std::string>> settings; };
+    const Variant variant = GENERATE(values<Variant>({
+        { "default",               {} },
+        { "z offset",              { {"z_offset", "0.3"} } },
+        { "no z hop",              { {"z_hop", "0"} } },
+        { "large z hop",           { {"z_hop", "1.5"} } },
+        { "raft",                  { {"raft_layers", "3"} } },
+        { "klipper, relative E",   { {"gcode_flavor", "klipper"}, {"use_relative_e_distances", "1"} } },
+        { "marlin 2, absolute E",  { {"gcode_flavor", "marlin2"}, {"use_relative_e_distances", "0"} } },
+        { "spiral vase",           { {"spiral_mode", "1"} } },
+    }));
+    CAPTURE(variant.name);
+    DynamicPrintConfig config = end_lift_config("by object");
+    for (const auto &[key, value] : variant.settings)
+        config.set_deserialize_strict(key, value);
+
+    double margin = 0.;
+    // Listed, and so printed, tall first: 30 mm, then 10 mm.
+    const EndOfPrint end = slice_end({make_cube(20., 20., 30.), make_cube(20., 20., 10.)}, config, &margin);
+    REQUIRE(end.end_found);
+    REQUIRE(end.top_extrusion_z > 29.);
+    // The short object really was last.
+    REQUIRE(end.last_extrusion_z < end.top_extrusion_z - 10.);
+    // Before the first end-template line, the nozzle is above the tallest object by the margin.
+    CHECK(end.z_at_end_gcode == Approx(end.top_extrusion_z + margin).margin(0.001));
+    CHECK(end.lift_comments == 1);
+}
+
+TEST_CASE("By object, nothing taller printed before the last object: the end of the print is unchanged", "[GCode][ByObjectEndLift]")
+{
+    SECTION("short first, tall last") {
+        const EndOfPrint end = slice_end({make_cube(20., 20., 10.), make_cube(20., 20., 30.)}, end_lift_config("by object"));
+        REQUIRE(end.end_found);
+        REQUIRE(end.last_extrusion_z == Approx(end.top_extrusion_z));
+        CHECK(end.lift_comments == 0);
+        CHECK(end.z_moves_after == 0);
+        CHECK(end.z_at_end_gcode == Approx(end.last_extrusion_z));
+    }
+    SECTION("a single object") {
+        const EndOfPrint end = slice_end({make_cube(20., 20., 30.)}, end_lift_config("by object"));
+        REQUIRE(end.end_found);
+        CHECK(end.lift_comments == 0);
+        CHECK(end.z_moves_after == 0);
+    }
+    SECTION("two copies of the same height") {
+        const EndOfPrint end = slice_end({make_cube(20., 20., 30.), make_cube(20., 20., 30.)}, end_lift_config("by object"));
+        REQUIRE(end.end_found);
+        CHECK(end.lift_comments == 0);
+        CHECK(end.z_moves_after == 0);
+    }
+    SECTION("by layer, tall object first") {
+        const EndOfPrint end = slice_end({make_cube(20., 20., 30.), make_cube(20., 20., 10.)}, end_lift_config("by layer"));
+        REQUIRE(end.end_found);
+        REQUIRE(end.last_extrusion_z == Approx(end.top_extrusion_z));
+        CHECK(end.lift_comments == 0);
+        CHECK(end.z_moves_after == 0);
+    }
+}
+
 // custom_gcode_changes_tool read the tool number from one character into the tool change prefix,
 // so with a prefix longer than "T" (the manual change's "; MANUAL_TOOL_CHANGE T", MakerWare's
 // "M135 T", Sailfish's "M108 T") a change the template already made was never seen, and the
