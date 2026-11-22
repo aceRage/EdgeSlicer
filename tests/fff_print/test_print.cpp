@@ -3230,6 +3230,39 @@ TEST_CASE("Sequential printing counts a raft toward the height checked against t
     CHECK(error.find("too tall") != std::string::npos);
 }
 
+TEST_CASE("Sequential printing counts a raft toward whether an object is short", "[Print][Orca17445]")
+{
+    // Objects below nozzle_height only need to clear the nozzle cone, so they may stand close together,
+    // and their skirt is kept at its full distance. A raft lifts a 2 mm slab past the 2.5 mm nozzle_height,
+    // so the slabs need the toolhead radius between them and the skirt offset of a tall object.
+    const bool raft = GENERATE(false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "print_sequence",            "by object" },
+        { "nozzle_height",             2.5 },
+        { "extruder_clearance_radius", 40 },
+        { "skirt_loops",               1 },
+        { "skirt_type",                "perobject" },
+        { "raft_layers",               raft ? 3 : 0 },
+        { "layer_change_gcode",        "G92 E0\n" } // validate() relative-E reset
+    });
+    Print print;
+    Model model;
+    for (double x : { 80., 110. }) // 10 mm apart, within the 40 mm toolhead radius
+        add_box_at(model, print, 20., 20., 2., Vec2d(x, 80.));
+    print.apply(model, config);
+    REQUIRE((2. + print.objects().front()->slicing_parameters().object_print_z_min > 2.5) == raft);
+
+    CHECK(print.is_all_objects_are_short() == ! raft);
+    CHECK((std::get<0>(print.object_skirt_offset()) > 0.f) == ! raft);
+    const std::string error = print.validate().string;
+    INFO(error);
+    if (raft)
+        CHECK(error.find("too close to others") != std::string::npos);
+    else
+        CHECK(error.empty());
+}
+
 TEST_CASE("Sequential printing without a raft keeps boxes just below the rod", "[Print][Orca17235]")
 {
     // Edge regression for the case above: the same boxes without a raft stay below the rod and validate.
@@ -3400,6 +3433,31 @@ TEST_CASE("No sparse layers still refuses an object that rises past the lid clea
     CHECK(print.validate().string.empty());
     print.set_status_silent();
     REQUIRE_THROWS_WITH(print.process(), Catch::Contains("No sparse layers"));
+}
+
+// Orca #17445. The head body passes over an object that stays below nozzle_height however close to the tower
+// it stands. A raft lifts a 2 mm slab past the 2.5 mm nozzle_height, so the same slab within the toolhead
+// radius is refused before slicing once it stands on one.
+TEST_CASE("No sparse layers counts a raft toward whether an object near the tower is short", "[Print][PrimeTower][Orca17445]")
+{
+    const bool raft = GENERATE(false, true);
+    Model model;
+    add_object(model, make_cube(10., 10., 2.), 140., 140.); // 10 mm from the tower in X and in Y
+    add_object(model, make_cube(20., 20., 10.), 20., 20.)->config.set_key_value("extruder", new ConfigOptionInt(2));
+    Print print;
+    print.apply(model, prime_tower_config({
+        { "wipe_tower_no_sparse_layers", 1 },
+        { "nozzle_height",               2.5 },
+        { "raft_layers",                 raft ? 3 : 0 },
+    }));
+    REQUIRE((2. + print.objects().front()->slicing_parameters().object_print_z_min > 2.5) == raft);
+
+    const std::string error = print.validate().string;
+    INFO(error);
+    if (raft)
+        CHECK(error.find("No sparse layers") != std::string::npos);
+    else
+        CHECK(error.empty());
 }
 
 TEST_CASE("Print validation rejects a zero layer height", "[Print]")

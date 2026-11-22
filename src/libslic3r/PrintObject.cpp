@@ -5093,6 +5093,11 @@ void PrintObject::generate_support_for_preview()
     this->throw_if_canceled();
 }
 
+double PrintObject::print_z_max() const
+{
+    return scale_(m_slicing_params.object_print_z_max);
+}
+
 void PrintObject::update_slicing_parameters()
 {
     // Orca: updated function call for XYZ shrinkage compensation
