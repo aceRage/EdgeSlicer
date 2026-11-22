@@ -343,3 +343,252 @@ TEST_CASE("Cookie cutter of difficult shapes", "[OutlineObjects]")
         REQUIRE(its_num_open_edges(res.mesh) == 0);
     }
 }
+
+TEST_CASE("Traced levels follow the silhouette", "[OutlineObjects]")
+{
+    // two halves of a 20 x 10 image: left and right
+    ExPolygons left  = {rect(0., 0., 10., 10.)};
+    ExPolygons right = {rect(10., 0., 20., 10.)};
+
+    SilhouetteParams p = plain_params(80.);
+    Silhouette       s = make_silhouette({left, right}, p);
+    REQUIRE(s.shape.size() == 1);
+    REQUIRE_THAT(s.factor, WithinRel(4., 1e-3));
+
+    ExPolygons l = to_silhouette_frame(left, s);
+    ExPolygons r = to_silhouette_frame(right, s);
+    REQUIRE_THAT(area_mm2(l), WithinRel(1600., 1e-3));
+    REQUIRE_THAT(area_mm2(union_ex(l, r)), WithinRel(area_mm2(s.shape), 1e-3));
+    REQUIRE(unscale<double>(get_extents(l).max.x()) < 0.01);
+    REQUIRE(unscale<double>(get_extents(r).min.x()) > -0.01);
+
+    p.mirror     = true;
+    Silhouette m = make_silhouette({left, right}, p);
+    REQUIRE(m.mirrored);
+    REQUIRE(unscale<double>(get_extents(to_silhouette_frame(left, m)).min.x()) > -0.01);
+}
+
+TEST_CASE("Box parameters are limited to printable values", "[OutlineObjects]")
+{
+    OutlineBoxParams p;
+    p.height           = 0.5;
+    p.wall             = 0.;
+    p.chamfer          = 5.;
+    p.lip_height       = 100.;
+    p.lid_thickness    = 0.1;
+    p.decoration_depth = 1.;
+    OutlineBoxParams s = sanitize(p);
+    REQUIRE(s.wall >= 0.4);
+    REQUIRE(s.height >= s.floor + 2.);
+    REQUIRE(s.chamfer <= s.floor);
+    REQUIRE(s.lip_height <= s.height - s.floor);
+    REQUIRE(s.lid_thickness >= s.decoration_depth + 0.4);
+}
+
+TEST_CASE("Box of a square", "[OutlineObjects]")
+{
+    Silhouette s = make_silhouette({{rect(0., 0., 10., 10.)}}, plain_params(40.));
+    REQUIRE(s.shape.size() == 1);
+
+    OutlineBoxParams p;
+    p.chamfer = 0.;
+
+    SECTION("sections")
+    {
+        OutlineBoxSections sec = outline_box_sections(s.shape, {}, p);
+        REQUIRE_THAT(area_mm2(sec.cavity), WithinRel(36.8 * 36.8, 1e-3));
+        REQUIRE_THAT(area_mm2(sec.wall), WithinRel(1600. - 36.8 * 36.8, 1e-3));
+        REQUIRE_THAT(area_mm2(sec.lid), WithinRel(1600. + 4. * 40. * 1.5 + PI * 1.5 * 1.5, 2e-3));
+        REQUIRE_THAT(area_mm2(sec.lip), WithinRel(36.4 * 36.4 - 33.2 * 33.2, 1e-3));
+        // the lip goes into the cavity with the clearance on every side
+        REQUIRE(area_mm2(intersection_ex(sec.lip, sec.wall)) < 1e-6);
+        REQUIRE(area_mm2(diff_ex(sec.lip, sec.cavity)) < 1e-6);
+        REQUIRE(area_mm2(intersection_ex(sec.lip, diff_ex(sec.cavity, offset_ex(sec.cavity, -float(scale_(0.19)))))) < 1e-3);
+        REQUIRE(sec.decoration.empty());
+
+        p.lid_overhang = 0.;
+        REQUIRE_THAT(area_mm2(outline_box_sections(s.shape, {}, p).lid), WithinRel(1600., 1e-6));
+    }
+
+    SECTION("meshes")
+    {
+        OutlineBoxResult res = make_outline_box(s.shape, {}, p);
+        REQUIRE(res.is_valid());
+        REQUIRE(res.warnings.empty());
+        REQUIRE(res.base.parts.size() == 1);
+        REQUIRE(res.lid.parts.size() == 1);
+
+        const indexed_triangle_set &base = res.base.parts.front().mesh;
+        REQUIRE(its_num_open_edges(base) == 0);
+        REQUIRE_THAT(double(its_volume(base)), WithinRel(1600. * 1.2 + (1600. - 36.8 * 36.8) * (25. - 1.2), 1e-3));
+        REQUIRE_THAT(bounding_box(base).min.z(), WithinAbs(0., 1e-6));
+        REQUIRE_THAT(bounding_box(base).max.z(), WithinAbs(25., 1e-4));
+
+        const indexed_triangle_set &lid = res.lid.parts.front().mesh;
+        REQUIRE(its_num_open_edges(lid) == 0);
+        double plate = 1600. + 4. * 40. * 1.5 + PI * 1.5 * 1.5;
+        REQUIRE_THAT(double(its_volume(lid)), WithinRel(plate * 2. + (36.4 * 36.4 - 33.2 * 33.2) * 4., 2e-3));
+        REQUIRE_THAT(bounding_box(lid).min.z(), WithinAbs(0., 1e-6));
+        REQUIRE_THAT(bounding_box(lid).max.z(), WithinAbs(6., 1e-4));
+        REQUIRE_THAT(bounding_box(lid).size().x(), WithinAbs(43., 0.01));
+    }
+
+    SECTION("chamfered bottom edge")
+    {
+        p.chamfer = 0.6;
+        OutlineBoxResult res = make_outline_box(s.shape, {}, p);
+        REQUIRE(res.is_valid());
+        const indexed_triangle_set &base = res.base.parts.front().mesh;
+        REQUIRE(its_num_open_edges(base) == 0);
+        double plain = 1600. * 1.2 + (1600. - 36.8 * 36.8) * (25. - 1.2);
+        REQUIRE(double(its_volume(base)) < plain);
+        REQUIRE(double(its_volume(base)) > plain - 4. * 40. * 0.6 * 0.6);
+        // the footprint is smaller than the box
+        REQUIRE(bounding_box(base).size().x() < 40.01);
+    }
+}
+
+TEST_CASE("Box lid with a picture", "[OutlineObjects]")
+{
+    // The right half of the image is one colour, a small square in the left half is another
+    ExPolygons level_a = {rect(10., 0., 20., 20.)};
+    ExPolygons level_b = {rect(2., 2., 6., 6.)};
+    ExPolygons rest    = {rect(0., 0., 20., 20.)};
+
+    Silhouette s = make_silhouette({rest}, plain_params(40.));
+    std::vector<ExPolygons> detail = {to_silhouette_frame(level_a, s), to_silhouette_frame(level_b, s)};
+
+    OutlineBoxParams   p;
+    OutlineBoxSections sec = outline_box_sections(s.shape, detail, p);
+    REQUIRE(sec.decoration.size() == 2);
+    // the picture keeps the margin from the outline
+    REQUIRE_THAT(area_mm2(sec.decoration[0]), WithinRel((20. - 0.8) * (40. - 1.6), 1e-3));
+    REQUIRE_THAT(area_mm2(sec.decoration[1]), WithinRel(64., 1e-3));
+    REQUIRE(area_mm2(intersection_ex(sec.decoration[0], sec.decoration[1])) < 1e-6);
+
+    OutlineBoxResult res = make_outline_box(s.shape, detail, p);
+    REQUIRE(res.is_valid());
+    REQUIRE(res.lid.parts.size() == 3);
+    REQUIRE(res.lid.parts[0].level == -1);
+    REQUIRE(res.lid.parts[1].level == 0);
+    REQUIRE(res.lid.parts[2].level == 1);
+
+    double volume = 0.;
+    for (const OutlinePart &part : res.lid.parts) {
+        REQUIRE(its_num_open_edges(part.mesh) == 0);
+        REQUIRE(its_volume(part.mesh) > 0.f);
+        volume += double(its_volume(part.mesh));
+    }
+    // the picture is inlaid: body and colours together are the plain lid
+    OutlineBoxParams plain = p;
+    plain.decoration       = false;
+    OutlineBoxResult plain_res = make_outline_box(s.shape, detail, plain);
+    REQUIRE(plain_res.lid.parts.size() == 1);
+    REQUIRE_THAT(volume, WithinRel(double(its_volume(plain_res.lid.parts.front().mesh)), 1e-3));
+
+    // 0.6 mm deep, in the first layers
+    REQUIRE_THAT(bounding_box(res.lid.parts[1].mesh).min.z(), WithinAbs(0., 1e-6));
+    REQUIRE_THAT(bounding_box(res.lid.parts[1].mesh).max.z(), WithinAbs(0.6, 1e-5));
+    // the lid is printed top face down: the right half of the image is on the left of the bed
+    REQUIRE(bounding_box(res.lid.parts[1].mesh).max.x() < 0.01);
+    REQUIRE(bounding_box(res.lid.parts[2].mesh).min.x() > -0.01);
+
+    SECTION("levels which overlap are separated")
+    {
+        std::vector<ExPolygons> both = {detail[0], detail[0]};
+        OutlineBoxSections      o    = outline_box_sections(s.shape, both, p);
+        REQUIRE(o.decoration.size() == 2);
+        REQUIRE(o.decoration[1].empty());
+        REQUIRE(make_outline_box(s.shape, both, p).lid.parts.size() == 2);
+    }
+}
+
+TEST_CASE("Box of difficult shapes", "[OutlineObjects]")
+{
+    SECTION("no shape")
+    {
+        OutlineBoxResult res = make_outline_box({}, {}, OutlineBoxParams());
+        REQUIRE_FALSE(res.is_valid());
+        REQUIRE_FALSE(res.error.empty());
+    }
+
+    SECTION("too thin for a cavity")
+    {
+        Silhouette       s   = make_silhouette({{rect(0., 0., 40., 3.)}}, plain_params(40.));
+        OutlineBoxResult res = make_outline_box(s.shape, {}, OutlineBoxParams());
+        REQUIRE(res.is_valid());
+        REQUIRE(res.warnings.size() >= 2); // solid base, no lip
+        REQUIRE(its_num_open_edges(res.base.parts.front().mesh) == 0);
+        REQUIRE(its_num_open_edges(res.lid.parts.front().mesh) == 0);
+    }
+
+    SECTION("star")
+    {
+        ExPolygon star;
+        for (int i = 0; i < 10; ++i) {
+            double a = PI * double(i) / 5.;
+            double r = i % 2 == 0 ? 30. : 12.;
+            star.contour.points.push_back(Point::new_scale(r * std::cos(a), r * std::sin(a)));
+        }
+        Silhouette       s   = make_silhouette({{star}}, SilhouetteParams());
+        OutlineBoxResult res = make_outline_box(s.shape, {}, OutlineBoxParams());
+        REQUIRE(res.is_valid());
+        REQUIRE(its_num_open_edges(res.base.parts.front().mesh) == 0);
+        REQUIRE(its_num_open_edges(res.lid.parts.front().mesh) == 0);
+        REQUIRE(its_volume(res.base.parts.front().mesh) > 0.f);
+    }
+}
+
+namespace {
+
+bool indices_in_range(const indexed_triangle_set &its)
+{
+    for (const stl_triangle_vertex_indices &face : its.indices)
+        for (int k = 0; k < 3; ++k)
+            if (face[k] < 0 || size_t(face[k]) >= its.vertices.size())
+                return false;
+    return true;
+}
+
+} // namespace
+
+TEST_CASE("Prism of a sliver that runs back along itself", "[OutlineObjects]")
+{
+    // Left over between two colour areas of a traced image [scaled]: the triangulation gave
+    // triangles of points that do not exist, which ended the application
+    std::vector<Points> slivers = {
+        {{-17510658, -24845776}, {-17512657, -24268097}, {-17392724, -23688425}, {-17392725, -23688427},
+         {-17512657, -24268095}, {-17510658, -24845778}, {-17438700, -25204573}, {-17438698, -25204573}},
+        {{-139428, -19941538}, {131421, -18905113}, {131421, -18905111}, {-139430, -19941543}, {-228766, -20161445}, {-228765, -20161445}},
+        {{-3995258, 130177}, {-3630467, 913727}, {-3265666, 1905188}, {-3194842, 2176032},
+         {-3265667, 1905185}, {-3630466, 913731}, {-3995257, 130180}, {-4621900, -861254}},
+    };
+    ExPolygons all;
+    for (const Points &points : slivers) {
+        ExPolygon sliver;
+        sliver.contour.points = points;
+        indexed_triangle_set its = outline_prism({sliver}, 0., 0.6);
+        REQUIRE(indices_in_range(its));
+        all.push_back(sliver);
+    }
+    // next to a good shape, the good shape is kept
+    all.push_back(rect(0., 0., 10., 10.));
+    indexed_triangle_set its = outline_prism(all, 0., 0.6);
+    REQUIRE(indices_in_range(its));
+    REQUIRE(its_volume(its) > 59.f);
+}
+
+TEST_CASE("Box lid with a picture of colour areas that do not meet exactly", "[OutlineObjects]")
+{
+    Silhouette s = make_silhouette({{rect(0., 0., 40., 40.)}}, plain_params(40.));
+    REQUIRE(!s.empty());
+    // two colour areas with a gap of 0.02 mm and a third one that touches in one point
+    std::vector<ExPolygons> levels = {{rect(-10., -10., 0., 10.)}, {rect(0.02, -10., 10., 10.)}, {rect(-14., -14., -10., -10.)}};
+    OutlineBoxResult res = make_outline_box(s.shape, levels, OutlineBoxParams());
+    REQUIRE(res.is_valid());
+    for (const OutlinePart &part : res.lid.parts) {
+        REQUIRE(indices_in_range(part.mesh));
+        REQUIRE(!part.mesh.indices.empty());
+    }
+    REQUIRE(its_num_open_edges(res.lid.parts.front().mesh) == 0);
+}
