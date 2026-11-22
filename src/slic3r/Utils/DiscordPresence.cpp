@@ -20,9 +20,11 @@
     #include <unistd.h>
 #endif
 
-// Supplied by the build; empty leaves the feature inert.
+// EdgeSlicer's Discord application (name and Rich Presence art live in the Discord
+// developer portal). A build may override it with -DSLIC3R_DISCORD_APP_ID=<id>, and
+// discord_rich_presence_app_id in EdgeSlicer.conf overrides both at run time.
 #ifndef SLIC3R_DISCORD_APP_ID
-    #define SLIC3R_DISCORD_APP_ID ""
+    #define SLIC3R_DISCORD_APP_ID "1574159097887199293"
 #endif
 
 namespace Slic3r {

@@ -1744,8 +1744,7 @@ endif ()
 # Add a definition so that we can tell we are compiling slic3r.
 target_compile_definitions(libslic3r_gui PRIVATE SLIC3R_CURRENTLY_COMPILING_GUI_MODULE)
 
-# Discord Rich Presence application id (empty leaves the feature inert unless
-# discord_rich_presence_app_id is set in EdgeSlicer.conf).
+# Discord Rich Presence application id override (empty keeps EdgeSlicer's own id).
 if (SLIC3R_DISCORD_APP_ID)
     target_compile_definitions(libslic3r_gui PRIVATE SLIC3R_DISCORD_APP_ID="${SLIC3R_DISCORD_APP_ID}")
 endif ()

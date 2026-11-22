@@ -261,3 +261,11 @@ TEST_CASE("Presence stays disabled without an application id", "[DiscordPresence
     presence.set_enabled(true);
     CHECK_FALSE(presence.is_enabled());
 }
+
+TEST_CASE("EdgeSlicer ships its own Discord application id", "[DiscordPresence]")
+{
+    // A build without -DSLIC3R_DISCORD_APP_ID must still publish as EdgeSlicer.
+    const std::string id = discord_default_application_id();
+    REQUIRE_FALSE(id.empty());
+    CHECK(id.find_first_not_of("0123456789") == std::string::npos);
+}
