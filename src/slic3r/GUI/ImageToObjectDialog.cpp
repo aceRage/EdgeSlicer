@@ -243,8 +243,8 @@ void i2o_add_objects(Plater *plater, const std::vector<OutlineObject> &objects, 
         for (const OutlinePart &part : source.parts)
             if (part.level < 0)
                 body = dialog.extruder(part);
-        // a replaced object without a filament of its own in the dialog (cutter) keeps the one it had
-        if (body > 0 || placement == nullptr)
+        // the dialog has no filament for a cutter: a replaced one keeps the filament it had
+        if (placement == nullptr || dialog.settings().type != ImageObjectType::CookieCutter)
             object->config.set_key_value("extruder", new ConfigOptionInt(body));
         if (!dialog.is_fit_test()) {
             object->image_object_recipe.group      = group;
@@ -1526,12 +1526,24 @@ bool edit_image_object()
 
     // The selected object and the other objects made with it (the lid of a box): one per place
     // in the group. Copies of them keep what they are.
+    // A copy of an object has the group of the original. Copies are told apart by their order:
+    // the n-th base belongs to the n-th lid, which holds for a box copied as a whole. A copy of
+    // the lid alone has no base then, and gets a new one.
     auto find_targets = [&model, &recipe, selected]() {
         std::map<int, size_t> targets;
         targets[recipe.index] = size_t(selected);
+        size_t rank = 0;
+        for (size_t i = 0; i < size_t(selected); ++i) {
+            const ImageObjectRecipe &other = model.objects[i]->image_object_recipe;
+            if (other.group == recipe.group && other.index == recipe.index)
+                ++rank;
+        }
+        std::map<int, size_t> seen;
         for (size_t i = 0; i < model.objects.size(); ++i) {
             const ImageObjectRecipe &other = model.objects[i]->image_object_recipe;
-            if (other.group == recipe.group && targets.count(other.index) == 0)
+            if (other.group != recipe.group || other.index == recipe.index)
+                continue;
+            if (seen[other.index]++ == rank)
                 targets[other.index] = i;
         }
         return targets;
@@ -1576,7 +1588,9 @@ bool edit_image_object()
     targets = find_targets();
 
     Plater::TakeSnapshot      snapshot(plater, "Edit image object");
-    std::vector<I2OPlacement> placements;
+    // the n-th new object takes the place of the old object which was the n-th of its group;
+    // an entry without instances is an object which is not there any more and is added beside
+    std::vector<I2OPlacement> placements(size_t(std::max(0, targets.rbegin()->first)) + 1);
     std::vector<size_t>       remove;
     for (const auto &[index, object_idx] : targets) {
         const ModelObject *object = model.objects[object_idx];
@@ -1585,7 +1599,8 @@ bool edit_image_object()
             placement.instances.push_back(instance->get_transformation());
         placement.config    = object->config.get();
         placement.printable = object->printable;
-        placements.push_back(std::move(placement));
+        if (index >= 0 && size_t(index) < placements.size())
+            placements[size_t(index)] = std::move(placement);
         remove.push_back(object_idx);
     }
     // from the end, so the indices of the other ones stay valid
