@@ -125,7 +125,7 @@ struct FakeUiThread
             for (;;) {
                 std::function<void()> task;
                 {
-                    std::unique_lock<std::mutex> lock(mutex);
+                    std::unique_lock<std::mutex> lock(this->mutex);
                     cv.wait(lock, [this] { return stop || !tasks.empty(); });
                     if (tasks.empty())
                         return;
