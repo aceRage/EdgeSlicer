@@ -1591,8 +1591,11 @@ std::vector<size_t> Print::layers_sorted_for_object(float start, float end, std:
     return idx_of_object_sorted;
 };
 
-StringObjectException Print::sequential_print_clearance_valid(const Print &print, Polygons *polygons, std::vector<std::pair<Polygon, float>>* height_polygons)
+StringObjectException Print::sequential_print_clearance_valid(const Print &print, Polygons *polygons, std::vector<std::pair<Polygon, float>>* height_polygons,
+                                                              StringObjectException *rod_warning)
 {
+    if (rod_warning != nullptr)
+        *rod_warning = StringObjectException();
     StringObjectException single_object_exception;
     const auto& print_config = print.config();
     Polygons exclude_polys = get_bed_excluded_area(print_config);
@@ -1616,6 +1619,8 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
         bool                 has_above_rod   = false;
         coord_t              above_rod_min_y = 0;
         coord_t              above_rod_max_y = 0;
+        // The instance's own footprint, not grown by the clearance (bounding_box above is).
+        BoundingBox          footprint;
     };
     // ORCA: Y extent of an instance's geometry above the rod height, in the same coordinates as the
     // bounding boxes below. Conservative: any triangle with a vertex above the rod contributes all
@@ -1762,6 +1767,7 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                 print_info.height = object_top(instance);
                 print_info.model_position = model_position_of(print.model(), instance.model_instance);
                 print_info.has_above_rod = above_rod_y_range(instance, print_info.above_rod_min_y, print_info.above_rod_max_y);
+                print_info.footprint = convex_hull_no_offset.bounding_box();
                 print_instance_with_bounding_box.push_back(std::move(print_info));
                 convex_hulls_other.emplace_back(std::move(convex_hull));
             }
@@ -1998,6 +2004,41 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                 }
                 if (height_polygons)
                     height_polygons->emplace_back(std::move(iter.second));
+            }
+        }
+
+        // EDGE: a warning, never a refusal, and it changes neither the order nor the G-code. Bambu Studio grows
+        // every footprint by half of extruder_clearance_dist_to_rod, so it refuses an instance that reaches above
+        // the rod when a later one is closer to it in Y than dist_to_rod (56.5 mm on the A1 / A2L). The test above
+        // reaches only half the clearance radius plus the skirt (36.4 mm there). Between the two, warn: the part
+        // above the rod (as above, shrunk by the same 0.1 mm) against the later instance's own footprint. Only on
+        // i3 printers, whose gantry spans the bed at the rod height.
+        if (rod_warning != nullptr && print.config().printer_structure.value == PrinterStructure::psI3) {
+            const coord_t rod_reach = scaled<coord_t>(print.config().extruder_clearance_dist_to_rod.value);
+            const coord_t tol       = scaled<coord_t>(0.1);
+            for (int k = 0; k + 1 < print_instance_count; k++) {
+                const auto &info_k = print_instance_with_bounding_box[k];
+                if (!info_k.has_above_rod || too_tall_instances.count(info_k.print_instance) > 0)
+                    continue;
+                const coord_t iy1   = info_k.above_rod_min_y + tol - rod_reach;
+                const coord_t iy2   = info_k.above_rod_max_y - tol + rod_reach;
+                bool          close = false;
+                for (int i = k + 1; i < print_instance_count && !close; i++) {
+                    const BoundingBox &later = print_instance_with_bounding_box[i].footprint;
+                    close = std::min(iy2, later.max.y()) - std::max(iy1, later.min.y()) > 0;
+                }
+                if (!close)
+                    continue;
+                const ModelObject *object = info_k.print_instance->model_instance->get_object();
+                const std::string  text   = (boost::format(L("%1% is tall and close to an object printed after it. The printer's gantry may hit it. "
+                                                               "Move them further apart, or print it last.")) % object->name).str();
+                if (rod_warning->string.empty()) {
+                    rod_warning->string = text;
+                    rod_warning->object = object;
+                } else {
+                    rod_warning->string += "\n" + text;
+                    rod_warning->object = nullptr;
+                }
             }
         }
     }
@@ -3303,11 +3344,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             return {L("Smooth mode of timelapse is not supported when \"by object\" sequence is enabled.")};
 
         //BBS: refine seq-print validation logic
-        auto ret = sequential_print_clearance_valid(*this, collison_polygons, height_polygons);
+        StringObjectException rod_warning;
+        auto ret = sequential_print_clearance_valid(*this, collison_polygons, height_polygons, &rod_warning);
         if (!ret.string.empty()) {
             ret.type = STRING_EXCEPT_OBJECT_COLLISION_IN_SEQ_PRINT;
             return ret;
         }
+        if (!rod_warning.string.empty())
+            add_warning(rod_warning);
         // A single object printed by object can still build a tower: test it against the object (warning only).
         if (StringObjectException tower_warning = by_object_tower_clearance_warning(*this); !tower_warning.string.empty())
             add_warning(tower_warning);
