@@ -399,6 +399,13 @@ FlushOrderCacheKey make_flush_order_cache_key(const std::vector<unsigned int> &e
 // still orders the filaments it does name. Exposed for unit testing.
 std::vector<unsigned int> parse_cyclic_order(const std::string& str, unsigned int number_of_extruders);
 
+namespace GroupReorder {
+// Each extruder's filaments x filaments flush matrix the filament grouping scores maps with, times its flush
+// multiplier: one flush_volumes_matrix block per nozzle, or the single matrix whole for every nozzle. Exposed for
+// unit testing.
+std::vector<std::vector<std::vector<float>>> prepare_flush_matrices(const PrintConfig &print_config);
+} // namespace GroupReorder
+
 // Classic DP flush-volume solver used by reorder_extruders_for_minimum_flush_volume.
 // Snapmaker #754: exposed so Catch2 can drive the wipe_volumes OOB guard without constructing a Print.
 std::vector<unsigned int> get_extruders_order(const std::vector<std::vector<float>> &wipe_volumes,

@@ -1,0 +1,194 @@
+#include <catch2/catch.hpp>
+
+#include "libslic3r/FilamentGroup.hpp"
+#include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/MixedFilamentCliGates.hpp"
+#include "libslic3r/MultiNozzleUtils.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/GCode/ToolOrdering.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <set>
+#include <vector>
+
+using namespace Slic3r;
+
+// flush_volumes_matrix holds, for N filaments, either ONE N x N matrix that every nozzle uses (as this fork's GUI
+// and command line write two-extruder H2D / H2C projects) or one N x N matrix PER NOZZLE, nozzle after nozzle
+// (2 x N x N, as Bambu Studio writes them). These cases pin how each reader takes both shapes.
+
+namespace {
+
+// matrix[block][from][to] = 1000 * (block + 1) + 10 * from + to + 1, so every entry is distinct and nonzero.
+std::vector<double> numbered_blocks(size_t filaments, size_t blocks)
+{
+    std::vector<double> values;
+    for (size_t b = 0; b < blocks; ++b)
+        for (size_t from = 0; from < filaments; ++from)
+            for (size_t to = 0; to < filaments; ++to)
+                values.push_back(double(1000 * (b + 1) + 10 * from + to + 1));
+    return values;
+}
+
+std::vector<double> block_of(const std::vector<double> &values, size_t filaments, size_t block)
+{
+    return std::vector<double>(values.begin() + block * filaments * filaments, values.begin() + (block + 1) * filaments * filaments);
+}
+
+} // namespace
+
+TEST_CASE("flush_matrix_layout tells one shared matrix from one matrix per nozzle", "[FlushMatrix]")
+{
+    SECTION("one N x N matrix on two nozzles is one block")
+    {
+        const FlushMatrixLayout layout = flush_matrix_layout(16, 2, 4);
+        CHECK(layout.filaments == 4);
+        CHECK(layout.blocks == 1);
+        const FlushMatrixLayout by_size = flush_matrix_layout(16, 2);
+        CHECK(by_size.filaments == 4);
+        CHECK(by_size.blocks == 1);
+    }
+    SECTION("2 x N x N on two nozzles is one block per nozzle")
+    {
+        for (size_t n = 1; n <= 8; ++n) {
+            INFO("filaments " << n);
+            const FlushMatrixLayout layout = flush_matrix_layout(2 * n * n, 2, n);
+            CHECK(layout.filaments == n);
+            CHECK(layout.blocks == 2);
+            const FlushMatrixLayout by_size = flush_matrix_layout(2 * n * n, 2);
+            CHECK(by_size.filaments == n);
+            CHECK(by_size.blocks == 2);
+        }
+    }
+    SECTION("one nozzle, or a length that is neither, is the old floor(sqrt) square")
+    {
+        CHECK(flush_matrix_layout(32, 1).filaments == 5);
+        CHECK(flush_matrix_layout(32, 1).blocks == 1);
+        CHECK(flush_matrix_layout(10, 2, 3).filaments == 3);
+        CHECK(flush_matrix_layout(10, 2, 3).blocks == 1);
+        CHECK(flush_matrix_layout(0, 2).filaments == 0);
+    }
+    SECTION("four equal blocks on a four-tool printer stay one square without a filament count")
+    {
+        // 4 x 2 x 2 = 16 is a 4 x 4 square; a toolchanger's list is read as it always was.
+        CHECK(flush_matrix_layout(16, 4).filaments == 4);
+        CHECK(flush_matrix_layout(16, 4).blocks == 1);
+    }
+}
+
+TEST_CASE("get_flush_volumes_matrix gives every nozzle the whole of a single matrix", "[FlushMatrix]")
+{
+    SECTION("N x N on two nozzles: the whole matrix for each")
+    {
+        const std::vector<double> single = numbered_blocks(3, 1);
+        CHECK(get_flush_volumes_matrix(single, 0, 2, 3) == single);
+        CHECK(get_flush_volumes_matrix(single, 1, 2, 3) == single);
+    }
+    SECTION("2 x N x N: each nozzle its own block")
+    {
+        const std::vector<double> per_nozzle = numbered_blocks(3, 2);
+        CHECK(get_flush_volumes_matrix(per_nozzle, 0, 2, 3) == block_of(per_nozzle, 3, 0));
+        CHECK(get_flush_volumes_matrix(per_nozzle, 1, 2, 3) == block_of(per_nozzle, 3, 1));
+    }
+    SECTION("one nozzle: unchanged")
+    {
+        const std::vector<double> single = numbered_blocks(3, 1);
+        CHECK(get_flush_volumes_matrix(single, 0, 1, 3) == single);
+        CHECK(get_flush_volumes_matrix(single, size_t(-1), 2, 3) == single);
+        CHECK(get_flush_volumes_matrix(single) == single);
+    }
+    SECTION("a too-short matrix is still cut in equal parts")
+    {
+        const std::vector<double> short_list = {1., 2., 3., 4., 5., 6.};
+        CHECK(get_flush_volumes_matrix(short_list, 0, 2, 3) == std::vector<double>{1., 2., 3.});
+        CHECK(get_flush_volumes_matrix(short_list, 1, 2, 3) == std::vector<double>{4., 5., 6.});
+    }
+}
+
+TEST_CASE("The filament grouping reads a single matrix whole on both nozzles", "[FlushMatrix][FilamentGroup]")
+{
+    // Three filaments; 0 <-> 1 flushes 600 mm3 both ways, every pair with 2 only 50.
+    const std::vector<double> single = {  0., 600., 50.,
+                                        600.,   0., 50.,
+                                         50.,  50.,  0. };
+    PrintConfig config;
+    config.nozzle_diameter.values      = {0.4, 0.4};
+    config.filament_colour.values      = {"#FFFFFF", "#000000", "#FF0000"};
+    config.flush_volumes_matrix.values = single;
+    config.flush_multiplier.value      = 1.;
+
+    const std::vector<FlushMatrix> matrices = GroupReorder::prepare_flush_matrices(config);
+    REQUIRE(matrices.size() == 2);
+    for (size_t nozzle = 0; nozzle < 2; ++nozzle) {
+        INFO("nozzle " << nozzle);
+        REQUIRE(matrices[nozzle].size() == 3);
+        for (size_t from = 0; from < 3; ++from)
+            for (size_t to = 0; to < 3; ++to)
+                CHECK(matrices[nozzle][from][to] == float(single[from * 3 + to]));
+    }
+
+    // The grouping run on those matrices: four layers that each print all three filaments.
+    auto group = [](const std::vector<FlushMatrix> &flush) {
+        FilamentGroupContext ctx;
+        ctx.model_info.flush_matrix = flush;
+        ctx.model_info.layer_filaments.assign(4, std::vector<unsigned int>{0, 1, 2});
+        for (const char *colour : {"#FFFFFF", "#000000", "#FF0000"}) {
+            FilamentGroupUtils::FilamentInfo info;
+            info.color      = FilamentGroupUtils::Color(std::string(colour));
+            info.type       = "PLA";
+            info.usage_type = FilamentUsageType::ModelOnly;
+            ctx.model_info.filament_info.emplace_back(info);
+        }
+        ctx.model_info.filament_ids.resize(3);
+        ctx.model_info.unprintable_filaments.assign(2, std::set<int>());
+        ctx.group_info.total_filament_num  = 3;
+        ctx.group_info.max_gap_threshold   = 0.01;
+        ctx.group_info.mode                = FGMode::FlushMode;
+        ctx.group_info.strategy            = FGStrategy::BestCost;
+        ctx.group_info.filament_volume_map.assign(3, int(NozzleVolumeType::nvtHybrid));
+        ctx.machine_info.max_group_size.assign(2, 3);
+        ctx.machine_info.prefer_non_model_filament.assign(2, false);
+        ctx.machine_info.master_extruder_id = 1;
+        for (int nozzle = 0; nozzle < 2; ++nozzle) {
+            MultiNozzleUtils::NozzleInfo info;
+            info.diameter    = "0.4";
+            info.volume_type = NozzleVolumeType::nvtStandard;
+            info.extruder_id = nozzle;
+            info.group_id    = nozzle;
+            ctx.nozzle_info.nozzle_list.emplace_back(info);
+            ctx.nozzle_info.extruder_nozzle_list[nozzle] = {nozzle};
+        }
+        return FilamentGroup(ctx).calc_filament_group();
+    };
+
+    const std::vector<int> map = group(matrices);
+    REQUIRE(map.size() == 3);
+    // Read whole, the 600 mm3 pair goes to different nozzles.
+    CHECK(map[0] != map[1]);
+
+    // The old reading cut the nine values in halves, one per nozzle, padded with zeros: it groups otherwise.
+    std::vector<FlushMatrix> halved;
+    for (size_t nozzle = 0; nozzle < 2; ++nozzle) {
+        std::vector<double> part = get_flush_volumes_matrix(single, nozzle, 2);
+        part.resize(9, 0.);
+        FlushMatrix m(3, std::vector<float>(3));
+        for (size_t i = 0; i < 9; ++i)
+            m[i / 3][i % 3] = float(part[i]);
+        halved.emplace_back(m);
+    }
+    CHECK(group(halved) != map);
+}
+
+TEST_CASE("A single matrix reads the same in every per-change reader", "[FlushMatrix]")
+{
+    // One N x N block (the fork's own shape) and a too-short list keep exactly the floor(sqrt) square they had.
+    for (const std::vector<double> &values : {numbered_blocks(3, 1), std::vector<double>{1., 2., 3., 4., 5., 6., 7.}}) {
+        const size_t n = size_t(std::sqrt(double(values.size())));
+        const std::vector<std::vector<float>> table = flush_matrix_for_changes(values, 2, {2, 1, 2});
+        REQUIRE(table.size() == n);
+        for (size_t from = 0; from < n; ++from)
+            for (size_t to = 0; to < n; ++to)
+                CHECK(table[from][to] == float(values[from * n + to]));
+    }
+}

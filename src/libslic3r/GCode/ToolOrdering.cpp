@@ -1769,7 +1769,9 @@ std::vector<FlushMatrix> prepare_flush_matrices(const PrintConfig& print_config)
     size_t filament_nums = print_config.filament_colour.values.size();
     std::vector<FlushMatrix> nozzle_flush_mtx;
     for (size_t nozzle_id = 0; nozzle_id < extruder_nums; ++nozzle_id) {
-        std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(print_config.flush_volumes_matrix.values, nozzle_id, extruder_nums)));
+        // One filaments x filaments matrix (as this fork writes two-extruder projects) is every nozzle's whole
+        // matrix; Bambu Studio's one matrix per nozzle is cut per nozzle.
+        std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(print_config.flush_volumes_matrix.values, nozzle_id, extruder_nums, filament_nums)));
         // A flush matrix shorter than filaments x filaments per nozzle (a preset written for another
         // extruder count) must not be sliced past its end below: missing entries flush nothing.
         if (flush_matrix.size() < filament_nums * filament_nums)

@@ -743,6 +743,67 @@ std::vector<std::map<int, int>> get_extruder_ams_count(const std::vector<std::st
     return extruder_ams_counts;
 }
 
+namespace {
+size_t flush_matrix_isqrt(size_t value)
+{
+    size_t root = size_t(std::sqrt(double(value)) + EPSILON);
+    while (root > 0 && root * root > value)
+        --root;
+    while ((root + 1) * (root + 1) <= value)
+        ++root;
+    return root;
+}
+} // namespace
+
+FlushMatrixLayout flush_matrix_layout(size_t size, size_t nozzle_nums, size_t filaments)
+{
+    FlushMatrixLayout layout;
+    layout.filaments = flush_matrix_isqrt(size);
+    if (nozzle_nums < 2)
+        return layout;
+    if (filaments > 0) {
+        if (size == nozzle_nums * filaments * filaments) {
+            layout.filaments = filaments;
+            layout.blocks    = nozzle_nums;
+        }
+        return layout;
+    }
+    if (layout.filaments * layout.filaments == size || size % nozzle_nums != 0)
+        return layout;
+    const size_t block = size / nozzle_nums;
+    const size_t root  = flush_matrix_isqrt(block);
+    if (root > 0 && root * root == block) {
+        layout.filaments = root;
+        layout.blocks    = nozzle_nums;
+    }
+    return layout;
+}
+
+double flush_volume_for_change(const std::vector<double> &values, size_t nozzle_nums, const std::vector<int> &filament_map,
+                               size_t from, size_t to, size_t filaments)
+{
+    const FlushMatrixLayout layout = flush_matrix_layout(values.size(), nozzle_nums, filaments);
+    const size_t            n      = layout.filaments;
+    if (from >= n || to >= n)
+        return 0.;
+    size_t block = 0;
+    if (layout.per_nozzle() && to < filament_map.size() && filament_map[to] >= 1 && size_t(filament_map[to]) <= layout.blocks)
+        block = size_t(filament_map[to]) - 1;
+    const size_t idx = block * n * n + from * n + to;
+    return idx < values.size() ? values[idx] : 0.;
+}
+
+std::vector<std::vector<float>> flush_matrix_for_changes(const std::vector<double> &values, size_t nozzle_nums,
+                                                         const std::vector<int> &filament_map, size_t filaments)
+{
+    const size_t                    n = flush_matrix_layout(values.size(), nozzle_nums, filaments).filaments;
+    std::vector<std::vector<float>> table(n, std::vector<float>(n, 0.f));
+    for (size_t from = 0; from < n; ++from)
+        for (size_t to = 0; to < n; ++to)
+            table[from][to] = float(flush_volume_for_change(values, nozzle_nums, filament_map, from, to, filaments));
+    return table;
+}
+
 // Parse the per-extruder nozzle-stat encoding "VolumeType#count|VolumeType#count|..." into a map per extruder.
 std::vector<std::map<NozzleVolumeType, int>> get_extruder_nozzle_stats(const std::vector<std::string>& strs)
 {

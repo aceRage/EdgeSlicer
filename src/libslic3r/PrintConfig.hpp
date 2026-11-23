@@ -1387,11 +1387,41 @@ void handle_legacy_sla(DynamicPrintConfig &config);
 extern std::vector<std::map<int, int>>              get_extruder_ams_count(const std::vector<std::string> &strs);
 extern std::vector<std::map<NozzleVolumeType, int>> get_extruder_nozzle_stats(const std::vector<std::string> &strs);
 
+// How a flush_volumes_matrix of `size` values is laid out on a printer of `nozzle_nums` nozzles (extruders):
+// Bambu Studio writes one filaments x filaments block per nozzle, nozzle after nozzle (blocks == nozzle_nums);
+// this fork's GUI and command line write one block that every nozzle uses (blocks == 1). With `filaments` given,
+// a list of nozzle_nums blocks of that size is per nozzle; with filaments == 0 the size decides: a perfect
+// square is one block, nozzle_nums equal perfect squares one per nozzle. Any other length is read as one
+// square of floor(sqrt(size)) filaments, as the readers always did.
+struct FlushMatrixLayout
+{
+    size_t filaments = 0; // rows (and columns) of each block
+    size_t blocks    = 1; // 1, or nozzle_nums
+    bool   per_nozzle() const { return blocks > 1; }
+};
+FlushMatrixLayout flush_matrix_layout(size_t size, size_t nozzle_nums, size_t filaments = 0);
+
+// The filaments x filaments table a filament change is read from: entry [from][to] of the block of the nozzle `to`
+// prints from (filament_map, 1-based extruder per filament; a filament it does not place reads the first block),
+// so a change onto a nozzle flushes by that nozzle's matrix. A single block (or any length that is not one block
+// per nozzle) gives exactly the square the readers built before: floor(sqrt(size)) rows of the values as they are.
+std::vector<std::vector<float>> flush_matrix_for_changes(const std::vector<double> &values, size_t nozzle_nums,
+                                                         const std::vector<int> &filament_map, size_t filaments = 0);
+// One entry of flush_matrix_for_changes() (0 for a pair outside it), without building the table, in double.
+double flush_volume_for_change(const std::vector<double> &values, size_t nozzle_nums, const std::vector<int> &filament_map,
+                              size_t from, size_t to, size_t filaments = 0);
+
 // Ultra (dual-nozzle): slice one nozzle's sub-matrix out of a packed multi-nozzle flush matrix.
 // extruder_id == size_t(-1) (or nozzle_nums == 1) returns the whole (single-nozzle) matrix unchanged.
+// With filament_nums given, a list of exactly filament_nums x filament_nums values is the one matrix every
+// nozzle uses (as this fork writes two-extruder projects) and is returned whole for each nozzle, not cut in
+// nozzle_nums parts; one block per nozzle, or any other length, is cut as before.
 template<class T>
-static std::vector<T> get_flush_volumes_matrix(const std::vector<T> &fv_matrix, size_t extruder_id = size_t(-1), size_t nozzle_nums = 1)
+static std::vector<T> get_flush_volumes_matrix(const std::vector<T> &fv_matrix, size_t extruder_id = size_t(-1), size_t nozzle_nums = 1,
+                                               size_t filament_nums = 0)
 {
+    if (filament_nums > 0 && fv_matrix.size() == filament_nums * filament_nums)
+        return fv_matrix;
     if (extruder_id != size_t(-1) && nozzle_nums != 1) {
         return std::vector<T>(fv_matrix.begin() + size_t(fv_matrix.size() / nozzle_nums * extruder_id + EPSILON),
                               fv_matrix.begin() + size_t(fv_matrix.size() / nozzle_nums * (extruder_id + 1) + EPSILON));
