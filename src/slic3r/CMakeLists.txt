@@ -90,6 +90,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/CameraPopup.hpp
     GUI/CameraUtils.cpp
     GUI/CameraUtils.hpp
+    GUI/ApplyTransformDialog.cpp
+    GUI/ApplyTransformDialog.hpp
     GUI/CloneDialog.cpp
     GUI/CloneDialog.hpp
     GUI/FillBedDialog.cpp
@@ -1512,6 +1514,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Widgets/WebView.cpp                       # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
     GUI/AMSSetting.cpp                            # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/Calibration.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/ApplyTransformDialog.cpp                  # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/CloneDialog.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/FillBedDialog.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/HeightPatternDialog.cpp                   # ::CheckBox vs GUI::CheckBox (Field.hpp)

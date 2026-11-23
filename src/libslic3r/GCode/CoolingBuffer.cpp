@@ -383,6 +383,45 @@ finished:
 	return new_feedrate;
 }
 
+// Orca #17534: whether the layer cooling slowdown brought an outer wall of this extruder inside the resonance
+// avoidance range. Edge: a Z-contoured wall (TYPE_ZAA_SCALED) is left out, its feed rate follows the bead height.
+static bool outer_wall_slowed_into_range(const PerExtruderAdjustments &adj, float min_speed, float max_speed)
+{
+    return std::any_of(adj.lines.begin(), adj.lines.end(), [min_speed, max_speed](const CoolingLine &line) {
+        return line.slowdown && (line.type & CoolingLine::TYPE_EXTERNAL_PERIMETER) && ! (line.type & CoolingLine::TYPE_ZAA_SCALED) &&
+               line.feedrate > min_speed + EPSILON && line.feedrate < max_speed - EPSILON;
+    });
+}
+
+// Fixes the outer walls printed at or above max_speed at speed, for the extruders whose walls the slowdown brought into the range.
+static void hold_outer_walls(std::vector<PerExtruderAdjustments>       &unslowed,
+                             const std::vector<PerExtruderAdjustments> &slowed,
+                             float                                      min_speed,
+                             float                                      max_speed,
+                             float                                      speed)
+{
+    for (size_t i = 0; i < unslowed.size(); ++i)
+        if (outer_wall_slowed_into_range(slowed[i], min_speed, max_speed))
+            for (CoolingLine &line : unslowed[i].lines)
+                if ((line.type & CoolingLine::TYPE_ADJUSTABLE) && (line.type & CoolingLine::TYPE_EXTERNAL_PERIMETER) &&
+                    ! (line.type & CoolingLine::TYPE_ZAA_SCALED) && line.feedrate > max_speed - EPSILON) {
+                    line.type &= ~size_t(CoolingLine::TYPE_ADJUSTABLE);
+                    line.feedrate = speed;
+                    line.time     = line.length / speed;
+                    line.slowdown = true;
+                }
+}
+
+// The longest minimum layer time among the filaments whose layer may slow down.
+static float longest_minimum_layer_time(const std::vector<PerExtruderAdjustments> &per_extruder_adjustments)
+{
+    float longest = 0.f;
+    for (const PerExtruderAdjustments &adj : per_extruder_adjustments)
+        if (adj.cooling_slow_down_enabled && ! adj.lines.empty())
+            longest = std::max(longest, adj.slow_down_layer_time);
+    return longest;
+}
+
 std::string CoolingBuffer::process_layer(std::string &&gcode, size_t layer_id, bool flush)
 {
     // Cache the input G-code.
@@ -396,7 +435,33 @@ std::string CoolingBuffer::process_layer(std::string &&gcode, size_t layer_id, b
         // This is either an object layer or the very last print layer. Calculate cool down over the collected support layers
         // and one object layer.
         std::vector<PerExtruderAdjustments> per_extruder_adjustments = this->parse_layer_gcode(m_gcode, m_current_pos);
+        // Orca #17534: resonance avoidance moved the outer walls out of its range when the G-code was written;
+        // the slowdown below does not know the range and may bring them back into it.
+        const float ra_min          = float(m_config.min_resonance_avoidance_speed.value);
+        const float ra_max          = float(m_config.max_resonance_avoidance_speed.value);
+        const bool  avoid_resonance = m_config.resonance_avoidance.value && ra_min > 0.f && ra_max > ra_min;
+        std::vector<PerExtruderAdjustments> unslowed;
+        if (avoid_resonance)
+            unslowed = per_extruder_adjustments;
         float layer_time_stretched = this->calculate_layer_slowdown(per_extruder_adjustments);
+        if (avoid_resonance && std::any_of(per_extruder_adjustments.begin(), per_extruder_adjustments.end(),
+                                           [ra_min, ra_max](const PerExtruderAdjustments &adj) {
+                                               return outer_wall_slowed_into_range(adj, ra_min, ra_max);
+                                           })) {
+            // Hold those outer walls at the top of the range and slow the rest of the layer more, or at the
+            // bottom of the range when that cannot reach the layer time.
+            std::vector<PerExtruderAdjustments> held = unslowed;
+            hold_outer_walls(held, per_extruder_adjustments, ra_min, ra_max, ra_max);
+            float held_time = this->calculate_layer_slowdown(held);
+            // A layer up to 0.2% short of its target is accepted.
+            if (held_time < 0.998f * std::min(layer_time_stretched, longest_minimum_layer_time(unslowed))) {
+                held = std::move(unslowed);
+                hold_outer_walls(held, per_extruder_adjustments, ra_min, ra_max, ra_min);
+                held_time = this->calculate_layer_slowdown(held);
+            }
+            per_extruder_adjustments = std::move(held);
+            layer_time_stretched     = held_time;
+        }
         // Record whether any line's F is about to be rewritten with a cooling speed
         // (CoolingLine::slowdown is the flag apply_layer_cooldown() keys the rewrite on).
         m_last_layer_slowed_down = std::any_of(per_extruder_adjustments.begin(), per_extruder_adjustments.end(),
