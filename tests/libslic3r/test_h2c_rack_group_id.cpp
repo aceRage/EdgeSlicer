@@ -548,8 +548,8 @@ TEST_CASE("Rule P: on an automatic map a size pin is read on the extruder that h
     CHECK_THAT(nozzle_diameter_for_filament(automatic, 1), Catch::Matchers::WithinAbs(0.6, 1e-6));
     CHECK(rack_pin_extruder(automatic, 1, 0) == 1);
     CHECK_THAT(nozzle_diameter_for_filament(automatic, 3), Catch::Matchers::WithinAbs(0.4, 1e-6)); // no pin: as before
-    CHECK(rack_pin_extruders(automatic, 1, 0) == std::vector<bool>{ false, true });
-    CHECK(rack_pin_extruders(automatic, 3, 0).empty());
+    CHECK(rack_pin_extruders(automatic, 1) == std::vector<bool>{ false, true });
+    CHECK(rack_pin_extruders(automatic, 3).empty());
     PrintConfig print_config;
     print_config.apply(automatic, true);
     CHECK(validate_rack_nozzle_diameters(print_config, { 0, 1, 2 }).empty());
@@ -681,11 +681,12 @@ TEST_CASE("Rule P2: an automatic map keeps other sizes off a rack the pins set t
         CHECK(unprintable[0] == std::set<int>{ 0, 1 });
         CHECK(unprintable[1] == std::set<int>{ 2 });
     }
-    SECTION("pins putting two sizes on the right bar nothing more")
+    SECTION("forced pins putting two sizes on the right bar nothing more")
     {
-        const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 1 }, { 0.6, 0.4, 0. }, { 0 }, "Auto For Flush");
+        // f1 pinned 0.6 and f2 pinned to slot 1 (a 0.4): both can only go right.
+        const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 1 }, { 0.6, 0., 0. }, { 0, 1, 0 }, "Auto For Flush");
         CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable).empty());
-        CHECK(unprintable[0] == std::set<int>{ 0 });
+        CHECK(unprintable[0] == std::set<int>{ 0, 1 });
         CHECK(unprintable[1].empty());
     }
     SECTION("a pin to the extruder's own size bars no unpinned filament")
@@ -695,10 +696,10 @@ TEST_CASE("Rule P2: an automatic map keeps other sizes off a rack the pins set t
         CHECK(unprintable[0].empty());
         CHECK(unprintable[1].empty());
     }
-    SECTION("a filament pinned to another size the right also has is kept off it")
+    SECTION("a FREE pin to another size the right also has is kept off it")
     {
-        // f1 pinned 0.6 (right only), f2 pinned 0.4 with the saved map on the left (its pin extruder): the right is set to 0.6.
-        const DynamicPrintConfig cfg = h2c_pins({ 2, 1, 1 }, { 0.6, 0.4, 0. }, { 0 }, "Auto For Flush");
+        // f1 pinned 0.6 (right only: forced), f2 pinned 0.4 (both extruders: free): the right is set to 0.6.
+        const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 1 }, { 0.6, 0.4, 0. }, { 0 }, "Auto For Flush");
         CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable).empty());
         CHECK(unprintable[0] == std::set<int>{ 0 });
         CHECK(unprintable[1] == std::set<int>{ 1, 2 });
@@ -710,12 +711,81 @@ TEST_CASE("Rule P2: an automatic map keeps other sizes off a rack the pins set t
         CHECK(unprintable[0].empty());
         CHECK(unprintable[1].empty());
     }
-    SECTION("the saved map can be given (print by object)")
+    SECTION("print by object: the plate map with the pin moves")
     {
         const DynamicPrintConfig cfg = h2c_pins({ 1, 1, 1 }, { 0., 0.6, 0. }, { 0 }, "Auto For Flush");
-        const std::vector<int>   map{ 1, 0, 1 };
-        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable, &map).empty());
-        CHECK(unprintable[0] == std::set<int>{ 1 });
-        CHECK(unprintable[1] == std::set<int>{ 0, 2 });
+        CHECK(rack_pin_filament_map(cfg, { 0, 1, 2 }, { 1, 1, 1 }) == std::vector<int>{ 1, 2, 1 });
+        CHECK(rack_pin_filament_map(cfg, { 0, 1, 2 }, { 2, 1, 2 }) == std::vector<int>{ 1, 2, 1 });
+        // An unused filament keeps its entry.
+        CHECK(rack_pin_filament_map(cfg, { 0, 1 }, { 2, 1, 2 }) == std::vector<int>{ 1, 2, 2 });
+        // A hand-set map and a plate without pins are untouched.
+        const DynamicPrintConfig manual = h2c_pins({ 1, 1, 1 }, { 0., 0.6, 0. });
+        CHECK(rack_pin_filament_map(manual, { 0, 1, 2 }, { 2, 1, 2 }) == std::vector<int>{ 2, 1, 2 });
+        const DynamicPrintConfig none = h2c_pins({ 1, 1, 1 }, { 0. }, { 0 }, "Auto For Flush");
+        CHECK(rack_pin_filament_map(none, { 0, 1, 2 }, { 2, 1, 2 }) == std::vector<int>{ 2, 1, 2 });
     }
+}
+
+TEST_CASE("R2: on an automatic map the saved filament_map does not change the result", "[H2CRackGroupId][RackPins][AutoMap]")
+{
+    // Pins 0.6 (forced right) and 0.4 (free); saved maps 1,2,1,2 and 1,1,1,2 must give the same bars and the same moved map.
+    std::vector<std::vector<std::set<int>>> bars;
+    for (const std::vector<int> &saved : { std::vector<int>{ 1, 2, 1, 2 }, std::vector<int>{ 1, 1, 1, 2 } }) {
+        const DynamicPrintConfig cfg = h2c_pins(saved, { 0.6, 0.4, 0., 0. }, { 0 }, "Auto For Flush");
+        std::vector<std::set<int>> unprintable(2);
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2, 3 }, unprintable).empty());
+        CHECK(rack_pin_filament_map(cfg, { 0, 1, 2, 3 }, saved) == std::vector<int>{ 2, 1, 1, 1 });
+        CHECK(rack_pin_extruder(cfg, 2, saved[1] - 1) == 0); // a FREE pin is read on the lowest extruder that can take it
+        bars.push_back(unprintable);
+    }
+    REQUIRE(bars.size() == 2);
+    CHECK(bars[0] == bars[1]);
+    CHECK(bars[0][0] == std::set<int>{ 0 });
+    CHECK(bars[0][1] == std::set<int>{ 1, 2, 3 });
+    // A slot pin belongs to the lowest extruder that shows the slot, whatever the saved map says.
+    const DynamicPrintConfig slot = h2c_pins({ 2, 1, 1 }, { 0. }, { 0, 0, 2 }, "Auto For Flush");
+    CHECK(rack_pin_extruders(slot, 3) == std::vector<bool>{ false, true });
+}
+
+TEST_CASE("R3: Manual and Nozzle Manual are set by hand; the Auto modes follow the grouping", "[H2CRackGroupId][RackPins]")
+{
+    CHECK(hand_set_filament_map(h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. })));
+    CHECK(hand_set_filament_map(h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, "Nozzle Manual")));
+    CHECK_FALSE(rack_pins_follow_grouping(h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, "Nozzle Manual")));
+    for (const char *mode : { "Auto For Flush", "Auto For Match", "Auto For Quality" }) {
+        CAPTURE(mode);
+        const DynamicPrintConfig cfg = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, mode);
+        CHECK_FALSE(hand_set_filament_map(cfg));
+        CHECK(rack_pins_follow_grouping(cfg));
+    }
+    // A Nozzle Manual map with a 0.6 pin on the left is not regrouped: it is refused (R4).
+    const DynamicPrintConfig nozzle_manual = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, "Nozzle Manual");
+    CHECK(rack_pin_extruder(nozzle_manual, 1, 0) == 0);
+    std::vector<std::set<int>> unprintable(2);
+    CHECK(bar_rack_pin_extruders(nozzle_manual, { 0, 1, 2 }, unprintable).empty());
+    CHECK(unprintable[0].empty());
+    CHECK(unprintable[1].empty());
+}
+
+TEST_CASE("R4: a pin its hand-set extruder cannot take is refused", "[H2CRackGroupId][RackPins]")
+{
+    const auto validate = [](const DynamicPrintConfig &cfg) {
+        PrintConfig print_config;
+        print_config.apply(cfg, true);
+        return validate_rack_nozzle_diameters(print_config, { 0, 1, 2 });
+    };
+    for (const char *mode : { "Manual", "Nozzle Manual" }) {
+        CAPTURE(mode);
+        // The left has no rack and a 0.4: a 0.6 pin there was sliced at 0.4 with no message.
+        const std::string error = validate(h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, mode));
+        CHECK_THAT(error, Catch::Matchers::StartsWith("Filament 1 asks for a 0.6 mm rack nozzle, but the "));
+        CHECK_THAT(error, Catch::Matchers::EndsWith(" extruder has none."));
+        // Its own size is fine.
+        CHECK(validate(h2c_pins({ 1, 2, 1 }, { 0.4, 0., 0. }, { 0 }, mode)).empty());
+    }
+    // An extruder with a rack keeps the existing message; a slot pin the existing slot message.
+    CHECK(validate(h2c_pins({ 2, 2, 1 }, { 0.8, 0., 0. })) == "Filament 1 asks for a 0.8 mm rack nozzle, but extruder 2's rack has none.");
+    CHECK_THAT(validate(h2c_pins({ 1, 2, 1 }, { 0. }, { 2, 0, 0 })), Catch::Matchers::EndsWith("slot 2, but that rack has 0 nozzles."));
+    // On the right with the size: fine.
+    CHECK(validate(h2c_pins({ 2, 2, 1 }, { 0.6, 0., 0. })).empty());
 }
