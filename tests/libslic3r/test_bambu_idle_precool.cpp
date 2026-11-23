@@ -534,3 +534,49 @@ TEST_CASE("An H2D project saved before enable_pre_heating existed pre-heats once
     CHECK(bundle.printers.get_edited_preset().config.opt_bool("enable_pre_heating"));
     CHECK(bundle.full_config_secure().opt_bool("enable_pre_heating"));
 }
+
+// The H2C keeps hotend_cooling_rate / hotend_heating_rate per extruder variant (1.6,1.6,1.6,3.4,3.4 / 3.5,3.5,3.5,13.3,13.3).
+// The change_filament_gcode's "compensate for heating and cooling" divides one temperature difference by
+// hotend_cooling_rate[filament_map[next]-1] and then by hotend_heating_rate[...]: the two SYNC T values of a change are in the
+// ratio heating / cooling rate of the extruder the next filament is on. Before, a right-extruder change read index 1 of the
+// variant list (the left extruder's High Flow entry): 3.5 / 1.6 instead of 13.3 / 3.4.
+TEST_CASE("H2C: the change template's temperature compensation uses the rates of the extruder it changes on", "[BambuPreCool][HotendRates]")
+{
+    const std::regex re_sync(R"(^SYNC T(-?[\d.]+)$)");
+    auto ratios = [&](const std::string &gcode) {
+        std::vector<double> out;
+        const std::vector<std::string> lines = body_lines(gcode);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (lines[i] != "; compensate for heating and cooling")
+                continue;
+            // The next two SYNC lines (blank lines between them), when the flush was not 0.
+            std::vector<std::string> next;
+            for (size_t j = i + 1; j < lines.size() && j < i + 6 && next.size() < 2; ++j)
+                if (lines[j].rfind("SYNC ", 0) == 0)
+                    next.push_back(lines[j]);
+            std::smatch a, b;
+            if (next.size() == 2 && std::regex_match(next[0], a, re_sync) && std::regex_match(next[1], b, re_sync)) {
+                const double t1 = std::stod(a[1].str()), t2 = std::stod(b[1].str());
+                if (std::abs(t2) > 1e-6 && std::abs(t1) > 1e-6)
+                    out.push_back(t1 / t2);
+            }
+        }
+        return out;
+    };
+    for (const auto &[map, ratio] : std::vector<std::pair<const char *, double>>{ { "2,2,2", 13.3 / 3.4 }, { "1,1,1", 3.5 / 1.6 } }) {
+        DYNAMIC_SECTION("filament_map " << map)
+        {
+            const DynamicPrintConfig cfg = machine_config(H2C, { { "filament_map_mode", "Manual" }, { "filament_map", map } });
+            REQUIRE(cfg.option<ConfigOptionFloats>("hotend_cooling_rate")->values.size() == 5);
+            Print print;
+            Model model;
+            const std::string gcode = slice(print, model, cfg, H2C);
+            const std::vector<double> r = ratios(gcode);
+            REQUIRE_FALSE(r.empty());
+            for (double v : r)
+                CHECK_THAT(v, Catch::Matchers::WithinRel(ratio, 1e-3));
+            // The config block keeps the variant list.
+            CHECK(config_value(gcode, "hotend_cooling_rate") == "1.6,1.6,1.6,3.4,3.4");
+        }
+    }
+}

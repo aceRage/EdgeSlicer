@@ -4516,6 +4516,22 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                    int(initial_non_support_extruder_id == (unsigned int) -1 ? 0 :
                                            physical_extruder_for_filament(m_config, initial_non_support_extruder_id + 1)));
     this->placeholder_parser().set("physical_nozzle_properties", new ConfigOptionString(physical_nozzle_properties(print.config())));
+    // The change_filament_gcode of the H2D / H2C / A2L reads hotend_cooling_rate[filament_map[..] - 1] and hotend_heating_rate[..]
+    // by extruder ("compensate for heating and cooling" SYNC T). The config keeps one value per printer_extruder_variant (H2C:
+    // 1.6,1.6,1.6,3.4,3.4), so index 1 read the left extruder's second variant: 1.6 / 3.5 for the right extruder instead of
+    // 3.4 / 13.3. The templates get one value per extruder, its current variant's, as the pre-cooling pass reads them
+    // (PreCooling::extruder_variant_value) and Bambu Studio writes them. The config block keeps the variant list.
+    for (const char *key : { "hotend_cooling_rate", "hotend_heating_rate" }) {
+        const std::vector<double> &values   = std::string(key) == "hotend_cooling_rate" ? m_config.hotend_cooling_rate.values :
+                                                                                         m_config.hotend_heating_rate.values;
+        const size_t               extruders = m_config.nozzle_diameter.values.size();
+        if (values.empty() || extruders == 0 || values.size() <= extruders || m_config.printer_extruder_id.values.size() != values.size())
+            continue;
+        std::vector<double> per_extruder(extruders);
+        for (size_t e = 0; e < extruders; ++e)
+            per_extruder[e] = PreCooling::extruder_variant_value(m_config, values, e, values.front());
+        this->placeholder_parser().set(key, new ConfigOptionFloatsNullable(per_extruder));
+    }
     this->placeholder_parser().set("current_extruder", output_tool_of(initial_extruder_id));
     // Orca: set the key for compatibilty
     set_cut_retraction_placeholders(this->placeholder_parser(), m_config, size_t(initial_extruder_id));
