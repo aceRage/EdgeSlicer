@@ -1486,7 +1486,11 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             // Ultra (Phase 7): a change between two filaments on DIFFERENT physical nozzles (per the grouping's
             // filament_map) is a nozzle switch, not a color purge — the next filament already sits in its own
             // nozzle, so no flush is needed. Zero the purge for cross-nozzle transitions (over-purge fix).
-            {
+            // Not on a Bambu printer with two extruders (H2D / X2D / H2C): there the tower already planned the
+            // purge for what the nozzle taken last held (Print::_make_wipe_tower), across extruders and between
+            // the nozzles of a rack alike, and the G-code asks the firmware for that same purge. A printer whose
+            // rack hotends stand for extruders (H3C) keeps the rule as it was: its tower plans by its own tracker.
+            if (!gcodegen.is_bbl_multi_extruder() || hotend_as_extruder(gcodegen.m_config)) {
                 const auto& fm = full_config.filament_map.values; // 1-based nozzle per filament; empty on classic machines
                 if (previous_extruder_id >= 0 && (size_t)previous_extruder_id < fm.size() && (size_t)new_extruder_id < fm.size()
                     && fm[previous_extruder_id] != fm[new_extruder_id])
@@ -13947,9 +13951,9 @@ float GCode::hotend_flush_volume(int new_filament_id) const
 
 bool GCode::cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const
 {
-    const int old_extruder = logical_extruder_for_filament(old_filament_id);
-    const int new_extruder = logical_extruder_for_filament(new_filament_id);
-    if (old_extruder < 0 || new_extruder < 0 || old_extruder == new_extruder)
+    // A change onto another nozzle: another extruder, or another nozzle of the same extruder's rack (H2C).
+    if (logical_extruder_for_filament(old_filament_id) < 0 || logical_extruder_for_filament(new_filament_id) < 0 ||
+        nozzle_key_for_filament(old_filament_id) == nozzle_key_for_filament(new_filament_id))
         return false;
     volume = 0.f;
     auto it = m_filament_in_nozzle.find(nozzle_key_for_filament(new_filament_id));

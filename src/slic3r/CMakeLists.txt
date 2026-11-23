@@ -140,6 +140,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/DesktopIntegrationDialog.hpp
     GUI/DeviceManager.cpp
     GUI/DeviceManager.hpp
+    GUI/DiscordPresenceSnapshot.cpp
+    GUI/DiscordPresenceSnapshot.hpp
     GUI/Downloader.cpp
     GUI/DownloaderFileGet.cpp
     GUI/DownloaderFileGet.hpp
@@ -1069,6 +1071,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/Spoolman.cpp
     Utils/Spoolman.hpp
     Utils/Http.hpp
+    Utils/DiscordIPC.cpp
+    Utils/DiscordIPC.hpp
+    Utils/DiscordPresence.cpp
+    Utils/DiscordPresence.hpp
     Utils/InstanceID.cpp
     Utils/InstanceID.hpp
     Utils/LoginUserAgent.cpp
@@ -1740,6 +1746,11 @@ endif ()
 
 # Add a definition so that we can tell we are compiling slic3r.
 target_compile_definitions(libslic3r_gui PRIVATE SLIC3R_CURRENTLY_COMPILING_GUI_MODULE)
+
+# Discord Rich Presence application id override (empty keeps EdgeSlicer's own id).
+if (SLIC3R_DISCORD_APP_ID)
+    target_compile_definitions(libslic3r_gui PRIVATE SLIC3R_DISCORD_APP_ID="${SLIC3R_DISCORD_APP_ID}")
+endif ()
 
 # Sentry crash reporting integration
 if (SLIC3R_SENTRY)

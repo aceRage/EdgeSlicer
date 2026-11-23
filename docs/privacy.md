@@ -1,7 +1,8 @@
 # Privacy
 
-EdgeSlicer collects no usage statistics and no analytics. This page covers the two things that
-can leave your computer: crash reports (off unless you turn them on) and phone app notifications.
+EdgeSlicer collects no usage statistics and no analytics. This page covers the things that can
+leave your computer: crash reports and Discord activity (both off unless you turn them on) and
+phone app notifications.
 The full privacy policy, including the other connections EdgeSlicer makes, is at
 <https://edgeslicer.com/privacy>.
 
@@ -32,8 +33,8 @@ start.
 
 # Crash reports
 
-EdgeSlicer collects no usage statistics and no analytics. The one thing it can send by itself is
-a **crash report**, and only after you turn that on.
+EdgeSlicer collects no usage statistics and no analytics. Apart from Discord activity (below),
+the one thing it can send by itself is a **crash report**, and only after you turn that on.
 
 ## Turning it on and off
 
@@ -106,6 +107,23 @@ With reports on or off, the crash handler keeps its minidumps on your machine fo
 They are in `%LOCALAPPDATA%\EdgeSlicer\reports` on Windows and in
 `~/Library/Application Support/EdgeSlicer/SentryData` on macOS. An instance started with
 `--datadir <dir>` keeps them in `<dir>/SentryData` instead. You can delete them at any time.
+
+# Discord activity
+
+**Preferences > General > Privacy > Show current activity on Discord** shows what you are doing
+in EdgeSlicer on your Discord profile. It is **off** by default.
+
+When it is on, EdgeSlicer hands the Discord app running on your computer a short status: the open
+project's name, editing / previewing / slicing with a percentage, and for a connected Bambu Lab
+printer the print job name, its progress, the time left and the printer model. Discord then shows
+that status to the people who can see your profile. EdgeSlicer talks only to the local Discord app
+(a named pipe on Windows, a local socket on macOS and Linux) and opens no network connection
+itself. No model geometry, thumbnails, file paths, G-code or account details are sent. Nothing is
+sent while Discord is not running.
+
+**Hide project and print job names on Discord** replaces the project and job names with generic
+wording and keeps the progress and status. Turning the main option off clears the status from your
+profile at once.
 
 # Phone app notifications
 
