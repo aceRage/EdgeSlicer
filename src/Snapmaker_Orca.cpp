@@ -4248,8 +4248,11 @@ int CLI::run(int argc, char **argv)
                                             cli_mixed_num_physical);
 
         if (ConfigOptionFloats *flush_opt = m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix")) {
-            const size_t n = size_t(std::sqrt(double(flush_opt->values.size())) + 0.001);
-            zero_mixed_flush_rows_and_cols(flush_opt->values, n, cli_mixed_filament_mgr, cli_mixed_num_physical);
+            // One N x N matrix, or one per nozzle (Bambu Studio's 2 x N x N on an H2D / H2C): each block is
+            // zeroed on its own diagonal and its mixed slots' rows and columns, not one floor(sqrt) square.
+            const ConfigOptionFloats *nozzles = m_print_config.option<ConfigOptionFloats>("nozzle_diameter");
+            zero_mixed_flush_rows_and_cols_for_nozzles(flush_opt->values, nozzles == nullptr ? 1 : nozzles->values.size(),
+                                                       cli_mixed_filament_mgr, cli_mixed_num_physical);
         }
 
         const std::string mixed_defs = cli_mixed_filament_definitions(m_print_config, nullptr);

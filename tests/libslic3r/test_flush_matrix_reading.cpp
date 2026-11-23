@@ -180,6 +180,58 @@ TEST_CASE("The filament grouping reads a single matrix whole on both nozzles", "
     CHECK(group(halved) != map);
 }
 
+TEST_CASE("The command line zeroes each nozzle's diagonal and mixed rows only", "[FlushMatrix][MixedFilamentCli]")
+{
+    const std::vector<std::string> colours = {"#FFFFFF", "#000000", "#FF0000", "#0000FF"};
+    MixedFilamentManager           no_mixed;
+
+    SECTION("2 x N x N, no mixed filament: only the true diagonals")
+    {
+        std::vector<double> values = numbered_blocks(4, 2);
+        const std::vector<double> before = values;
+        zero_mixed_flush_rows_and_cols_for_nozzles(values, 2, no_mixed, 4);
+        for (size_t b = 0; b < 2; ++b)
+            for (size_t from = 0; from < 4; ++from)
+                for (size_t to = 0; to < 4; ++to) {
+                    const size_t idx = b * 16 + from * 4 + to;
+                    INFO("block " << b << " from " << from << " to " << to);
+                    CHECK(values[idx] == (from == to ? 0. : before[idx]));
+                }
+    }
+    SECTION("2 x N x N with a mixed slot: its row and column in both blocks")
+    {
+        MixedFilamentManager mgr;
+        mgr.add_custom_filament(1, 2, 50, colours);
+        REQUIRE(mgr.filament_id_from_mixed_index(0, 4) == 5);
+        std::vector<double> values = numbered_blocks(5, 2);
+        const std::vector<double> before = values;
+        zero_mixed_flush_rows_and_cols_for_nozzles(values, 2, mgr, 4);
+        for (size_t b = 0; b < 2; ++b)
+            for (size_t from = 0; from < 5; ++from)
+                for (size_t to = 0; to < 5; ++to) {
+                    const size_t idx = b * 25 + from * 5 + to;
+                    INFO("block " << b << " from " << from << " to " << to);
+                    CHECK(values[idx] == ((from == to || from == 4 || to == 4) ? 0. : before[idx]));
+                }
+    }
+    SECTION("one N x N matrix on two nozzles: as before")
+    {
+        std::vector<double> values = numbered_blocks(4, 1);
+        std::vector<double> expected = values;
+        zero_mixed_flush_rows_and_cols(expected, 4, no_mixed, 4);
+        zero_mixed_flush_rows_and_cols_for_nozzles(values, 2, no_mixed, 4);
+        CHECK(values == expected);
+    }
+    SECTION("one nozzle: as before")
+    {
+        std::vector<double> values = numbered_blocks(4, 2); // 32 values read as a 5 x 5 square, as always
+        std::vector<double> expected = values;
+        zero_mixed_flush_rows_and_cols(expected, 5, no_mixed, 4);
+        zero_mixed_flush_rows_and_cols_for_nozzles(values, 1, no_mixed, 4);
+        CHECK(values == expected);
+    }
+}
+
 TEST_CASE("A single matrix reads the same in every per-change reader", "[FlushMatrix]")
 {
     // One N x N block (the fork's own shape) and a too-short list keep exactly the floor(sqrt) square they had.
