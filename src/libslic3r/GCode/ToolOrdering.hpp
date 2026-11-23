@@ -326,6 +326,13 @@ private:
     void                mark_skirt_layers(const PrintConfig &config, coordf_t max_layer_height);
     void 				collect_extruder_statistics(bool prime_multi_material);
     void                reorder_extruders_for_minimum_flush_volume();
+    // Every layer's filament order, nozzle by nozzle, by Bambu Studio's reorder_filaments_for_multi_nozzle_extruder (the
+    // routine the filament grouping scores its maps with): each nozzle's filaments ordered by its extruder's flush matrix
+    // from what that nozzle holds. The first layer, layers that keep their order and the layers get_custom_seq names keep
+    // theirs. Empty when it does not apply (no grouping result, a filament outside the matrices).
+    std::vector<std::vector<unsigned int>> order_layers_by_nozzle(const PrintConfig                          &print_config,
+                                                                  const std::function<bool(int, std::vector<int> &)> &get_custom_seq,
+                                                                  bool                                                grouped);
 
     // Ultra (dual-nozzle): per-slice grouping inputs, and the compute entry that turns them into a
     // filament->nozzle grouping result. Only invoked for grouping-model machines (H2D/H2C/X2D); classic
@@ -411,17 +418,6 @@ std::vector<std::vector<std::vector<float>>> prepare_flush_matrices(const PrintC
 std::vector<unsigned int> get_extruders_order(const std::vector<std::vector<float>> &wipe_volumes,
                                               std::vector<unsigned int>              all_extruders,
                                               std::optional<unsigned int>            start_extruder_id);
-
-// The order of a layer's filaments on a printer whose project carries one flush matrix per nozzle (Bambu Studio's
-// 2 x N x N on an H2D / H2C): each nozzle's filaments (filament_map, 1-based) in the order that flushes least by that
-// nozzle's matrix from the filament it holds (held, -1 for empty), the nozzle of `current` first, then the others.
-// A nozzle flushes only for its own filaments, so this is the least flush of any order of the layer. Empty when a
-// filament has no nozzle among the matrices. Exposed for unit testing.
-std::vector<unsigned int> get_extruders_order_per_nozzle(const std::vector<std::vector<std::vector<float>>> &nozzle_flush,
-                                                         const std::vector<int>                              &filament_map,
-                                                         const std::vector<unsigned int>                     &filaments,
-                                                         const std::vector<int>                              &held,
-                                                         std::optional<unsigned int>                          current);
 
 // Reorder a layer's 0-based filaments for cyclic ordering: ascending by default, or following
 // cyclic_order when non-empty. Filaments absent from the sequence keep ascending order after

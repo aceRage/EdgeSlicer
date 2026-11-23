@@ -6,8 +6,10 @@
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
+#include "libslic3r/GCode/ToolOrderUtils.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <set>
 #include <vector>
@@ -29,6 +31,21 @@ std::vector<double> numbered_blocks(size_t filaments, size_t blocks)
             for (size_t to = 0; to < filaments; ++to)
                 values.push_back(double(1000 * (b + 1) + 10 * from + to + 1));
     return values;
+}
+
+// The H2D shape: one nozzle per extruder.
+std::vector<MultiNozzleUtils::NozzleInfo> two_nozzles()
+{
+    std::vector<MultiNozzleUtils::NozzleInfo> list;
+    for (int nozzle = 0; nozzle < 2; ++nozzle) {
+        MultiNozzleUtils::NozzleInfo info;
+        info.diameter    = "0.4";
+        info.volume_type = NozzleVolumeType::nvtStandard;
+        info.extruder_id = nozzle;
+        info.group_id    = nozzle;
+        list.emplace_back(info);
+    }
+    return list;
 }
 
 std::vector<double> block_of(const std::vector<double> &values, size_t filaments, size_t block)
@@ -268,12 +285,27 @@ TEST_CASE("The layer order reads the matrix of the nozzle each change happens on
         return total;
     };
 
-    // Each nozzle's own matrix; the right nozzle holds filament 2, the left one is empty.
-    std::vector<std::vector<std::vector<float>>> nozzle_flush(2, std::vector<std::vector<float>>(3, std::vector<float>(3)));
+    // The layer order runs Bambu Studio's per-nozzle routine (reorder_filaments_for_multi_nozzle_extruder, what the
+    // grouping scores maps with): layer 0 fixed at filament 2, then a layer of all three.
+    std::vector<FlushMatrix> nozzle_flush(2, FlushMatrix(3, std::vector<float>(3)));
     for (size_t block = 0; block < 2; ++block)
         for (size_t i = 0; i < 9; ++i)
             nozzle_flush[block][i / 3][i % 3] = float(per_nozzle[block * 9 + i]);
-    const std::vector<unsigned int> order = get_extruders_order_per_nozzle(nozzle_flush, filament_map, {0, 1, 2}, {-1, 2}, 2u);
+    const std::optional<MultiNozzleUtils::LayeredNozzleGroupResult> grouping =
+        MultiNozzleUtils::LayeredNozzleGroupResult::create({0, 0, 1}, two_nozzles(), {0, 1, 2});
+    REQUIRE(grouping.has_value());
+    const std::vector<std::vector<unsigned int>> layers = {{2}, {0, 1, 2}};
+    auto first_layer_fixed = [](int layer, std::vector<int> &seq) {
+        if (layer != 0)
+            return false;
+        seq = {3};
+        return true;
+    };
+    std::vector<std::vector<unsigned int>> sequences;
+    reorder_filaments_for_multi_nozzle_extruder({0, 1, 2}, *grouping, layers, nozzle_flush, first_layer_fixed, &sequences);
+    REQUIRE(sequences.size() == 2);
+    CHECK(sequences[0] == std::vector<unsigned int>{2});
+    const std::vector<unsigned int> &order = sequences[1];
     CHECK(order == std::vector<unsigned int>{2, 0, 1});
     CHECK(true_flush(order) == 290.f);
     // No order of the layer flushes less.
@@ -282,11 +314,6 @@ TEST_CASE("The layer order reads the matrix of the nozzle each change happens on
         INFO(permutation[0] << permutation[1] << permutation[2]);
         CHECK(true_flush(order) <= true_flush(permutation));
     } while (std::next_permutation(permutation.begin(), permutation.end()));
-    // A filament the map leaves off the matrices' nozzles: no per-nozzle answer, the caller keeps the old solver.
-    CHECK(get_extruders_order_per_nozzle(nozzle_flush, {1, 1, 3}, {0, 1, 2}, {-1, 2}, 2u).empty());
-    // The left nozzle holding filament 1: it goes on from 1 (1 -> 0 is 740, so 0 after 1 costs that; the solver keeps
-    // 1 first since it is what the nozzle holds).
-    CHECK(get_extruders_order_per_nozzle(nozzle_flush, filament_map, {0, 1}, {1, 2}, 1u) == std::vector<unsigned int>{1, 0});
 
     // The 18 values read as one 4 x 4 square, as before, order the layer 2, 1, 0: 740 mm3.
     std::vector<std::vector<float>> square(4, std::vector<float>(4));
@@ -308,4 +335,36 @@ TEST_CASE("A single matrix reads the same in every per-change reader", "[FlushMa
             for (size_t to = 0; to < n; ++to)
                 CHECK(table[from][to] == float(values[from * n + to]));
     }
+}
+
+TEST_CASE("The per-nozzle layer order stays fast with sixteen filaments on one nozzle", "[FlushMatrix][ToolOrdering]")
+{
+    // Sixteen filaments on the left nozzle, one on the right, 200 layers that each print all of them: the routine's
+    // own cache answers a layer met again, so the plate takes about one solve per distinct layer.
+    const size_t n = 17;
+    std::vector<FlushMatrix> flush(2, FlushMatrix(n, std::vector<float>(n)));
+    for (size_t e = 0; e < 2; ++e)
+        for (size_t from = 0; from < n; ++from)
+            for (size_t to = 0; to < n; ++to)
+                flush[e][from][to] = from == to ? 0.f : float(50 + (from * 37 + to * 11 + e * 5) % 500);
+    std::vector<int>          map(n, 0);
+    std::vector<unsigned int> used(n);
+    map[n - 1] = 1;
+    for (size_t f = 0; f < n; ++f)
+        used[f] = unsigned(f);
+    const std::optional<MultiNozzleUtils::LayeredNozzleGroupResult> grouping = MultiNozzleUtils::LayeredNozzleGroupResult::create(map, two_nozzles(), used);
+    REQUIRE(grouping.has_value());
+    std::vector<std::vector<unsigned int>> layers(200, used);
+    // Every fourth layer leaves one filament out, so the plate has distinct layers too.
+    for (size_t layer = 0; layer < layers.size(); layer += 4)
+        layers[layer].erase(layers[layer].begin() + long(layer / 4 % n));
+    std::vector<std::vector<unsigned int>> sequences;
+    const auto start = std::chrono::steady_clock::now();
+    reorder_filaments_for_multi_nozzle_extruder(used, *grouping, layers, flush, {}, &sequences);
+    const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    INFO("seconds " << seconds);
+    CHECK(seconds < 5.);
+    REQUIRE(sequences.size() == layers.size());
+    for (size_t layer = 0; layer < layers.size(); ++layer)
+        CHECK(sequences[layer].size() == layers[layer].size());
 }
