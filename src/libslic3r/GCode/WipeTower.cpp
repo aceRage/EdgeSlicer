@@ -2673,9 +2673,9 @@ WipeTower::NozzleChangeResult WipeTower::idle_travel_cooling(size_t old_tool, si
     const float               max_travel_speed = m_travel_speed * 60.f;
     float                     travel_speed     = max_travel_speed;
     if (precool_target > 0) {
-        // The outgoing hotend's extruder's rate. plan.old_nozzle is the grouping's nozzle id (a rack hotend: LayeredNozzleGroupResult
-        // group id), not an index into the per-extruder rates; it read the variant list by that id before.
-        float cooling_rate = plan.old_extruder >= 0 && plan.old_extruder < int(m_hotend_cooling_rate.size()) ? m_hotend_cooling_rate[plan.old_extruder] : 2.f;
+        // Bambu Studio indexes the cooling rate by the outgoing nozzle (the hotend id, get_nozzle_id of the old filament), falling
+        // back to 2 when that id is past the list (Bambu Studio 02.09.01.70 WipeTower.cpp idle_travel_cooling); kept as it is.
+        float cooling_rate = plan.old_nozzle >= 0 && plan.old_nozzle < int(m_hotend_cooling_rate.size()) ? m_hotend_cooling_rate[plan.old_nozzle] : 2.f;
         if (cooling_rate < EPSILON)
             cooling_rate = 2.f;
         const float current_temp = float(fp.nozzle_temperature);
