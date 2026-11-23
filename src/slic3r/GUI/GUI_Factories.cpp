@@ -2043,6 +2043,15 @@ void MenuFactory::append_menu_items_mirror(wxMenu* menu)
         []() { return plater()->can_mirror(); }, m_parent);
 }
 
+void MenuFactory::append_menu_items_apply_transform(wxMenu* menu)
+{
+    // One item that opens a small dialog with a box for each of rotation, scale and position.
+    append_menu_item(menu, wxID_ANY, _L("Apply Transform") + dots,
+        _L("Make the current rotation, scale or position the new baseline, without moving anything"),
+        [](wxCommandEvent&) { plater()->apply_transformation_dialog(false, true, true); }, "", menu,
+        []() { return plater()->can_apply_transformation(false); }, m_parent);
+}
+
 void MenuFactory::append_menu_item_edit_text(wxMenu *menu)
 {
     wxString name        = _L("Edit text");
@@ -2334,6 +2343,7 @@ void MenuFactory::create_common_object_menu(wxMenu* menu)
 
     append_menu_item_fix_through_netfabb(menu);
     append_menu_items_mirror(menu);
+    append_menu_items_apply_transform(menu);
 }
 
 void MenuFactory::create_object_menu()
@@ -2440,6 +2450,7 @@ void MenuFactory::create_extra_object_menu()
 
     // Mirror
     append_menu_items_mirror(&m_object_menu);
+    append_menu_items_apply_transform(&m_object_menu);
     // Delete
     append_menu_item_delete(&m_object_menu);
     m_object_menu.AppendSeparator();
@@ -2502,6 +2513,7 @@ void MenuFactory::create_part_menu()
     append_menu_item_export_stl_part(menu);
     append_menu_item_fix_through_netfabb(menu);
     append_menu_items_mirror(menu);
+    append_menu_items_apply_transform(menu);
     // Ultra: per-part visibility inside assemblies
     append_menu_items_visibility(menu);
     // "Separate": extract this one part into its own object, keeping its position
@@ -2522,6 +2534,7 @@ void MenuFactory::create_part_menu()
     menu->AppendSeparator();
     append_menu_item_change_type(menu);
     append_menu_items_mirror(&m_part_menu);
+    append_menu_items_apply_transform(&m_part_menu);
     append_menu_item(&m_part_menu, wxID_ANY, _L("Split"), _L("Split the selected object into multiple parts"),
         [](wxCommandEvent&) { plater()->split_volume(); }, "split_parts", nullptr,
         []() { return plater()->can_split(false); }, m_parent);
@@ -2538,6 +2551,7 @@ void MenuFactory::create_text_part_menu()
     append_menu_item_fix_through_netfabb(menu);
     append_menu_item_simplify(menu);
     append_menu_items_mirror(menu);
+    append_menu_items_apply_transform(menu);
     append_menu_item_export_stl_part(menu);
     append_menu_item_export_outline_dxf(menu);
     menu->AppendSeparator();
@@ -2554,6 +2568,7 @@ void MenuFactory::create_svg_part_menu()
     append_menu_item_fix_through_netfabb(menu);
     append_menu_item_simplify(menu);
     append_menu_items_mirror(menu);
+    append_menu_items_apply_transform(menu);
     append_menu_item_export_stl_part(menu);
     append_menu_item_export_outline_dxf(menu);
     menu->AppendSeparator();
@@ -2572,6 +2587,7 @@ void MenuFactory::create_bbl_part_menu()
     append_menu_item_center(menu);
     append_menu_item_drop(menu);
     append_menu_items_mirror(menu);
+    append_menu_items_apply_transform(menu);
     // Ultra: per-part visibility inside assemblies
     append_menu_items_visibility(menu);
     // "Separate": pull this one part out of the assembly into its own object, keeping its
