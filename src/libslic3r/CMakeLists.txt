@@ -820,6 +820,8 @@ set(lisbslic3r_sources
     ZipOpen.hpp
     ZipWorkCleaner.cpp
     ZipWorkCleaner.hpp
+    CoalescingWorker.cpp
+    CoalescingWorker.hpp
 )
 
 if (APPLE)
