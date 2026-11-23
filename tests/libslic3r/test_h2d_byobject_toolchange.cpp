@@ -215,15 +215,18 @@ std::string config_value(const std::string &gcode, const std::string &key)
     return value;
 }
 
+// 1-based filament_map "2,1,2" -> the nozzle (1 = left, 2 = right) each filament prints from.
+const int NOZZLE_OF[NUM_FILAMENTS] = { 2, 1, 2 };
+
+// The flush length of a change from -> to: the matrix's entry, from the block of the nozzle `to` prints from where the
+// project carries one matrix per nozzle (Bambu Studio's 2 x N x N).
 double flush_length(const DynamicPrintConfig &cfg, int from, int to)
 {
     const auto  *matrix = cfg.option<ConfigOptionFloats>("flush_volumes_matrix");
     const double d      = cfg.option<ConfigOptionFloats>("filament_diameter")->get_at(to);
-    return matrix->get_at(from * NUM_FILAMENTS + to) / (M_PI / 4. * d * d);
+    const size_t block  = matrix->size() == size_t(2 * NUM_FILAMENTS * NUM_FILAMENTS) ? size_t(NOZZLE_OF[to] - 1) : 0;
+    return matrix->get_at(block * NUM_FILAMENTS * NUM_FILAMENTS + from * NUM_FILAMENTS + to) / (M_PI / 4. * d * d);
 }
-
-// 1-based filament_map "2,1,2" -> the nozzle (1 = left, 2 = right) each filament prints from.
-const int NOZZLE_OF[NUM_FILAMENTS] = { 2, 1, 2 };
 
 void check_flushes_follow_the_nozzle_contents(const std::vector<Change> &changes, const DynamicPrintConfig &cfg, int start_filament)
 {
@@ -325,6 +328,43 @@ SCENARIO("H2D print by object: tool changes and temperatures name the real hoten
         REQUIRE(changes.size() >= 2);
         // The start G-code loads the first filament of the first layer; find it from the first change.
         check_flushes_follow_the_nozzle_contents(changes, cfg, changes.front().current_i);
+    }
+
+    GIVEN("the same plate by layer with one flush matrix per nozzle (Bambu Studio's 2 x N x N)")
+    {
+        // Every entry distinct, the right nozzle's (second block) 100 above the left one's: a change read from the
+        // wrong block, or from the floor(sqrt(18)) = 4 square the writer used to take, lands on another value.
+        DynamicPrintConfig cfg = h2d_config("by layer", false);
+        cfg.set_deserialize_strict({ { "flush_volumes_matrix", "0,101,102,110,0,112,120,121,0,0,201,202,210,0,212,220,221,0" } });
+        for (const bool tower : { false, true }) {
+            INFO("prime tower " << tower);
+            cfg.set_deserialize_strict({ { "enable_prime_tower", tower ? "1" : "0" } });
+            Print print;
+            Model model;
+            add_objects(model, { 1, 2, 3 });
+            const std::string         gcode   = slice(print, model, cfg);
+            const std::vector<Change> changes = collect_changes(body_lines(gcode));
+            REQUIRE(changes.size() >= 2);
+            CHECK(config_value(gcode, "filament_map") == "2,1,2");
+            if (!tower) {
+                check_flushes_follow_the_nozzle_contents(changes, cfg, changes.front().current_i);
+                continue;
+            }
+            // With the tower a change onto the other extruder tells the firmware to flush nothing on this branch (the
+            // tower path; draft PR 1160 changes that), so only the changes on the extruder printing are checked here:
+            // each flushes by that nozzle's own block.
+            int    active      = changes.front().current_i;
+            size_t same_nozzle = 0;
+            for (const Change &c : changes) {
+                CAPTURE(active, c.next, c.flush);
+                if (active >= 0 && NOZZLE_OF[c.next] == NOZZLE_OF[active]) {
+                    ++same_nozzle;
+                    CHECK(c.flush == Approx(flush_length(cfg, active, c.next)).epsilon(1e-3));
+                }
+                active = c.next;
+            }
+            CHECK(same_nozzle >= 1);
+        }
     }
 }
 
