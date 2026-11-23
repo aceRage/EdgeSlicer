@@ -69,6 +69,7 @@ add_executable(${_TEST_NAME}_tests
 	test_simple_shape.cpp
 	test_image_trace.cpp
 	test_outline_objects.cpp
+	test_image_object_recipe.cpp
 	test_dxf.cpp
 	test_svg_split.cpp
 	test_svg_import.cpp

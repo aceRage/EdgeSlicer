@@ -224,6 +224,10 @@ set(lisbslic3r_sources
     ImageTrace.hpp
     OutlineObjects.cpp
     OutlineObjects.hpp
+    ImageObjectRecipe.cpp
+    ImageObjectRecipe.hpp
+    MeshPreview.cpp
+    MeshPreview.hpp
     SimpleShape.cpp
     SimpleShape.hpp
     enum_bitmask.hpp
