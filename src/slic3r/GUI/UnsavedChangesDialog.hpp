@@ -2,12 +2,14 @@
 #define slic3r_UnsavedChangesDialog_hpp_
 
 #include <wx/dataview.h>
+#include <functional>
 #include <map>
 #include <vector>
 
 #include "GUI_Utils.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/PresetDiffSession.hpp"
 #include "Widgets/Button.hpp"
 #include "Widgets/ScrolledWindow.hpp"
 
@@ -16,8 +18,6 @@ class wxStaticText;
 
 namespace Slic3r {
 namespace GUI{
-
-wxDECLARE_EVENT(EVT_DIFF_DIALOG_TRANSFER, SimpleEvent);
 
 // ----------------------------------------------------------------------------
 //                  ModelNode: a node inside DiffModel
@@ -69,6 +69,8 @@ public:
     wxString    m_text;
     wxString    m_old_value;
     wxString    m_new_value;
+    // Edge: Compare presets - the row's values differ (highlighted row)
+    bool        m_differs {false};
 
     // TODO/FIXME:
     // the GTK version of wxDVC (in particular wxDataViewCtrlInternal::ItemAdded)
@@ -109,6 +111,8 @@ public:
 
     void UpdateEnabling();
     void UpdateIcons();
+    // Edge: Compare presets - new values for an option node after a copy
+    void SetValues(const wxString& old_value, const wxString& new_value, bool differs);
 };
 
 
@@ -122,6 +126,8 @@ class DiffModel : public wxDataViewModel
     ModelNodePtrArray       m_preset_nodes;
 
     wxDataViewCtrl*         m_ctrl{ nullptr };
+    // Edge: background of option rows whose values differ (invalid = no highlight)
+    wxColour                m_diff_colour;
 
     ModelNode *AddOption(ModelNode *group_node,
                          wxString   option_name,
@@ -153,6 +159,7 @@ public:
     ~DiffModel() override = default;
 
     void            SetAssociatedControl(wxDataViewCtrl* ctrl) { m_ctrl = ctrl; }
+    void            SetDiffColour(const wxColour& colour) { m_diff_colour = colour; }
 
     wxDataViewItem  AddPreset(Preset::Type type, wxString preset_name, PrinterTechnology pt);
     wxDataViewItem  AddOption(Preset::Type type, wxString category_name, wxString group_name, wxString option_name,
@@ -175,6 +182,7 @@ public:
     bool SetValue(const wxVariant& variant, const wxDataViewItem& item, unsigned int col) override;
 
     bool IsEnabled(const wxDataViewItem& item, unsigned int col) const override;
+    bool GetAttr(const wxDataViewItem& item, unsigned int col, wxDataViewItemAttr& attr) const override;
     bool IsContainer(const wxDataViewItem& item) const override;
     // Is the container just a header or an item with all columns
     // In our case it is an item with all columns
@@ -192,6 +200,7 @@ class DiffViewCtrl : public wxDataViewCtrl
     bool                    m_empty_selection { false };
     int                     m_em_unit;
 
+public:
     struct ItemData
     {
         std::string     opt_key;
@@ -202,12 +211,14 @@ class DiffViewCtrl : public wxDataViewCtrl
         bool            is_long{ false };
     };
 
+private:
     // tree items related to the options
     std::map<wxDataViewItem, ItemData> m_items_map;
     std::map<unsigned int, int>        m_columns_width;
+    std::function<void(wxDataViewItem)> m_on_context_menu;
 
 public:
-    DiffViewCtrl(wxWindow* parent, wxSize size);
+    DiffViewCtrl(wxWindow* parent, wxSize size, long extra_style = 0);
     ~DiffViewCtrl();
 
     DiffModel* model{ nullptr };
@@ -216,8 +227,20 @@ public:
     void    AppendToggleColumn_(const wxString& label, unsigned model_column, int width);
     void    Rescale(int em = 0);
     void    Append(const std::string& opt_key, Preset::Type type, wxString category_name, wxString group_name, wxString option_name,
-                   wxString old_value, wxString new_value, const std::string category_icon_name);
+                   wxString old_value, wxString new_value, const std::string category_icon_name, bool differs = true);
     void    Clear();
+
+    // Edge: Compare presets
+    const ItemData*             item_data(const wxDataViewItem& item) const;
+    // new values of an option row after a copy
+    void                        update_row(const wxDataViewItem& item, const wxString& old_value, const wxString& new_value, bool differs);
+    // option rows in display order (preset > category > group > option)
+    std::vector<wxDataViewItem> option_items_in_order() const;
+    // selected option rows; a selected preset, category or group stands for all its option rows
+    std::vector<wxDataViewItem> selected_option_items() const;
+    void                        set_on_context_menu(std::function<void(wxDataViewItem)> fn) { m_on_context_menu = std::move(fn); }
+    // shows the full left/right values of a long row; false when the row has no long values
+    bool                        show_full_compare(wxDataViewItem item);
 
     wxString    get_short_string(wxString full_string);
     bool        has_selection() { return !m_empty_selection; }
@@ -411,22 +434,52 @@ public:
 //------------------------------------------
 class DiffPresetDialog : public DPIDialog
 {
+    using Side = PresetDiffSession::Side;
+
     DiffViewCtrl*           m_tree              { nullptr };
     wxBoxSizer*             m_presets_sizer     { nullptr };
     wxStaticText*           m_top_info_line     { nullptr };
     wxStaticText*           m_bottom_info_line  { nullptr };
     wxCheckBox*             m_show_all_presets  { nullptr };
-    wxCheckBox*             m_use_for_transfer  { nullptr };
-    wxBoxSizer*             m_buttons           { nullptr };
+    // Edge: WinMerge style compare
+    wxCheckBox*             m_show_diff_only    { nullptr };
+    wxBoxSizer*             m_copy_sizer        { nullptr };
     wxBoxSizer*             m_edit_sizer        { nullptr };
+    Button*                 m_btn_copy_left     { nullptr };
+    Button*                 m_btn_copy_right    { nullptr };
+    Button*                 m_btn_all_left      { nullptr };
+    Button*                 m_btn_all_right     { nullptr };
+    Button*                 m_btn_prev_diff     { nullptr };
+    Button*                 m_btn_next_diff     { nullptr };
+    Button*                 m_btn_undo          { nullptr };
+    Button*                 m_btn_redo          { nullptr };
+    Button*                 m_btn_save          { nullptr };
+    Button*                 m_btn_close         { nullptr };
 
     Preset::Type            m_view_type         { Preset::TYPE_INVALID };
     PrinterTechnology       m_pr_technology;
     std::unique_ptr<PresetBundle>   m_preset_bundle_left;
     std::unique_ptr<PresetBundle>   m_preset_bundle_right;
 
+    // One compare session per preset type shown in the tree.
+    struct TypeSession
+    {
+        Preset::Type        type;
+        std::string         left_name;
+        std::string         right_name;
+        PrinterTechnology   pt { ptFFF };
+        PresetDiffSession   session;
+    };
+    std::vector<std::unique_ptr<TypeSession>> m_sessions;
+    // Dialog-wide undo: each step lists the types whose sessions took one step.
+    std::vector<std::vector<Preset::Type>>    m_undo_steps;
+    size_t                                    m_undo_pos { 0 };
+    // An outside preset change arrived while moves were pending; reload once they are saved/discarded.
+    bool                                      m_presets_stale { false };
+
     void create_buttons();
     void create_edit_sizer();
+    void create_copy_sizer();
     void complete_dialog_creation();
     void create_presets_sizer();
     void create_info_lines();
@@ -435,17 +488,43 @@ class DiffPresetDialog : public DPIDialog
 
     void update_bottom_info(wxString bottom_info = "");
     void update_tree();
+    // rebuilds the tree from the sessions (keeps the selection by option key)
+    void rebuild_tree();
     void update_bundles_from_app();
     void update_controls_visibility(Preset::Type type = Preset::TYPE_INVALID);
     void update_compatibility(const std::string& preset_name, Preset::Type type, PresetBundle* preset_bundle);
-         
-    void button_event(Action act);
+    void update_edit_controls();
+    void update_column_titles();
+    void update_equal_icons();
+
+    TypeSession*    session(Preset::Type type);
+    bool            has_pending_changes() const;
+    // Asks Save / Discard / Cancel when moves are pending. False = the user cancelled.
+    bool            confirm_pending_changes();
+    void            discard_pending_changes();
+
+    void copy_selected(Side to, bool advance = false);
+    void copy_all(Side to);
+    void copy_rows(const std::vector<wxDataViewItem>& items, Side to);
+    void refresh_rows();
+    void select_diff(int direction /* +1 next, -1 prev, +2 last, -2 first */);
+    void undo();
+    void redo();
+    bool save_changes(bool refresh_view = true);
+    bool save_side(TypeSession& ts, Side side, std::string& saved_name, wxString& error);
+    void on_char_hook(wxKeyEvent& evt);
+    void on_tree_context_menu(wxDataViewItem item);
+    void on_close(wxCloseEvent& evt);
+    void close_dialog();
 
     struct DiffPresets
     {
         PresetComboBox* presets_left    { nullptr };
         ScalableButton* equal_bmp       { nullptr };
         PresetComboBox* presets_right   { nullptr };
+        // last selection, so a cancelled "unsaved moves" prompt can put the combo back
+        std::string     prev_left;
+        std::string     prev_right;
     };
 
     std::vector<DiffPresets> m_preset_combos;
@@ -462,8 +541,6 @@ public:
 
     std::string get_left_preset_name(Preset::Type type);
     std::string get_right_preset_name(Preset::Type type);
-
-    std::vector<std::string> get_selected_options(Preset::Type type) const { return m_tree->options(type, true); }
 
     std::array<Preset::Type, 3>         types_list() const;
 

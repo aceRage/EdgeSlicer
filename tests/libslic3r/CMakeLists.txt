@@ -3,6 +3,7 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
+	test_preset_diff_session.cpp
 	test_model_rotate_center.cpp
 	test_orient.cpp
 	test_plugin_preset_3mf.cpp
