@@ -284,6 +284,65 @@ std::vector<unsigned int> get_extruders_order(const std::vector<std::vector<floa
     return solve_extruder_order(wipe_volumes, all_extruders, start_extruder_id);
 }
 
+std::vector<unsigned int> get_extruders_order_per_nozzle(const std::vector<std::vector<std::vector<float>>> &nozzle_flush,
+                                                         const std::vector<int>                              &filament_map,
+                                                         const std::vector<unsigned int>                     &filaments,
+                                                         const std::vector<int>                              &held,
+                                                         std::optional<unsigned int>                          current)
+{
+    // Split the layer by nozzle; a filament the map does not place on one of the matrices' nozzles: no answer.
+    std::vector<std::vector<unsigned int>> on_nozzle(nozzle_flush.size());
+    for (unsigned int f : filaments) {
+        if (f >= filament_map.size() || filament_map[f] < 1 || size_t(filament_map[f]) > nozzle_flush.size() ||
+            f >= nozzle_flush[size_t(filament_map[f] - 1)].size())
+            return {};
+        on_nozzle[size_t(filament_map[f] - 1)].push_back(f);
+    }
+    auto chain_flush = [](const std::vector<std::vector<float>> &matrix, std::optional<unsigned int> from, const std::vector<unsigned int> &order) {
+        float total = 0.f;
+        for (unsigned int f : order) {
+            if (from && *from != f)
+                total += matrix[*from][f];
+            from = f;
+        }
+        return total;
+    };
+    std::vector<std::vector<unsigned int>> ordered(nozzle_flush.size());
+    for (size_t nozzle = 0; nozzle < on_nozzle.size(); ++nozzle) {
+        const std::vector<unsigned int> &group  = on_nozzle[nozzle];
+        const auto                      &matrix = nozzle_flush[nozzle];
+        if (group.empty())
+            continue;
+        const int in_nozzle = nozzle < held.size() ? held[nozzle] : -1;
+        if (in_nozzle >= 0 && size_t(in_nozzle) < matrix.size()) {
+            // From what the nozzle holds: the solver's minimum over every order.
+            ordered[nozzle] = get_extruders_order(matrix, group, unsigned(in_nozzle));
+        } else {
+            // An empty nozzle flushes nothing for its first filament: the best of every first filament.
+            float best = std::numeric_limits<float>::max();
+            for (unsigned int first : group) {
+                std::vector<unsigned int> candidate = get_extruders_order(matrix, group, first);
+                const float               flush     = chain_flush(matrix, std::nullopt, candidate);
+                if (flush < best) {
+                    best            = flush;
+                    ordered[nozzle] = std::move(candidate);
+                }
+            }
+        }
+    }
+    // The nozzle printing now goes first (no nozzle change to start the layer), then the others in turn.
+    size_t first_nozzle = 0;
+    if (current && *current < filament_map.size() && filament_map[*current] >= 1 && size_t(filament_map[*current]) <= ordered.size())
+        first_nozzle = size_t(filament_map[*current] - 1);
+    std::vector<unsigned int> order;
+    order.reserve(filaments.size());
+    for (size_t k = 0; k < ordered.size(); ++k) {
+        const std::vector<unsigned int> &part = ordered[(first_nozzle + k) % ordered.size()];
+        order.insert(order.end(), part.begin(), part.end());
+    }
+    return order.size() == filaments.size() ? order : std::vector<unsigned int>();
+}
+
 // Returns true in case that extruder a comes before b (b does not have to be present). False otherwise.
 bool LayerTools::is_extruder_order(unsigned int a, unsigned int b) const
 {
@@ -2271,10 +2330,24 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
     const unsigned int number_of_extruders = (unsigned int) (sqrt(flush_matrix.size()) + EPSILON);
     // Extract purging volumes for each extruder pair:
     std::vector<std::vector<float>> wipe_volumes;
+    // With one flush matrix per nozzle (Bambu Studio's 2 x N x N): each nozzle's matrix, the layers being ordered nozzle
+    // by nozzle below (get_extruders_order_per_nozzle).
+    std::vector<std::vector<std::vector<float>>> nozzle_flush;
     if ((print_config->purge_in_prime_tower && print_config->single_extruder_multi_material) || m_wipe_tower_type1) {
-        for (unsigned int i = 0; i < number_of_extruders; ++i)
-            wipe_volumes.push_back( std::vector<float>(flush_matrix.begin() + i * number_of_extruders,
-                                                       flush_matrix.begin() + (i + 1) * number_of_extruders));
+        // A change flushes on the nozzle the new filament prints from, from the filament that nozzle last held, by that
+        // nozzle's matrix. A single matrix (or any other length) is read as the square it always was.
+        const size_t nozzle_nums = print_config->nozzle_diameter.values.size();
+        if (const FlushMatrixLayout layout = flush_matrix_layout(flush_matrix.size(), nozzle_nums); layout.per_nozzle()) {
+            wipe_volumes = flush_matrix_for_changes(print_config->flush_volumes_matrix.values, nozzle_nums, print_config->filament_map.values);
+            for (size_t nozzle = 0; nozzle < layout.blocks; ++nozzle) {
+                std::vector<int> on_nozzle(layout.filaments, int(nozzle) + 1);
+                nozzle_flush.emplace_back(flush_matrix_for_changes(print_config->flush_volumes_matrix.values, nozzle_nums, on_nozzle));
+            }
+        } else {
+            for (unsigned int i = 0; i < number_of_extruders; ++i)
+                wipe_volumes.push_back( std::vector<float>(flush_matrix.begin() + i * number_of_extruders,
+                                                           flush_matrix.begin() + (i + 1) * number_of_extruders));
+        }
     } else {
         // populate wipe_volumes with prime_volume
         for (unsigned int i = 0; i < number_of_extruders; ++i)
@@ -2326,6 +2399,14 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
                                                  use_cyclic_ordering, cyclic_first_layer, effective_cyclic_order);
 
     std::optional<unsigned int> current_extruder_id;
+    // Per-nozzle matrices: the filament each nozzle last held, by the filament_map the grouping above wrote.
+    const std::vector<int> &filament_map = print_config->filament_map.values;
+    std::vector<int>        held(nozzle_flush.size(), -1);
+    auto                    hold = [&](const std::vector<unsigned int> &order) {
+        for (unsigned int f : order)
+            if (f < filament_map.size() && filament_map[f] >= 1 && size_t(filament_map[f]) <= held.size())
+                held[size_t(filament_map[f] - 1)] = int(f);
+    };
     for (int i = 0; i < m_layer_tools.size(); ++i) {
         LayerTools& lt = m_layer_tools[i];
         // This pass runs more than once per slice; only the custom-sequence branch below sets it.
@@ -2334,6 +2415,7 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
             continue;
         if (lt.preserve_extruder_order) {
             current_extruder_id = lt.extruders.back();
+            hold(lt.extruders);
             continue;
         }
 
@@ -2353,7 +2435,20 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
             assert(lt.extruders.size() == unsign_custom_extruder_seq.size());
             lt.extruders = unsign_custom_extruder_seq;
             current_extruder_id = lt.extruders.back();
+            hold(lt.extruders);
             continue;
+        }
+
+        // Per-nozzle matrices: each nozzle's filaments in the order that flushes least on that nozzle from what it
+        // holds, which is the least the layer can flush (a nozzle's flush depends only on its own filaments).
+        if (i != 0 && !nozzle_flush.empty()) {
+            std::vector<unsigned int> order = get_extruders_order_per_nozzle(nozzle_flush, filament_map, lt.extruders, held, current_extruder_id);
+            if (!order.empty()) {
+                lt.extruders        = std::move(order);
+                current_extruder_id = lt.extruders.back();
+                hold(lt.extruders);
+                continue;
+            }
         }
 
         // The algorithm complexity is O(n2*2^n)
@@ -2377,6 +2472,7 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
             }
         }
         current_extruder_id = lt.extruders.back();
+        hold(lt.extruders);
     }
 }
 

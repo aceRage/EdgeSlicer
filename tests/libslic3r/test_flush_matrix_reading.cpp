@@ -232,6 +232,71 @@ TEST_CASE("The command line zeroes each nozzle's diagonal and mixed rows only", 
     }
 }
 
+TEST_CASE("The layer order reads the matrix of the nozzle each change happens on", "[FlushMatrix][ToolOrdering]")
+{
+    // Filaments 0 and 1 on the left nozzle, 2 on the right; one 3 x 3 block per nozzle.
+    const std::vector<double> per_nozzle = {  0., 290., 650.,
+                                            740.,   0., 750.,
+                                            650., 550.,   0.,
+                                       /* right */
+                                              0., 240., 340.,
+                                            240.,   0., 710.,
+                                            540.,  60.,   0. };
+    const std::vector<int> filament_map = {1, 1, 2};
+
+    const std::vector<std::vector<float>> table = flush_matrix_for_changes(per_nozzle, 2, filament_map);
+    REQUIRE(table.size() == 3);
+    for (size_t from = 0; from < 3; ++from)
+        for (size_t to = 0; to < 3; ++to) {
+            INFO("from " << from << " to " << to);
+            const size_t block = size_t(filament_map[to] - 1);
+            CHECK(table[from][to] == float(per_nozzle[block * 9 + from * 3 + to]));
+            CHECK(flush_volume_for_change(per_nozzle, 2, filament_map, from, to) == table[from][to]);
+        }
+
+    // The flush the printer does for a layer printed in `order` after filament 2: each nozzle flushes from what
+    // it last held, by its own matrix.
+    auto true_flush = [&](const std::vector<unsigned int> &order) {
+        int   held[2] = {-1, 2};
+        float total   = 0.f;
+        for (unsigned int b : order) {
+            const int e = filament_map[b] - 1;
+            if (held[e] >= 0 && held[e] != int(b))
+                total += float(per_nozzle[size_t(e) * 9 + size_t(held[e]) * 3 + b]);
+            held[e] = int(b);
+        }
+        return total;
+    };
+
+    // Each nozzle's own matrix; the right nozzle holds filament 2, the left one is empty.
+    std::vector<std::vector<std::vector<float>>> nozzle_flush(2, std::vector<std::vector<float>>(3, std::vector<float>(3)));
+    for (size_t block = 0; block < 2; ++block)
+        for (size_t i = 0; i < 9; ++i)
+            nozzle_flush[block][i / 3][i % 3] = float(per_nozzle[block * 9 + i]);
+    const std::vector<unsigned int> order = get_extruders_order_per_nozzle(nozzle_flush, filament_map, {0, 1, 2}, {-1, 2}, 2u);
+    CHECK(order == std::vector<unsigned int>{2, 0, 1});
+    CHECK(true_flush(order) == 290.f);
+    // No order of the layer flushes less.
+    std::vector<unsigned int> permutation = {0, 1, 2};
+    do {
+        INFO(permutation[0] << permutation[1] << permutation[2]);
+        CHECK(true_flush(order) <= true_flush(permutation));
+    } while (std::next_permutation(permutation.begin(), permutation.end()));
+    // A filament the map leaves off the matrices' nozzles: no per-nozzle answer, the caller keeps the old solver.
+    CHECK(get_extruders_order_per_nozzle(nozzle_flush, {1, 1, 3}, {0, 1, 2}, {-1, 2}, 2u).empty());
+    // The left nozzle holding filament 1: it goes on from 1 (1 -> 0 is 740, so 0 after 1 costs that; the solver keeps
+    // 1 first since it is what the nozzle holds).
+    CHECK(get_extruders_order_per_nozzle(nozzle_flush, filament_map, {0, 1}, {1, 2}, 1u) == std::vector<unsigned int>{1, 0});
+
+    // The 18 values read as one 4 x 4 square, as before, order the layer 2, 1, 0: 740 mm3.
+    std::vector<std::vector<float>> square(4, std::vector<float>(4));
+    for (size_t i = 0; i < 16; ++i)
+        square[i / 4][i % 4] = float(per_nozzle[i]);
+    const std::vector<unsigned int> old_order = get_extruders_order(square, {0, 1, 2}, 2u);
+    CHECK(old_order == std::vector<unsigned int>{2, 1, 0});
+    CHECK(true_flush(old_order) == 740.f);
+}
+
 TEST_CASE("A single matrix reads the same in every per-change reader", "[FlushMatrix]")
 {
     // One N x N block (the fork's own shape) and a too-short list keep exactly the floor(sqrt) square they had.

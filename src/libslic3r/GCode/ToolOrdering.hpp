@@ -412,6 +412,17 @@ std::vector<unsigned int> get_extruders_order(const std::vector<std::vector<floa
                                               std::vector<unsigned int>              all_extruders,
                                               std::optional<unsigned int>            start_extruder_id);
 
+// The order of a layer's filaments on a printer whose project carries one flush matrix per nozzle (Bambu Studio's
+// 2 x N x N on an H2D / H2C): each nozzle's filaments (filament_map, 1-based) in the order that flushes least by that
+// nozzle's matrix from the filament it holds (held, -1 for empty), the nozzle of `current` first, then the others.
+// A nozzle flushes only for its own filaments, so this is the least flush of any order of the layer. Empty when a
+// filament has no nozzle among the matrices. Exposed for unit testing.
+std::vector<unsigned int> get_extruders_order_per_nozzle(const std::vector<std::vector<std::vector<float>>> &nozzle_flush,
+                                                         const std::vector<int>                              &filament_map,
+                                                         const std::vector<unsigned int>                     &filaments,
+                                                         const std::vector<int>                              &held,
+                                                         std::optional<unsigned int>                          current);
+
 // Reorder a layer's 0-based filaments for cyclic ordering: ascending by default, or following
 // cyclic_order when non-empty. Filaments absent from the sequence keep ascending order after
 // the listed ones. Exposed for unit testing.
