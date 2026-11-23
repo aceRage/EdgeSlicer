@@ -1049,7 +1049,12 @@ float CoolingBuffer::slow_down_layer(const std::string &gcode, std::vector<PerEx
     };
     float lo_scale = time_at_feed_rates / target, lo_time = time, hi_scale = 0.f, hi_time = 0.f;
     float scale = time_at_feed_rates / time, slowed_time = time, at_feed_rates = time_at_feed_rates;
-    for (int i = 0; i < 6; ++ i) {
+    // Edge: where the moves never reach their speed, slowing changes nothing until the cap drops below the speed
+    // they do reach, then the time climbs steeply. False position keeps landing short of that bend, so the end
+    // it leaves in place twice running is given up for the midpoint, and the search gets eight estimates
+    // instead of upstream's six. Measured on a 10 mm cube at 300 mm/s2: a layer 2.5% short came out 7% long.
+    int last_side = 0, same_side_runs = 0;
+    for (int i = 0; i < 8; ++ i) {
         const float prev_at_feed_rates = at_feed_rates;
         at_feed_rates = slow_down(scale);
         slowed_time   = this->estimate_layer_time(gcode, per_extruder_adjustments);
@@ -1066,9 +1071,14 @@ float CoolingBuffer::slow_down_layer(const std::string &gcode, std::vector<PerEx
             lo_scale = scale;
             lo_time  = slowed_time;
         }
+        const int side = slowed_time >= target ? 1 : -1;
+        same_side_runs = side == last_side ? same_side_runs + 1 : 0;
+        last_side      = side;
         if (hi_scale > 0.f) {
-            scale = std::clamp(lo_scale + (target - lo_time) * (hi_scale - lo_scale) / (hi_time - lo_time),
-                               lo_scale + 0.1f * (hi_scale - lo_scale), hi_scale - 0.1f * (hi_scale - lo_scale));
+            scale = same_side_runs > 0 ?
+                0.5f * (lo_scale + hi_scale) :
+                std::clamp(lo_scale + (target - lo_time) * (hi_scale - lo_scale) / (hi_time - lo_time),
+                           lo_scale + 0.1f * (hi_scale - lo_scale), hi_scale - 0.1f * (hi_scale - lo_scale));
         } else {
             // Slowed to one speed, the moves spend about k / t accelerating in a layer taking t at its feed rates.
             // Where they never reach their speed, slowing barely lengthens the layer, and the time is taken as proportional.
