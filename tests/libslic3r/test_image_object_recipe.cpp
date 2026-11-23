@@ -290,6 +290,22 @@ TEST_CASE("Image object settings: bad text is refused or limited", "[ImageObject
     CHECK_THAT(e.silhouette.longest_side, WithinAbs(defaults.silhouette.longest_side, 1e-9));
 }
 
+TEST_CASE("Image object colours: a colour left out by the fine trace does not move the other ones", "[ImageObjectRecipe]")
+{
+    // the rows of the dialog, from the small trace of an image
+    const std::vector<std::array<uint8_t, 3>> shown = {{2, 1, 3}, {137, 81, 47}, {110, 132, 169}, {231, 88, 62}, {240, 206, 80}, {234, 240, 180}};
+    // the fine trace of the same image has no brown (it was only specks)
+    const std::vector<std::array<uint8_t, 3>> fine = {{2, 1, 3}, {110, 132, 169}, {231, 88, 62}, {240, 206, 80}, {234, 240, 180}};
+    CHECK(match_image_object_colors(fine, shown) == std::vector<int>{0, 2, 3, 4, 5});
+    // the same colours: the same order
+    CHECK(match_image_object_colors(shown, shown) == std::vector<int>{0, 1, 2, 3, 4, 5});
+    // a colour which is a little off goes to the nearest one
+    CHECK(match_image_object_colors({{236, 236, 176}, {5, 5, 5}}, shown) == std::vector<int>{5, 0});
+    // nothing shown: the order of the trace
+    CHECK(match_image_object_colors(fine, {}) == std::vector<int>{0, 1, 2, 3, 4});
+    CHECK(match_image_object_colors({}, shown).empty());
+}
+
 TEST_CASE("Image object recipes: the file of the project round-trips", "[ImageObjectRecipe][Json]")
 {
     CHECK(is_valid_image_object_group(new_image_object_group()));

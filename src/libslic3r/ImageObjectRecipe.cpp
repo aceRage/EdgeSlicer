@@ -332,6 +332,30 @@ bool image_object_settings_from_json(const std::string &text, ImageToObjectSetti
     return settings_from(j, settings);
 }
 
+std::vector<int> match_image_object_colors(const std::vector<std::array<uint8_t, 3>> &colors,
+                                           const std::vector<std::array<uint8_t, 3>> &shown)
+{
+    std::vector<int> out;
+    out.reserve(colors.size());
+    for (size_t i = 0; i < colors.size(); ++i) {
+        int  best          = int(i);
+        long best_distance = -1;
+        for (size_t k = 0; k < shown.size(); ++k) {
+            long distance = 0;
+            for (size_t c = 0; c < 3; ++c) {
+                long d    = long(colors[i][c]) - long(shown[k][c]);
+                distance += d * d;
+            }
+            if (best_distance < 0 || distance < best_distance) {
+                best_distance = distance;
+                best          = int(k);
+            }
+        }
+        out.push_back(best);
+    }
+    return out;
+}
+
 bool is_valid_image_object_group(const std::string &group)
 {
     if (group.size() < 8 || group.size() > 64)

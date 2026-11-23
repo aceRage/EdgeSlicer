@@ -91,6 +91,18 @@ struct ImageObjectRecipe
     template<class Archive> void serialize(Archive &ar) { ar(group, index, image_name, settings, source_png); }
 };
 
+/// <summary>
+/// The dialog shows the colours of a small trace of the image, and the user gives every one a
+/// filament. The object is made from a finer trace, which can leave out a colour that covers
+/// only specks, so its colours are found among the shown ones by their value, not by their order.
+/// </summary>
+/// <param name="colors">Colours of the trace the object is made from</param>
+/// <param name="shown">Colours shown to the user</param>
+/// <returns>For every colour the index of the nearest shown colour; its own index when
+/// nothing is shown</returns>
+std::vector<int> match_image_object_colors(const std::vector<std::array<uint8_t, 3>> &colors,
+                                           const std::vector<std::array<uint8_t, 3>> &shown);
+
 bool is_valid_image_object_group(const std::string &group);
 // Random group, 32 hexadecimal digits
 std::string new_image_object_group();

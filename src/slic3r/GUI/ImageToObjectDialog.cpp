@@ -1032,11 +1032,14 @@ void ImageToObjectDialog::match_filaments(TraceFilamentMatch mode)
     TraceFilamentPlan plan = plan_trace_filaments(colors, m_filament_colors, mode);
 
     if (!plan.recolour.empty()) {
-        wxString text = GUI::format_wxstr(_L("Change the colour of filaments %1% to %2% to the colours of the picture?"),
-                                          plan.recolour.front().first, plan.recolour.back().first);
-        text += "\n" + _L("Other objects printed with these filaments change their colour too.");
+        // say all of it: with 4 filaments and 8 colours, "1 to 4" alone reads as if 4 colours were lost
+        wxString text = GUI::format_wxstr(_L("The picture has %1% colours, which go to filaments 1 to %1%."), int(colors.size()));
+        text += "\n" + GUI::format_wxstr(_L("%1% existing filaments (from %2% to %3%) get a new colour."), int(plan.recolour.size()),
+                                         plan.recolour.front().first, plan.recolour.back().first);
+        text += " " + _L("Other objects printed with these filaments change their colour too.");
         if (!plan.add.empty())
-            text += "\n" + GUI::format_wxstr(_L("%1% filaments are added."), int(plan.add.size()));
+            text += "\n" + GUI::format_wxstr(_L("%1% new filaments are added."), int(plan.add.size()));
+        text += "\n" + _L("Continue?");
         MessageDialog dialog(this, text, _L("Replace filament colours"), wxYES_NO | wxICON_QUESTION);
         if (dialog.ShowModal() != wxID_YES)
             return;
@@ -1419,11 +1422,37 @@ bool ImageToObjectDialog::finish_unchecked()
         error              = shape.error;
         I2O_LOG("traced: " << shape.silhouette.shape.size() << " islands, " << shape.detail.size() << " colour levels, "
                            << shape.silhouette.width << " x " << shape.silhouette.height << " mm");
+        // The colours of this trace are put into the rows of the dialog by their value: the
+        // fine trace can leave out a colour of the rows (only specks of it), and by their order
+        // every colour after it would get the filament of another one.
+        const size_t            rows = m_level_colors.size();
+        std::vector<bool>       found(rows, false);
+        if (rows > 0 && !shape.detail.empty()) {
+            const std::vector<int>  row_of = match_image_object_colors(shape.colors, m_level_colors);
+            std::vector<ExPolygons> detail(rows);
+            for (size_t i = 0; i < shape.detail.size() && i < row_of.size(); ++i) {
+                const size_t row = size_t(std::clamp(row_of[i], 0, int(rows) - 1));
+                append(detail[row], std::move(shape.detail[i]));
+                found[row] = true;
+            }
+            shape.detail = std::move(detail);
+            shape.colors = m_level_colors;
+        }
         if (shape.silhouette.empty()) {
             if (error.empty() && !shape.silhouette.warnings.empty())
                 error = shape.silhouette.warnings.front();
-        } else
-            generate(shape, m_settings, m_objects, m_warnings, error);
+        } else if (generate(shape, m_settings, m_objects, m_warnings, error) && with_picture(m_settings)) {
+            // say which colours of the rows are not in the object
+            for (size_t row = 0; row < rows; ++row) {
+                bool made = false;
+                for (const OutlineObject &object : m_objects)
+                    for (const OutlinePart &part : object.parts)
+                        made = made || part.level == int(row);
+                if (!made)
+                    m_warnings.push_back(GUI::format(_u8L("Colour %1% of the picture is only in details too small to print and was left out."),
+                                                     row + 1));
+            }
+        }
     }
     for (const OutlineObject &object : m_objects)
         for (const OutlinePart &part : object.parts)
