@@ -273,6 +273,7 @@
 #include "ImageTraceDialog.hpp"
 #include "ImageToObjectDialog.hpp"
 #include "CloneDialog.hpp"
+#include "ApplyTransformDialog.hpp"
 #include "WebPreprintDialog.hpp"
 #include "SSWCP.hpp" // Ultra: the U1 send leaves its end-of-print unload choice for sw_SendGCodes
 
@@ -24128,6 +24129,18 @@ void Plater::load_gcode(const wxString& filename)
     // Same breakdown as a sliced plate, machine time included. Prices come only from the file: one
     // exported without filament prices shows "not in file" rather than today's preset prices.
     current_print.print_statistics().total_cost = compute_cost(*current_result).total;
+    // Orca #17679: the legend shows the filament length and weight too, and subtracts the support and
+    // tower filament from them, so an opened file read 0 in total and a negative model filament.
+    double total_used_filament = 0.;
+    double total_weight        = 0.;
+    for (const auto &[extruder_id, volume] : current_result->print_statistics.total_volumes_per_extruder) {
+        if (extruder_id < current_result->filament_diameters.size() && current_result->filament_diameters[extruder_id] > 0.f)
+            total_used_filament += volume / (PI * sqr(0.5 * double(current_result->filament_diameters[extruder_id])));
+        if (extruder_id < current_result->filament_densities.size())
+            total_weight += volume * double(current_result->filament_densities[extruder_id]) * 0.001;
+    }
+    current_print.print_statistics().total_used_filament = total_used_filament;
+    current_print.print_statistics().total_weight        = total_weight;
 
     current_print.set_gcode_file_ready();
 
@@ -30211,6 +30224,107 @@ bool Plater::is_shutting_down() const
 void Plater::center_selection()     { p->center_selection(); }
 void Plater::drop_selection()       { p->drop_selection(); }
 void Plater::mirror(Axis axis)      { p->mirror(axis); }
+
+bool Plater::can_apply_transformation(bool position) const
+{
+    if (!is_view3D_shown())
+        return false;
+    // The gizmos that edit a mesh or its painting hold on to the mesh that is about to change.
+    const GLGizmosManager::EType gizmo = p->view3D->get_canvas3d()->get_gizmos_manager().get_current_type();
+    if (gizmo != GLGizmosManager::Undefined && gizmo != GLGizmosManager::Move && gizmo != GLGizmosManager::Rotate &&
+        gizmo != GLGizmosManager::Scale)
+        return false;
+
+    const Selection &selection = get_selection();
+    if (selection.is_empty() || selection.is_wipe_tower() || p->sidebar->obj_list()->has_selected_cut_object())
+        return false;
+
+    if (selection.get_mode() != Selection::Volume)
+        // An object has no place of its own to bake: its position is where it stands on the plate.
+        return !position;
+
+    for (unsigned int idx : selection.get_volume_idxs()) {
+        const GLVolume *gl_volume = selection.get_volume(idx);
+        if (gl_volume == nullptr)
+            continue;
+        const int obj_idx = gl_volume->object_idx();
+        const int vol_idx = gl_volume->volume_idx();
+        if (obj_idx < 0 || obj_idx >= int(model().objects.size()) || vol_idx < 0 || vol_idx >= int(model().objects[obj_idx]->volumes.size()))
+            continue;
+        if (ModelObject::can_apply_volume_transformation(*model().objects[obj_idx]->volumes[vol_idx]))
+            return true;
+    }
+    return false;
+}
+
+void Plater::apply_transformation_dialog(bool position, bool rotation, bool scale)
+{
+    if (!can_apply_transformation(false))
+        return;
+    ApplyTransformDialog dlg(this, can_apply_transformation(true), position, rotation, scale);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    // The selection can not change under a modal dialog, but the checks are cheap.
+    apply_transformation(dlg.position(), dlg.rotation(), dlg.scale());
+}
+
+void Plater::apply_transformation(bool position, bool rotation, bool scale)
+{
+    if (!can_apply_transformation(false))
+        return;
+
+    // What to apply, read before the model changes under the selection.
+    const Selection &selection = get_selection();
+    std::set<std::pair<int, int>> targets; // object + instance, or object + volume
+    const bool parts = selection.get_mode() == Selection::Volume;
+    // An object has no place of its own to bake.
+    position = position && parts;
+    if (!position && !rotation && !scale)
+        return;
+    for (unsigned int idx : selection.get_volume_idxs()) {
+        const GLVolume *gl_volume = selection.get_volume(idx);
+        if (gl_volume == nullptr)
+            continue;
+        const int obj_idx = gl_volume->object_idx();
+        if (obj_idx < 0 || obj_idx >= int(model().objects.size()))
+            continue;
+        const int sub_idx = parts ? gl_volume->volume_idx() : gl_volume->instance_idx();
+        if (sub_idx < 0)
+            continue;
+        if (!parts) {
+            // One instance per object: the others follow it.
+            const auto it = targets.lower_bound({obj_idx, -1});
+            if (it != targets.end() && it->first == obj_idx)
+                continue;
+        }
+        targets.insert({obj_idx, sub_idx});
+    }
+    if (targets.empty())
+        return;
+
+    const std::string name = position && (rotation || scale) ? "Apply transform" : position ? "Apply position" :
+                             rotation && scale ? "Apply rotation and scale" : rotation ? "Apply rotation" : "Apply scale";
+    Plater::TakeSnapshot snapshot(this, name);
+
+    std::set<int> changed;
+    for (const std::pair<int, int> &target : targets) {
+        ModelObject &object = *model().objects[target.first];
+        const bool done = parts ? object.apply_volume_transformation(size_t(target.second), position, rotation, scale) :
+                                  object.apply_instance_transformation(size_t(target.second), rotation, scale);
+        if (done)
+            changed.insert(target.first);
+    }
+
+    for (int obj_idx : changed) {
+        // BBS: backup
+        Slic3r::save_object_mesh(*model().objects[obj_idx]);
+        changed_mesh(obj_idx);
+    }
+    if (GLCanvas3D *canvas = p->view3D->get_canvas3d()) {
+        canvas->get_gizmos_manager().update_data();
+        canvas->set_as_dirty();
+    }
+}
 void Plater::split_object()         { p->split_object(); }
 void Plater::split_volume()         { p->split_volume(); }
 

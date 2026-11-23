@@ -2448,7 +2448,8 @@ void ModelVolume::restore_painting(const std::optional<TriangleSelector::SavedPa
             TriangleSelector::remap_painting(saved->mesh.its, src_data, mesh().its, Geometry::translation_transform(mesh().get_init_shift()),
                                              keep_existing_paint ?
                                                  std::optional<std::reference_wrapper<const TriangleSelector::TriangleSplittingData>>{std::ref(target_facets.get_data())} :
-                                                 std::optional<std::reference_wrapper<const TriangleSelector::TriangleSplittingData>>{});
+                                                 std::optional<std::reference_wrapper<const TriangleSelector::TriangleSplittingData>>{},
+                                             saved->inside_out);
         if (!result.bitstream.empty())
             target_facets.set_data(std::move(result));
     };
@@ -2488,13 +2489,30 @@ static void invalidate_translations(ModelObject* object, const ModelInstance* sr
     }
 }
 
+// The volume of the intersection of two bounding boxes, 0 if they don't overlap.
+static double bbox_overlap_volume(const BoundingBoxf3 &a, const BoundingBoxf3 &b)
+{
+    const Vec3d size = a.max.cwiseMin(b.max) - a.min.cwiseMax(b.min);
+    return size.minCoeff() > 0. ? size.prod() : 0.;
+}
+
 void ModelObject::split(ModelObjectPtrs* new_objects)
 {
     std::vector<TriangleMesh> all_meshes;
     std::vector<Transform3d> all_transfos;
     std::vector<std::pair<int, int>> volume_mesh_counts;
     all_meshes.reserve(this->volumes.size() * 5);
-    bool is_multi_volume_object = (this->volumes.size() > 1);
+    // Orca #17679: negative parts, modifiers, support blockers and enforcers don't make objects of their own.
+    const bool is_multi_volume_object = std::count_if(this->volumes.begin(), this->volumes.end(),
+        [](const ModelVolume *volume) { return volume->is_model_part(); }) > 1;
+    struct Piece
+    {
+        ModelObject  *object;
+        // The offset of the part, which the instances of the new object took over.
+        Vec3d         offset;
+        BoundingBoxf3 bbox;
+    };
+    std::vector<Piece> pieces;
 
     for (int volume_idx = 0; volume_idx < this->volumes.size(); volume_idx++) {
         ModelVolume* volume = this->volumes[volume_idx];
@@ -2562,6 +2580,7 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
             if (mesh.facets_count() < 3)
                 continue;
 
+            const BoundingBoxf3 piece_bbox = mesh.bounding_box().transformed(volume->get_matrix());
             // XXX: this seems to be the only real usage of m_model, maybe refactor this so that it's not needed?
             ModelObject* new_object = m_model->add_object();
             //BBS: refine the config logic
@@ -2624,12 +2643,29 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
                 model_instance->set_offset_to_assembly(new_vol->get_offset());
             }
 
+            pieces.push_back({ new_object, new_vol->get_offset(), piece_bbox });
             new_vol->set_offset(Vec3d::Zero());
             // reset the source to disable reload from disk
             new_vol->source = ModelVolume::Source();
             new_objects->emplace_back(new_object);
         }
     }
+
+    // Give every other volume to the piece it overlaps most, or to the first piece, where it stands.
+    if (! pieces.empty())
+        for (const ModelVolume *volume : this->volumes) {
+            if (volume->is_model_part() || volume->mesh().empty())
+                continue;
+            const BoundingBoxf3 bbox   = volume->mesh().bounding_box().transformed(volume->get_matrix());
+            const Piece        *target = &pieces.front();
+            double              max_overlap = 0.;
+            for (const Piece &piece : pieces)
+                if (const double overlap = bbox_overlap_volume(bbox, piece.bbox); overlap > max_overlap) {
+                    target      = &piece;
+                    max_overlap = overlap;
+                }
+            target->object->add_volume(*volume)->set_transformation(Geometry::translation_transform(-target->offset) * volume->get_matrix());
+        }
 }
 
 
@@ -2787,6 +2823,145 @@ void ModelObject::bake_xy_rotation_into_meshes(size_t instance_idx)
     }
 
     this->invalidate_bounding_box();
+}
+
+namespace {
+
+// Takes the rotation and / or the scale out of `trafo` and returns the matrix A that was taken, so that
+//     old linear part == new linear part * A
+// A goes to whatever the transformation is applied to. A mirror stays in `trafo`, so A never flips the handedness.
+// Returns false (and leaves `trafo` alone) for a degenerate transformation.
+bool take_applied_part(Geometry::Transformation &trafo, bool rotation, bool scale, Matrix3d &applied)
+{
+    applied = Matrix3d::Identity();
+    if (!rotation && !scale)
+        return true;
+
+    const Matrix3d linear = trafo.get_matrix().linear();
+    if (std::abs(linear.determinant()) < 1e-12)
+        return false;
+
+    Geometry::Transformation kept = trafo;
+    if (rotation && scale) {
+        Transform3d m = Transform3d::Identity();
+        if (linear.determinant() < 0.)
+            m.linear()(0, 0) = -1.;
+        m.translation() = trafo.get_offset();
+        kept.set_matrix(m);
+    } else if (rotation)
+        kept.reset_rotation();
+    else
+        kept.reset_scaling_factor();
+
+    const Matrix3d kept_linear = kept.get_matrix().linear();
+    if (std::abs(kept_linear.determinant()) < 1e-12)
+        return false;
+    applied = kept_linear.inverse() * linear;
+    trafo   = kept;
+    return true;
+}
+
+} // namespace
+
+bool ModelObject::can_apply_volume_transformation(const ModelVolume &volume)
+{
+    // A text or an SVG is generated again from its recipe, a connector from the cut, and the texture projection is
+    // given in the coordinates of the mesh.
+    return !volume.is_text() && !volume.emboss_shape.has_value() && !volume.is_cut_connector() &&
+           volume.texture_displacement_layers.empty() && !volume.mesh().empty();
+}
+
+bool ModelObject::apply_instance_transformation(size_t instance_idx, bool rotation, bool scale)
+{
+    if (instance_idx >= this->instances.size() || !this->cut_connectors.empty())
+        return false;
+
+    Geometry::Transformation kept = this->instances[instance_idx]->get_transformation();
+    Matrix3d                 applied;
+    if (!take_applied_part(kept, rotation, scale, applied) || applied.isApprox(Matrix3d::Identity(), 1e-9))
+        return false;
+    const Matrix3d applied_inv = applied.inverse();
+
+    // The volumes that bake the change into the mesh need an invertible transformation of their own.
+    for (const ModelVolume *volume : this->volumes)
+        if (can_apply_volume_transformation(*volume) && std::abs(volume->get_matrix().linear().determinant()) < 1e-12)
+            return false;
+
+    // The instances: the reference one loses what is applied, the others are compensated.
+    auto compensated = [&applied_inv](const Geometry::Transformation &trafo) {
+        Transform3d m = trafo.get_matrix();
+        m.linear()    = m.linear() * applied_inv;
+        return m;
+    };
+    for (size_t i = 0; i < this->instances.size(); ++i) {
+        ModelInstance &instance = *this->instances[i];
+        if (i == instance_idx)
+            instance.set_transformation(kept);
+        else
+            instance.set_transformation(Geometry::Transformation(compensated(instance.get_transformation())));
+        if (instance.is_assemble_initialized())
+            instance.set_assemble_from_transform(compensated(instance.get_assemble_transformation()));
+    }
+
+    // The volumes: the object's coordinates changed by `applied`.
+    for (ModelVolume *volume : this->volumes) {
+        const Transform3d volume_matrix = volume->get_matrix();
+        const Matrix3d    volume_linear = volume_matrix.linear();
+        Transform3d       new_matrix    = volume_matrix;
+        new_matrix.translation()        = applied * volume_matrix.translation();
+        if (can_apply_volume_transformation(*volume)) {
+            // The volume keeps its own rotation and scale, the mesh takes the change as seen from inside the volume.
+            const Matrix3d mesh_trafo = volume_linear.inverse() * applied * volume_linear;
+            if (!mesh_trafo.isApprox(Matrix3d::Identity(), 1e-9)) {
+                volume->transform_this_mesh(mesh_trafo, false);
+                // The mesh is no longer the one in the file.
+                volume->source = ModelVolume::Source();
+            }
+        } else
+            new_matrix.linear() = applied * volume_linear;
+        volume->set_transformation(Geometry::Transformation(new_matrix));
+    }
+
+    // Points kept in the object's coordinates.
+    const Matrix3f applied_f = applied.cast<float>();
+    for (BrimPoint &point : this->brim_points)
+        point.pos = applied_f * point.pos;
+
+    this->invalidate_bounding_box();
+    return true;
+}
+
+bool ModelObject::apply_volume_transformation(size_t volume_idx, bool position, bool rotation, bool scale)
+{
+    if (volume_idx >= this->volumes.size())
+        return false;
+    ModelVolume &volume = *this->volumes[volume_idx];
+    if (!can_apply_volume_transformation(volume))
+        return false;
+
+    Geometry::Transformation kept = volume.get_transformation();
+    Matrix3d                 applied;
+    if (!take_applied_part(kept, rotation, scale, applied))
+        return false;
+
+    Transform3d mesh_trafo = Transform3d::Identity();
+    mesh_trafo.linear()    = applied;
+    if (position) {
+        const Matrix3d kept_linear = kept.get_matrix().linear();
+        if (std::abs(kept_linear.determinant()) < 1e-12)
+            return false;
+        // offset + K * A * p == K * (A * p + K^-1 * offset)
+        mesh_trafo.translation() = kept_linear.inverse() * kept.get_offset();
+        kept.set_offset(Vec3d::Zero());
+    }
+    if (mesh_trafo.isApprox(Transform3d::Identity(), 1e-9))
+        return false;
+
+    volume.transform_this_mesh(mesh_trafo, false);
+    volume.set_transformation(kept);
+    volume.source = ModelVolume::Source();
+    this->invalidate_bounding_box();
+    return true;
 }
 
 double ModelObject::get_instance_min_z(size_t instance_idx) const

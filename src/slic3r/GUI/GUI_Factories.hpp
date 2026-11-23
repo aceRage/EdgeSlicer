@@ -213,6 +213,7 @@ private:
     void        append_menu_item_merge_parts_to_single_part(wxMenu *menu);
     void        append_menu_item_merge_some_parts_to_single_part(wxMenu *menu);
     void        append_menu_items_mirror(wxMenu *menu);
+    void        append_menu_items_apply_transform(wxMenu *menu);
     // RE-EDITABLE CUTS: reopen the Cut gizmo on an existing cut.
     void        append_menu_item_edit_cut(wxMenu *menu);
     // "Copy cut to...": a submenu of the other objects, setting the selected

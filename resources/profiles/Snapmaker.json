@@ -1,6 +1,6 @@
 {
   "name": "Snapmaker",
-  "version": "02.03.03.16",
+  "version": "02.03.03.17",
   "force_update": "0",
   "description": "Snapmaker configurations",
   "machine_model_list": [
@@ -1987,6 +1987,10 @@
     {
       "name": "Polymaker PETG Galaxy @U1",
       "sub_path": "filament/Polymaker PETG Galaxy @U1.json"
+    },
+    {
+      "name": "Polymaker G-Flex PETG @U1",
+      "sub_path": "filament/Polymaker G-Flex PETG @U1.json"
     },
     {
       "name": "Polymaker PLA @U1",

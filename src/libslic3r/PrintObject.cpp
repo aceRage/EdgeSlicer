@@ -143,7 +143,12 @@ PrintBase::ApplyStatus PrintObject::set_instances(PrintInstances &&instances)
     	[](const PrintInstance& lhs, const PrintInstance& rhs) { return lhs.model_instance == rhs.model_instance && lhs.shift == rhs.shift; });
     if (! equal) {
         status = PrintBase::APPLY_STATUS_CHANGED;
-        if (m_print->invalidate_steps({ psSkirtBrim, psGCodeExport }) ||
+        // Orca #17680: tree supports stay inside the bed shape, which they place at the first instance,
+        // so after that one moved they kept the old position until a setting changed.
+        const bool first_moved = instances.empty() || m_instances.empty() || instances.front().shift != m_instances.front().shift;
+        const bool support_follows_instances = this->has_support_material() && is_tree(m_config.support_type.value) && first_moved;
+        if ((support_follows_instances && this->invalidate_step(posSupportMaterial)) ||
+            m_print->invalidate_steps({ psSkirtBrim, psGCodeExport }) ||
             (! equal_length && m_print->invalidate_step(psWipeTower)))
             status = PrintBase::APPLY_STATUS_INVALIDATED;
         m_instances = std::move(instances);
@@ -5091,6 +5096,11 @@ void PrintObject::generate_support_for_preview()
         this->_generate_support_material();
     this->clear_tree_support_preview_cache();
     this->throw_if_canceled();
+}
+
+double PrintObject::print_z_max() const
+{
+    return scale_(m_slicing_params.object_print_z_max);
 }
 
 void PrintObject::update_slicing_parameters()

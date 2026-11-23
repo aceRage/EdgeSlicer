@@ -16,6 +16,71 @@ using namespace Slic3r;
 using namespace Slic3r::Measure;
 using Catch::Matchers::WithinAbs;
 
+// Edge form of the gizmo half of #17549: only the stretch of the volume's transform is baked into
+// the mesh used for feature detection.
+TEST_CASE("Detection stretch is the scale part of a transform", "[Measure]")
+{
+    const Eigen::Matrix3d rotation = (Eigen::AngleAxisd(0.7, Vec3d::UnitZ()) * Eigen::AngleAxisd(-0.4, Vec3d::UnitX())).toRotationMatrix();
+    const Eigen::Matrix3d scale    = Vec3d(3., 1., 0.5).asDiagonal();
+
+    SECTION("uniform scale and rotation need no stretch") {
+        Transform3d world = Transform3d::Identity();
+        world.linear() = rotation * 2.5;
+        world.translation() = Vec3d(10., -4., 2.);
+        CHECK(detection_stretch(world).isApprox(Transform3d::Identity()));
+        CHECK(detection_stretch(Transform3d::Identity()).isApprox(Transform3d::Identity()));
+    }
+
+    SECTION("nonuniform scale under a rotation") {
+        Transform3d world = Transform3d::Identity();
+        world.linear() = rotation * scale;
+        world.translation() = Vec3d(10., -4., 2.);
+        const Transform3d stretch = detection_stretch(world);
+        CHECK(stretch.linear().isApprox(scale, 1e-9));
+        CHECK(stretch.translation().isZero());
+        // What is left maps the stretched frame to the world rigidly.
+        const Eigen::Matrix3d rest = (world * stretch.inverse()).linear();
+        CHECK((rest * rest.transpose()).isApprox(Eigen::Matrix3d::Identity(), 1e-9));
+        // Moving or rotating the part afterwards leaves the stretch alone.
+        Transform3d moved = Transform3d::Identity();
+        moved.linear() = Eigen::AngleAxisd(1.3, Vec3d(1., 2., 3.).normalized()).toRotationMatrix();
+        moved.translation() = Vec3d(5., 5., 5.);
+        CHECK(detection_stretch(moved * world).linear().isApprox(stretch.linear(), 1e-9));
+    }
+
+    SECTION("a mirror stays outside the stretch") {
+        Transform3d world = Transform3d::Identity();
+        world.linear() = rotation * Vec3d(-3., 1., 0.5).asDiagonal();
+        const Transform3d stretch = detection_stretch(world);
+        CHECK(stretch.linear().determinant() > 0.);
+        CHECK(stretch.linear().isApprox(scale, 1e-9));
+        CHECK((world * stretch.inverse()).linear().determinant() < 0.);
+    }
+}
+
+TEST_CASE("A cylinder stretched across its axis has no circle features", "[Measure]")
+{
+    // 16 segments: coarse enough that no run of the stretched rim passes for an arc.
+    indexed_triangle_set mesh = its_make_cylinder(10., 10., PI / 8.);
+    auto count_circles = [](const indexed_triangle_set &its) {
+        Measuring measuring(its);
+        int       circles = 0;
+        for (int i = 0; i < measuring.get_num_of_planes(); ++i)
+            for (const SurfaceFeature &feature : measuring.get_plane_features(i))
+                if (feature.get_type() == SurfaceFeatureType::Circle)
+                    ++circles;
+        return circles;
+    };
+    REQUIRE(count_circles(mesh) == 2);
+
+    Transform3d world = Transform3d::Identity();
+    world.linear() = Eigen::AngleAxisd(0.5, Vec3d::UnitZ()).toRotationMatrix() * Vec3d(3., 1., 1.).asDiagonal();
+    const Transform3d stretch = detection_stretch(world);
+    for (Vec3f &vertex : mesh.vertices)
+        vertex = (stretch * vertex.cast<double>()).cast<float>();
+    CHECK(count_circles(mesh) == 0);
+}
+
 TEST_CASE("Scaled plane normals remain perpendicular to the transformed surface", "[Measure]")
 {
     const Vec3d normal = Vec3d(1, 0, 1).normalized();

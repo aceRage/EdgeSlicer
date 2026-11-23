@@ -953,6 +953,13 @@ public:
     void drop_selection();
     void search(bool plater_is_active, Preset::Type  type, wxWindow *tag, TextInput *etag, wxWindow *stag);
     void mirror(Axis axis);
+    // "Apply transform": the chosen parts of the selection's transformation become its new baseline (they read as
+    // zero rotation / 100% scale / zero offset afterwards) and nothing moves. Objects when objects are selected,
+    // parts when parts are; a position can only be applied to parts.
+    void apply_transformation(bool position, bool rotation, bool scale);
+    // Asks which ones in a small dialog (the arguments are the boxes ticked at first), then applies them.
+    void apply_transformation_dialog(bool position, bool rotation, bool scale);
+    bool can_apply_transformation(bool position) const;
     void split_object();
     void split_volume();
     // Ultra: split a painted part into one solid part per filament (docs/superpowers/specs/2026-09-01-color-split-design.md).

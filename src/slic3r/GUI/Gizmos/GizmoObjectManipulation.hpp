@@ -198,6 +198,7 @@ public:
     void show_move_tooltip_information(ImGuiWrapper *imgui_wrapper, float caption_max, float x, float y);
     void show_rotate_tooltip_information(ImGuiWrapper *imgui_wrapper, float caption_max, float x, float y);
     void show_scale_tooltip_information(ImGuiWrapper *imgui_wrapper, float caption_max, float x, float y);
+    void render_apply_transform_button(ImGuiWrapper *imgui_wrapper);
     void set_init_rotation(const Geometry::Transformation &value);
 
 private:
