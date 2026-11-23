@@ -556,13 +556,25 @@ TEST_CASE("A Bambu firmware flush (VFLUSH) counts as flushed filament and as tim
         CHECK(ps.total_filamentchanges == none.print_statistics.total_filamentchanges);
     }
 
-    SECTION("virtual moves and SYNC lines outside a VFLUSH block count nothing")
+    SECTION("outside a VFLUSH block a virtual move is time only, a SYNC line nothing")
     {
         GCodeProcessorResult outside;
-        // The template's deretract after T (";VG1 E4 ...") and the start G-code's "SYNC R0 T120 ; Adjust estimated time".
+        // The template's deretract after T (";VG1 E4 ...", timed as Bambu Studio times it) and the start G-code's
+        // "SYNC R0 T120 ; Adjust estimated time" (not read).
         run(";VG1 E4 F600\n;VG1 E4 F300\nSYNC R0 T120\n", outside);
         CHECK(outside.print_statistics.flush_per_filament.empty());
-        CHECK_THAT(outside.print_statistics.modes[normal].time, Catch::Matchers::WithinAbs(none.print_statistics.modes[normal].time, 1e-4));
+        const float added = outside.print_statistics.modes[normal].time - none.print_statistics.modes[normal].time;
+        CHECK_THAT(added, Catch::Matchers::WithinAbs(0.4 + 0.8, 0.01));
+    }
+    SECTION("switched off (GCodeProcessor::s_EstimateVirtualFlush, for tests), nothing is read")
+    {
+        const bool was = GCodeProcessor::s_EstimateVirtualFlush;
+        const ScopeGuard restore([was] { GCodeProcessor::s_EstimateVirtualFlush = was; });
+        GCodeProcessor::s_EstimateVirtualFlush = false;
+        GCodeProcessorResult off;
+        run("; VFLUSH_START\n;VG1 E41.5 F600\nSYNC T10\n; VFLUSH_END\n;VG1 E4 F600\n", off);
+        CHECK(off.print_statistics.flush_per_filament.empty());
+        CHECK_THAT(off.print_statistics.modes[normal].time, Catch::Matchers::WithinAbs(none.print_statistics.modes[normal].time, 1e-4));
     }
 
     SECTION("a FLUSH_START block of real moves books the same flush as before")

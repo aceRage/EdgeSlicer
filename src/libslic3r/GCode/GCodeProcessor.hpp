@@ -447,6 +447,8 @@ inline bool is_bbl_special_tool_command(int tool_number)
         static constexpr size_t Output_Block_Size = 65536;
 
         static bool s_IsBBLPrinter;
+        // Tests only: false skips the Bambu firmware flush (VFLUSH) accounting, to compare the G-code with and without it.
+        static bool s_EstimateVirtualFlush;
 
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
         static const std::string Mm3_Per_Mm_Tag;
@@ -579,6 +581,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
                 unsigned int id;
                 unsigned int remaining_internal_g1_lines{ 0 };
                 float elapsed_time;
+                // elapsed_time without the estimate-only time (add_estimate_only_time): what the passes that place
+                // G-code lines by time read (the pre-cooling planner, the tool change preheat backtrace).
+                float planning_time;
             };
 
             // A point of the planner's speed profile (end of acceleration / start of deceleration) inside
@@ -627,6 +632,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
             std::vector<ActualSpeedMove> actual_speed_moves;
             //BBS: prepare stage time before print model, including start gcode time and mostly same with start gcode time
             float prepare_time;
+            // EDGE: `time` without the estimate-only time, summed exactly as `time` is without it.
+            double planning_time;
+            // EDGE: estimate-only time (a Bambu firmware flush) not yet put on a block; the next processed block carries it.
+            float estimate_only_pending{ 0.0f };
 
             // Orca (#14573): extra time (e.g. a filament-change delay) that can't be attributed to a
             // matching block on this pass is buffered here and retried on a later pass, so it
@@ -1256,6 +1265,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         // both are ignored, as before.
         void process_virtual_flush_move(const std::string_view comment);
         void process_SYNC(const GCodeReader::GCodeLine& line);
+        // Time that counts in the estimate (totals, M73, layer and move times) but not in what places G-code lines by time:
+        // it goes on the next block each machine processes, outside the planner queue and the booked waits
+        // (m_booked_times), and outside G1LinesCacheItem::planning_time. The G-code itself stays as without it.
+        void add_estimate_only_time(float seconds);
         // Books `volume` mm^3 flushed after a filament change: what is left of the previous filament in the nozzle first
         // (m_remaining_volume, nozzle_volume after each change), the rest to the current filament.
         void book_flush_volume(float volume);
