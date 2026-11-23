@@ -909,9 +909,10 @@ private:
     int  temperature_tool_for_filament(int filament_id) const;
     bool is_bbl_multi_extruder() const;
     void note_filament_loaded(int filament_id);
-    // Purge volume for a change old -> new that crosses extruders: the flush from the filament the
-    // target nozzle still holds, 0 when it holds nothing or already holds the new filament.
-    // Returns false (and leaves volume alone) when old and new share an extruder.
+    // Purge volume for a change old -> new onto another nozzle (the other extruder, or another nozzle
+    // of the same extruder's rack): the flush from the filament the target nozzle still holds, 0 when
+    // it holds nothing or already holds the new filament.
+    // Returns false (and leaves volume alone) when old and new share a nozzle.
     bool cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const;
     // hotend_as_extruder (H3C): the flush into the next filament's own rack hotend (0 when it is empty or holds it).
     float hotend_flush_volume(int new_filament_id) const;
