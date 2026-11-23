@@ -1645,6 +1645,97 @@ TEST_CASE("By object, tall object first: the nozzle rises above it before the en
     CHECK(end.lift_comments == 1);
 }
 
+// The gantry-reach warning was only a validation notice, which the plater hides in the preview, where a plate set to
+// "By object" in its own plate settings is looked at after slicing (and the CLI only logged it). It is now also a
+// slicing warning of the G-code export step. The plater applies a plate's own settings over the global ones
+// (BackgroundSlicingProcess::apply), so a plate-level "By object" reaches Print the same way as a global one.
+TEST_CASE("By object: the gantry-reach warning is a slicing warning too, from a global or a plate setting", "[GCode][ByObjectEndLift]")
+{
+    const auto a2l_like = [](const char *sequence) {
+        DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+        cfg.set_deserialize_strict({
+            {"print_sequence",                   sequence},
+            {"printer_structure",                "i3"},
+            {"printable_area",                   "0x0,330x0,330x320,0x320"},
+            {"printable_height",                 325.},
+            {"extruder_clearance_radius",        73.},
+            {"extruder_clearance_max_radius",    73.},
+            {"extruder_clearance_dist_to_rod",   56.5},
+            {"extruder_clearance_height_to_rod", 25.},
+            {"extruder_clearance_height_to_lid", 325.},
+            {"skirt_loops",                      0},
+            {"brim_type",                        "no_brim"},
+            {"layer_height",                     0.3},
+            {"initial_layer_print_height",       0.3},
+            {"machine_start_gcode",              ""},
+        });
+        cfg.set_key_value("machine_end_gcode", new ConfigOptionString(";MACHINE_END_MARK\n"));
+        cfg.option<ConfigOptionStrings>("filament_end_gcode")->values = {";FILAMENT_END_MARK\n"};
+        return cfg;
+    };
+    struct Setting { const char *name; const char *global; const char *plate; bool by_object; };
+    const Setting setting = GENERATE(values<Setting>({
+        { "global by object",                        "by object", nullptr,     true },
+        { "global by layer, plate by object",        "by layer",  "by object", true },
+        { "global by object, plate by layer",        "by object", "by layer",  false },
+        { "global by layer",                         "by layer",  nullptr,     false },
+    }));
+    CAPTURE(setting.name);
+    DynamicPrintConfig cfg = a2l_like(setting.global);
+    if (setting.plate != nullptr) {
+        // What BackgroundSlicingProcess::apply does with the plate's own settings.
+        DynamicPrintConfig plate;
+        plate.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(
+                                                  std::string(setting.plate) == "by object" ? PrintSequence::ByObject : PrintSequence::ByLayer));
+        cfg.apply(plate);
+    }
+
+    // The A2L plate: a 66 mm cylinder, a 39.6 mm cube 44.7 mm behind it, a 16.5 mm cube at the back, in that order.
+    Model model;
+    const auto add = [&model](const char *name, TriangleMesh mesh, double x, double y) {
+        ModelObject *object = model.add_object();
+        object->name        = name;
+        object->add_volume(std::move(mesh));
+        object->add_instance();
+        object->center_around_origin();
+        object->instances.front()->set_offset(Vec3d(x, y, 0.));
+        object->ensure_on_bed();
+    };
+    add("Cylinder", make_cylinder(33., 66., 2. * PI / 36.), 67.3, 55.5);
+    add("Cube", make_cube(39.6, 39.6, 39.6), 260.8, 88.5 + 44.7 + 19.8);
+    add("Small cube", make_cube(16.5, 16.5, 16.5), 101.75, 259.75);
+
+    Print print;
+    print.apply(model, cfg);
+    std::vector<StringObjectException> warnings;
+    print.validate(&warnings);
+    const std::string gcode = Test::gcode(print);
+
+    const std::string text = "Cylinder is tall and close to an object printed after it.";
+    size_t validation = 0;
+    for (const StringObjectException &w : warnings)
+        if (w.string.find(text) != std::string::npos)
+            ++validation;
+    size_t slicing = 0;
+    for (const PrintStateBase::Warning &w : print.step_state_with_warnings(psGCodeExport).warnings)
+        if (w.message_id == int(PrintStateBase::SlicingByObjectGantryReach)) {
+            CHECK(w.level == PrintStateBase::WarningLevel::NON_CRITICAL);
+            CHECK(w.message.find(text) != std::string::npos);
+            ++slicing;
+        }
+    const EndOfPrint end = end_of_print(gcode);
+    REQUIRE(end.end_found);
+    REQUIRE(end.top_extrusion_z > 65.);
+    CHECK(validation == (setting.by_object ? 1 : 0));
+    CHECK(slicing == (setting.by_object ? 1 : 0));
+    // The same effective setting drives the end lift: by object, the end G-code starts above the cylinder; by
+    // layer, the last layer is the cylinder's top and nothing moves.
+    if (setting.by_object)
+        CHECK(end.z_at_end_gcode > end.top_extrusion_z + 0.1);
+    else
+        CHECK(end.z_at_end_gcode == Approx(end.top_extrusion_z));
+}
+
 TEST_CASE("By object, nothing taller printed before the last object: the end of the print is unchanged", "[GCode][ByObjectEndLift]")
 {
     SECTION("short first, tall last") {

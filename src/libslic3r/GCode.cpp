@@ -3659,6 +3659,15 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     if (m_config.printer_structure.value == PrinterStructure::psI3 && print->config().print_sequence == PrintSequence::ByObject) {
         m_timelapse_warning_code += (1 << 1);
     }
+    // EDGE: the by-object gantry-reach warning is a validation notice, and the plater hides those in the preview, where
+    // a plate is looked at after slicing (and the CLI only logs them). Raise it again as a slicing warning of this step.
+    // Read-only: the print order and the G-code do not change.
+    if (print->config().print_sequence == PrintSequence::ByObject) {
+        StringObjectException rod_warning;
+        if (Print::sequential_print_clearance_valid(*print, nullptr, nullptr, &rod_warning).string.empty() && !rod_warning.string.empty())
+            print->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, rod_warning.string,
+                                           PrintStateBase::SlicingByObjectGantryReach);
+    }
     m_processor.result().timelapse_warning_code        = m_timelapse_warning_code;
     m_processor.result().support_traditional_timelapse = m_support_traditional_timelapse;
 
