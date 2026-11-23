@@ -8459,13 +8459,10 @@ LayerResult GCode::process_layer(const Print& print,
 
     // BBS: get next extruder according to flush and soluble
     auto get_next_extruder = [&](int current_extruder, const std::vector<unsigned int>& extruders) {
-        std::vector<float> flush_matrix(cast<float>(m_config.flush_volumes_matrix.values));
-        const unsigned int number_of_extruders = (unsigned int) (sqrt(flush_matrix.size()) + EPSILON);
-        // Extract purging volumes for each extruder pair:
-        std::vector<std::vector<float>> wipe_volumes;
-        for (unsigned int i = 0; i < number_of_extruders; ++i)
-            wipe_volumes.push_back(
-                std::vector<float>(flush_matrix.begin() + i * number_of_extruders, flush_matrix.begin() + (i + 1) * number_of_extruders));
+        // Purging volumes for each filament pair; with one matrix per nozzle (Bambu Studio's 2 x N x N) the
+        // block of the nozzle the new filament prints from, else the one square as before.
+        const std::vector<std::vector<float>> wipe_volumes =
+            flush_matrix_for_changes(m_config.flush_volumes_matrix.values, m_config.nozzle_diameter.size(), m_config.filament_map.values);
         unsigned int next_extruder = current_extruder;
         float        min_flush     = std::numeric_limits<float>::max();
         for (auto extruder_id : extruders) {
@@ -13937,12 +13934,10 @@ float GCode::hotend_flush_volume(int new_filament_id) const
     auto it = m_filament_in_nozzle.find(nozzle_key_for_filament(new_filament_id));
     if (it == m_filament_in_nozzle.end() || it->second < 0 || it->second == new_filament_id)
         return 0.f; // empty hotend, or it already holds the new filament
-    const std::vector<double> &matrix = m_config.flush_volumes_matrix.values;
-    const size_t               n      = size_t(std::sqrt(double(matrix.size())) + EPSILON);
-    const size_t               idx    = size_t(it->second) * n + size_t(new_filament_id);
-    if (n > 0 && size_t(it->second) < n && size_t(new_filament_id) < n && idx < matrix.size())
-        return float(matrix[idx] * m_config.flush_multiplier.value);
-    return 0.f;
+    // The new filament's nozzle's matrix where the project carries one per nozzle (flush_volume_for_change).
+    return float(flush_volume_for_change(m_config.flush_volumes_matrix.values, m_config.nozzle_diameter.size(),
+                                         m_config.filament_map.values, size_t(it->second), size_t(new_filament_id)) *
+                 m_config.flush_multiplier.value);
 }
 
 bool GCode::cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const
@@ -13955,11 +13950,11 @@ bool GCode::cross_extruder_flush_volume(int old_filament_id, int new_filament_id
     auto it = m_filament_in_nozzle.find(nozzle_key_for_filament(new_filament_id));
     if (it == m_filament_in_nozzle.end() || it->second < 0 || it->second == new_filament_id)
         return true; // empty nozzle, or it already holds the new filament
-    const std::vector<double> &matrix = m_config.flush_volumes_matrix.values;
-    const size_t               n      = size_t(std::sqrt(double(matrix.size())) + EPSILON);
-    const size_t               idx    = size_t(it->second) * n + size_t(new_filament_id);
-    if (n > 0 && size_t(it->second) < n && size_t(new_filament_id) < n && idx < matrix.size())
-        volume = float(matrix[idx] * m_config.flush_multiplier.value);
+    // The flush on the new filament's nozzle: its own matrix where the project carries one per nozzle (Bambu
+    // Studio's 2 x N x N), the single matrix otherwise (flush_volume_for_change).
+    volume = float(flush_volume_for_change(m_config.flush_volumes_matrix.values, m_config.nozzle_diameter.size(),
+                                           m_config.filament_map.values, size_t(it->second), size_t(new_filament_id)) *
+                   m_config.flush_multiplier.value);
     return true;
 }
 
@@ -14162,6 +14157,11 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
         // Orca #15289: bounds-check flush_volumes_matrix — partial/legacy configs can be shorter than filament count.
         size_t flush_idx = size_t(previous_extruder_id) * number_of_extruders + extruder_id;
         wipe_volume      = flush_idx < flush_matrix.size() ? flush_matrix[flush_idx] : 0.f;
+        // A project with one matrix per nozzle (Bambu Studio's 2 x N x N on an H2D / H2C) flushes by the matrix of
+        // the nozzle the new filament prints from, not by one floor(sqrt) square over both.
+        if (flush_matrix_layout(flush_matrix.size(), m_config.nozzle_diameter.size()).per_nozzle())
+            wipe_volume = float(flush_volume_for_change(m_config.flush_volumes_matrix.values, m_config.nozzle_diameter.size(),
+                                                        m_config.filament_map.values, size_t(previous_extruder_id), size_t(extruder_id)));
         wipe_volume *= m_config.flush_multiplier;
         // A change onto the other extruder of a Bambu two-extruder printer purges what that nozzle
         // still holds (Bambu Studio GCode.cpp:8180-8196): nothing when it is empty or already holds
