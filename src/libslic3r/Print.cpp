@@ -7969,11 +7969,35 @@ void Print::_make_wipe_tower()
             MultiNozzleUtils::HotendFilamentTracker hotends(hotend_as_extruder(m_config), get_layered_nozzle_group_result());
             const auto nozzle_group = get_layered_nozzle_group_result();
             hotends.load(current_extruder_id, 0);
+            // Bambu printers with two extruders (H2D / X2D / H2C; Bambu Studio's NozzleStatusRecorder, as in
+            // LayeredNozzleGroupResult::estimate_seq_flush_weight): a nozzle keeps the last filament it held, so a
+            // change onto another nozzle - the other extruder, or another nozzle of the H2C's rack - flushes from
+            // THAT filament, and nothing when the nozzle is empty or already holds the next one. A change on one
+            // nozzle keeps the flush from the outgoing filament. The nozzle is the grouping's (filament_nozzle_map),
+            // or the extruder (filament_map) when the plate has no grouping. GCode's append_tcr writes this purge
+            // (M620.10 L / flush_length) as it is.
+            const bool                  flush_by_held_nozzle = !hotends.active() && is_BBL_printer() && m_config.nozzle_diameter.size() >= 2;
+            std::map<int, int>          filament_in_nozzle;
+            auto nozzle_of = [&](unsigned int filament_id, int layer_idx) -> int {
+                if (nozzle_group)
+                    return nozzle_group->get_nozzle_id(int(filament_id), layer_idx);
+                const std::vector<int> &fm = m_config.filament_map.values;
+                return filament_id < fm.size() && fm[filament_id] >= 1 ? fm[filament_id] - 1 : -1;
+            };
+            auto load_nozzle = [&](unsigned int filament_id, int layer_idx) {
+                if (!flush_by_held_nozzle)
+                    return;
+                if (const int nozzle = nozzle_of(filament_id, layer_idx); nozzle >= 0)
+                    filament_in_nozzle[nozzle] = int(filament_id);
+            };
+            load_nozzle(current_extruder_id, 0);
             for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) { // for all layers
                 const int layer_idx = int(&layer_tools - &m_wipe_tower_data.tool_ordering.front());
                 if (!layer_tools.has_wipe_tower) {
-                    for (const unsigned int filament_id : layer_tools.extruders)
+                    for (const unsigned int filament_id : layer_tools.extruders) {
                         hotends.load(filament_id, layer_idx);
+                        load_nozzle(filament_id, layer_idx);
+                    }
                     continue;
                 }
                 bool first_layer = &layer_tools == &m_wipe_tower_data.tool_ordering.front();
@@ -7987,8 +8011,10 @@ void Print::_make_wipe_tower()
                         const std::vector<LocalZWipeTowerToolchange> local_z_toolchanges =
                             collect_local_z_wipe_tower_toolchanges(*this, local_z_layers_to_print[local_z_layers_to_print_idx].second,
                                                                    int(current_extruder_id));
-                        for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges)
+                        for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges) {
                             hotends.load(toolchange.new_tool, layer_idx);
+                            load_nozzle(toolchange.new_tool, layer_idx);
+                        }
                         if (!local_z_toolchanges.empty())
                             current_extruder_id = local_z_toolchanges.back().new_tool;
                     }
@@ -8016,6 +8042,17 @@ void Print::_make_wipe_tower()
                                                   0.f :
                                                   wipe_volumes[size_t(held)][extruder_id];
                             hotends.load(extruder_id, layer_idx);
+                        } else if (flush_by_held_nozzle) {
+                            const int old_nozzle = nozzle_of(current_extruder_id, layer_idx);
+                            const int new_nozzle = nozzle_of(extruder_id, layer_idx);
+                            if (old_nozzle >= 0 && new_nozzle >= 0 && old_nozzle != new_nozzle) {
+                                const auto it   = filament_in_nozzle.find(new_nozzle);
+                                const int  held = it == filament_in_nozzle.end() ? -1 : it->second;
+                                volume_to_purge = held < 0 || held == int(extruder_id) || size_t(held) >= wipe_volumes.size() ?
+                                                      0.f :
+                                                      wipe_volumes[size_t(held)][extruder_id];
+                            }
+                            load_nozzle(extruder_id, layer_idx);
                         }
                         volume_to_purge *= m_config.flush_multiplier;
 
