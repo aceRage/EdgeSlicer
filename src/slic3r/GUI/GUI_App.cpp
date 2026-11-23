@@ -3345,6 +3345,13 @@ void GUI_App::update_discord_presence()
 
 int GUI_App::OnExit()
 {
+    // The ZIP work-folder clean-up thread. MainFrame::shutdown() normally stopped it already, but this
+    // also runs when the window never got its close event: an unhandled exception that ended the main
+    // loop (OnExit then runs while the stack unwinds), or the end of the Windows session
+    // (wxApp::OnEndSession deletes the windows without closing them). Cancelled between files, so it
+    // is quick; it does not throw.
+    ZipCleanup::shutdown();
+
     // Stop before the device manager goes away: the worker formats state that
     // was read from it, and its destructor clears the presence from the profile.
     m_discord_presence.reset();
@@ -3530,6 +3537,7 @@ bool GUI_App::on_init_inner()
     wxGetApp().Bind(wxEVT_END_SESSION, [this](wxCloseEvent &e) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "received wxEVT_END_SESSION";
         stop_sync_user_preset();
+        ZipCleanup::shutdown(); // its worker thread, before exit() destroys the statics
         Slic3r::NetworkAgent::unload_network_module();
 #ifdef EDGE_PYTHON_PLUGINS
         // Orca #16136: AppKit calls exit() after wxEVT_END_SESSION, so OnExit()/~GUI_App()
