@@ -661,6 +661,22 @@ public:
     // Rotation and mirroring is being baked in. In case the instance scaling was non-uniform, it is baked in as well.
     void bake_xy_rotation_into_meshes(size_t instance_idx);
 
+    // "Apply transform" (as in Blender): the chosen parts of a transformation become the new baseline. They are moved
+    // into the data below (the meshes), so they read as zero rotation / 100% scale / zero offset afterwards, while
+    // nothing moves or changes shape in the scene. A mirror is never applied: it stays a transformation, so that
+    // painting keeps its triangle order.
+    //
+    // The object as placed by the given instance. Its parts keep their own rotation, scale and offset inside the
+    // object; the other instances are compensated, so they stay as they are too. Texts, SVGs and parts with
+    // texture displacement keep their mesh and take the change into their own transformation instead.
+    // Returns false when there was nothing to apply or it cannot be done (cut connectors, a degenerate scale).
+    bool apply_instance_transformation(size_t instance_idx, bool rotation, bool scale);
+    // One part inside the object. `position` makes the part's offset zero: its origin moves to the object's origin.
+    // Returns false when there was nothing to apply or it cannot be done (see can_apply_volume_transformation()).
+    bool apply_volume_transformation(size_t volume_idx, bool position, bool rotation, bool scale);
+    // False for the parts whose mesh is generated or bound to data that a changed mesh would break.
+    static bool can_apply_volume_transformation(const ModelVolume &volume);
+
     double get_instance_min_z(size_t instance_idx) const;
     double get_instance_max_z(size_t instance_idx) const;
 

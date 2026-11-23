@@ -48,6 +48,11 @@ using InsertedLines = std::map<unsigned int, std::vector<std::string>>;
 // changes (no markers, no injected lines).
 bool pre_cooling_active(const Print &print);
 
+// A per-extruder-variant printer value (hotend_cooling_rate / hotend_heating_rate: one entry per printer_extruder_variant) for
+// logical extruder e: the entry of the extruder's current variant (printer_extruder_variant_slot), as Bambu Studio resolves these
+// when it loads the preset. Values not laid out per variant are read by extruder; `fallback` when there are none.
+double extruder_variant_value(const PrintConfig &cfg, const std::vector<double> &values, size_t e, double fallback);
+
 // Bambu's first-pass usage blocks (BambuStudio GCodeProcessor.hpp:379-441).
 struct FilamentUsageBlock
 {

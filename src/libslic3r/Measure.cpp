@@ -1012,6 +1012,18 @@ const indexed_triangle_set& Measuring::get_its() const
     return priv->get_its();
 }
 
+Transform3d detection_stretch(const Transform3d& world)
+{
+    const Eigen::Matrix3d              linear = world.linear();
+    const Eigen::JacobiSVD<Eigen::Matrix3d> svd(linear, Eigen::ComputeFullV);
+    const Eigen::Vector3d              sv = svd.singularValues(); // sorted, largest first
+    Transform3d                        stretch = Transform3d::Identity();
+    if (!(sv(2) > 1e-9) || sv(0) - sv(2) <= 1e-6 * sv(0))
+        return stretch; // degenerate or uniform scale
+    stretch.linear() = svd.matrixV() * sv.asDiagonal() * svd.matrixV().transpose();
+    return stretch;
+}
+
 const AngleAndEdges AngleAndEdges::Dummy = { 0.0, Vec3d::Zero(), { Vec3d::Zero(), Vec3d::Zero() }, { Vec3d::Zero(), Vec3d::Zero() }, 0.0, true };
 
 static AngleAndEdges angle_edge_edge(const std::pair<Vec3d, Vec3d>& e1, const std::pair<Vec3d, Vec3d>& e2)
