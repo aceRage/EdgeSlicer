@@ -644,3 +644,38 @@ TEST_CASE("H2C: the change template's temperature compensation uses the rates of
         }
     }
 }
+
+// The prime tower's ramming on an extruder change waits for the outgoing nozzle to reach filament_pre_cooling_temperature,
+// timed by hotend_cooling_rate (WipeTower). The H2C keeps that rate per extruder variant (1.6,1.6,1.6,3.4,3.4); the tower
+// read it by extruder, so the right extruder (index 1) got the left extruder's High Flow slot. Only each extruder's current
+// variant may matter: changing the slots no extruder uses must leave the G-code as it is.
+TEST_CASE("H2C: the tower's pre-cool ramming reads the cooling rate of the outgoing extruder's variant", "[BambuPreCool][HotendRates][Tower]")
+{
+    auto sliced = [](const char *cooling) {
+        const DynamicPrintConfig cfg = machine_config(H2C, { { "filament_map_mode", "Manual" },
+                                                             { "filament_map", "2,1,2" },
+                                                             { "filament_pre_cooling_temperature", "200,200,200" },
+                                                             { "hotend_cooling_rate", cooling } });
+        Print print;
+        Model model;
+        return slice(print, model, cfg, H2C);
+    };
+    const std::string stock  = sliced("1.6,1.6,1.6,3.4,3.4");
+    // The left High Flow / E3D High Flow slots: no extruder of this plate prints with them (both are Standard).
+    const std::string unused = sliced("1.6,9.9,9.9,3.4,3.4");
+    // The plate has extruder changes with a ramming on the tower.
+    REQUIRE(count_lines(stock, std::regex("^; NOZZLE_CHANGE_START")) > 0);
+    const std::vector<std::string> a = body_lines(stock);
+    const std::vector<std::string> b = body_lines(unused);
+    CHECK(a.size() == b.size());
+    size_t differing = 0;
+    for (size_t i = 0; i < std::min(a.size(), b.size()); ++i)
+        if (a[i] != b[i] && a[i].find("label id") == std::string::npos && a[i].rfind("M62", 0) != 0) {
+            if (differing++ < 5)
+                UNSCOPED_INFO("line " << i << ": " << a[i] << " -> " << b[i]);
+        }
+    CHECK(differing == 0);
+    // And the right extruder's own slot does matter.
+    const std::string slower = sliced("1.6,1.6,1.6,1.0,1.0");
+    CHECK(body_lines(slower) != a);
+}

@@ -20,6 +20,7 @@
 #include <boost/log/trivial.hpp>
 
 #include "GCodeProcessor.hpp"
+#include "PreCoolingInjector.hpp"
 #include "GCodeWriter.hpp"
 #include "BoundingBox.hpp"
 #include "Circle.hpp"
@@ -2001,8 +2002,22 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
 
     // Bambu Studio 2.9.1 (WipeTower.cpp:1929-1935): the nozzle-change ramming mode and its cooling timing.
     m_handle_hotend_as_extruder = Slic3r::hotend_as_extruder(config);
-    for (double rate : config.hotend_cooling_rate.values)
-        m_hotend_cooling_rate.push_back(std::isfinite(rate) ? float(rate) : 0.f);
+    // hotend_cooling_rate holds one value per printer_extruder_variant (H2C 0.4: 1.6,1.6,1.6,3.4,3.4); the readers below want
+    // one per extruder. Indexing the variant list by extruder gave the right extruder the left's High Flow 1.6 instead of 3.4.
+    // Each extruder gets its current variant's value, as the pre-heating planner and the change template read it
+    // (PreCooling::extruder_variant_value). A list laid out per extruder is copied as before.
+    const std::vector<double> &rates     = config.hotend_cooling_rate.values;
+    const size_t               extruders = config.nozzle_diameter.values.size();
+    const bool per_variant = extruders > 0 && rates.size() > extruders && config.printer_extruder_id.values.size() == rates.size();
+    if (per_variant) {
+        for (size_t e = 0; e < extruders; ++e) {
+            const double rate = PreCooling::extruder_variant_value(config, rates, e, 0.);
+            m_hotend_cooling_rate.push_back(std::isfinite(rate) ? float(rate) : 0.f);
+        }
+    } else {
+        for (double rate : rates)
+            m_hotend_cooling_rate.push_back(std::isfinite(rate) ? float(rate) : 0.f);
+    }
 }
 
 
@@ -2658,8 +2673,9 @@ WipeTower::NozzleChangeResult WipeTower::idle_travel_cooling(size_t old_tool, si
     const float               max_travel_speed = m_travel_speed * 60.f;
     float                     travel_speed     = max_travel_speed;
     if (precool_target > 0) {
-        // Bambu Studio indexes the cooling rate by the outgoing nozzle.
-        float cooling_rate = plan.old_nozzle >= 0 && plan.old_nozzle < int(m_hotend_cooling_rate.size()) ? m_hotend_cooling_rate[plan.old_nozzle] : 2.f;
+        // The outgoing hotend's extruder's rate. plan.old_nozzle is the grouping's nozzle id (a rack hotend: LayeredNozzleGroupResult
+        // group id), not an index into the per-extruder rates; it read the variant list by that id before.
+        float cooling_rate = plan.old_extruder >= 0 && plan.old_extruder < int(m_hotend_cooling_rate.size()) ? m_hotend_cooling_rate[plan.old_extruder] : 2.f;
         if (cooling_rate < EPSILON)
             cooling_rate = 2.f;
         const float current_temp = float(fp.nozzle_temperature);
