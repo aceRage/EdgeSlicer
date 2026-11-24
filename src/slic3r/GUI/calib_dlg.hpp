@@ -45,7 +45,6 @@ protected:
 	TextInput* m_tiBMAccels;
 	TextInput* m_tiBMSpeeds;
 
-	Plater* m_plater;
 };
 
 class Temp_Calibration_Dlg : public DPIDialog
@@ -65,7 +64,6 @@ protected:
     TextInput* m_tiStart;
     TextInput* m_tiEnd;
     TextInput* m_tiStep;
-    Plater* m_plater;
 };
 
 class MaxVolumetricSpeed_Test_Dlg : public DPIDialog
@@ -83,7 +81,6 @@ protected:
     TextInput* m_tiStart;
     TextInput* m_tiEnd;
     TextInput* m_tiStep;
-    Plater* m_plater;
 };
 
 class VFA_Test_Dlg : public DPIDialog {
@@ -101,7 +98,6 @@ protected:
     TextInput* m_tiStep;
     CheckBox*  m_cbAutoAdjust; // Orca #14759
     CheckBox*  m_cbResize;     // Orca #14759
-    Plater* m_plater;
 };
 
 
@@ -120,7 +116,6 @@ protected:
     TextInput* m_tiStart;
     TextInput* m_tiEnd;
     TextInput* m_tiStep;
-    Plater* m_plater;
 };
 
 class TempRetract_Calibration_Dlg : public DPIDialog
@@ -156,7 +151,6 @@ protected:
     CheckBox  *m_cbNoZHop;
     wxStaticText *m_stSummary;
     wxStaticText *m_stRangeNote;
-    Plater    *m_plater;
 };
 
 class Input_Shaping_Freq_Test_Dlg : public DPIDialog
@@ -178,7 +172,6 @@ protected:
     TextInput* m_tiFreqStartY;
     TextInput* m_tiFreqEndY;
     TextInput* m_tiDampingFactor;
-    Plater* m_plater;
 };
 
 class Input_Shaping_Damp_Test_Dlg : public DPIDialog
@@ -199,7 +192,6 @@ protected:
     TextInput* m_tiFreqY;
     TextInput* m_tiDampingFactorStart;
     TextInput* m_tiDampingFactorEnd;
-    Plater* m_plater;
 };
 
 class Cornering_Test_Dlg : public DPIDialog
@@ -216,7 +208,6 @@ protected:
     RadioGroup* m_rbModel;
     TextInput* m_tiJDStart;
     TextInput* m_tiJDEnd;
-    Plater* m_plater;
 };
 
 class IroningFlow_Test_Dlg : public DPIDialog
@@ -233,7 +224,6 @@ protected:
     TextInput* m_tiStart;
     TextInput* m_tiEnd;
     TextInput* m_tiLength;
-    Plater* m_plater;
 };
 }} // namespace Slic3r::GUI
 #endif
