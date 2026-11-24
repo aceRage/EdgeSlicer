@@ -1486,7 +1486,11 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             // Ultra (Phase 7): a change between two filaments on DIFFERENT physical nozzles (per the grouping's
             // filament_map) is a nozzle switch, not a color purge — the next filament already sits in its own
             // nozzle, so no flush is needed. Zero the purge for cross-nozzle transitions (over-purge fix).
-            {
+            // Not on a Bambu printer with two extruders (H2D / X2D / H2C): there the tower already planned the
+            // purge for what the nozzle taken last held (Print::_make_wipe_tower), across extruders and between
+            // the nozzles of a rack alike, and the G-code asks the firmware for that same purge. A printer whose
+            // rack hotends stand for extruders (H3C) keeps the rule as it was: its tower plans by its own tracker.
+            if (!gcodegen.is_bbl_multi_extruder() || hotend_as_extruder(gcodegen.m_config)) {
                 const auto& fm = full_config.filament_map.values; // 1-based nozzle per filament; empty on classic machines
                 if (previous_extruder_id >= 0 && (size_t)previous_extruder_id < fm.size() && (size_t)new_extruder_id < fm.size()
                     && fm[previous_extruder_id] != fm[new_extruder_id])
@@ -3659,6 +3663,15 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     if (m_config.printer_structure.value == PrinterStructure::psI3 && print->config().print_sequence == PrintSequence::ByObject) {
         m_timelapse_warning_code += (1 << 1);
     }
+    // EDGE: the by-object gantry-reach warning is a validation notice, and the plater hides those in the preview, where
+    // a plate is looked at after slicing (and the CLI only logs them). Raise it again as a slicing warning of this step.
+    // Read-only: the print order and the G-code do not change.
+    if (print->config().print_sequence == PrintSequence::ByObject) {
+        StringObjectException rod_warning;
+        if (Print::sequential_print_clearance_valid(*print, nullptr, nullptr, &rod_warning).string.empty() && !rod_warning.string.empty())
+            print->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, rod_warning.string,
+                                           PrintStateBase::SlicingByObjectGantryReach);
+    }
     m_processor.result().timelapse_warning_code        = m_timelapse_warning_code;
     m_processor.result().support_traditional_timelapse = m_support_traditional_timelapse;
 
@@ -4516,6 +4529,22 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                    int(initial_non_support_extruder_id == (unsigned int) -1 ? 0 :
                                            physical_extruder_for_filament(m_config, initial_non_support_extruder_id + 1)));
     this->placeholder_parser().set("physical_nozzle_properties", new ConfigOptionString(physical_nozzle_properties(print.config())));
+    // The change_filament_gcode of the H2D / H2C / A2L reads hotend_cooling_rate[filament_map[..] - 1] and hotend_heating_rate[..]
+    // by extruder ("compensate for heating and cooling" SYNC T). The config keeps one value per printer_extruder_variant (H2C:
+    // 1.6,1.6,1.6,3.4,3.4), so index 1 read the left extruder's second variant: 1.6 / 3.5 for the right extruder instead of
+    // 3.4 / 13.3. The templates get one value per extruder, its current variant's, as the pre-cooling pass reads them
+    // (PreCooling::extruder_variant_value) and Bambu Studio writes them. The config block keeps the variant list.
+    for (const char *key : { "hotend_cooling_rate", "hotend_heating_rate" }) {
+        const std::vector<double> &values   = std::string(key) == "hotend_cooling_rate" ? m_config.hotend_cooling_rate.values :
+                                                                                         m_config.hotend_heating_rate.values;
+        const size_t               extruders = m_config.nozzle_diameter.values.size();
+        if (values.empty() || extruders == 0 || values.size() <= extruders || m_config.printer_extruder_id.values.size() != values.size())
+            continue;
+        std::vector<double> per_extruder(extruders);
+        for (size_t e = 0; e < extruders; ++e)
+            per_extruder[e] = PreCooling::extruder_variant_value(m_config, values, e, values.front());
+        this->placeholder_parser().set(key, new ConfigOptionFloatsNullable(per_extruder));
+    }
     this->placeholder_parser().set("current_extruder", output_tool_of(initial_extruder_id));
     // Orca: set the key for compatibilty
     set_cut_retraction_placeholders(this->placeholder_parser(), m_config, size_t(initial_extruder_id));
@@ -5428,6 +5457,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     if (this->m_objsWithBrim.empty())
         m_brim_done = true;
 
+    // Object instances printed one after the other (print by object without a wipe tower); 0 when the
+    // layers of all objects were printed together. Read before the end G-code.
+    size_t sequential_instances_printed = 0;
     // SoftFever: calib
     if (print.calib_params().mode == CalibMode::Calib_PA_Line) {
         std::string gcode;
@@ -5468,7 +5500,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         // Do all objects for each layer.
         if (print.config().print_sequence == PrintSequence::ByObject && !has_wipe_tower) {
-            size_t             finished_objects = 0;
+            size_t&            finished_objects = sequential_instances_printed;
             const PrintObject* prev_object      = (*print_object_instance_sequential_active)->print_object;
             for (; print_object_instance_sequential_active != print_object_instances_ordering.end();
                  ++print_object_instance_sequential_active) {
@@ -5634,6 +5666,23 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         std::string gcode;
         m_writer.add_object_change_labels(gcode);
         file.write(gcode);
+    }
+
+    // EDGE: printing by object, the last instance need not be the tallest. Its last layer is where the nozzle
+    // is when the end G-code starts, and end templates move in X/Y (the A2L's unloads the filament and runs
+    // the trash-bin macros) before they raise Z, so the head can hit an object printed earlier. Rise above
+    // the tallest object first, as the travel between objects does. Written after the object's end label,
+    // so it is not skipped with the object, and before the end G-code, so the time estimate counts it.
+    // The margin is the Z hop the travel between objects adds above the tallest top, at least 0.4 mm (what the
+    // Bambu end templates add to max_layer_z) for a filament with no hop.
+    if (sequential_instances_printed > 1 && m_last_layer_z < m_max_layer_z - EPSILON && m_writer.extruder() != nullptr) {
+        const double margin = std::max(EXTRUDER_CONFIG(z_hop), 0.4);
+        const double clear_z = std::min(double(m_max_layer_z) + m_config.z_offset.value + margin, print.config().printable_height.value);
+        if (clear_z > m_writer.get_position().z() + EPSILON) {
+            file.write(m_writer.travel_to_z(clear_z, "lift above the printed objects before the end G-code"));
+            // The pending Z hop of the last retraction is covered by this move.
+            m_writer.cancel_pending_lift();
+        }
     }
 
     file.write(m_writer.set_fan(0));
@@ -13949,9 +13998,9 @@ float GCode::hotend_flush_volume(int new_filament_id) const
 
 bool GCode::cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const
 {
-    const int old_extruder = logical_extruder_for_filament(old_filament_id);
-    const int new_extruder = logical_extruder_for_filament(new_filament_id);
-    if (old_extruder < 0 || new_extruder < 0 || old_extruder == new_extruder)
+    // A change onto another nozzle: another extruder, or another nozzle of the same extruder's rack (H2C).
+    if (logical_extruder_for_filament(old_filament_id) < 0 || logical_extruder_for_filament(new_filament_id) < 0 ||
+        nozzle_key_for_filament(old_filament_id) == nozzle_key_for_filament(new_filament_id))
         return false;
     volume = 0.f;
     auto it = m_filament_in_nozzle.find(nozzle_key_for_filament(new_filament_id));
