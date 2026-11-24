@@ -115,6 +115,7 @@ add_executable(${_TEST_NAME}_tests
     remote_error_actions_tests.cpp
     plate_focus_hide_tests.cpp
     gizmo_volume_refs_tests.cpp
+    gizmo_rectangle_selection_tests.cpp
     camera_projection_type_tests.cpp
     plate_print_slots_tests.cpp
     plate_cut_membership_tests.cpp
