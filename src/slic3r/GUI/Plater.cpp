@@ -702,7 +702,13 @@ static void collect_used_filament_slots_on_plate(
             support_filament_used_on_plate = true;
         if (object_activity.uses_support_interface_filament())
             support_interface_used_on_plate = true;
-        collect_filament_slots_from_model_config(model_object->config, num_filaments, used_slots_0_based, object_activity.active());
+        // A leftover object support_filament still applies when a height range
+        // turns support on (the range inherits the object's filament). Collect
+        // object and volume support keys if the object OR any of its ranges is
+        // active, not only object_activity.active().
+        const bool collect_object_support_keys =
+            object_or_range_support_active(object_activity, model_object->layer_config_ranges);
+        collect_filament_slots_from_model_config(model_object->config, num_filaments, used_slots_0_based, collect_object_support_keys);
         collect_filament_slots_from_layer_config_ranges(model_object->layer_config_ranges, num_filaments, used_slots_0_based,
             object_activity, support_filament_used_on_plate, support_interface_used_on_plate);
 
@@ -710,7 +716,7 @@ static void collect_used_filament_slots_on_plate(
             uses_default_extruder = true;
 
         for (const ModelVolume* model_volume : model_object->volumes) {
-            collect_filament_slots_from_model_config(model_volume->config, num_filaments, used_slots_0_based, object_activity.active());
+            collect_filament_slots_from_model_config(model_volume->config, num_filaments, used_slots_0_based, collect_object_support_keys);
             for (int extruder_id : model_volume->get_extruders()) {
                 if (extruder_id >= 1 && extruder_id <= num_filaments)
                     used_slots_0_based.insert(extruder_id - 1);

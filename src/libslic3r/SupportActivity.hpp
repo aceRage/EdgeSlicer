@@ -2,6 +2,8 @@
 
 #include "PrintConfig.hpp"
 
+#include <set>
+
 namespace Slic3r {
 
 /// Effective support / raft / enforce / stabilizer activity of one config scope.
@@ -61,6 +63,39 @@ inline SupportActivity effective_support_activity(const ModelConfig &config, con
     out.stabilizers = config.has("stabilizer_supports") ?
         (config.get().opt_enum<StabilizerMode>("stabilizer_supports") != smOff) : fallback.stabilizers;
     return out;
+}
+
+/// True when leftover object/volume support_filament keys must be collected:
+/// the object itself generates support, or any height range does. A range that
+/// turns support on still uses the object's support filament, not the global one.
+/// RangeMap entries must expose `.second` as a ModelConfig (layer_config_ranges).
+template<typename RangeMap>
+inline bool object_or_range_support_active(const SupportActivity &object_activity, const RangeMap &ranges)
+{
+    if (object_activity.active())
+        return true;
+    for (const auto &layer_range : ranges) {
+        if (effective_support_activity(layer_range.second, object_activity).active())
+            return true;
+    }
+    return false;
+}
+
+/// Insert 0-based support_filament / support_interface_filament slots from one
+/// ModelConfig when collect_support_keys is true.
+inline void collect_support_filament_slots_from_model_config(
+    const ModelConfig &config, int num_filaments, bool collect_support_keys, std::set<int> &used_slots_0_based)
+{
+    if (!collect_support_keys)
+        return;
+    const char *keys[2] = { "support_filament", "support_interface_filament" };
+    for (int i = 0; i < 2; ++i) {
+        if (config.has(keys[i])) {
+            const int val = config.opt_int(keys[i]);
+            if (val >= 1 && val <= num_filaments)
+                used_slots_0_based.insert(val - 1);
+        }
+    }
 }
 
 } // namespace Slic3r

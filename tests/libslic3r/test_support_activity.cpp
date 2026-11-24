@@ -3,6 +3,10 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SupportActivity.hpp"
 
+#include <set>
+#include <utility>
+#include <vector>
+
 using namespace Slic3r;
 
 TEST_CASE("Support activity is off when support, raft, enforcers and stabilizers are off", "[SupportActivity]")
@@ -153,6 +157,38 @@ TEST_CASE("A leftover support filament override is inert when the scope is inact
     const SupportActivity a = effective_support_activity(object, global);
     CHECK_FALSE(a.active());
     CHECK_FALSE(a.uses_support_filament());
+}
+
+TEST_CASE("Object support_filament override is collected when a height range turns support on", "[SupportActivity]")
+{
+    SupportActivity global;
+    ModelConfig     object;
+    object.set_key_value("enable_support", new ConfigOptionBool(false));
+    object.set_key_value("support_filament", new ConfigOptionInt(2));
+    const SupportActivity object_activity = effective_support_activity(object, global);
+    CHECK_FALSE(object_activity.active());
+
+    SECTION("no range: leftover override is not collected") {
+        std::vector<std::pair<int, ModelConfig>> ranges;
+        CHECK_FALSE(object_or_range_support_active(object_activity, ranges));
+        std::set<int> slots;
+        collect_support_filament_slots_from_model_config(object, 4,
+            object_or_range_support_active(object_activity, ranges), slots);
+        CHECK(slots.empty());
+    }
+
+    SECTION("a range turns support on: the object's override slot is collected") {
+        ModelConfig range;
+        range.set_key_value("enable_support", new ConfigOptionBool(true));
+        std::vector<std::pair<int, ModelConfig>> ranges;
+        ranges.emplace_back(0, range);
+        CHECK(object_or_range_support_active(object_activity, ranges));
+        std::set<int> slots;
+        collect_support_filament_slots_from_model_config(object, 4,
+            object_or_range_support_active(object_activity, ranges), slots);
+        REQUIRE(slots.size() == 1);
+        CHECK(slots.count(1) == 1); // 1-based slot 2
+    }
 }
 
 TEST_CASE("A layer range can disable all support activity inherited from the object", "[SupportActivity]")
