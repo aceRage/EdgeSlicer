@@ -425,6 +425,7 @@ public:
     boost::bimaps::bimap<std::string, std::string> m_models_map;
 
     void switch_input_panel(int index);
+    void clamp_to_work_area();
     void on_cancel();
     void update_title(wxString title);
     void set_machine_obj(MachineObject* obj);

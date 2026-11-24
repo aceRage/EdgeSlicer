@@ -9,6 +9,7 @@
 #include "libslic3r/Thread.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
+#include "DialogWorkArea.hpp"
 #include "GUI_Preview.hpp"
 #include "MainFrame.hpp"
 #include "format.hpp"
@@ -2021,6 +2022,7 @@ InputIpAddressDialog::InputIpAddressDialog(wxWindow *parent)
 
     CentreOnParent(wxBOTH);
     Move(wxPoint(GetScreenPosition().x, GetScreenPosition().y - FromDIP(50)));
+    clamp_to_work_area();
     wxGetApp().UpdateDlgDarkUI(this);
 
     closeTimer = new wxTimer();
@@ -2046,6 +2048,21 @@ InputIpAddressDialog::InputIpAddressDialog(wxWindow *parent)
         Layout();
         Fit();
     });
+}
+
+void InputIpAddressDialog::clamp_to_work_area()
+{
+    // CentreOnParent picks the display from the parent, so GetFromWindow uses the same window.
+    wxWindow *anchor = GetParent() ? GetParent() : this;
+    const int display_idx = work_area_display_index(wxDisplay::GetFromWindow(anchor));
+    const wxRect work_area = wxDisplay(static_cast<unsigned>(display_idx)).GetClientArea();
+    const wxSize size = GetSize();
+    const wxPoint pos = GetScreenPosition();
+    int x = pos.x;
+    int y = pos.y;
+    clamp_dialog_to_work_area(x, y, size.x, size.y, work_area.x, work_area.y, work_area.width, work_area.height);
+    if (x != pos.x || y != pos.y)
+        Move(wxPoint(x, y));
 }
 
 void InputIpAddressDialog::switch_input_panel(int index) 
