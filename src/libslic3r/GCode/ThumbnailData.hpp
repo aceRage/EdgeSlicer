@@ -129,6 +129,15 @@ struct PlateBBoxData
     }
 };
 
+// plate_N.json filament lists live on PlateBBoxData between exports. Clear every plate before
+// writing this export so plates left out of it (and a second export of the same plates) do not
+// keep leftover ids/colors. Null entries are skipped.
+void clear_plate_bbox_filaments(const std::vector<PlateBBoxData *> &id_bboxes);
+
+// The bbox this plate should write its filaments into. Uses this plate's own 0-based index, not
+// the currently selected plate. Null if the plate is not sliced or plate_index is out of range.
+PlateBBoxData *plate_bbox_for_filament_export(const std::vector<PlateBBoxData *> &id_bboxes, int plate_index, bool is_sliced_valid);
+
 } // namespace Slic3r
 
 #endif // slic3r_ThumbnailData_hpp_

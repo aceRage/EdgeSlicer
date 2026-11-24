@@ -49,4 +49,23 @@ BBoxData wipe_tower_first_layer_bbox_data(const Points &corners, const Vec2d &pl
     return data;
 }
 
+void clear_plate_bbox_filaments(const std::vector<PlateBBoxData *> &id_bboxes)
+{
+    for (PlateBBoxData *bbox : id_bboxes) {
+        if (bbox == nullptr)
+            continue;
+        bbox->filament_ids.clear();
+        bbox->filament_colors.clear();
+    }
+}
+
+PlateBBoxData *plate_bbox_for_filament_export(const std::vector<PlateBBoxData *> &id_bboxes, int plate_index, bool is_sliced_valid)
+{
+    if (!is_sliced_valid)
+        return nullptr;
+    if (plate_index < 0 || plate_index >= static_cast<int>(id_bboxes.size()))
+        return nullptr;
+    return id_bboxes[static_cast<size_t>(plate_index)];
+}
+
 } // namespace Slic3r

@@ -99,3 +99,90 @@ TEST_CASE("A BBoxData not filled in is zero", "[SlicedFile]")
     CHECK(data.area == 0.f);
     CHECK(data.layer_height == 0.f);
 }
+
+namespace {
+
+// Same sequence Plater::export_3mf uses after it fills each plate's filament type/color: clear
+// every bbox, then append this plate's filaments onto this plate's bbox.
+void write_export_plate_filaments(const std::vector<PlateBBoxData *> &bboxes, int plate_index, bool is_sliced_valid,
+                                  const std::vector<int> &ids, const std::vector<std::string> &colors)
+{
+    PlateBBoxData *bbox = plate_bbox_for_filament_export(bboxes, plate_index, is_sliced_valid);
+    if (bbox == nullptr)
+        return;
+    for (size_t i = 0; i < ids.size(); ++i) {
+        bbox->filament_ids.push_back(ids[i]);
+        bbox->filament_colors.push_back(colors[i]);
+    }
+}
+
+} // namespace
+
+TEST_CASE("Each sliced plate writes its own filaments into plate_N.json bbox data", "[SlicedFile][PlateBBox]")
+{
+    PlateBBoxData p0;
+    PlateBBoxData p1;
+    PlateBBoxData p2;
+    p0.filament_ids    = {9};
+    p0.filament_colors = {"#OLD0"};
+    p1.filament_ids    = {8};
+    p1.filament_colors = {"#OLD1"};
+    p2.filament_ids    = {7};
+    p2.filament_colors = {"#OLD2"};
+    const std::vector<PlateBBoxData *> bboxes = {&p0, &p1, &p2};
+
+    // Export all, current plate would have been 2: the old get_curr_plate_index() path dumped
+    // every plate's filaments onto plate 2 and left 0 and 1 empty (or, with leftover lists, stale).
+    clear_plate_bbox_filaments(bboxes);
+    write_export_plate_filaments(bboxes, 0, true, {0}, {"#C0C0C0"});
+    write_export_plate_filaments(bboxes, 1, true, {1}, {"#FF0000"});
+    write_export_plate_filaments(bboxes, 2, true, {2}, {"#0000FF"});
+
+    CHECK(p0.filament_ids == std::vector<int>{0});
+    CHECK(p0.filament_colors == std::vector<std::string>{"#C0C0C0"});
+    CHECK(p1.filament_ids == std::vector<int>{1});
+    CHECK(p1.filament_colors == std::vector<std::string>{"#FF0000"});
+    CHECK(p2.filament_ids == std::vector<int>{2});
+    CHECK(p2.filament_colors == std::vector<std::string>{"#0000FF"});
+
+    // A second export-all must not append the same filaments again.
+    clear_plate_bbox_filaments(bboxes);
+    write_export_plate_filaments(bboxes, 0, true, {0}, {"#C0C0C0"});
+    write_export_plate_filaments(bboxes, 1, true, {1}, {"#FF0000"});
+    write_export_plate_filaments(bboxes, 2, true, {2}, {"#0000FF"});
+    CHECK(p0.filament_ids == std::vector<int>{0});
+    CHECK(p1.filament_ids == std::vector<int>{1});
+    CHECK(p2.filament_ids == std::vector<int>{2});
+
+    // A later single-plate export of plate 2 writes [2] there and empty lists on 0 and 1.
+    clear_plate_bbox_filaments(bboxes);
+    write_export_plate_filaments(bboxes, 2, true, {2}, {"#0000FF"});
+    CHECK(p0.filament_ids.empty());
+    CHECK(p0.filament_colors.empty());
+    CHECK(p1.filament_ids.empty());
+    CHECK(p1.filament_colors.empty());
+    CHECK(p2.filament_ids == std::vector<int>{2});
+    CHECK(p2.filament_colors == std::vector<std::string>{"#0000FF"});
+}
+
+TEST_CASE("plate_bbox_for_filament_export uses this plate's index and rejects a bad range", "[SlicedFile][PlateBBox]")
+{
+    PlateBBoxData p0;
+    PlateBBoxData p1;
+    const std::vector<PlateBBoxData *> bboxes = {&p0, &p1};
+
+    CHECK(plate_bbox_for_filament_export(bboxes, 0, true) == &p0);
+    CHECK(plate_bbox_for_filament_export(bboxes, 1, true) == &p1);
+    CHECK(plate_bbox_for_filament_export(bboxes, 1, false) == nullptr);
+    CHECK(plate_bbox_for_filament_export(bboxes, -1, true) == nullptr);
+    CHECK(plate_bbox_for_filament_export(bboxes, 2, true) == nullptr);
+    CHECK(plate_bbox_for_filament_export({}, 0, true) == nullptr);
+
+    PlateBBoxData leftover;
+    leftover.filament_ids    = {4};
+    leftover.filament_colors = {"#KEEP"};
+    std::vector<PlateBBoxData *> with_null = {nullptr, &leftover};
+    clear_plate_bbox_filaments(with_null);
+    CHECK(leftover.filament_ids.empty());
+    CHECK(leftover.filament_colors.empty());
+}
