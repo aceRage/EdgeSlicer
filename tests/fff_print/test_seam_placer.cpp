@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -96,15 +97,30 @@ LayerRegion &clear_first_layer(PrintObject &object)
 
 // place_seam on a worker so a hang cannot stall Catch2. Detach before FAIL: a joinable
 // std::thread destructor would terminate, and an std::async future would join forever.
+// The worker's state lives on the heap: after detach, FAIL unwinds this frame and the
+// test, so a stack capture of done/loop/overhang would race the rest of the run.
+struct PlaceSeamJob
+{
+    const SeamPlacer *placer;
+    const Layer      *layer;
+    ExtrusionLoop     loop;
+    float             overhang;
+    std::atomic<bool> done;
+
+    PlaceSeamJob(const SeamPlacer *placer, const Layer *layer, ExtrusionLoop loop, float overhang)
+        : placer(placer), layer(layer), loop(std::move(loop)), overhang(overhang), done(false)
+    {}
+};
+
 void place_seam_or_timeout(const SeamPlacer &placer, const Layer *layer, ExtrusionLoop &loop, float &overhang)
 {
-    std::atomic<bool> done{false};
-    std::thread       worker([&] {
-        placer.place_seam(layer, loop, Point(0, 0), overhang);
-        done.store(true, std::memory_order_release);
+    auto        job    = std::make_shared<PlaceSeamJob>(&placer, layer, loop, overhang);
+    std::thread worker([job] {
+        job->placer->place_seam(job->layer, job->loop, Point(0, 0), job->overhang);
+        job->done.store(true, std::memory_order_release);
     });
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (!done.load(std::memory_order_acquire)) {
+    while (!job->done.load(std::memory_order_acquire)) {
         if (std::chrono::steady_clock::now() >= deadline) {
             worker.detach();
             FAIL("place_seam hung on a hairpin inner seam");
@@ -112,6 +128,8 @@ void place_seam_or_timeout(const SeamPlacer &placer, const Layer *layer, Extrusi
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     worker.join();
+    loop     = std::move(job->loop);
+    overhang = job->overhang;
 }
 
 } // namespace
