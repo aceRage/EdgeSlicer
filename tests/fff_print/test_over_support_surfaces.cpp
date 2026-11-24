@@ -871,6 +871,19 @@ const Layer *first_overhang_layer(const PrintObject &object)
     return nullptr;
 }
 
+// A layer on the caged slope, with two layers below it. Consecutive slope layers have different
+// outlines, so measuring a wall against two_below is observably different from measuring it against
+// one_below. TestMesh::overhang's first such layer is still a vertical stem, so the two trees match.
+const Layer *caged_slope_layer(const PrintObject &object)
+{
+    for (const Layer *layer : object.layers()) {
+        if (layer != nullptr && layer->print_z > 8. && layer->lower_layer != nullptr &&
+            layer->lower_layer->lower_layer != nullptr && layer->has_extrusions())
+            return layer;
+    }
+    return nullptr;
+}
+
 bool has_curled_lines(const PrintObject &object)
 {
     const auto layers = object.layers();
@@ -971,15 +984,9 @@ TEST_CASE("Walls are measured against the layer below them whichever layer was p
         {"brim_type", "no_brim"},
     });
     Print print;
-    init_and_process_print({TestMesh::overhang}, print, config);
+    init_and_process_print({caged_overhang_mesh()}, print, config);
     const PrintObject *object = print.objects().front();
-    const Layer       *layer  = nullptr;
-    for (const Layer *l : object->layers()) {
-        if (l != nullptr && l->lower_layer != nullptr && l->lower_layer->lower_layer != nullptr && l->has_extrusions()) {
-            layer = l;
-            break;
-        }
-    }
+    const Layer       *layer  = caged_slope_layer(*object);
     REQUIRE(layer != nullptr);
     const Layer *one_below = layer->lower_layer;
     REQUIRE(one_below != nullptr);
@@ -1015,15 +1022,9 @@ TEST_CASE("Overhang data computed for another layer is not used", "[ExtrusionPro
         {"brim_type", "no_brim"},
     });
     Print print;
-    init_and_process_print({TestMesh::overhang}, print, config);
+    init_and_process_print({caged_overhang_mesh()}, print, config);
     const PrintObject *object    = print.objects().front();
-    const Layer       *layer     = nullptr;
-    for (const Layer *l : object->layers()) {
-        if (l != nullptr && l->lower_layer != nullptr && l->lower_layer->lower_layer != nullptr && l->has_extrusions()) {
-            layer = l;
-            break;
-        }
-    }
+    const Layer       *layer     = caged_slope_layer(*object);
     REQUIRE(layer != nullptr);
     const Layer *one_below = layer->lower_layer;
     REQUIRE(one_below != nullptr);
