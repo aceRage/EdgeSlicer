@@ -856,7 +856,6 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
     wxGetApp().persist_window_geometry(this, true);
     wxGetApp().persist_window_geometry(&m_settings_dialog, true);
-    // The "Compare presets" dialog's events are bound when it is built (diff_dialog()).
 }
 
 DiffPresetDialog& MainFrame::diff_dialog()
@@ -865,43 +864,11 @@ DiffPresetDialog& MainFrame::diff_dialog()
         const auto started = std::chrono::steady_clock::now();
         wxBusyCursor busy;
         m_diff_dialog = std::make_unique<DiffPresetDialog>(this);
-        bind_diff_dialog();
         BOOST_LOG_TRIVIAL(info) << "DiffPresetDialog built on first use in "
                                 << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() << " ms";
     }
     return *m_diff_dialog;
 }
-
-void MainFrame::bind_diff_dialog()
-{
-    DiffPresetDialog* dlg = m_diff_dialog.get();
-    auto get_tab = [](Preset::Type type) {
-        Tab* null_tab = nullptr;
-        for (Tab* tab : wxGetApp().tabs_list)
-            if (tab->type() == type)
-                return tab;
-        return null_tab;
-    };
-
-    auto transfer = [dlg, get_tab](Preset::Type type) {
-        get_tab(type)->transfer_options(dlg->get_left_preset_name(type),
-                                        dlg->get_right_preset_name(type),
-                                        dlg->get_selected_options(type));
-    };
-
-    auto process_options = [dlg](std::function<void(Preset::Type)> process) {
-        const Preset::Type diff_dlg_type = dlg->view_type();
-        if (diff_dlg_type == Preset::TYPE_INVALID) {
-            for (const Preset::Type& type : dlg->types_list() )
-                process(type);
-        }
-        else
-            process(diff_dlg_type);
-    };
-
-    dlg->Bind(EVT_DIFF_DIALOG_TRANSFER,      [process_options, transfer](SimpleEvent&)         { process_options(transfer); });
-}
-
 
 #ifdef __WIN32__
 

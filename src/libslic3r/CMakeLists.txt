@@ -618,6 +618,8 @@ set(lisbslic3r_sources
     StartupProfile.cpp
     StartupProfile.hpp
     Preset.cpp
+    PresetDiffSession.cpp
+    PresetDiffSession.hpp
     Preset.hpp
     PresetFlowVariant.cpp
     PresetFlowVariant.hpp
