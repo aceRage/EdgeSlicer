@@ -880,6 +880,7 @@ void CalibUtils::calib_max_vol_speed(const CalibInfo &calib_info, wxString &erro
     print_config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config.set_key_value("overhang_reverse", new ConfigOptionBool(false));
     print_config.set_key_value("spiral_mode", new ConfigOptionBool(true));
+    apply_max_vol_speed_spiral_starting_flow(print_config);
     print_config.set_key_value("outer_wall_line_width", new ConfigOptionFloat(line_width));
     print_config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(layer_height));
     print_config.set_key_value("layer_height", new ConfigOptionFloat(layer_height));

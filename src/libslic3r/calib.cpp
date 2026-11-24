@@ -1452,6 +1452,11 @@ void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
     (void) filament_idx; // kept for callers; no per-filament override is needed any more
 }
 
+void apply_max_vol_speed_spiral_starting_flow(DynamicPrintConfig &print_config)
+{
+    print_config.set_key_value("spiral_starting_flow_ratio", new ConfigOptionFloat(1));
+}
+
 std::string stringing_grid_column_name(int column)
 {
     char buf[32];
