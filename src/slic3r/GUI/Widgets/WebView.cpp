@@ -357,12 +357,14 @@ public:
 
     void LoadURL(const wxString &url) override
     {
-        if (!m_scriptMessageHandlerInstalled) {
-            // wxWebViewWebKit::Create() calls LoadURL() with an empty URL while
-            // creating the view. Ignore it so it cannot overwrite the pending URL
-            // or create a blank back/forward entry.
-            if (IsBlankUrl(url))
-                return;
+        // wxWebViewWebKit::Create() calls LoadURL() with an empty URL while
+        // creating the view. Ignore it so it cannot overwrite the pending URL
+        // or create a blank back/forward entry.
+        const Slic3r::WebViewPendingLoad::LoadAction action =
+            Slic3r::WebViewPendingLoad::load_action(m_scriptMessageHandlerInstalled, std::string(url.utf8_str()));
+        if (action == Slic3r::WebViewPendingLoad::LoadAction::Ignore)
+            return;
+        if (action == Slic3r::WebViewPendingLoad::LoadAction::Stash) {
             m_pendingUrl = url;
             return;
         }
@@ -376,7 +378,7 @@ public:
     // page, whose view is created then), WebKit never completes the script, the loop spins at
     // 100% CPU and the app hangs. Keep wx's registration and user script, and only turn that
     // one immediate run into a fire-and-forget evaluation. Loads are gated until the handler is
-    // installed, so the view is still on about:blank and the user script covers the real page.
+    // installed, so the view is still on the empty initial document and the user script covers the real page.
     bool AddScriptMessageHandler(const wxString &name) override
     {
         m_addingScriptMessageHandler = true;
