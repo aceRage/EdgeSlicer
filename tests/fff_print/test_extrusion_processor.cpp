@@ -6,11 +6,15 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/AABBTreeLines.hpp"
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/GCode/ExtrusionProcessor.hpp"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/Line.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -18,11 +22,13 @@
 #include "test_data.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -265,8 +271,10 @@ float furthest_reading(const std::vector<ExtendedPoint>& points)
            })->distance;
 }
 
-DynamicPrintConfig caged_overhang_config(const char* wall_generator){
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+// The overhang settings of these tests, on top of `config`, which gives the printer and its filaments. They set one
+// 0.4mm nozzle: a test on more nozzles sets nozzle_diameter again.
+DynamicPrintConfig caged_overhang_config(const char* wall_generator,
+                                         DynamicPrintConfig config = DynamicPrintConfig::full_print_config()){
     config.set_deserialize_strict({
         {"nozzle_diameter", "0.4"},
         {"initial_layer_print_height", caged_layer_height},
@@ -799,4 +807,285 @@ TEST_CASE("Arachne overhang walls are laid with the bridge flow ratio", "[Extrus
     REQUIRE(overhang_length > 40.);
     // The ratio applies to the cross section, the walls being as wide as each other here.
     CHECK_THAT((overhang_e / overhang_length) / (outer_e / outer_length), Catch::Matchers::WithinRel(std::stod(bridge_flow), 0.01));
+}
+
+namespace {
+
+ModelObject *model_object_named(Model &model, const std::string &name)
+{
+    for (ModelObject *object : model.objects)
+        if (object->name == name)
+            return object;
+    return nullptr;
+}
+
+PrintObject *print_object_named(Print &print, const std::string &name)
+{
+    for (PrintObject *object : print.objects_mutable())
+        if (object->model_object()->name == name)
+            return object;
+    return nullptr;
+}
+
+// The curled edges that slow a wall down come from the layer below it too, not from a layer prepared before.
+TEST_CASE("Walls are slowed for the curled edges of the layer below them whichever layer was prepared before",
+          "[ExtrusionProcessor][Regression]")
+{
+    // Nothing, a stale layer, or the stale layer and then the layer below.
+    const int prepared_before = GENERATE(0, 1, 2);
+    CAPTURE(prepared_before);
+    Print print;
+    Model model;
+    ModelObject *model_object = model.add_object();
+    model_object->name        = "cube";
+    model_object->add_volume(mesh(TestMesh::cube_20x20x20));
+    model_object->add_instance();
+    model_object->ensure_on_bed();
+    print.auto_assign_extruders(model_object);
+    print.apply(model, DynamicPrintConfig::full_print_config());
+    PrintObject *object = print_object_named(print, "cube");
+    REQUIRE(object != nullptr);
+    Layer *stale = object->add_layer(0, 0.2, 0.2, 0.1);
+    Layer *below = object->add_layer(1, 0.2, 0.4, 0.3);
+    Layer *layer = object->add_layer(2, 0.2, 0.6, 0.5);
+    below->lower_layer = stale;
+    layer->lower_layer = below;
+    // The 0.4mm wide wall runs 0.2mm inside the edge of the layer below, so it is fully supported, but along an edge
+    // that curled up 1mm. The stale layer ends 0.8mm short of the wall and has no curled edges: measured against it,
+    // the wall would be a full overhang.
+    below->lslices      = {ExPolygon(Polygon{Point::new_scale(0, 0), Point::new_scale(40, 0),
+                                             Point::new_scale(40, 10), Point::new_scale(0, 10)})};
+    below->curled_lines = {CurledLine(Point::new_scale(1, 0.2), Point::new_scale(39, 0.2), 1.f)};
+    stale->lslices      = {ExPolygon(Polygon{Point::new_scale(0, 1), Point::new_scale(40, 1),
+                                             Point::new_scale(40, 10), Point::new_scale(0, 10)})};
+    ExtrusionPath wall(erExternalPerimeter, 0.08, 0.4f, 0.2f);
+    wall.polyline.points = {Point::new_scale(1, 0.2), Point::new_scale(39, 0.2)};
+
+    ExtrusionQualityEstimator estimator;
+    estimator.set_current_object(object);
+    if (prepared_before >= 1)
+        estimator.prepare_for_new_layer(object, stale);
+    if (prepared_before >= 2)
+        estimator.prepare_for_new_layer(object, below);
+    estimator.prepare_for_new_layer(object, layer);
+    // 100mm/s when fully supported, 20mm/s when a whole width out.
+    const std::vector<ProcessedPoint> points = estimator.estimate_extrusion_quality(wall,
+        ConfigOptionPercents({100, 0}),
+        ConfigOptionFloatsOrPercents({FloatOrPercent{100, false}, FloatOrPercent{20, false}}), 100.f, 100.f, true);
+
+    // A 1mm curl under a 0.2mm layer reads as half the width, 0.2mm, out: halfway between the two speeds.
+    REQUIRE_FALSE(points.empty());
+    for (const ProcessedPoint &point : points) {
+        CHECK_THAT(point.speed, Catch::Matchers::WithinAbs(60., 0.5));
+        CHECK_THAT(point.overlap, Catch::Matchers::WithinAbs(0.5, 1e-3));
+    }
+}
+
+// A 20 x 10 x 2mm wedge whose front face leans out by one layer height per layer (45 degrees), from y = 2 at the bed
+// to y = 0 at the top, while its back face at y = 12 stands vertical and fully supported.
+constexpr double wedge_height       = 2.;
+constexpr double wedge_base_front_y = 2.;
+constexpr double wedge_back_y       = 12.;
+
+TriangleMesh wedge_mesh()
+{
+    const float length = 20.f, top = float(wedge_height), front = float(wedge_base_front_y), back = float(wedge_back_y);
+    return TriangleMesh(
+        {
+            {0.f, front, 0.f}, {length, front, 0.f}, {length, back, 0.f}, {0.f, back, 0.f},
+            {0.f, 0.f, top},   {length, 0.f, top},   {length, back, top},   {0.f, back, top},
+        },
+        {
+            {0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+            {0, 1, 5}, {0, 5, 4}, {1, 2, 6}, {1, 6, 5},
+            {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7},
+        });
+}
+
+// A height range modifier over these heights. Layers are sliced half a layer below their print_z, at 0.1, 0.3, 0.5 and
+// so on, so the bounds fall between slice planes: the layers printed at 0.6 and 0.8 take the range's settings.
+constexpr double wedge_range_min = 0.4;
+constexpr double wedge_range_max = 0.8;
+
+bool in_wedge_range(double print_z)
+{
+    const double slice_z = print_z - 0.5 * caged_layer_height;
+    return slice_z > wedge_range_min && slice_z < wedge_range_max;
+}
+
+// The wedge with overhang speed set to `object_speed`, and to `range_speed` by the height range modifier.
+// Print::apply copies the Model, so the object is found by name, never by a pointer kept across apply().
+std::string wedge_gcode(bool object_speed, bool range_speed)
+{
+    DynamicPrintConfig config = caged_overhang_config("classic");
+    config.set_deserialize_strict({
+        {"enable_overhang_speed", object_speed ? "1" : "0"},
+        // The overhang fan has every layer prepared for overhang detection, whether overhang speed is on or not.
+        {"enable_overhang_bridge_fan", "0"},
+    });
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name        = "wedge";
+    object->add_volume(wedge_mesh());
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    ModelObject *wedge = model_object_named(model, "wedge");
+    REQUIRE(wedge != nullptr);
+    DynamicPrintConfig range_config;
+    // Every layer range must carry a layer_height (see layer_height_profile_from_ranges).
+    range_config.set_key_value("layer_height", new ConfigOptionFloat(caged_layer_height));
+    range_config.set_deserialize_strict("enable_overhang_speed", range_speed ? "1" : "0");
+    wedge->layer_config_ranges[{wedge_range_min, wedge_range_max}].assign_config(std::move(range_config));
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    return gcode(print);
+}
+
+// Feed rates of the outer wall moves printed at print_z along the wedge's sloped front face, or along its back face.
+// The side walls run from one face to the other, so neither filter takes them.
+std::vector<double> wedge_wall_feed_rates(const std::string &gcode, double print_z, bool front)
+{
+    return outer_wall_feed_rates(gcode, [print_z, front](const GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const auto on_face = [front](double y) { return front ? y < wedge_base_front_y + 1. : y > wedge_back_y - 1.; };
+        return std::abs(line.new_Z(self) - print_z) < 0.5 * caged_layer_height && on_face(self.y()) &&
+            on_face(line.new_Y(self));
+    });
+}
+
+} // namespace
+
+// Regression: the estimator measured each layer against the layer it was prepared for before. process_layer() skips the
+// layers with overhang speed off, so the first layer above a range turning it off was measured against the layer below
+// the range, and the first layer of a range turning it on against no layer at all, which slowed even supported walls.
+TEST_CASE("Walls printed with overhang speed on match a print with it always on when a height range toggles it",
+          "[ExtrusionProcessor][Regression]")
+{
+    const bool object_speed = GENERATE(true, false);
+    INFO("overhang speed " << (object_speed ? "on" : "off") << " for the object, " << (object_speed ? "off" : "on")
+                           << " for the range");
+    const std::string toggled   = wedge_gcode(object_speed, !object_speed);
+    const std::string always_on = wedge_gcode(true, true);
+
+    // The first layers printed with the other setting, at either end of the range.
+    for (const double print_z : {wedge_range_min + caged_layer_height, wedge_range_max + caged_layer_height}) {
+        INFO("back wall at z = " << print_z);
+        const std::vector<double> feed_rates = wedge_wall_feed_rates(toggled, print_z, false);
+        REQUIRE_FALSE(feed_rates.empty());
+        for (const double feed_rate : feed_rates)
+            CHECK_THAT(feed_rate / MM_PER_MIN, Catch::Matchers::WithinRel(caged_outer_wall_speed, 0.01));
+    }
+
+    // Every layer printed with overhang speed on, above the first, which is never slowed for overhangs.
+    const int layer_count = int(std::lround(wedge_height / caged_layer_height));
+    for (int layer = 2; layer <= layer_count; ++layer) {
+        const double print_z = layer * caged_layer_height;
+        if (in_wedge_range(print_z) == object_speed)
+            continue;
+        INFO("slope at z = " << print_z);
+        const std::vector<double> expected = wedge_wall_feed_rates(always_on, print_z, true);
+        REQUIRE_FALSE(expected.empty());
+        // The slope is slowed down, so matching speeds are not merely the wall speed.
+        REQUIRE(*std::max_element(expected.begin(), expected.end()) < caged_slow_speed * MM_PER_MIN);
+        const std::vector<double> actual = wedge_wall_feed_rates(toggled, print_z, true);
+        REQUIRE(actual.size() == expected.size());
+        for (size_t i = 0; i < actual.size(); ++i)
+            CHECK_THAT(actual[i], Catch::Matchers::WithinAbs(expected[i], 1.));
+    }
+}
+
+// Regression: process_layer() prepared the estimator only when overhang speed was on for the nozzle active before the
+// layer's tool changes. Here the second nozzle prints the walls and slows down for overhangs, the first prints the
+// infill and has overhang speed off. A layer starts with the nozzle that ended the layer below, so every other layer
+// starts with the first one and was not prepared: its walls were measured against an older layer, or against none.
+TEST_CASE("Walls printed by a nozzle with overhang speed on match a print with it on for every nozzle",
+          "[ExtrusionProcessor][Regression]")
+{
+    const auto two_nozzle_gcode = [](const char *overhang_speed) {
+        DynamicPrintConfig config = caged_overhang_config("classic");
+        config.set_num_extruders(2);
+        config.set_num_filaments(2);
+        config.option<ConfigOptionFloats>("filament_diameter")->values                   = {1.75, 1.75};
+        config.option<ConfigOptionStrings>("filament_colour")->values                    = {"#FF0000", "#00FF00"};
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values                     = {0.4, 0.4};
+        config.option<ConfigOptionInts>("printer_extruder_id", true)->values             = {1, 2};
+        config.option<ConfigOptionStrings>("printer_extruder_variant", true)->values     = {"Direct Drive Standard",
+                                                                                           "Direct Drive Standard"};
+        config.option<ConfigOptionInts>("print_extruder_id", true)->values               = {1, 2};
+        config.option<ConfigOptionStrings>("print_extruder_variant", true)->values       = {"Direct Drive Standard",
+                                                                                           "Direct Drive Standard"};
+        config.option<ConfigOptionBool>("process_extruder_values", true)->value          = true;
+        config.option<ConfigOptionBool>("single_extruder_multi_material", true)->value   = false;
+        if (auto *flush = config.option<ConfigOptionFloats>("flush_volumes_matrix"))
+            if (flush->values.size() < 4)
+                flush->values.assign(4, 0.);
+        config.set_deserialize_strict({
+            {"nozzle_diameter", "0.4,0.4"},
+            {"filament_map_mode", "Manual"},
+            {"filament_map", "1,2"},
+            {"enable_prime_tower", 0},
+            {"enable_overhang_speed", overhang_speed},
+            // The overhang fan has every layer prepared for overhang detection, whether overhang speed is on or not.
+            {"enable_overhang_bridge_fan", "0"},
+            {"wall_filament", 2},
+            {"outer_wall_filament", 2},
+            {"sparse_infill_filament", 1},
+            {"solid_infill_filament", 1},
+            {"top_surface_filament", 1},
+            {"bottom_surface_filament", 1},
+            {"skirt_loops", 0},
+            {"brim_type", "no_brim"},
+        });
+        Print print;
+        Model model;
+        ModelObject *object = model.add_object();
+        object->name        = "wedge";
+        object->add_volume(wedge_mesh());
+        object->add_instance();
+        object->ensure_on_bed();
+        print.auto_assign_extruders(object);
+        REQUIRE(model_object_named(model, "wedge") != nullptr);
+        print.apply(model, config);
+        print.validate();
+        print.set_status_silent();
+        return gcode(print);
+    };
+    const std::string mixed     = two_nozzle_gcode("0,1");
+    const std::string always_on = two_nozzle_gcode("1,1");
+
+    // The regression shows only on the layers process_layer() starts with the first filament (T0), on the first
+    // nozzle. Make sure the checked layers include some: the tool order, not this test, decides which layers those are.
+    int layers_starting_with_first_nozzle = 0;
+    std::istringstream lines(mixed);
+    int tool = -1;
+    for (std::string line; std::getline(lines, line);) {
+        if (line.size() > 1 && line[0] == 'T' && std::isdigit(static_cast<unsigned char>(line[1])))
+            tool = std::stoi(line.substr(1));
+        else if (tool == 0 && line.compare(0, 3, ";Z:") == 0 && std::stod(line.substr(3)) > 1.5 * caged_layer_height)
+            ++layers_starting_with_first_nozzle;
+    }
+    REQUIRE(layers_starting_with_first_nozzle > 0);
+
+    // Every layer above the first, which is never slowed for overhangs.
+    const int layer_count = int(std::lround(wedge_height / caged_layer_height));
+    for (int layer = 2; layer <= layer_count; ++layer) {
+        const double print_z = layer * caged_layer_height;
+        INFO("z = " << print_z);
+        // The supported back wall keeps the wall speed, so the print with overhang speed on for every nozzle measures
+        // each layer against a layer below, not against none, which would slow both prints alike.
+        const std::vector<double> back_wall = wedge_wall_feed_rates(always_on, print_z, false);
+        REQUIRE_FALSE(back_wall.empty());
+        for (const double feed_rate : back_wall)
+            CHECK_THAT(feed_rate / MM_PER_MIN, Catch::Matchers::WithinRel(caged_outer_wall_speed, 0.01));
+        const std::vector<double> expected = wedge_wall_feed_rates(always_on, print_z, true);
+        REQUIRE_FALSE(expected.empty());
+        // The slope is slowed down, so matching speeds are not merely the wall speed.
+        REQUIRE(*std::max_element(expected.begin(), expected.end()) < caged_slow_speed * MM_PER_MIN);
+        const std::vector<double> actual = wedge_wall_feed_rates(mixed, print_z, true);
+        REQUIRE(actual.size() == expected.size());
+        for (size_t i = 0; i < actual.size(); ++i)
+            CHECK_THAT(actual[i], Catch::Matchers::WithinAbs(expected[i], 1.));
+    }
 }
