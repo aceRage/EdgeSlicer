@@ -2663,6 +2663,29 @@ TEST_CASE("Print::validate accepts non-zero flow ratios", "[Print][validate]")
     CHECK(validate_flow_ratios({0.95, 1.05}, 2).string.empty());
 }
 
+TEST_CASE("Print::validate accepts a thin bridge as wide as the layer is tall", "[Print][validate][Regression]")
+{
+    const auto [bridge_line_width, rejected] = GENERATE(table<const char *, bool>({ { "100%", false }, { "0.15", true } }));
+
+    // 0.2 mm layers on a 0.2 mm nozzle, without thick bridges.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "nozzle_diameter",            "0.2" },
+        { "layer_height",               "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "thick_bridges",              "0" },
+        { "bridge_line_width",          bridge_line_width },
+    });
+
+    std::vector<StringObjectException> warnings;
+    const StringObjectException err = validate_cubes(config, warnings);
+
+    if (rejected)
+        CHECK(err.opt_key == "bridge_line_width");
+    else
+        CHECK(err.string.empty());
+}
+
 TEST_CASE("Print::validate tolerates a null warnings pointer", "[Print][validate]")
 {
     // Callers may pass no warnings sink: a warning-producing config must not crash
