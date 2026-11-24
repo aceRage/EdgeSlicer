@@ -148,12 +148,14 @@ TEST_CASE("Staggered inner seam stays next to a seam on a hairpin corner", "[Sea
     placer.init(fixture.print, [] {});
 
     // The planned seam of the hole is the slit tip, a concave corner within a float step of a full reversal.
-    const auto &layer_seams = placer.m_seam_per_object.at(&object).layers.front();
-    const auto  hole_seam   = std::find_if(layer_seams.points.begin(), layer_seams.points.end(), [&](const auto &candidate) {
-        return candidate.perimeter.seam_index < layer_seams.points.size() &&
-               &layer_seams.points[candidate.perimeter.seam_index] == &candidate &&
-               (unscale(tip).cast<float>() - candidate.position.head<2>()).norm() < 0.01f;
-    });
+    const auto  &layer_seams = placer.m_seam_per_object.at(&object).layers.front();
+    const Vec2f  tip_xy      = unscale(tip).cast<float>();
+    const auto   hole_seam   = std::find_if(layer_seams.points.begin(), layer_seams.points.end(),
+        [&](const SeamPlacerImpl::SeamCandidate &candidate) {
+            return candidate.perimeter.seam_index < layer_seams.points.size() &&
+                   &layer_seams.points[candidate.perimeter.seam_index] == &candidate &&
+                   (tip_xy - Vec2f(candidate.position.x(), candidate.position.y())).norm() < 0.01f;
+        });
     REQUIRE(hole_seam != layer_seams.points.end());
     REQUIRE(hole_seam->local_ccw_angle < -3.14159f);
     REQUIRE(hole_seam->local_ccw_angle > -static_cast<float>(PI)); // Short of a full reversal: cos(angle / 2) is positive.
