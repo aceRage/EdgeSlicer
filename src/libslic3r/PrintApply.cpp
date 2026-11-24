@@ -1794,6 +1794,25 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", has_scarf_joint_seam:" << has_scarf_joint_seam;
     }
 
+    // Orca #17774: a plate's filament maps can be longer than the filament list after a printer
+    // switch removes filaments. Cut them to the filament count so the flush reorder does not
+    // read past the end of the list. A map that is already the right length is not changed.
+    // This works on this print's copy of the config; readers of the plate/project config are
+    // not changed. Run before the #17476 nozzle clamp and keep_sliced_filament_map so the
+    // input snapshot is the shortened map.
+    if (const auto *diameter_opt = new_full_config.option<ConfigOptionFloats>("filament_diameter")) {
+        if (!diameter_opt->values.empty()) {
+            const size_t filament_count = diameter_opt->values.size();
+            const char *const map_keys[] = { "filament_map", "filament_volume_map", "filament_nozzle_map" };
+            for (const char *key : map_keys) {
+                if (auto *map_opt = new_full_config.option<ConfigOptionInts>(key)) {
+                    if (map_opt->values.size() > filament_count)
+                        map_opt->values.resize(filament_count);
+                }
+            }
+        }
+    }
+
     // Orca #17476: a value outside [1, nozzle count] means nozzle 1. Normalize it here so the
     // slicing engine only sees in-range values. This works on this print's copy of the config;
     // readers of the plate/project config are not changed. Run before keep_sliced_filament_map
