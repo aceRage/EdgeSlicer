@@ -89,6 +89,7 @@ struct PreparedSource
     float                         area_to_world = 1.f; // source mesh area -> world area
     Eigen::AlignedBox3f           bbox;                // of world_its, to skip sources that are far away
     std::vector<Vec3i32>          neighbors;           // edge neighbours of each facet, for the hint walk
+    std::vector<Vec3f>            normals;             // unit world normal of each facet; only with Options::normal_agreement
 };
 
 struct Hit
@@ -107,7 +108,10 @@ struct Transfer::Impl
     // The painting of each source, per paint layer, loaded on first use.
     std::vector<std::vector<std::unique_ptr<TriangleSelector>>> selectors; // [layer][source]
     std::vector<bool>                                           loaded;    // [layer]
+    Options                                                     options;
 };
+
+void Transfer::set_options(const Options &options) { m->options = options; }
 
 Transfer::Transfer(std::vector<Source> sources) : m(new Impl)
 {
@@ -210,9 +214,35 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
     const float         tie  = std::max(1e-4f, float(bbox.size().norm()) * 1e-6f);
     // The result's skin lies on the skin of the sources (the boolean only nudges vertices a few
     // microns). Anything farther than this has no source and stays unpainted.
-    const float         max_dist = std::max(0.05f, float(bbox.size().norm()) * 1e-3f);
+    // A rebuilt surface (repair / remesh / simplify) moves farther than that; its caller says how far.
+    const Options      &opts     = m->options;
+    const float         max_dist = opts.max_dist > 0.f ? opts.max_dist : std::max(0.05f, float(bbox.size().norm()) * 1e-3f);
     const Transform3f   t2w  = target_to_world.cast<float>();
     const float         world_to_target_area = 1.f / float(std::pow(std::abs(target_to_world.linear().determinant()), 2. / 3.));
+
+    // Normal agreement (Options): the world normal of every source facet and of every target facet.
+    const bool         use_normals = opts.normal_agreement;
+    std::vector<Vec3f> target_normals;
+    if (use_normals) {
+        for (PreparedSource &p : m->prepared)
+            if (p.normals.size() != p.world_its.indices.size())
+                p.normals = its_face_normals(p.world_its);
+        const indexed_triangle_set &tits = target.mesh().its;
+        // Normals go through the inverse transpose; a mirror flips the corner order, so the sign too.
+        const Eigen::Matrix3f lin  = t2w.linear();
+        const Eigen::Matrix3f nm   = lin.inverse().transpose();
+        const float    sign = lin.determinant() < 0.f ? -1.f : 1.f;
+        target_normals.assign(tits.indices.size(), Vec3f::Zero());
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, tits.indices.size()), [&](const tbb::blocked_range<size_t> &r) {
+            for (size_t f = r.begin(); f < r.end(); ++f) {
+                const Vec3i32 &t = tits.indices[f];
+                const Vec3f    n = (tits.vertices[t[1]] - tits.vertices[t[0]]).cross(tits.vertices[t[2]] - tits.vertices[t[0]]);
+                const Vec3f    w = sign * (nm * n);
+                const float    len = w.norm();
+                target_normals[f] = len > 0.f ? Vec3f(w / len) : Vec3f::Zero();
+            }
+        });
+    }
 
     // The sampler runs in parallel (TriangleSelector::resample): everything it touches is read
     // only, except this counter.
@@ -267,7 +297,38 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
         return std::min({ 1.f - v - w, v, w }) >= -1e-4f;
     };
 
-    auto on_hint = [&](const Vec3f &world, Hit &hit, float &d) {
+    // With normal agreement: whether source facet `facet` of `src` faces the way `n` does (less
+    // than about 78 degrees apart, so a side wall at right angles does not count).
+    constexpr float AGREE_COS = 0.2f;
+    auto agrees = [&](int src, int facet, const Vec3f *n) {
+        return n == nullptr || prepared[src].normals[facet].dot(*n) > AGREE_COS;
+    };
+    // The nearest facet of source `i` within `radius` of `world` that faces the way `n` does.
+    auto query_agreeing = [&](size_t i, const Vec3f &world, const Vec3f &n, float radius, float &d, int &facet_out, Vec3f &on_mesh) {
+        const PreparedSource &p    = prepared[i];
+        const std::vector<size_t> cands = AABBTreeIndirect::all_triangles_in_radius(p.world_its.vertices, p.world_its.indices, p.tree,
+                                                                                    world, radius * radius);
+        float best = std::numeric_limits<float>::max();
+        for (size_t f : cands) {
+            if (p.normals[f].dot(n) <= AGREE_COS)
+                continue;
+            const Vec3i32 &t = p.world_its.indices[f];
+            const Vec3f    q = AABBTreeIndirect::detail::closest_point_to_triangle<Vec3f>(world, p.world_its.vertices[t[0]],
+                                                                                         p.world_its.vertices[t[1]], p.world_its.vertices[t[2]]);
+            const float    d2 = (q - world).squaredNorm();
+            if (d2 < best) {
+                best      = d2;
+                facet_out = int(f);
+                on_mesh   = q;
+            }
+        }
+        if (best == std::numeric_limits<float>::max())
+            return false;
+        d = std::sqrt(best);
+        return true;
+    };
+
+    auto on_hint = [&](const Vec3f &world, const Vec3f *n, Hit &hit, float &d) {
         if (hint.owner != &prepared || hint.call != this_call || hint.source < 0)
             return false;
         const PreparedSource &p = prepared[hint.source];
@@ -284,6 +345,8 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
             if (facet < 0)
                 return false;
         }
+        if (! agrees(hint.source, facet, n))
+            return false;
         if (hint.source > 0) {
             const float need = std::abs(dist) + tie;
             if (! (tie_far.owner == &prepared && tie_far.call == this_call && tie_far.source == hint.source &&
@@ -314,12 +377,13 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
         return true;
     };
 
-    auto closest = [&](const Vec3f &target_pt) {
+    // `n`: the world normal of the target facet the point is on, with normal agreement; else null.
+    auto closest = [&](const Vec3f &target_pt, const Vec3f *n) {
         ++samples.local();
         const Vec3f world = t2w * target_pt;
         Hit         best;
         float       best_d = 0.f;
-        if (on_hint(world, best, best_d))
+        if (on_hint(world, n, best, best_d))
             return best;
         ++searches.local();
         best_d = std::numeric_limits<float>::max();
@@ -329,6 +393,18 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
             float d; int facet; Vec3f on_mesh;
             if (! query(i, world, d, facet, on_mesh))
                 continue;
+            if (n != nullptr && ! agrees(int(i), facet, n) && d <= max_dist) {
+                // The nearest facet faces away (the other side of a thin wall, or a facet the
+                // repair turned round): look for one that agrees nearby first, then out to the
+                // limit. None at all keeps the nearest.
+                const float r1 = std::min(max_dist, std::max(2.f * d, d + 0.1f));
+                float ad; int af = -1; Vec3f aon;
+                if (query_agreeing(i, world, *n, r1, ad, af, aon) || (r1 < max_dist && query_agreeing(i, world, *n, max_dist, ad, af, aon))) {
+                    d       = ad;
+                    facet   = af;
+                    on_mesh = aon;
+                }
+            }
             if (best.source < 0 || d < best_d - tie) {
                 best_d      = d;
                 best.source = int(i);
@@ -378,9 +454,13 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
         std::optional<TriangleSelector> selector;
         if (sample) {
             selector.emplace(target.mesh());
-            selector->resample([&](const Vec3f &pt) {
+            selector->resample_facets([&](const Vec3f &pt, int target_facet) {
                 TriangleSelector::SampledState out;
-                const Hit hit = closest(pt);
+                const Vec3f *n = nullptr;
+                if (use_normals && target_facet >= 0 && size_t(target_facet) < target_normals.size() &&
+                    target_normals[target_facet].squaredNorm() > 0.f)
+                    n = &target_normals[target_facet];
+                const Hit hit = closest(pt, n);
                 if (hit.source < 0 || sources[hit.source].cutter)
                     return out;
                 if (selectors[hit.source]) {
@@ -393,7 +473,7 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
                 if (colour && out.state == EnforcerBlockerType::NONE && sources[hit.source].filament != base_filament)
                     out.state = EnforcerBlockerType(sources[hit.source].filament);
                 return out;
-            }, EDGE_LIMIT, facet_map ? &copied : nullptr);
+            }, opts.edge_limit > 0.f ? opts.edge_limit : EDGE_LIMIT, facet_map ? &copied : nullptr);
         }
         stats.resample_ms += ms_since(t_resample);
 

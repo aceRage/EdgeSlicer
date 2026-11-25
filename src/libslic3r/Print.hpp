@@ -1335,6 +1335,54 @@ struct SupportInterfaceTemperatures
 // filament's flow-variant slot (the one get_value_at(config, ..., Filament, id) reads).
 void apply_support_interface_temperatures(ConfigBase &config, const std::map<unsigned int, int> &temperatures);
 
+// Print by object (per-object prime towers, PR 1): the plan Print::process makes for a plate printed by object, so the
+// G-code export and later the per-object prime towers read one result.
+// - blocks: one per printed copy, in print order (sort_object_instances_by_model_order), from the first copy that
+//   prints anything. Each copy's tool ordering is chained from the previous block's last filament, exactly as the
+//   export's per-instance loop chains it.
+// - orderings: the tool orderings those blocks print with, one per (object, first filament asked for).
+// - nozzle_status_before: what every nozzle last held when the block starts (the start G-code's load is the first
+//   block's first filament). Plan data only so far: nothing reads it yet.
+struct ByObjectBlock
+{
+    const PrintInstance                   *instance        = nullptr;
+    // The export builds a new ordering for this copy (another object, or the previous one does not start with the
+    // filament the nozzle holds); otherwise it keeps printing with the previous block's.
+    bool                                   rebuilt         = false;
+    // The first filament the new ordering was asked to start with (the previous block's last filament).
+    unsigned int                           chained_from    = (unsigned int) -1;
+    // Index into ByObjectPlan::orderings; -1 when the copy prints nothing and the export skips it.
+    int                                    ordering        = -1;
+    unsigned int                           first_extruder  = (unsigned int) -1;
+    unsigned int                           last_extruder   = (unsigned int) -1;
+    MultiNozzleUtils::NozzleStatusRecorder nozzle_status_before;
+};
+
+struct ByObjectPlan
+{
+    struct Ordering
+    {
+        const PrintObject *object         = nullptr;
+        unsigned int       first_extruder = (unsigned int) -1;
+        ToolOrdering       tool_ordering;
+    };
+    std::vector<Ordering>                  orderings;
+    std::vector<ByObjectBlock>             blocks;
+    // What every nozzle holds after the last block.
+    MultiNozzleUtils::NozzleStatusRecorder nozzle_status_after;
+
+    bool empty() const { return orderings.empty(); }
+    void clear() { orderings.clear(); blocks.clear(); nozzle_status_after = MultiNozzleUtils::NozzleStatusRecorder(); }
+    // The stored ToolOrdering(object, first_extruder), or null.
+    const ToolOrdering *find(const PrintObject *object, unsigned int first_extruder) const
+    {
+        for (const Ordering &o : orderings)
+            if (o.object == object && o.first_extruder == first_extruder)
+                return &o.tool_ordering;
+        return nullptr;
+    }
+};
+
 // The complete print tray with possibly multiple objects.
 class Print : public PrintBaseWithState<PrintStep, psCount>
 {
@@ -1395,6 +1443,13 @@ public:
     std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> get_layered_nozzle_group_result() const {
         return std::dynamic_pointer_cast<MultiNozzleUtils::LayeredNozzleGroupResult>(m_nozzle_group_result);
     }
+
+    // Print by object: the per-copy plan process() made (ByObjectPlan). Empty for a plate printed by layer.
+    const ByObjectPlan &by_object_plan() const { return m_by_object_plan; }
+    // ToolOrdering(object, first_extruder) for the G-code export of a by-object plate: the stored one when process()
+    // planned it, otherwise built here (counted in by_object_plan_misses() and logged).
+    ToolOrdering        by_object_tool_ordering(const PrintObject &object, unsigned int first_extruder) const;
+    size_t              by_object_plan_misses() const { return m_by_object_plan_misses; }
 
     // Ultra (dual-nozzle): inputs to the filament->nozzle grouping compute. In BBS these are populated by
     // GUI slice-prep; this fork does not populate them yet (stubbed-input grouping), so the getters return
@@ -1720,6 +1775,10 @@ private:
     bool                invalidate_state_by_config_options(const ConfigOptionResolver &new_config, const std::vector<t_config_option_key> &opt_keys);
 
     void                _make_skirt();
+    // Print by object, run by process() on every call before psWipeTower: the filament -> nozzle grouping
+    // (it used to run in GCode::_do_export), then the per-copy plan (m_by_object_plan).
+    void                group_print_by_object();
+    void                plan_print_by_object();
     void                _make_wipe_tower();
     void                finalize_first_layer_convex_hull();
 
@@ -1743,6 +1802,9 @@ private:
     // Ultra (dual-nozzle): filament->nozzle grouping result set externally before process(); null on
     // classic machines. Reset in clear().
     std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> m_nozzle_group_result;
+    // Print by object: see ByObjectPlan. Rebuilt by every process() call, cleared in clear().
+    ByObjectPlan                                            m_by_object_plan;
+    mutable size_t                                          m_by_object_plan_misses { 0 };
     // EdgeSlicer: support_interface_nozzle_temperature resolved per filament (apply()).
     SupportInterfaceTemperatures                            m_support_interface_temperatures;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.

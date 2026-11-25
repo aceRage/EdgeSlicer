@@ -96,6 +96,7 @@ add_executable(${_TEST_NAME}_tests
 	test_paint_split.cpp
 	test_paint_transfer_cut.cpp
 	test_paint_transfer_boolean.cpp
+	test_repair_paint.cpp
 	test_cut_groove.cpp
 	test_cut.cpp
 	test_cut_mesh_caps.cpp
