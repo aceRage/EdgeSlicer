@@ -19,7 +19,7 @@ namespace Slic3r {
 // Refusals and failures. paint_split_error_message() gives the (translatable) text; nothing here throws.
 enum class PaintSplitError {
     None,
-    OpenMesh,      // the part has open edges (design D16: refuse, the panel offers Repair)
+    OpenMesh,      // no longer returned: open parts are repaired while splitting (RepairFailed when that fails)
     NonManifold,   // closed, but Manifold does not accept it (self-touching, non-manifold edges)
     EmptyMask,     // nothing selected
     NoBoundary,    // a component covers a whole closed shell: there is no boundary to cut along
@@ -29,6 +29,7 @@ enum class PaintSplitError {
     BooleanFailed, // Manifold failed during the split
     EmptyPiece,    // no cut component carries the selection (the cutter misses the region)
     EmptyBody,     // the piece would take the whole part
+    RepairFailed,  // the part has holes or slivers that the automatic repair could not close
 };
 const char* paint_split_error_message(PaintSplitError err);
 
@@ -40,12 +41,41 @@ enum class PaintSplitWarning {
     ComponentsReturned,   // some cut components carried no selection and went back to the body
     PiecesAttached,       // some body-side material hung only from the piece and was attached to it (D18)
     LoosePieces,          // ... or was broken off as loose parts
+    Repaired,             // the part had holes or slivers; they were closed for the split (owner 2026-11-25)
 };
 const char* paint_split_warning_message(PaintSplitWarning w);
 
 // ---------------------------------------------------------------------------------------------------------
 // Region and boundary (design 4.1)
 // ---------------------------------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------------------------
+// Repair while splitting (owner hand test 2026-11-25: "Repair" first dropped the painting and blocked the
+// split). An open part is closed here instead, for the split only: the volume's own mesh and painting are not
+// touched, and the halves take the painting back by the Cut's spatial remap.
+// ---------------------------------------------------------------------------------------------------------
+
+struct PaintSplitRepairStats
+{
+    bool needed{ false };          // the input was not a closed, welded mesh
+    bool ok{ true };               // the output is closed (every edge used by exactly two faces)
+    int  welded{ 0 };              // vertices merged by the tolerance weld (float slivers)
+    int  degenerate_removed{ 0 };  // faces dropped because the weld collapsed them
+    int  holes_filled{ 0 };        // boundary loops closed with a fan
+    int  faces_added{ 0 };
+    int  nonmanifold_edges{ 0 };   // edges used by more than two faces after the repair (then ok == false)
+};
+
+// Welds exact and near-coincident vertices (float slivers), drops the faces that collapse, and closes every
+// boundary loop with a fan around its centroid. The kept faces stay in their input order and the added ones
+// come after them; `old_to_new` (input facet -> output facet, -1 = dropped) lets a mask follow. Returns
+// stats.ok. A closed, welded input comes back unchanged with stats.needed == false.
+bool paint_split_repair(const indexed_triangle_set& in, indexed_triangle_set& out, std::vector<int>* old_to_new,
+                        PaintSplitRepairStats& stats);
+// A one-state mask (or any painting) of the input, carried onto paint_split_repair()'s output: dropped facets
+// lose their entries, added facets are unpainted.
+TriangleSelector::TriangleSplittingData paint_split_remap_mask(const TriangleSelector::TriangleSplittingData& mask,
+                                                               const std::vector<int>& old_to_new);
 
 struct PaintSplitLoop
 {
@@ -72,6 +102,9 @@ struct PaintSplitRegion
     std::vector<double>   area;          // per component, selected area after the hole fill
     std::vector<int>      holes_filled;  // per component
     std::vector<PaintSplitError> comp_error; // per component: None, NoBoundary, Band or MultiLoop
+    // The part was open: the region was taken on paint_split_repair()'s output, and the split repairs too.
+    bool                  repaired{ false };
+    PaintSplitRepairStats repair;
 
     size_t num_components() const { return area.size(); }
     bool   component_ok(int comp) const
@@ -82,7 +115,8 @@ struct PaintSplitRegion
 };
 
 // `mesh` is the part's own mesh; `mask` its one-state selection (any painted state counts as selected).
-// Welds and refuses an open mesh exactly as the colour split does.
+// An open mesh is repaired first (paint_split_repair) and the mask carried onto it; only a failed repair is
+// refused (RepairFailed).
 PaintSplitRegion paint_split_region(const indexed_triangle_set& mesh, const TriangleSelector::TriangleSplittingData& mask,
                                     const PaintSplitRegionParams& params = {});
 // Carries a region into another frame (the cut frame): surface vertices and loop samples.

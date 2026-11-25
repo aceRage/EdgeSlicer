@@ -485,15 +485,25 @@ TEST_CASE("Paint split kerf: the slot is cut at the neck only, the returned arms
 
 // ------------------------------------------------------------------------------------------- 14 refusals
 
-TEST_CASE("Paint split refusals: open mesh, empty mask, bad component", "[PaintSplit]")
+TEST_CASE("Paint split refusals: unrepairable mesh, empty mask, bad component; an open mesh is repaired", "[PaintSplit]")
 {
     indexed_triangle_set cube = its_make_cube(20., 20., 20.);
     const auto           mask = ps_mask_where(cube, [](int i, const Vec3d&) { return i < 2; });
 
-    SECTION("open mesh") {
+    SECTION("open mesh: repaired, not refused (owner 2026-11-25)") {
         indexed_triangle_set open = cube;
         open.indices.pop_back();
-        CHECK(paint_split_region(open, mask).error == PaintSplitError::OpenMesh);
+        const PaintSplitRegion r = paint_split_region(open, mask);
+        CHECK(r.error == PaintSplitError::None);
+        CHECK(r.repaired);
+        CHECK(r.repair.holes_filled == 1);
+        CHECK(r.repair.faces_added == 1);
+    }
+    SECTION("an edge used by three faces cannot be repaired") {
+        indexed_triangle_set bad = cube;
+        bad.indices.push_back(bad.indices.front());
+        CHECK(paint_split_region(bad, mask).error == PaintSplitError::RepairFailed);
+        CHECK(paint_split_assign(bad, paint_split_region(cube, mask), 0, cube, true).error == PaintSplitError::RepairFailed);
     }
     SECTION("empty mask") {
         CHECK(paint_split_region(cube, TriangleSelector::TriangleSplittingData()).error == PaintSplitError::EmptyMask);
@@ -507,7 +517,7 @@ TEST_CASE("Paint split refusals: open mesh, empty mask, bad component", "[PaintS
         for (PaintSplitError e : { PaintSplitError::OpenMesh, PaintSplitError::NonManifold, PaintSplitError::EmptyMask,
                                    PaintSplitError::NoBoundary, PaintSplitError::Band, PaintSplitError::MultiLoop,
                                    PaintSplitError::BadComponent, PaintSplitError::BooleanFailed, PaintSplitError::EmptyPiece,
-                                   PaintSplitError::EmptyBody })
+                                   PaintSplitError::EmptyBody, PaintSplitError::RepairFailed })
             CHECK(std::string(paint_split_error_message(e)).size() > 10);
     }
 }
@@ -664,4 +674,189 @@ TEST_CASE("Paint split through Cut: pieces, keep as parts and paint on both halv
         CHECK(cut.perform_with_cutter_solid(cutter, true, keep, &rep).empty());
         CHECK(rep.error == PaintSplitError::Band);
     }
+}
+
+// ------------------------------------------------------------------------------------------- repair while splitting
+// Owner hand test 2026-11-25: an open part used to be refused with "Repair it first", and Repair dropped the
+// painting. The split now closes the part itself and the halves take the painting back.
+
+namespace {
+
+struct PsFigureCut
+{
+    PaintSplitReport report;
+    bool             region_repaired{ false };
+    double           piece_volume{ 0. }, body_volume{ 0. };
+    double           src_area2{ 0. }, src_area3{ 0. };
+    double           piece_area2{ 0. }, piece_area3{ 0. }, body_area2{ 0. }, body_area3{ 0. };
+    int              open_edges{ 0 };
+    size_t           objects{ 0 };
+};
+
+// The figure as one part: colour 2 on the head, colour 3 on the neck; the head masked; cut at the neck
+// through Cut::perform_with_cutter_solid with KeepPaint, as the gizmo's Apply does.
+PsFigureCut ps_cut_figure(const indexed_triangle_set& mesh)
+{
+    PsFigureCut  out;
+    Model        model;
+    ModelObject* mo  = model.add_object();
+    mo->name         = "figure";
+    ModelVolume* vol = mo->add_volume(TriangleMesh(mesh));
+    mo->add_instance();
+    const indexed_triangle_set& its = vol->mesh().its;
+    const Vec3d                 head = PS_HEAD_C - vol->get_offset();
+    {
+        TriangleSelector sel(vol->mesh());
+        for (int i = 0; i < int(its.indices.size()); ++i) {
+            const Vec3i32& t = its.indices[i];
+            const Vec3d    g = (its.vertices[t[0]] + its.vertices[t[1]] + its.vertices[t[2]]).cast<double>() / 3. + vol->get_offset();
+            const Vec3d    n = its_face_normal(its, i).cast<double>();
+            const Vec3d    d = g - PS_HEAD_C;
+            const double   radial = Vec2d(g.x(), g.y()).norm();
+            if (std::abs(d.norm() - PS_HEAD_R) < 0.6 && n.dot(d.normalized()) > 0.97)
+                sel.set_facet(i, EnforcerBlockerType::Extruder2);
+            else if (std::abs(radial - 5.) < 0.3 && g.z() > 0.5 && g.z() < 18.)
+                sel.set_facet(i, EnforcerBlockerType::Extruder3);
+        }
+        vol->mmu_segmentation_facets.set_data(sel.serialize());
+    }
+    out.src_area2 = ps_painted_area(mo, EnforcerBlockerType::Extruder2);
+    out.src_area3 = ps_painted_area(mo, EnforcerBlockerType::Extruder3);
+
+    PaintSplitRegion r = paint_split_region(its, ps_mask_sphere(its, head, PS_HEAD_R));
+    REQUIRE(r.component_ok(0));
+    out.region_repaired = r.repaired;
+    paint_split_transform(r, mo->instances.front()->get_transformation().get_matrix_no_offset() * vol->get_matrix());
+    const PaintSplitPlane pl = paint_split_fit_plane(r, 0);
+    REQUIRE(pl.valid);
+    const indexed_triangle_set cutter = paint_split_half_space(pl, mo->instance_bounding_box(0, true));
+
+    PaintSplitKeep keep;
+    keep.mask_volume_idx = 0;
+    keep.region          = &r;
+    Cut cut(mo, 0, Transform3d::Identity(),
+            ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::KeepPaint);
+    const ModelObjectPtrs& res = cut.perform_with_cutter_solid(cutter, true, keep, &out.report);
+    out.objects                = res.size();
+    if (res.size() != 2)
+        return out;
+    out.piece_volume = ps_volume_of(res[0]);
+    out.body_volume  = ps_volume_of(res[1]);
+    out.piece_area2  = ps_painted_area(res[0], EnforcerBlockerType::Extruder2);
+    out.piece_area3  = ps_painted_area(res[0], EnforcerBlockerType::Extruder3);
+    out.body_area2   = ps_painted_area(res[1], EnforcerBlockerType::Extruder2);
+    out.body_area3   = ps_painted_area(res[1], EnforcerBlockerType::Extruder3);
+    for (const ModelObject* o : res)
+        for (const ModelVolume* v : o->volumes)
+            if (v->is_model_part())
+                out.open_edges += int(its_num_open_edges(v->mesh().its));
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Paint split repair: an open painted figure splits like the closed one and keeps its paint", "[PaintSplit]")
+{
+    const indexed_triangle_set closed = ps_figure();
+    // Holes: one big torso triangle on the +X side, and two small facets at the top of the painted head.
+    indexed_triangle_set open = closed;
+    {
+        std::vector<int> drop;
+        int              torso = -1;
+        std::vector<std::pair<double, int>> top;
+        for (int i = 0; i < int(open.indices.size()); ++i) {
+            const Vec3i32& t = open.indices[i];
+            const Vec3d    g = (open.vertices[t[0]] + open.vertices[t[1]] + open.vertices[t[2]]).cast<double>() / 3.;
+            if (torso < 0 && g.x() > 24.99 && g.z() < -5.)
+                torso = i;
+            if ((g - PS_HEAD_C).norm() > 11. && g.z() > 40.)
+                top.emplace_back(-g.z(), i);
+        }
+        REQUIRE(torso >= 0);
+        REQUIRE(top.size() >= 3);
+        std::sort(top.begin(), top.end());
+        drop = { torso, top[0].second, top[2].second };
+        std::sort(drop.begin(), drop.end());
+        for (auto it = drop.rbegin(); it != drop.rend(); ++it)
+            open.indices.erase(open.indices.begin() + *it);
+    }
+    REQUIRE(its_num_open_edges(open) > 0);
+
+    const PsFigureCut c = ps_cut_figure(closed);
+    const PsFigureCut o = ps_cut_figure(open);
+    REQUIRE(c.report.error == PaintSplitError::None);
+    REQUIRE(o.report.error == PaintSplitError::None);
+    CHECK_FALSE(c.region_repaired);
+    CHECK(o.region_repaired);
+    CHECK(std::find(o.report.warnings.begin(), o.report.warnings.end(), PaintSplitWarning::Repaired) != o.report.warnings.end());
+    REQUIRE(o.objects == 2);
+
+    // Watertight pieces.
+    CHECK(o.open_edges == 0);
+    // The same split as the closed part: the holes were patched flat (the torso one exactly), so the volumes
+    // agree to within the two small facets at the top of the head.
+    CHECK_THAT(o.piece_volume, WithinRel(c.piece_volume, 0.01));
+    CHECK_THAT(o.body_volume, WithinRel(c.body_volume, 0.01));
+
+    // The paint survives on the right pieces: the head colour on the head, the neck colour on the body.
+    INFO("open: head colour " << o.piece_area2 << " / " << o.src_area2 << " on the piece, " << o.body_area2 << " on the body; neck colour "
+                              << o.body_area3 << " / " << o.src_area3 << " on the body, " << o.piece_area3 << " on the piece");
+    REQUIRE(o.src_area2 > 100.);
+    REQUIRE(o.src_area3 > 100.);
+    CHECK(o.piece_area2 > 0.95 * o.src_area2);
+    CHECK(o.body_area3 > 0.95 * o.src_area3);
+    CHECK(o.body_area2 < 0.05 * o.src_area2);
+    CHECK(o.piece_area3 < 0.05 * o.src_area3);
+    WARN("Paint kept through repair + split (open figure): head colour " << 100. * o.piece_area2 / o.src_area2 << " %, neck colour "
+                                                                         << 100. * o.body_area3 / o.src_area3 << " %");
+}
+
+TEST_CASE("Paint split repair: float slivers are welded, not refused", "[PaintSplit]")
+{
+    // A closed grid cube whose one top vertex is split in two a few float steps apart, as a boolean exported in
+    // floats leaves it: the seam's edges no longer pair up.
+    indexed_triangle_set cube = ps_grid_cube(40., 4);
+    int                  v    = -1;
+    for (int i = 0; i < int(cube.vertices.size()); ++i)
+        if (std::abs(cube.vertices[i].z() - 20.f) < 1e-4f && std::abs(cube.vertices[i].x()) < 1e-4f && std::abs(cube.vertices[i].y()) < 1e-4f)
+            v = i;
+    REQUIRE(v >= 0);
+    const int v2 = int(cube.vertices.size());
+    cube.vertices.push_back(cube.vertices[v] + Vec3f(4e-6f, 0.f, 0.f));
+    int moved = 0;
+    for (Vec3i32& t : cube.indices) {
+        const Vec3f g = (cube.vertices[t[0]] + cube.vertices[t[1]] + cube.vertices[t[2]]) / 3.f;
+        for (int k = 0; k < 3; ++k)
+            if (t[k] == v && g.x() > 0.f) {
+                t[k] = v2;
+                ++moved;
+            }
+    }
+    REQUIRE(moved > 0);
+    REQUIRE(its_num_open_edges(cube) > 0);
+
+    indexed_triangle_set  fixed;
+    PaintSplitRepairStats st;
+    REQUIRE(paint_split_repair(cube, fixed, nullptr, st));
+    CHECK(st.needed);
+    CHECK(st.welded == 1);
+    CHECK(st.holes_filled == 0);
+    CHECK(its_num_open_edges(fixed) == 0);
+
+    // The whole split goes through: the top face masked, a slab 10 mm deep taken.
+    const auto mask = ps_mask_where(cube, [](int, const Vec3d& g) { return g.z() > 19.9; });
+    const PaintSplitRegion r = paint_split_region(cube, mask);
+    REQUIRE(r.component_ok(0));
+    CHECK(r.repaired);
+    CHECK_THAT(r.area[0], WithinRel(1600., 1e-6));
+    PaintSplitPlaneParams pp;
+    pp.offset                = -10.;
+    const PaintSplitPlane pl = paint_split_fit_plane(r, 0, pp);
+    const PaintSplitPieces p = paint_split_assign(cube, r, 0, paint_split_half_space(pl, ps_bbox(cube)), true);
+    REQUIRE(p.ok());
+    CHECK(std::find(p.warnings.begin(), p.warnings.end(), PaintSplitWarning::Repaired) != p.warnings.end());
+    CHECK_THAT(p.piece_volume, WithinRel(16000., 1e-4));
+    CHECK_THAT(p.body_volume, WithinRel(48000., 1e-4));
+    CHECK(its_num_open_edges(p.piece) == 0);
+    CHECK(its_num_open_edges(p.body) == 0);
 }
