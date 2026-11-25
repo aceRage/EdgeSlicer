@@ -1408,6 +1408,7 @@ static std::vector<std::string> s_Preset_filament_options {
     // (M620.10, M620.11, M620.15). The BBL, Orca filament library and Snapmaker profiles carry them;
     // without them here the loader dropped them and the G-code always ran on the defaults.
     "filament_flush_volumetric_speed", "filament_flush_temp", "filament_flush_temp_fast", "filament_cooling_before_tower",
+    "min_temperature_when_ec",
     "filament_flow_support"
     };
 

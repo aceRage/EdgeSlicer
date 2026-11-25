@@ -142,6 +142,7 @@ struct InjectorParams
     std::vector<int>    filament_nozzle_temps;         // per filament
     std::vector<int>    filament_pre_cooling_temps;    // per filament
     std::vector<double> filament_preheat_temperature_delta; // per filament
+    std::vector<float>  filament_min_temperature_when_ec;   // per filament; idle floor in C, 0 = none
     std::vector<double> cooling_rate;                  // per logical extruder, degrees per second
     std::vector<double> cooling_rate_on_rack;          // per logical extruder: an idle hotend parked in the rack (H3C)
     std::vector<int>    filament_pre_heating_enabled;  // per filament (H3C: 0 = never pre-heated)

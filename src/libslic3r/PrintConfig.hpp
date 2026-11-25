@@ -889,6 +889,10 @@ inline double filament_flow_ratio_at(const ConfigBase &config, unsigned int fila
 // both read this, so a toolchange that cools always heats back.
 double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra);
 
+// BBS 2.9.2: idle-nozzle floor in C (min_temperature_when_ec). Negative or missing reads as 0,
+// matching this tree's previous hardcoded floor so H2D / H3C G-code stays unchanged.
+double min_temperature_when_ec_at(const ConfigBase &config, unsigned int filament_id);
+
 // Packed flow-variant vectors are segmented by filament_flow_step_size. Filament / tool id
 // count is filament_diameter, not the packed length.
 inline size_t flow_variant_filament_count(const ConfigBase &config)
@@ -2276,6 +2280,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionIntsNullable,        filament_flush_temp_fast))  // prime_volume_mode Fast; 0 = range high
     ((ConfigOptionFloatsNullable,      filament_flush_volumetric_speed))  // 0 = use filament_max_volumetric_speed
     ((ConfigOptionFloatsNullable,      filament_cooling_before_tower))  // °C below the print temperature
+    // BBS 2.9.2 P3C: idle-nozzle floor in C during pre-cooling (negative = no extra floor).
+    ((ConfigOptionFloats,              min_temperature_when_ec))
     ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
     ((ConfigOptionInts,                filament_pre_cooling_temperature))  // BBS: extruder-change pre-cool target, 0 = off
     // BBS 2.9.1: the tower's nozzle-change ramming (WipeTower::ramming): length rammed by the outgoing filament

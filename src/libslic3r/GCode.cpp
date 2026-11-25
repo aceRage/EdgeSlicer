@@ -11115,7 +11115,7 @@ void GCode::append_full_config(const Print& print, std::string& str)
     // BBS: the idle-nozzle pre-heating keys are dumped (as Bambu Studio does) only for a printer that
     // pre-heats; every other printer's config block stays as it was before the keys existed.
     static const std::set<std::string_view> pre_heating_keys({"enable_pre_heating"sv, "filament_pre_cooling_temperature"sv,
-                                                              "filament_preheat_temperature_delta"sv});
+                                                              "filament_preheat_temperature_delta"sv, "min_temperature_when_ec"sv});
     const bool dump_pre_heating_keys = print.config().enable_pre_heating.value;
     // Likewise the bed-slinger mass model keys: only for a printer that models it (the A2L sets both).
     static const std::set<std::string_view> mass_model_keys({"machine_max_force_Y"sv, "machine_bed_mass_Y"sv});
