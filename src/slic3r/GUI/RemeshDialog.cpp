@@ -184,7 +184,7 @@ RemeshDialog::RemeshDialog(wxWindow *parent, double auto_voxel, size_t triangles
     v_sizer->Add(m_preview_text, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
     auto note_text = new ::Label(this, Label::Body_14,
-                                 _L("Painted supports, seams and colours are cleared by a remesh."));
+                                 _L("Painted supports, seams and colours are carried over to the new surface. Detail finer than a voxel is lost."));
     note_text->Wrap(FromDIP(320));
     // Light-mode tone only; UpdateDlgDarkUI() maps it for dark mode, as in FillBedDialog.
     note_text->SetForegroundColour(wxColour("#6B6B6B"));

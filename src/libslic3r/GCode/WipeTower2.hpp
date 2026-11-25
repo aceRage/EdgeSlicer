@@ -86,6 +86,13 @@ public:
 			  int plate_idx, Vec3d plate_origin,
 			  const std::vector<std::vector<float>>& wiping_matrix,
 			  size_t initial_tool);
+    // The tower at wipe_tower_pos (its left front corner, in mm) instead of the plate's wipe_tower_x / wipe_tower_y. The
+    // constructor above passes the plate's position here.
+    WipeTower2(const PrintConfig& config,
+	          const PrintRegionConfig& default_region_config,
+			  const Vec2d &wipe_tower_pos, Vec3d plate_origin,
+			  const std::vector<std::vector<float>>& wiping_matrix,
+			  size_t initial_tool);
 
 	// Set the extruder properties.
     void set_extruder(size_t idx, const PrintConfig& config);

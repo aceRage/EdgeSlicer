@@ -356,6 +356,22 @@ void PrintObject::set_curved_tops_guard_inputs_used(std::string inputs)
     m_curved_tops_guard_inputs = std::move(inputs);
 }
 
+// Orca #17382: see Layer::anchor_bridges_in_neighbours(). Applied to the untyped slices restored from the raw slices,
+// so that the anchors follow the current wall widths. A layer only reads the lslices of the layers next to it, which
+// this does not change.
+template<typename ThrowOnCancel>
+static void anchor_bridges_in_neighbours(const LayerPtrs &layers, ThrowOnCancel throw_on_cancel)
+{
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, layers.size()),
+        [&layers, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {
+            for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
+                throw_on_cancel();
+                layers[layer_idx]->anchor_bridges_in_neighbours();
+            }
+        });
+    throw_on_cancel();
+}
+
 void PrintObject::make_perimeters()
 {
     // prerequisites
@@ -370,14 +386,14 @@ void PrintObject::make_perimeters()
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
 
-    // Revert the typed slices into untyped slices.
-    if (m_typed_slices) {
-        for (Layer *layer : m_layers) {
-            layer->restore_untyped_slices();
-            m_print->throw_if_canceled();
-        }
-        m_typed_slices = false;
+    // Revert the typed slices into untyped slices, together with the anchors handed to bridges by a previous run
+    // (Orca #17382).
+    for (Layer *layer : m_layers) {
+        layer->restore_untyped_slices();
+        m_print->throw_if_canceled();
     }
+    m_typed_slices = false;
+    anchor_bridges_in_neighbours(m_layers, [this]() { m_print->throw_if_canceled(); });
 
     // compare each layer to the one below, and mark those slices needing
     // one additional inner perimeter, like the top of domed objects-
@@ -527,6 +543,8 @@ void PrintObject::prepare_infill()
             layer->restore_untyped_slices_no_extra_perimeters();
             m_print->throw_if_canceled();
         }
+        // Orca #17382: the walls and the fill regions were generated with the anchors.
+        anchor_bridges_in_neighbours(m_layers, [this]() { m_print->throw_if_canceled(); });
     }
 
     // This will assign a type (top/bottom/internal) to $layerm->slices.
@@ -1499,6 +1517,16 @@ SupportLayer* PrintObject::add_support_layer(int id, int interface_id, coordf_t 
 SupportLayerPtrs::iterator PrintObject::insert_support_layer(SupportLayerPtrs::iterator pos, size_t id, size_t interface_id, coordf_t height, coordf_t print_z, coordf_t slice_z)
 {
     return m_support_layers.insert(pos, new SupportLayer(id, interface_id, this, height, print_z, slice_z));
+}
+
+SupportLayer* PrintObject::new_detached_support_layer(size_t id, size_t interface_id, coordf_t height, coordf_t print_z, coordf_t slice_z)
+{
+    return new SupportLayer(id, interface_id, this, height, print_z, slice_z);
+}
+
+void PrintObject::delete_detached_support_layer(SupportLayer *layer)
+{
+    delete layer;
 }
 
 // Called by Print::apply().

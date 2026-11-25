@@ -297,7 +297,7 @@ public:
     bool 				has_wipe_tower() const { return ! m_layer_tools.empty() && m_first_printing_extruder != (unsigned int)-1 && m_layer_tools.front().has_wipe_tower; }
     // A print-by-object plate on a grouping-model machine (H2D/H2C/X2D) skips the grouping of
     // reorder_extruders_for_minimum_flush_volume(); this groups it from the plate's own filament
-    // map (manual mode) for the given per-layer filament lists. See GCode::_do_export.
+    // map (manual mode) for the given per-layer filament lists. See Print::group_print_by_object.
     static MultiNozzleUtils::LayeredNozzleGroupResult group_by_plate_map(Print *print, const std::vector<std::vector<unsigned int>> &layer_filaments);
     // A print-by-object plate on a one-extruder printer whose rack hotends count as extruders (H3C,
     // handle_hotend_as_extruder) skips that grouping too, and group_by_plate_map does not cover it. This

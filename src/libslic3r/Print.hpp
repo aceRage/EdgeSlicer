@@ -607,6 +607,10 @@ public:
     SupportLayer*   get_support_layer_at_printz(coordf_t print_z, coordf_t epsilon);
     SupportLayer*   add_support_layer(int id, int interface_id, coordf_t height, coordf_t print_z);
     SupportLayerPtrs::iterator insert_support_layer(SupportLayerPtrs::iterator pos, size_t id, size_t interface_id, coordf_t height, coordf_t print_z, coordf_t slice_z);
+    // A support layer of this object that the object does not hold: a per-object prime tower keeps its tower-only layers
+    // in its WipeTowerData (virtual_support_layers) and frees them with delete_detached_support_layer().
+    SupportLayer*   new_detached_support_layer(size_t id, size_t interface_id, coordf_t height, coordf_t print_z, coordf_t slice_z);
+    static void     delete_detached_support_layer(SupportLayer *layer);
 
     // Initialize the layer_height_profile from the model_object's layer_height_profile, from model_object's layer height table, or from slicing parameters.
     // Returns true, if the layer_height_profile was changed.
@@ -1192,10 +1196,24 @@ struct WipeTowerData
         Polygon bottom;
     };
     std::optional<WipeTowerMeshData>                      wipe_tower_mesh_data;
+    // The tower-only layers of a per-object prime tower (a tower layer that prints neither object nor support, between
+    // the raft and the object), sorted by print_z. They belong to this tower alone: GCode::collect_layers_to_print(object,
+    // warn, tower) merges them into that copy's layers only. The plate tower leaves this empty and inserts its
+    // tower-only layers into the first object's support layers, as before. Owned here, freed by clear().
+    SupportLayerPtrs                                      virtual_support_layers;
 
     void construct_mesh(float width, float depth, float height, float brim_width, bool is_rib_wipe_tower, float rib_width, float rib_length, bool fillet_wall, float cone_angle = 0.f);
 
+    ~WipeTowerData() { clear_virtual_support_layers(); }
+
+    void clear_virtual_support_layers() {
+        for (SupportLayer *layer : virtual_support_layers)
+            PrintObject::delete_detached_support_layer(layer);
+        virtual_support_layers.clear();
+    }
+
     void clear() {
+        clear_virtual_support_layers();
         priming.reset(nullptr);
         tool_changes.clear();
         local_z_tool_changes.clear();
@@ -1220,6 +1238,7 @@ private:
 	// Only allow the WipeTowerData to be instantiated internally by Print, 
 	// as this WipeTowerData shares reference to Print::m_tool_ordering.
 	friend class Print;
+	friend struct WipeTowerDataTestAccess;
 	WipeTowerData(ToolOrdering &tool_ordering) : tool_ordering(tool_ordering) { clear(); }
 	WipeTowerData(const WipeTowerData & /* rhs */) = delete;
 	WipeTowerData &operator=(const WipeTowerData & /* rhs */) = delete;
@@ -1335,6 +1354,54 @@ struct SupportInterfaceTemperatures
 // filament's flow-variant slot (the one get_value_at(config, ..., Filament, id) reads).
 void apply_support_interface_temperatures(ConfigBase &config, const std::map<unsigned int, int> &temperatures);
 
+// Print by object (per-object prime towers, PR 1): the plan Print::process makes for a plate printed by object, so the
+// G-code export and later the per-object prime towers read one result.
+// - blocks: one per printed copy, in print order (sort_object_instances_by_model_order), from the first copy that
+//   prints anything. Each copy's tool ordering is chained from the previous block's last filament, exactly as the
+//   export's per-instance loop chains it.
+// - orderings: the tool orderings those blocks print with, one per (object, first filament asked for).
+// - nozzle_status_before: what every nozzle last held when the block starts (the start G-code's load is the first
+//   block's first filament). Plan data only so far: nothing reads it yet.
+struct ByObjectBlock
+{
+    const PrintInstance                   *instance        = nullptr;
+    // The export builds a new ordering for this copy (another object, or the previous one does not start with the
+    // filament the nozzle holds); otherwise it keeps printing with the previous block's.
+    bool                                   rebuilt         = false;
+    // The first filament the new ordering was asked to start with (the previous block's last filament).
+    unsigned int                           chained_from    = (unsigned int) -1;
+    // Index into ByObjectPlan::orderings; -1 when the copy prints nothing and the export skips it.
+    int                                    ordering        = -1;
+    unsigned int                           first_extruder  = (unsigned int) -1;
+    unsigned int                           last_extruder   = (unsigned int) -1;
+    MultiNozzleUtils::NozzleStatusRecorder nozzle_status_before;
+};
+
+struct ByObjectPlan
+{
+    struct Ordering
+    {
+        const PrintObject *object         = nullptr;
+        unsigned int       first_extruder = (unsigned int) -1;
+        ToolOrdering       tool_ordering;
+    };
+    std::vector<Ordering>                  orderings;
+    std::vector<ByObjectBlock>             blocks;
+    // What every nozzle holds after the last block.
+    MultiNozzleUtils::NozzleStatusRecorder nozzle_status_after;
+
+    bool empty() const { return orderings.empty(); }
+    void clear() { orderings.clear(); blocks.clear(); nozzle_status_after = MultiNozzleUtils::NozzleStatusRecorder(); }
+    // The stored ToolOrdering(object, first_extruder), or null.
+    const ToolOrdering *find(const PrintObject *object, unsigned int first_extruder) const
+    {
+        for (const Ordering &o : orderings)
+            if (o.object == object && o.first_extruder == first_extruder)
+                return &o.tool_ordering;
+        return nullptr;
+    }
+};
+
 // The complete print tray with possibly multiple objects.
 class Print : public PrintBaseWithState<PrintStep, psCount>
 {
@@ -1395,6 +1462,13 @@ public:
     std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> get_layered_nozzle_group_result() const {
         return std::dynamic_pointer_cast<MultiNozzleUtils::LayeredNozzleGroupResult>(m_nozzle_group_result);
     }
+
+    // Print by object: the per-copy plan process() made (ByObjectPlan). Empty for a plate printed by layer.
+    const ByObjectPlan &by_object_plan() const { return m_by_object_plan; }
+    // ToolOrdering(object, first_extruder) for the G-code export of a by-object plate: the stored one when process()
+    // planned it, otherwise built here (counted in by_object_plan_misses() and logged).
+    ToolOrdering        by_object_tool_ordering(const PrintObject &object, unsigned int first_extruder) const;
+    size_t              by_object_plan_misses() const { return m_by_object_plan_misses; }
 
     // Ultra (dual-nozzle): inputs to the filament->nozzle grouping compute. In BBS these are populated by
     // GUI slice-prep; this fork does not populate them yet (stubbed-input grouping), so the getters return
@@ -1592,7 +1666,9 @@ public:
     // Re-run clearance with current instance / tower / z_offset / toolhead values and
     // copy the matching TCR into wipe_tower_data().final_purge. Safe when the tower
     // step was skipped (N2: drag object or tower, change clearance, change z_offset).
-    void                        select_final_purge_variant();
+    void                        select_final_purge_variant() { this->select_final_purge_variant(m_wipe_tower_data); }
+    // The same for the plate tower generated into data (_make_wipe_tower(data, nullptr, pos)).
+    void                        select_final_purge_variant(WipeTowerData &data);
     const ToolOrdering& 		tool_ordering() const { return m_tool_ordering; }
     // Orca/BambuStudio: the 0-based physical filaments the first layer prints with (first_layer = true), or the
     // whole print (false). Set when the skirt and brim are made.
@@ -1720,7 +1796,20 @@ private:
     bool                invalidate_state_by_config_options(const ConfigOptionResolver &new_config, const std::vector<t_config_option_key> &opt_keys);
 
     void                _make_skirt();
-    void                _make_wipe_tower();
+    // Print by object, run by process() on every call before psWipeTower: the filament -> nozzle grouping
+    // (it used to run in GCode::_do_export), then the per-copy plan (m_by_object_plan).
+    void                group_print_by_object();
+    void                plan_print_by_object();
+    // Generate a prime tower into data, its left front corner at pos (mm, plate coordinates as wipe_tower_x / y).
+    // - inst == nullptr: the plate tower. process() calls it with m_wipe_tower_data and the plate's wipe_tower_x / y;
+    //   it plans from the plate's tool ordering, inserts the tower-only layers into the first object's support layers,
+    //   and sets up the fake tower and the final purge choice, as before.
+    // - inst != nullptr: a tower for that printed copy alone (per-object prime towers). It plans from the copy's ordering
+    //   in the by-object plan, keeps its tower-only layers in data.virtual_support_layers, and leaves the plate's fake
+    //   tower and final purge alone. Nothing calls it this way yet.
+    void                _make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, const Vec2d &pos);
+    // The plate tower's position, the left front corner (wipe_tower_x / wipe_tower_y of this plate).
+    Vec2d               plate_wipe_tower_position() const;
     void                finalize_first_layer_convex_hull();
 
     static void append_model_object_extruders(const ModelObject &mo, std::vector<unsigned int> &extruders);
@@ -1743,6 +1832,9 @@ private:
     // Ultra (dual-nozzle): filament->nozzle grouping result set externally before process(); null on
     // classic machines. Reset in clear().
     std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> m_nozzle_group_result;
+    // Print by object: see ByObjectPlan. Rebuilt by every process() call, cleared in clear().
+    ByObjectPlan                                            m_by_object_plan;
+    mutable size_t                                          m_by_object_plan_misses { 0 };
     // EdgeSlicer: support_interface_nozzle_temperature resolved per filament (apply()).
     SupportInterfaceTemperatures                            m_support_interface_temperatures;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.
@@ -1836,6 +1928,8 @@ private:
     friend class GCode;
     // Allow PrintObject to access m_mutex and m_cancel_callback.
     friend class PrintObject;
+    // Tests of _make_wipe_tower(data, inst, pos) (tests/fff_print/test_wipe_tower_data.cpp).
+    friend struct WipeTowerDataTestAccess;
 
 public:
     //BBS: this was a print config and now seems to be useless so we move it to here

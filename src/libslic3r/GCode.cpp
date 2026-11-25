@@ -2798,10 +2798,22 @@ void GCode::PlaceholderParserIntegration::validate_output_vector_variables()
 
 // Collect pairs of object_layer + support_layer sorted by print_z.
 // object_layer & support_layer are considered to be on the same print_z, if they are not further than EPSILON.
-std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObject& object)
+std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObject& object, bool warn, const WipeTowerData *tower)
 {
+    // The support layers: the object's own, plus the tower-only layers of this copy's prime tower, by print_z. On a tie
+    // the object's own layer comes first. Without a tower (every caller so far) these are exactly the object's.
+    std::vector<const SupportLayer*> support_layers = object.support_layers().vector();
+    if (tower != nullptr && !tower->virtual_support_layers.empty()) {
+        std::vector<const SupportLayer*> merged;
+        merged.reserve(support_layers.size() + tower->virtual_support_layers.size());
+        std::merge(support_layers.begin(), support_layers.end(), tower->virtual_support_layers.begin(), tower->virtual_support_layers.end(),
+                   std::back_inserter(merged),
+                   [](const SupportLayer *l1, const SupportLayer *l2) { return l1->print_z < l2->print_z; });
+        support_layers = std::move(merged);
+    }
+
     std::vector<GCode::LayerToPrint> layers_to_print;
-    layers_to_print.reserve(object.layers().size() + object.support_layers().size());
+    layers_to_print.reserve(object.layers().size() + support_layers.size());
 
     /*
     // Calculate a minimum support layer height as a minimum over all extruders, but not smaller than 10um.
@@ -2826,7 +2838,7 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
     size_t              idx_support_layer    = 0;
     const LayerToPrint* last_extrusion_layer = nullptr;
     size_t              last_extrusion_layer_idx = 0;
-    while (idx_object_layer < object.layers().size() || idx_support_layer < object.support_layers().size()) {
+    while (idx_object_layer < object.layers().size() || idx_support_layer < support_layers.size()) {
         LayerToPrint layer_to_print;
         double       print_z_min = std::numeric_limits<double>::max();
         if (idx_object_layer < object.layers().size()) {
@@ -2834,8 +2846,8 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
             print_z_min                 = std::min(print_z_min, layer_to_print.object_layer->print_z);
         }
 
-        if (idx_support_layer < object.support_layers().size()) {
-            layer_to_print.support_layer = object.support_layers()[idx_support_layer++];
+        if (idx_support_layer < support_layers.size()) {
+            layer_to_print.support_layer = support_layers[idx_support_layer++];
             print_z_min                  = std::min(print_z_min, layer_to_print.support_layer->print_z);
         }
 
@@ -2928,7 +2940,7 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
         }
     }
 
-    if (!warning_ranges.empty()) {
+    if (warn && !warning_ranges.empty()) {
         std::string warning;
         size_t      i = 0;
         for (i = 0; i < std::min(warning_ranges.size(), size_t(5)); ++i)
@@ -4190,72 +4202,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     m_writer.set_is_bbl_machine(is_bbl_printers);
 
-    // Bambu two-extruder printers, print by object: the filament -> nozzle grouping
-    // (ToolOrdering::reorder_extruders_for_minimum_flush_volume) never runs for such a plate - it is
-    // skipped for a sequential print, and Print::process builds no print-wide ToolOrdering for a
-    // by-object plate even with one object - so nothing told the printer which hotend each filament
-    // uses: the CONFIG_BLOCK kept the
-    // project's stale filament_nozzle_map (an H2D plate with filament_map 2,1,2,2,... went out as
-    // "1,0,0,0,..." - filament 5 on nozzle 0, the LEFT hotend, while its AMS feeds the right one),
-    // slice_info gave every filament group 0 with no <nozzle> table, and the start G-code's
-    // filament_map shim heated and selected the left hotend ("M104 T1 ; rise temp in advance",
-    // "G151 P1 M"). Bambu Studio groups print-by-object plates too; group this one from the plate's
-    // own map, before the header is written. A by-layer plate keeps the grouping ToolOrdering made.
-    // (A by-object plate with ONE object and a prime tower does get the print-wide ToolOrdering, and
-    // its grouping, from Print::_make_wipe_tower; keep that one.)
-    if (is_bbl_printers && print.config().print_sequence == PrintSequence::ByObject && print.config().nozzle_diameter.size() >= 2 &&
-        (print.objects().size() > 1 || !print.has_wipe_tower())) {
-        // R1 (rack pins, review of PR 1163): on an automatic map the pin rules can move a filament off the plate map's extruder
-        // (rack_pin_filament_map; the reach check and the grouping read the same). The moved map is the slice's map: write it
-        // where the header, the logical extruders, the temperatures and the start G-code read filament_map, as
-        // ToolOrdering::reorder_extruders_for_minimum_flush_volume does for a by-layer plate. Unchanged without pins.
-        if (const std::vector<int> moved = rack_pin_filament_map(print.config(), print.extruders(), print.filament_map_input());
-            moved != print.filament_map_input()) {
-            const_cast<PrintConfig &>(print.config()).filament_map.values = moved;
-            if (auto *opt = const_cast<DynamicPrintConfig &>(print.full_print_config()).option<ConfigOptionInts>("filament_map", true))
-                opt->values = moved;
-        }
-        std::vector<std::vector<unsigned int>> layer_filaments;
-        for (const PrintObject *object : print.objects()) {
-            ToolOrdering object_ordering(*object, (unsigned int) -1);
-            for (const LayerTools &lt : object_ordering.layer_tools())
-                if (!lt.extruders.empty())
-                    layer_filaments.push_back(lt.extruders);
-        }
-        std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> grouping;
-        if (!layer_filaments.empty()) {
-            try {
-                grouping = std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(ToolOrdering::group_by_plate_map(&print, layer_filaments));
-                if (grouping->get_used_filaments().empty())
-                    grouping.reset();
-            } catch (const std::exception &e) {
-                BOOST_LOG_TRIVIAL(warning) << "print-by-object nozzle grouping failed: " << e.what();
-                grouping.reset();
-            }
-        }
-        // Always replace: a result from an earlier by-layer slice of this Print must not describe this one.
-        print.set_nozzle_group_result(grouping);
-    } else if (is_bbl_printers && print.config().print_sequence == PrintSequence::ByObject && print.config().nozzle_diameter.size() < 2 &&
-               hotend_as_extruder(print.config()) && (print.objects().size() > 1 || !print.has_wipe_tower())) {
-        // H3C (one extruder, its rack hotends handled as extruders): the shim above needs two extruders, so a
-        // by-object H3C plate had no hotend grouping at all - a one-entry filament_nozzle_map, no pre-heat /
-        // pre-cool of the rack hotends (M632 ... W / M104 I.. N0 W / M633, M104 I.. N0 C), every colour change
-        // written as a swap in one hotend, while the printer still put the colours in separate hotends (owner's
-        // H3C stopped at 97 % on such a plate, 2026-11-23). Group it as Bambu Studio's ByObjectPrintData::build
-        // does: the objects' layers in print order, the plate's own grouping mode (as the by-layer pass).
-        std::vector<std::vector<unsigned int>> layer_filaments;
-        const PrintObject                     *prev_object = nullptr;
-        for (const PrintInstance *instance : sort_object_instances_by_model_order(print)) {
-            if (instance->print_object == prev_object)
-                continue;
-            prev_object = instance->print_object;
-            ToolOrdering object_ordering(*instance->print_object, (unsigned int) -1);
-            for (const LayerTools &lt : object_ordering.layer_tools())
-                if (!lt.extruders.empty())
-                    layer_filaments.push_back(lt.extruders);
-        }
-        ToolOrdering::group_print_by_object_hotends(&print, layer_filaments);
-    }
+    // Print by object: the filament -> nozzle grouping of a Bambu plate with two extruders or an H3C rack, and every
+    // copy's chained tool ordering, are made by Print::process (Print::group_print_by_object / plan_print_by_object).
 
     // How many times will be change_layer() called?
     // change_layer() in turn increments the progress bar status.
@@ -4359,7 +4307,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // Find the 1st printing object, find its tool ordering and the initial extruder ID.
         print_object_instance_sequential_active = print_object_instances_ordering.begin();
         for (; print_object_instance_sequential_active != print_object_instances_ordering.end(); ++print_object_instance_sequential_active) {
-            tool_ordering = ToolOrdering(*(*print_object_instance_sequential_active)->print_object, initial_extruder_id);
+            tool_ordering = print.by_object_tool_ordering(*(*print_object_instance_sequential_active)->print_object, initial_extruder_id);
             if ((initial_extruder_id = tool_ordering.first_extruder()) != static_cast<unsigned int>(-1)) {
                 // BBS: try to find the non-support filament extruder if is multi color and initial_extruder is support filament
                 initial_non_support_extruder_id = initial_extruder_id;
@@ -5536,7 +5484,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                  ++print_object_instance_sequential_active) {
                 const PrintObject& object = *(*print_object_instance_sequential_active)->print_object;
                 if (&object != prev_object || tool_ordering.first_extruder() != final_extruder_id) {
-                    tool_ordering                = ToolOrdering(object, final_extruder_id);
+                    tool_ordering                = print.by_object_tool_ordering(object, final_extruder_id);
                     unsigned int new_extruder_id = tool_ordering.first_extruder();
                     if (new_extruder_id == (unsigned int) -1)
                         // Skip this object.

@@ -42,6 +42,7 @@ namespace Slic3r {
 // Forward declarations.
 class GCode;
 struct WipeInwardSupport;
+struct WipeTowerData;
 
 namespace { struct Item; }
 struct PrintInstance;
@@ -462,7 +463,12 @@ private:
     };
     void            _do_export(Print &print, GCodeOutputStream &file, ThumbnailsGeneratorCallback thumbnail_cb);
 
-    static std::vector<LayerToPrint>        		                   collect_layers_to_print(const PrintObject &object);
+    // An object's layers by print_z, its object and support layers paired. warn: report empty layers in between as a
+    // print warning (the "empty layer between" check). tower: a per-object prime tower of this copy, whose tower-only
+    // layers (WipeTowerData::virtual_support_layers) are merged in as support layers; none for the plate tower, which
+    // inserts its own into the first object's support layers.
+    static std::vector<LayerToPrint>        		                   collect_layers_to_print(const PrintObject &object, bool warn = true,
+                                                                                               const WipeTowerData *tower = nullptr);
     static std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>> collect_layers_to_print(const Print &print);
 
     std::string generate_skirt(const Print &print,
@@ -975,6 +981,8 @@ private:
     friend class WipeTowerIntegration;
     friend class PressureEqualizer;
     friend class Print;
+    // tests/fff_print/test_wipe_tower_data.cpp: collect_layers_to_print(object, warn, tower).
+    friend struct WipeTowerDataTestAccess;
     friend class SmallAreaInfillFlowCompensator;
 };
 

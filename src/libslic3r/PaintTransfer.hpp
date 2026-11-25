@@ -69,6 +69,23 @@ enum LayerMask : unsigned {
     ALL_LAYERS    = LAYER_SUPPORT | LAYER_SEAM | LAYER_COLOUR | LAYER_FUZZY,
 };
 
+// Opt-in tuning of Transfer::to() for a target that is the SAME surface rebuilt (repair, remesh,
+// simplify: RepairPaint.hpp) rather than the result of a boolean. The defaults keep the boolean /
+// cut behaviour exactly.
+struct Options
+{
+    // > 0: the farthest (world mm) a point of the target may lie from the sources and still take
+    // their painting. 0 keeps the boolean's own limit (a few microns of nudging).
+    float max_dist = 0.f;
+    // Take the nearest source facet that faces the same way as the target facet (normals less
+    // than 90 degrees apart), searching up to max_dist around the point, before the plain nearest
+    // facet. Stops a rebuilt thin wall taking the painting of its other side.
+    bool  normal_agreement = false;
+    // > 0: the smallest edge (target mesh coords) a target facet is split down to along a border;
+    // 0 keeps the default (0.005 mm).
+    float edge_limit = 0.f;
+};
+
 // The sources prepared once (search trees, painting loaded) for several targets, as when one
 // mesh is split into many pieces.
 class Transfer
@@ -76,6 +93,8 @@ class Transfer
 public:
     explicit Transfer(std::vector<Source> sources);
     ~Transfer();
+    // Applies to every later to().
+    void set_options(const Options &options);
     // See transfer() below. With one source, `facet_map` (from FacetMatcher::match()) may say
     // which facets of the target are facets of the source: their painting is copied as it is and
     // only the rest is resampled (a cut, where only the facets along the plane are new).

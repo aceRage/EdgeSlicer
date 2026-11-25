@@ -510,7 +510,8 @@ std::vector<Bridge> get_grouped_bridges(
 void detect_bridge_directions(
     const Algorithm::WaveSeeds& bridge_anchors,
     std::vector<Bridge>& bridges,
-    const std::vector<ExpansionZone>& expansion_zones
+    const std::vector<ExpansionZone>& expansion_zones,
+    const Polygons& other_regions_anchors
 ) {
     if (expansion_zones.empty()) {
         throw std::runtime_error("At least one expansion zone must exist!");
@@ -518,7 +519,9 @@ void detect_bridge_directions(
     auto it_bridge_anchor = bridge_anchors.begin();
     for (uint32_t bridge_id = 0; bridge_id < uint32_t(bridges.size()); ++ bridge_id) {
         Bridge &bridge = bridges[bridge_id];
-        Polygons anchor_areas;
+        // Orca #17382: the supported parts of the other regions anchor the bridge too.
+        Polygons anchor_areas = other_regions_anchors.empty() ? Polygons() :
+            ClipperUtils::clip_clipper_polygons_with_subject_bbox(other_regions_anchors, get_extents(bridge.expolygon).inflated(SCALED_EPSILON * 2));
         int32_t last_anchor_id = -1;
         for (; it_bridge_anchor != bridge_anchors.end() && it_bridge_anchor->src == bridge_id; ++ it_bridge_anchor) {
             if (last_anchor_id != int(it_bridge_anchor->boundary)) {
@@ -646,7 +649,8 @@ ExpansionResult expand_expolygons(
 Surfaces expand_bridges_detect_orientations(
     Surfaces &surfaces,
     std::vector<ExpansionZone>& expansion_zones,
-    const float closing_radius
+    const float closing_radius,
+    const Polygons& other_regions_anchors
 )
 {
     using namespace Slic3r::Algorithm;
@@ -669,7 +673,7 @@ Surfaces expand_bridges_detect_orientations(
     bridge_expolygons.clear();
 
     std::sort(expansion_result.anchors.begin(), expansion_result.anchors.end(), Algorithm::lower_by_src_and_boundary);
-    detect_bridge_directions(expansion_result.anchors, bridges, expansion_zones);
+    detect_bridge_directions(expansion_result.anchors, bridges, expansion_zones, other_regions_anchors);
 
     // Merge the groups with the same group id, produce surfaces by merging source overhangs with their newly expanded anchors.
     std::sort(expansion_result.expansions.begin(), expansion_result.expansions.end(), [](auto &l, auto &r) {
@@ -806,9 +810,18 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
             align_offset_rad = std::atan2((double)m(1, 0), (double)m(0, 0));
         }
 
+        // Orca #17382: the supported parts of the other regions anchor a bridge as well, as one segmented into a
+        // region of its own. Edge: not on a plate with several nozzle diameters, see Layer::anchor_bridges_in_neighbours().
+        Polygons other_regions_anchors;
+        if (lower_layer != nullptr && this->fill_surfaces.has(stBottomBridge) && this->layer()->regions().size() > 1 &&
+            ! this->layer()->object()->print()->uses_multiple_nozzle_diameters())
+            for (const LayerRegion *other : this->layer()->regions())
+                if (other != this)
+                    polygons_append(other_regions_anchors, intersection(other->slices.surfaces, lower_layer->lslices));
+
         bridges.surfaces = (custom_angle_deg > 0.0 && !relative_angle) ?
             expand_merge_surfaces(this->fill_surfaces.surfaces, stBottomBridge, expansion_zones, closing_radius, custom_angle_rad + align_offset_rad) :
-            expand_bridges_detect_orientations(this->fill_surfaces.surfaces, expansion_zones, closing_radius);
+            expand_bridges_detect_orientations(this->fill_surfaces.surfaces, expansion_zones, closing_radius, other_regions_anchors);
         if (custom_angle_deg > 0.0 && relative_angle) {
             for (Surface &bridge_surface : bridges.surfaces) {
                 if (bridge_surface.bridge_angle >= 0)

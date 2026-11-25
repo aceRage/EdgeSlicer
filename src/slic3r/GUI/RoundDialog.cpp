@@ -198,7 +198,7 @@ RoundDialog::RoundDialog(wxWindow *parent, double bbox_min_extent, size_t triang
     v_sizer->Add(m_warning_text, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
     auto note_text = new ::Label(this, Label::Body_14,
-                                 _L("The part is rebuilt, so painted supports, seams and colours are cleared."));
+                                 _L("The part is rebuilt; painted supports, seams and colours are carried over to the new surface."));
     note_text->Wrap(FromDIP(320));
     note_text->SetForegroundColour(wxColour("#6B6B6B"));
     v_sizer->Add(note_text, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
