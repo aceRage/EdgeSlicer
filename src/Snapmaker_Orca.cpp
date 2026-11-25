@@ -3990,9 +3990,10 @@ int CLI::run(int argc, char **argv)
     // This runs AFTER the flush-volume block on purpose: that block is entered only when the
     // project already carries colours (or --filament-colour was given), and it sizes
     // flush_volumes_matrix filament_count x filament_count, which is a single-nozzle shape. Adding
-    // the colours before it would pull dual-nozzle slices into that branch and hand
-    // prepare_flush_matrices a matrix half the size it slices per nozzle. Leaving the branch alone
-    // keeps the 4x4 PrintConfig default, which every nozzle can be sliced out of.
+    // the colours before it would pull dual-nozzle slices into that branch. Leaving the branch alone
+    // keeps the 4x4 PrintConfig default; with another filament count prepare_flush_matrices reads
+    // it as the G-code writer does, one 4x4 square whose first filaments x filaments entries every
+    // nozzle uses.
     if (filament_count > 0) {
         ConfigOptionStrings *filament_colors_option = m_print_config.option<ConfigOptionStrings>("filament_colour", true);
         std::vector<std::string> &filament_colors = filament_colors_option->values;
@@ -4248,8 +4249,11 @@ int CLI::run(int argc, char **argv)
                                             cli_mixed_num_physical);
 
         if (ConfigOptionFloats *flush_opt = m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix")) {
-            const size_t n = size_t(std::sqrt(double(flush_opt->values.size())) + 0.001);
-            zero_mixed_flush_rows_and_cols(flush_opt->values, n, cli_mixed_filament_mgr, cli_mixed_num_physical);
+            // One N x N matrix, or one per nozzle (Bambu Studio's 2 x N x N on an H2D / H2C): each block is
+            // zeroed on its own diagonal and its mixed slots' rows and columns, not one floor(sqrt) square.
+            const ConfigOptionFloats *nozzles = m_print_config.option<ConfigOptionFloats>("nozzle_diameter");
+            zero_mixed_flush_rows_and_cols_for_nozzles(flush_opt->values, nozzles == nullptr ? 1 : nozzles->values.size(),
+                                                       cli_mixed_filament_mgr, cli_mixed_num_physical);
         }
 
         const std::string mixed_defs = cli_mixed_filament_definitions(m_print_config, nullptr);

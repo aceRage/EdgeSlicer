@@ -7879,6 +7879,19 @@ void Print::_make_wipe_tower()
     // Let the ToolOrdering class know there will be initial priming extrusions at the start of the print.
     m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2);
 
+    // A project with one flush matrix per nozzle (Bambu Studio's 2 x N x N on an H2D / H2C): a change flushes by the
+    // matrix of the nozzle the new filament prints from, by the filament_map the tool ordering above has just
+    // grouped, not by the one floor(sqrt) square read above. A single matrix keeps that square.
+    if (flush_matrix_layout(flush_matrix.size(), m_config.nozzle_diameter.size()).per_nozzle()) {
+        wipe_volumes = flush_matrix_for_changes(m_config.flush_volumes_matrix.values, m_config.nozzle_diameter.size(),
+                                                m_config.filament_map.values);
+        if ((!m_config.purge_in_prime_tower || !m_config.single_extruder_multi_material) && bUseWipeTower2)
+            for (std::vector<float> &row : wipe_volumes)
+                for (float &volume : row)
+                    if (volume > 0)
+                        volume = m_config.prime_volume;
+    }
+
     if (!m_wipe_tower_data.tool_ordering.has_wipe_tower())
         // Don't generate any wipe tower.
         return;

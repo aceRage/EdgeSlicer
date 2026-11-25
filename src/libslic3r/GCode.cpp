@@ -4235,6 +4235,26 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         }
         // Always replace: a result from an earlier by-layer slice of this Print must not describe this one.
         print.set_nozzle_group_result(grouping);
+    } else if (is_bbl_printers && print.config().print_sequence == PrintSequence::ByObject && print.config().nozzle_diameter.size() < 2 &&
+               hotend_as_extruder(print.config()) && (print.objects().size() > 1 || !print.has_wipe_tower())) {
+        // H3C (one extruder, its rack hotends handled as extruders): the shim above needs two extruders, so a
+        // by-object H3C plate had no hotend grouping at all - a one-entry filament_nozzle_map, no pre-heat /
+        // pre-cool of the rack hotends (M632 ... W / M104 I.. N0 W / M633, M104 I.. N0 C), every colour change
+        // written as a swap in one hotend, while the printer still put the colours in separate hotends (owner's
+        // H3C stopped at 97 % on such a plate, 2026-11-23). Group it as Bambu Studio's ByObjectPrintData::build
+        // does: the objects' layers in print order, the plate's own grouping mode (as the by-layer pass).
+        std::vector<std::vector<unsigned int>> layer_filaments;
+        const PrintObject                     *prev_object = nullptr;
+        for (const PrintInstance *instance : sort_object_instances_by_model_order(print)) {
+            if (instance->print_object == prev_object)
+                continue;
+            prev_object = instance->print_object;
+            ToolOrdering object_ordering(*instance->print_object, (unsigned int) -1);
+            for (const LayerTools &lt : object_ordering.layer_tools())
+                if (!lt.extruders.empty())
+                    layer_filaments.push_back(lt.extruders);
+        }
+        ToolOrdering::group_print_by_object_hotends(&print, layer_filaments);
     }
 
     // How many times will be change_layer() called?
@@ -5323,6 +5343,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     // Write the custom start G-code
     file.writeln(machine_start_gcode);
+    // Orca #17540: the layer cooling times the layers with the motion limits the start G-code sets.
+    m_cooling_buffer->remember_motion_settings(machine_start_gcode);
     // BBS: mark the end of the machine start G-code for the idle-nozzle pre-cooling (BambuStudio
     // GCode.cpp:2991). Written only when it applies, so no other printer's G-code changes.
     m_pre_cooling_markers = PreCooling::pre_cooling_active(print);
@@ -8518,13 +8540,10 @@ LayerResult GCode::process_layer(const Print& print,
 
     // BBS: get next extruder according to flush and soluble
     auto get_next_extruder = [&](int current_extruder, const std::vector<unsigned int>& extruders) {
-        std::vector<float> flush_matrix(cast<float>(m_config.flush_volumes_matrix.values));
-        const unsigned int number_of_extruders = (unsigned int) (sqrt(flush_matrix.size()) + EPSILON);
-        // Extract purging volumes for each extruder pair:
-        std::vector<std::vector<float>> wipe_volumes;
-        for (unsigned int i = 0; i < number_of_extruders; ++i)
-            wipe_volumes.push_back(
-                std::vector<float>(flush_matrix.begin() + i * number_of_extruders, flush_matrix.begin() + (i + 1) * number_of_extruders));
+        // Purging volumes for each filament pair; with one matrix per nozzle (Bambu Studio's 2 x N x N) the
+        // block of the nozzle the new filament prints from, else the one square as before.
+        const std::vector<std::vector<float>> wipe_volumes =
+            flush_matrix_for_changes(m_config.flush_volumes_matrix.values, m_config.nozzle_diameter.size(), m_config.filament_map.values);
         unsigned int next_extruder = current_extruder;
         float        min_flush     = std::numeric_limits<float>::max();
         for (auto extruder_id : extruders) {
@@ -13996,12 +14015,10 @@ float GCode::hotend_flush_volume(int new_filament_id) const
     auto it = m_filament_in_nozzle.find(nozzle_key_for_filament(new_filament_id));
     if (it == m_filament_in_nozzle.end() || it->second < 0 || it->second == new_filament_id)
         return 0.f; // empty hotend, or it already holds the new filament
-    const std::vector<double> &matrix = m_config.flush_volumes_matrix.values;
-    const size_t               n      = size_t(std::sqrt(double(matrix.size())) + EPSILON);
-    const size_t               idx    = size_t(it->second) * n + size_t(new_filament_id);
-    if (n > 0 && size_t(it->second) < n && size_t(new_filament_id) < n && idx < matrix.size())
-        return float(matrix[idx] * m_config.flush_multiplier.value);
-    return 0.f;
+    // The new filament's nozzle's matrix where the project carries one per nozzle (flush_volume_for_change).
+    return float(flush_volume_for_change(m_config.flush_volumes_matrix.values, m_config.nozzle_diameter.size(),
+                                         m_config.filament_map.values, size_t(it->second), size_t(new_filament_id)) *
+                 m_config.flush_multiplier.value);
 }
 
 bool GCode::cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const
@@ -14014,11 +14031,11 @@ bool GCode::cross_extruder_flush_volume(int old_filament_id, int new_filament_id
     auto it = m_filament_in_nozzle.find(nozzle_key_for_filament(new_filament_id));
     if (it == m_filament_in_nozzle.end() || it->second < 0 || it->second == new_filament_id)
         return true; // empty nozzle, or it already holds the new filament
-    const std::vector<double> &matrix = m_config.flush_volumes_matrix.values;
-    const size_t               n      = size_t(std::sqrt(double(matrix.size())) + EPSILON);
-    const size_t               idx    = size_t(it->second) * n + size_t(new_filament_id);
-    if (n > 0 && size_t(it->second) < n && size_t(new_filament_id) < n && idx < matrix.size())
-        volume = float(matrix[idx] * m_config.flush_multiplier.value);
+    // The flush on the new filament's nozzle: its own matrix where the project carries one per nozzle (Bambu
+    // Studio's 2 x N x N), the single matrix otherwise (flush_volume_for_change).
+    volume = float(flush_volume_for_change(m_config.flush_volumes_matrix.values, m_config.nozzle_diameter.size(),
+                                           m_config.filament_map.values, size_t(it->second), size_t(new_filament_id)) *
+                   m_config.flush_multiplier.value);
     return true;
 }
 
@@ -14221,6 +14238,11 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
         // Orca #15289: bounds-check flush_volumes_matrix — partial/legacy configs can be shorter than filament count.
         size_t flush_idx = size_t(previous_extruder_id) * number_of_extruders + extruder_id;
         wipe_volume      = flush_idx < flush_matrix.size() ? flush_matrix[flush_idx] : 0.f;
+        // A project with one matrix per nozzle (Bambu Studio's 2 x N x N on an H2D / H2C) flushes by the matrix of
+        // the nozzle the new filament prints from, not by one floor(sqrt) square over both.
+        if (flush_matrix_layout(flush_matrix.size(), m_config.nozzle_diameter.size()).per_nozzle())
+            wipe_volume = float(flush_volume_for_change(m_config.flush_volumes_matrix.values, m_config.nozzle_diameter.size(),
+                                                        m_config.filament_map.values, size_t(previous_extruder_id), size_t(extruder_id)));
         wipe_volume *= m_config.flush_multiplier;
         // A change onto the other extruder of a Bambu two-extruder printer purges what that nozzle
         // still holds (Bambu Studio GCode.cpp:8180-8196): nothing when it is empty or already holds

@@ -1768,8 +1768,23 @@ std::vector<FlushMatrix> prepare_flush_matrices(const PrintConfig& print_config)
     size_t extruder_nums = print_config.nozzle_diameter.values.size();
     size_t filament_nums = print_config.filament_colour.values.size();
     std::vector<FlushMatrix> nozzle_flush_mtx;
+    const std::vector<double> &values = print_config.flush_volumes_matrix.values;
+    // A list that is neither one filaments x filaments matrix nor one per nozzle (the command line's 4 x 4 default
+    // with another filament count) is read as the G-code writer reads it: one floor(sqrt) square, its first
+    // filaments x filaments entries for every nozzle. Cutting it in equal parts gave each nozzle rows out of place.
+    const FlushMatrixLayout layout  = flush_matrix_layout(values.size(), extruder_nums, filament_nums);
+    const bool              neither = extruder_nums > 1 && !layout.per_nozzle() && values.size() != filament_nums * filament_nums;
     for (size_t nozzle_id = 0; nozzle_id < extruder_nums; ++nozzle_id) {
-        std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(print_config.flush_volumes_matrix.values, nozzle_id, extruder_nums)));
+        // One filaments x filaments matrix (as this fork writes two-extruder projects) is every nozzle's whole
+        // matrix; Bambu Studio's one matrix per nozzle is cut per nozzle.
+        std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(values, nozzle_id, extruder_nums, filament_nums)));
+        if (neither) {
+            flush_matrix.assign(filament_nums * filament_nums, 0.f);
+            const size_t n = layout.filaments;
+            for (size_t from = 0; from < filament_nums && from < n; ++from)
+                for (size_t to = 0; to < filament_nums && to < n; ++to)
+                    flush_matrix[from * filament_nums + to] = float(values[from * n + to]);
+        }
         // A flush matrix shorter than filaments x filaments per nozzle (a preset written for another
         // extruder count) must not be sliced past its end below: missing entries flush nothing.
         if (flush_matrix.size() < filament_nums * filament_nums)
@@ -1953,6 +1968,52 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::group_by_plate_map(Prin
     const size_t extruders = print->config().nozzle_diameter.size();
     return get_recommended_filament_maps(print, layer_filaments, FilamentMapMode::fmmManual, std::vector<std::set<int>>(extruders),
                                          std::vector<std::set<int>>(extruders), std::map<int, std::set<NozzleVolumeType>>());
+}
+
+// Bambu Studio 2.9.1 ByObjectPrintData::build (ByObjectPrintData.cpp:86-208, the branch without a dynamic
+// nozzle map, which is the H3C's: one extruder): the whole plate's filaments in object print order, grouped
+// by the plate's mode before the per-object tool orderings print it. The mode, the unprintable filaments,
+// the rack size check and the config writes are the by-layer pass's (reorder_extruders_for_minimum_flush_volume),
+// so a by-object plate is grouped as the same plate printed by layer is.
+void ToolOrdering::group_print_by_object_hotends(Print *print, const std::vector<std::vector<unsigned int>> &layer_filaments)
+{
+    if (print == nullptr)
+        return;
+    std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> stored;
+    const std::vector<unsigned int> used_filaments = collect_sorted_used_filaments(layer_filaments);
+    if (!used_filaments.empty()) {
+        const PrintConfig    &print_config = print->config();
+        const FilamentMapMode config_mode  = print_config.filament_map_mode.value;
+        const bool            manual       = config_mode == FilamentMapMode::fmmManual || config_mode == FilamentMapMode::fmmNozzleManual;
+        const FilamentMapMode group_mode   = (!manual && print->get_ultra_force_match_mode()) ? FilamentMapMode::fmmAutoForMatch : config_mode;
+        auto grouping = get_recommended_filament_maps(print, layer_filaments, group_mode, print->get_physical_unprintable_filaments(used_filaments),
+                                                      print->get_geometric_unprintable_filaments(), print->get_filament_unprintable_flow(used_filaments));
+        if (!grouping.get_used_filaments().empty()) {
+            // Per-nozzle process P4: the geometry was cut for each filament's rack nozzle size.
+            if (const std::string mismatch = check_rack_nozzle_diameters(print_config, grouping); !mismatch.empty())
+                throw Slic3r::SlicingError(mismatch);
+            stored = std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(grouping);
+        }
+    }
+    // Always replace: a result from an earlier by-layer slice of this Print must not describe this one.
+    print->set_nozzle_group_result(stored);
+    if (!stored)
+        return;
+    // The by-layer pass's writes: the 1-based filament -> extruder map into the print config (the G-code) and the
+    // full config (the "; filament_map" header line), then the flow type of each filament's nozzle.
+    const std::vector<int> em = stored->get_extruder_map(false);
+    if (em.empty())
+        return;
+    const_cast<PrintConfig &>(print->config()).filament_map.values = em;
+    auto &full_config = const_cast<DynamicPrintConfig &>(print->full_print_config());
+    if (auto *opt = full_config.option<ConfigOptionInts>("filament_map", true))
+        opt->values = em;
+    if (BambuFlowSupport::apply_filament_volume_types_from_map(const_cast<PrintConfig &>(print->config())))
+        full_config.option<ConfigOptionEnumsGeneric>("filament_volume_type", true)->values = print->config().filament_volume_type.values;
+    std::string map_str;
+    for (int n : stored->get_nozzle_map())
+        map_str += std::to_string(n) + " ";
+    BOOST_LOG_TRIVIAL(warning) << "[H3C] print-by-object hotend grouping: filament->nozzle " << map_str;
 }
 
 MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filament_maps(
@@ -2201,6 +2262,85 @@ std::function<bool(int, std::vector<int>&)> make_cyclic_custom_seq(
     };
 }
 
+std::vector<std::vector<unsigned int>> ToolOrdering::order_layers_by_nozzle(const PrintConfig                                 &print_config,
+                                                                         const std::function<bool(int, std::vector<int> &)> &get_custom_seq,
+                                                                         bool                                                grouped)
+{
+    if (m_print == nullptr || m_layer_tools.empty())
+        return {};
+    std::vector<std::vector<unsigned int>> layer_filaments;
+    layer_filaments.reserve(m_layer_tools.size());
+    std::set<unsigned int> used;
+    for (const LayerTools &lt : m_layer_tools) {
+        layer_filaments.emplace_back(lt.extruders);
+        used.insert(lt.extruders.begin(), lt.extruders.end());
+    }
+    // The grouping this pass wrote (the Print keeps a result across slices, so only this pass's), else the plate's own
+    // map (a per-nozzle matrix on a plate the grouping does not see, such as one printed object by object).
+    std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> grouping = grouped ? m_print->get_layered_nozzle_group_result() : nullptr;
+    MultiNozzleUtils::LayeredNozzleGroupResult                  by_plate_map;
+    if (!grouping) {
+        by_plate_map = ToolOrdering::group_by_plate_map(m_print, layer_filaments);
+        grouping     = std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(by_plate_map);
+    }
+    // Each extruder's matrix (one N x N matrix is every nozzle's), filaments x filaments. The routine keys its caches on
+    // a bit per filament (fewer than 32) and indexes the matrices by filament: anything else keeps the classic solver.
+    const std::vector<FlushMatrix> flush = GroupReorder::prepare_flush_matrices(print_config);
+    if (flush.size() != 2)
+        return {};
+    for (unsigned int f : used) {
+        const auto nozzle = grouping->get_nozzle_for_filament(int(f), -1);
+        if (f >= 32 || !nozzle || nozzle->extruder_id < 0 || nozzle->extruder_id >= int(flush.size()) || f >= flush[size_t(nozzle->extruder_id)].size())
+            return {};
+    }
+    // Layers whose order is not the solver's: the first layer, layers that keep their order, custom / cyclic sequences.
+    auto fixed = [&](int layer, std::vector<int> &seq) {
+        if (layer < 0 || size_t(layer) >= m_layer_tools.size())
+            return false;
+        const LayerTools &lt = m_layer_tools[size_t(layer)];
+        if (lt.extruders.empty())
+            return false;
+        if (layer == 0 || lt.preserve_extruder_order || (get_custom_seq(layer, seq) && !seq.empty())) {
+            if (layer == 0 || lt.preserve_extruder_order) {
+                seq.clear();
+                for (unsigned int f : lt.extruders)
+                    seq.emplace_back(int(f) + 1);
+            }
+            return true;
+        }
+        return false;
+    };
+    std::vector<std::vector<unsigned int>> sequences;
+    const std::vector<unsigned int>        used_list(used.begin(), used.end());
+    const bool rack = std::any_of(print_config.extruder_max_nozzle_count.values.begin(), print_config.extruder_max_nozzle_count.values.end(),
+                                  [](int count) { return count > 1; });
+    if (rack) {
+        // An extruder with several nozzles (the H2C rack): nozzle by nozzle, each from what it holds
+        // (reorder_filaments_for_multi_nozzle_extruder, ToolOrderUtils.cpp: no look-ahead on this path).
+        reorder_filaments_for_multi_nozzle_extruder(used_list, *grouping, layer_filaments, flush, fixed, &sequences);
+    } else {
+        // One nozzle per extruder (H2D, X2D): extruder by extruder, with the one-layer look-ahead where an extruder prints
+        // five filaments or fewer on both layers (reorder_filaments_for_minimum_flush_volume, ToolOrderUtils.cpp).
+        std::vector<int> extruder_of;
+        extruder_of.reserve(used_list.size());
+        for (unsigned int f : used_list)
+            extruder_of.push_back(grouping->get_nozzle_for_filament(int(f), -1)->extruder_id);
+        reorder_filaments_for_minimum_flush_volume(used_list, extruder_of, layer_filaments, flush,
+                                                   std::function<bool(int, std::vector<int> &)>(fixed), &sequences);
+    }
+    // Every layer the solver orders must come back as the same filaments.
+    if (sequences.size() != layer_filaments.size())
+        return {};
+    for (size_t layer = 0; layer < layer_filaments.size(); ++layer) {
+        std::vector<unsigned int> a = sequences[layer], b = layer_filaments[layer];
+        std::sort(a.begin(), a.end());
+        std::sort(b.begin(), b.end());
+        if (a != b)
+            return {};
+    }
+    return sequences;
+}
+
 void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
 {
     const PrintConfig *print_config = m_print_config_ptr;
@@ -2221,6 +2361,8 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
     // header, and placeholder together, so the LAST call wins and the grouping-dependent outputs stay
     // mutually consistent. (Do NOT guard on the already-stored result: it persists across slices and would
     // leave a re-slice single-mapped.) The grouping is non-deterministic, so the map may vary per slice.
+    // Set when the grouping below gives the plate a filament -> nozzle map this pass (H2D / H2C / X2D).
+    bool grouped_this_pass = false;
     if (m_print && m_print_full_config) {
         int extruder_count = 0;
         bool is_sequential = (print_config->print_sequence == PrintSequence::ByObject) && (m_print->objects().size() > 1);
@@ -2239,6 +2381,7 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
                 m_print, layer_data.layer_filaments, group_mode,
                 layer_data.physical_unprintables, layer_data.geometric_unprintables, layer_data.filament_unprintable_volumes);
             m_print->set_nozzle_group_result(std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(grouping));
+            grouped_this_pass = true;
             // Per-nozzle process P4: the geometry was cut for each filament's rack nozzle size; refuse a grouping
             // that would print it with another size on any layer.
             if (const std::string mismatch = check_rack_nozzle_diameters(*print_config, grouping); !mismatch.empty())
@@ -2287,10 +2430,27 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
     const unsigned int number_of_extruders = (unsigned int) (sqrt(flush_matrix.size()) + EPSILON);
     // Extract purging volumes for each extruder pair:
     std::vector<std::vector<float>> wipe_volumes;
+    // The layers are ordered nozzle by nozzle (order_layers_by_nozzle below) where a change flushes by what the nozzle
+    // taken holds: a two-extruder printer whose filaments the grouping placed this pass, or a project with one matrix per
+    // nozzle.
+    bool order_by_nozzle = false;
     if ((print_config->purge_in_prime_tower && print_config->single_extruder_multi_material) || m_wipe_tower_type1) {
-        for (unsigned int i = 0; i < number_of_extruders; ++i)
-            wipe_volumes.push_back( std::vector<float>(flush_matrix.begin() + i * number_of_extruders,
-                                                       flush_matrix.begin() + (i + 1) * number_of_extruders));
+        // A change flushes on the nozzle the new filament prints from, from the filament that nozzle last held, by that
+        // nozzle's matrix. A single matrix (or any other length) is read as the square it always was.
+        const size_t nozzle_nums = print_config->nozzle_diameter.values.size();
+        const bool   per_nozzle  = flush_matrix_layout(flush_matrix.size(), nozzle_nums).per_nozzle();
+        // Not on a plate printed object by object (one object included): the export orders each object with its own
+        // ToolOrdering(const PrintObject&), which has no Print and keeps the classic solver, and the tower plan has to
+        // print the order the export prints.
+        order_by_nozzle = nozzle_nums == 2 && m_print != nullptr && print_config->print_sequence != PrintSequence::ByObject &&
+                          (grouped_this_pass || per_nozzle);
+        if (per_nozzle) {
+            wipe_volumes = flush_matrix_for_changes(print_config->flush_volumes_matrix.values, nozzle_nums, print_config->filament_map.values);
+        } else {
+            for (unsigned int i = 0; i < number_of_extruders; ++i)
+                wipe_volumes.push_back( std::vector<float>(flush_matrix.begin() + i * number_of_extruders,
+                                                           flush_matrix.begin() + (i + 1) * number_of_extruders));
+        }
     } else {
         // populate wipe_volumes with prime_volume
         for (unsigned int i = 0; i < number_of_extruders; ++i)
@@ -2341,6 +2501,11 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
     auto get_custom_seq = make_cyclic_custom_seq(other_layers_seqs, layer_filaments,
                                                  use_cyclic_ordering, cyclic_first_layer, effective_cyclic_order);
 
+    // Nozzle by nozzle: every layer's order at once, the first layer, layers that keep their order and custom / cyclic
+    // sequences fixed. Empty where it does not apply (then the classic solver below orders the layer).
+    const std::vector<std::vector<unsigned int>> nozzle_orders =
+        order_by_nozzle ? order_layers_by_nozzle(*print_config, get_custom_seq, grouped_this_pass) : std::vector<std::vector<unsigned int>>();
+
     std::optional<unsigned int> current_extruder_id;
     for (int i = 0; i < m_layer_tools.size(); ++i) {
         LayerTools& lt = m_layer_tools[i];
@@ -2368,6 +2533,16 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
             }
             assert(lt.extruders.size() == unsign_custom_extruder_seq.size());
             lt.extruders = unsign_custom_extruder_seq;
+            current_extruder_id = lt.extruders.back();
+            continue;
+        }
+
+        if (i != 0 && size_t(i) < nozzle_orders.size()) {
+            lt.extruders        = nozzle_orders[size_t(i)];
+            // Printed as the routine planned it (its look-ahead may start a layer with another filament than the one in
+            // hand, and plans the next layers from where this one ends): not rotated to the loaded filament
+            // (LayerTools::nominal_extruder_order), on the tower plan and in the export alike.
+            lt.fixed_extruder_order = true;
             current_extruder_id = lt.extruders.back();
             continue;
         }
