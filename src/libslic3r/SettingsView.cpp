@@ -20,6 +20,26 @@ std::string settings_view_to_string(SettingsView view)
     return view == SettingsView::Bambu ? "bambu" : "";
 }
 
+ViewChoice view_choice(const std::string &user_mode, const std::string &settings_view)
+{
+    if (user_mode == "develop")
+        return ViewChoice::Developer;
+    if (settings_view_from_string(settings_view) == SettingsView::Bambu)
+        return ViewChoice::Bambu;
+    return user_mode == "advanced" ? ViewChoice::Advanced : ViewChoice::Basic;
+}
+
+ViewChoiceConfig view_choice_config(ViewChoice choice)
+{
+    switch (choice) {
+    case ViewChoice::Basic: return { "simple", "", false };
+    case ViewChoice::Advanced: return { "advanced", "", false };
+    case ViewChoice::Bambu: return { "advanced", settings_view_to_string(SettingsView::Bambu), false };
+    case ViewChoice::Developer: break;
+    }
+    return { "develop", "", true };
+}
+
 namespace SettingsViewKeys {
 
 std::string base_key(const std::string &opt_id)

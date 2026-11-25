@@ -30,6 +30,25 @@ SettingsView settings_view_from_string(const std::string &value);
 // Default -> "" (the key is removed / left absent), Bambu -> "bambu".
 std::string  settings_view_to_string(SettingsView view);
 
+// The selector in the sidebar and tab headers (Basic | Advanced | Bambu). Developer is not a segment:
+// it is Preferences > Developer mode (user_mode "develop"), which disables the selector.
+enum class ViewChoice { Basic, Advanced, Bambu, Developer };
+// What the selector shows for AppConfig "user_mode" / "settings_view" (either may be absent: "").
+// user_mode develop -> Developer; settings_view bambu -> Bambu; user_mode advanced -> Advanced; else Basic
+// (an absent or unknown user_mode reads as simple, as GUI_App::get_mode()).
+ViewChoice   view_choice(const std::string &user_mode, const std::string &settings_view);
+// What choosing a segment writes. settings_view empty = remove the key. Bambu is Bambu Studio's Advanced
+// list, so it writes user_mode "advanced" (design D2): every reader of the level (search, G-code
+// viewer, hub, web views) sees Advanced, and an older build without views shows Advanced.
+// Developer keeps settings_view (keep_settings_view): leaving Developer mode returns to the view.
+struct ViewChoiceConfig
+{
+    std::string user_mode;
+    std::string settings_view;
+    bool        keep_settings_view = false;
+};
+ViewChoiceConfig view_choice_config(ViewChoice choice);
+
 struct ViewFilter
 {
     ConfigOptionMode level       = comSimple;             // user_mode

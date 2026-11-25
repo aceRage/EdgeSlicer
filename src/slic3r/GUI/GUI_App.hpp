@@ -8,6 +8,7 @@
 #include "OpenGLManager.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/SettingsView.hpp"
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/UserNotification.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
@@ -517,6 +518,7 @@ private:
     void start_remote_access();
 private:
     static bool s_showcase_render_mode;
+    std::set<std::string> m_settings_view_revealed;
     // S5: runs the render job once the project is loaded, then ends the process with its code.
     void run_showcase_render_job();
 public:
@@ -866,6 +868,15 @@ public:
     std::string     get_mode_str();
     void            save_mode(const /*ConfigOptionMode*/int mode) ;
     void            update_mode();
+    // Settings views (Basic | Advanced | Bambu selector, libslic3r/SettingsView.hpp). The Bambu view is
+    // AppConfig "settings_view" = "bambu", next to user_mode; get_mode() keeps returning the level.
+    SettingsView    get_settings_view();
+    ViewChoice      get_view_choice();
+    // Writes user_mode + settings_view for a segment and refreshes every settings view (update_mode()).
+    void            save_view_choice(ViewChoice choice);
+    // Options the user jumped to from search (or a hint) while the Bambu view hid them: shown, with the
+    // "Not in Bambu Studio" chip, for the rest of the session or until the view changes.
+    std::set<std::string>& settings_view_revealed() { return m_settings_view_revealed; }
     // Curved tops P3: Developer mode on and the Developer setting lines shown (the developer-override gate).
     bool            curved_tops_developer_lines_shown();
     void            update_internal_development();

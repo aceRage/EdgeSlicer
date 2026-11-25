@@ -183,6 +183,17 @@ void SegmentedToggle::setSegmentToolTip(int index, const wxString& tip)
         m_buttons[index]->SetToolTip(tip);
 }
 
+void SegmentedToggle::setButtonMinWidth(int width_dip)
+{
+    if (m_style == Style::Plain)
+        return;
+    for (Button* btn : m_buttons)
+        if (btn != nullptr)
+            btn->SetMinSize(wxSize(FromDIP(width_dip), btn->GetMinSize().y));
+    Layout();
+    Fit();
+}
+
 void SegmentedToggle::bindSelectionCallback(SelectionCallback cb)
 {
     m_selectionCallback = std::move(cb);

@@ -8687,6 +8687,34 @@ void GUI_App::save_mode(const /*ConfigOptionMode*/int mode)
     update_mode();
 }
 
+SettingsView GUI_App::get_settings_view()
+{
+    return settings_view_from_string(app_config->get("settings_view"));
+}
+
+ViewChoice GUI_App::get_view_choice()
+{
+    return view_choice(get_mode_str(), app_config->get("settings_view"));
+}
+
+void GUI_App::save_view_choice(ViewChoice choice)
+{
+    if (choice == ViewChoice::Developer || choice == get_view_choice())
+        return; // Developer is Preferences > Developer mode, not a segment
+    const ViewChoiceConfig cfg = view_choice_config(choice);
+    BOOST_LOG_TRIVIAL(info) << "Settings view: user_mode " << cfg.user_mode << ", settings_view "
+                            << (cfg.settings_view.empty() ? std::string("(none)") : cfg.settings_view);
+    app_config->set("user_mode", cfg.user_mode);
+    if (!cfg.keep_settings_view) {
+        if (cfg.settings_view.empty())
+            app_config->erase("app", "settings_view");
+        else
+            app_config->set("settings_view", cfg.settings_view);
+    }
+    m_settings_view_revealed.clear();
+    update_mode();
+}
+
 // Update view mode according to selected menu
 void GUI_App::update_mode()
 {

@@ -362,3 +362,39 @@ TEST_CASE("Unset settings_view: every group decision is main's is_visible", "[Se
             CHECK(group_visible(unset_view_filter(lvl), modes, ids) == main_group_is_visible(modes, lvl));
         }
 }
+
+TEST_CASE("Selector choice <-> AppConfig user_mode + settings_view", "[SettingsView][AppConfig]")
+{
+    // Reading: what the selector shows.
+    CHECK(view_choice("", "") == ViewChoice::Basic); // new install before MainFrame writes "simple"
+    CHECK(view_choice("simple", "") == ViewChoice::Basic);
+    CHECK(view_choice("advanced", "") == ViewChoice::Advanced);
+    CHECK(view_choice("advanced", "bambu") == ViewChoice::Bambu);
+    CHECK(view_choice("simple", "bambu") == ViewChoice::Bambu);
+    CHECK(view_choice("develop", "") == ViewChoice::Developer);
+    CHECK(view_choice("develop", "bambu") == ViewChoice::Developer); // Developer wins while on
+    CHECK(view_choice("something", "") == ViewChoice::Basic);
+    CHECK(view_choice("advanced", "newer-view") == ViewChoice::Advanced); // unknown view from a newer build
+
+    // Writing: what each segment stores.
+    const ViewChoiceConfig basic = view_choice_config(ViewChoice::Basic);
+    CHECK(basic.user_mode == "simple");
+    CHECK(basic.settings_view.empty());
+    CHECK_FALSE(basic.keep_settings_view);
+    const ViewChoiceConfig advanced = view_choice_config(ViewChoice::Advanced);
+    CHECK(advanced.user_mode == "advanced");
+    CHECK(advanced.settings_view.empty());
+    const ViewChoiceConfig bambu_cfg = view_choice_config(ViewChoice::Bambu);
+    CHECK(bambu_cfg.user_mode == "advanced");
+    CHECK(bambu_cfg.settings_view == "bambu");
+    CHECK(view_choice_config(ViewChoice::Developer).keep_settings_view);
+
+    // Round trip: every selectable choice reads back as itself (restart keeps the choice).
+    for (ViewChoice c : { ViewChoice::Basic, ViewChoice::Advanced, ViewChoice::Bambu }) {
+        const ViewChoiceConfig cfg = view_choice_config(c);
+        CHECK(view_choice(cfg.user_mode, cfg.settings_view) == c);
+    }
+    // Preferences > Developer mode off writes user_mode "advanced" and leaves settings_view: a Bambu
+    // view survives a Developer on/off (design 5.11).
+    CHECK(view_choice("advanced", bambu_cfg.settings_view) == ViewChoice::Bambu);
+}
