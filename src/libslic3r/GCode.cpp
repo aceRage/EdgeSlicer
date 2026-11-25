@@ -4235,6 +4235,26 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         }
         // Always replace: a result from an earlier by-layer slice of this Print must not describe this one.
         print.set_nozzle_group_result(grouping);
+    } else if (is_bbl_printers && print.config().print_sequence == PrintSequence::ByObject && print.config().nozzle_diameter.size() < 2 &&
+               hotend_as_extruder(print.config()) && (print.objects().size() > 1 || !print.has_wipe_tower())) {
+        // H3C (one extruder, its rack hotends handled as extruders): the shim above needs two extruders, so a
+        // by-object H3C plate had no hotend grouping at all - a one-entry filament_nozzle_map, no pre-heat /
+        // pre-cool of the rack hotends (M632 ... W / M104 I.. N0 W / M633, M104 I.. N0 C), every colour change
+        // written as a swap in one hotend, while the printer still put the colours in separate hotends (owner's
+        // H3C stopped at 97 % on such a plate, 2026-11-23). Group it as Bambu Studio's ByObjectPrintData::build
+        // does: the objects' layers in print order, the plate's own grouping mode (as the by-layer pass).
+        std::vector<std::vector<unsigned int>> layer_filaments;
+        const PrintObject                     *prev_object = nullptr;
+        for (const PrintInstance *instance : sort_object_instances_by_model_order(print)) {
+            if (instance->print_object == prev_object)
+                continue;
+            prev_object = instance->print_object;
+            ToolOrdering object_ordering(*instance->print_object, (unsigned int) -1);
+            for (const LayerTools &lt : object_ordering.layer_tools())
+                if (!lt.extruders.empty())
+                    layer_filaments.push_back(lt.extruders);
+        }
+        ToolOrdering::group_print_by_object_hotends(&print, layer_filaments);
     }
 
     // How many times will be change_layer() called?
