@@ -356,7 +356,7 @@ public:
     std::map<std::string, AmsTray *> trayList;
 
     int nozzle;
-    int type{1}; // GUI::AmsTypes: 0 dummy, 1 AMS, 2 AMS Lite, 3 AMS 2 Pro, 4 AMS HT, 5 AMS Lite (N9), 6 AMS 3H, 7 AMS-B
+    int type{1}; // GUI::AmsTypes: 0 dummy, 1 AMS, 2 AMS Lite, 3 AMS 2 Pro, 4 AMS HT, 5 AMS Lite (N9), 6 AMS 3H, 7 AMS 3P
     // Remote drying state (AMS 2 Pro / AMS HT): info bits 4-7/18-23, dry_setting, dry_sf_reason.
     GUI::AmsDrying::DryState dry;
 
