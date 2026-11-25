@@ -124,8 +124,9 @@ LineShow line_show(const ViewFilter &filter, const std::vector<std::string> &opt
         // (with the chip) once changed, so a value nobody can see is never left in force.
         if (SettingsViewKeys::on_bambu_list(key) && !(filter.bbl_printer && SettingsViewKeys::hidden_by_bambu_on_bbl(key)))
             listed = true;
-        else if ((filter.changed != nullptr && filter.changed->count(key) != 0) ||
-                 (filter.revealed != nullptr && filter.revealed->count(key) != 0))
+        // Checked for listed keys too: a Developer line on Bambu's list is only an exception.
+        if ((filter.changed != nullptr && filter.changed->count(key) != 0) ||
+            (filter.revealed != nullptr && filter.revealed->count(key) != 0))
             exception = true;
     }
     if (listed && !develop_line)
