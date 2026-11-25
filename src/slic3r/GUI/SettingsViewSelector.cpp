@@ -113,8 +113,13 @@ void SettingsViewSelector::apply_visibility()
     InvalidateBestSize();
     Layout();
     Fit();
-    if (wxWindow* parent = GetParent())
+    if (wxWindow* parent = GetParent()) {
         parent->Layout();
+        // The header's height comes from the sizer that owns the header panel, one level up.
+        parent->InvalidateBestSize();
+        if (wxWindow* grand = parent->GetParent())
+            grand->Layout();
+    }
 }
 
 void SettingsViewSelector::on_parent_size(wxSizeEvent& evt)
@@ -168,6 +173,7 @@ void SettingsViewSelector::msw_rescale()
 void SettingsViewSelector::sys_color_changed()
 {
     SetBackgroundColour(GetParent()->GetBackgroundColour());
+    m_toggle->SetBackgroundColour(GetParent()->GetBackgroundColour());
     m_combo->Rescale();
     Refresh();
 }
