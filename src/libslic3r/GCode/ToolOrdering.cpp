@@ -2475,6 +2475,10 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
 
         if (i != 0 && size_t(i) < nozzle_orders.size()) {
             lt.extruders        = nozzle_orders[size_t(i)];
+            // Printed as the routine planned it (its look-ahead may start a layer with another filament than the one in
+            // hand, and plans the next layers from where this one ends): not rotated to the loaded filament
+            // (LayerTools::nominal_extruder_order), on the tower plan and in the export alike.
+            lt.fixed_extruder_order = true;
             current_extruder_id = lt.extruders.back();
             continue;
         }
