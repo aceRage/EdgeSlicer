@@ -1,5 +1,7 @@
 #include "PrintHostDialogs.hpp"
 
+#include "libslic3r/UploadName.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -511,6 +513,16 @@ static const char* CONFIG_KEY_CREALITY_CALIBRATE = "creality_send_calibrate";
 static const char* CONFIG_KEY_QIDI_LEVELING  = "qidi_send_bed_leveling";
 static const char* CONFIG_KEY_QIDI_TIMELAPSE = "qidi_send_timelapse";
 static const char* CONFIG_KEY_QIDI_POLAR     = "qidi_send_polar_cooler";
+
+namespace {
+// The stem of the file the dialog was opened for, cleaned, as the name to use when a typed name
+// cleans down to nothing.
+std::string upload_fallback_stem(const fs::path& path)
+{
+    const std::string stem = Slic3r::sanitize_upload_filename(path.stem().string(), Slic3r::upload_name_rules::print_host(), "plate_1");
+    return stem.empty() ? std::string("plate_1") : stem;
+}
+} // namespace
 
 PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, PrintHostPostUploadActions post_actions, const wxArrayString &groups, const wxArrayString& storage_paths, const wxArrayString& storage_names, bool switch_to_device_tab)
     : MsgDialog(static_cast<wxWindow*>(wxGetApp().mainframe), _L("Send G-code to printer host"), _L("Upload to Printer Host with the following filename:"), 0) // Set style = 0 to avoid default creation of the "OK" button. 
@@ -1542,7 +1554,7 @@ void PrintHostSendDialog::init()
     // The target before the file name: which of this model's printers this plate is going to.
     build_device_ui();
 
-    auto *label_dir_hint = new wxStaticText(this, wxID_ANY, _L("Please do not include the special characters #, *, ;, \\, /, :, \", <, >, or | in filenames."));
+    auto *label_dir_hint = new wxStaticText(this, wxID_ANY, _L("The special characters #, *, ;, \\, :, \", <, >, and | are removed from the file name automatically."));
     label_dir_hint->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
 
     content_sizer->Add(txt_filename, 0, wxEXPAND);
@@ -1592,10 +1604,18 @@ void PrintHostSendDialog::init()
     if (recent_path.Length() > 0 && recent_path[recent_path.Length() - 1] != '/') {
         recent_path += '/';
     }
-    const auto recent_path_len = recent_path.Length();
     recent_path += path.filename().wstring();
-    wxString stem(path.stem().wstring());
-    const auto stem_len = stem.Length();
+    // The project name can carry characters the host dislikes (# * ; ...): they are removed from
+    // the pre-filled name here, so the user is not asked to fix it.
+    recent_path = from_u8(Slic3r::sanitize_upload_filename(into_u8(recent_path), Slic3r::upload_name_rules::print_host(),
+                                                           upload_fallback_stem(path)));
+    // The selected part is the file name's stem (the folder prefix and the extension stay out of it).
+    const int  last_slash_pos = recent_path.Find('/', true);
+    const auto recent_path_len = last_slash_pos == wxNOT_FOUND ? size_t(0) : size_t(last_slash_pos + 1);
+    const int  last_dot_pos   = recent_path.Find('.', true);
+    const auto stem_len       = (last_dot_pos != wxNOT_FOUND && size_t(last_dot_pos) > recent_path_len) ?
+                                    size_t(last_dot_pos) - recent_path_len :
+                                    recent_path.Length() - recent_path_len;
 
     txt_filename->SetValue(recent_path);
 
@@ -1619,16 +1639,14 @@ void PrintHostSendDialog::init()
     if (size_t extension_start = recent_path.find_last_of('.'); extension_start != std::string::npos)
         m_valid_suffix = recent_path.substr(extension_start);
     // .gcode suffix control
-    auto validate_path = [this](const wxString &path) -> bool {
-        // BBS: 检查文件名是否包含特殊字符
-        if (path.find_first_of("#*;\\/:\"<>|") != wxString::npos) {
-            MessageDialog msg_window(this, 
-                wxString::Format(_L("The filename '%s' contains special characters (#, *, ;, \\, /, :, \", <, >, or |) which may cause issues.Do you wish to continue?"), path), 
-                wxString(SLIC3R_APP_NAME), wxYES | wxNO | wxICON_WARNING);
-            if (msg_window.ShowModal() == wxID_NO)
-                return false;
-        }
-        
+    auto validate_path = [this](const wxString &typed) -> bool {
+        // Characters the host dislikes (# * ; ...) are removed from what the user typed, without a
+        // prompt; the field shows the cleaned name that is then sent.
+        wxString path = from_u8(Slic3r::sanitize_upload_filename(into_u8(typed), Slic3r::upload_name_rules::print_host(),
+                                                                 upload_fallback_stem(m_path)));
+        if (path != typed)
+            txt_filename->SetValue(path);
+
         if (! path.Lower().EndsWith(m_valid_suffix.Lower())) {
             MessageDialog msg_wingow(this, wxString::Format(_L("Upload filename doesn't end with \"%s\". Do you wish to continue?"), m_valid_suffix), wxString(SLIC3R_APP_NAME), wxYES | wxNO);
             if (msg_wingow.ShowModal() == wxID_NO)

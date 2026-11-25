@@ -55,6 +55,15 @@ void zero_mixed_flush_rows_and_cols(std::vector<double>        &flush_vol_matrix
                                      const MixedFilamentManager &mgr,
                                      size_t                      num_physical);
 
+// zero_mixed_flush_rows_and_cols on a flush_volumes_matrix as the project carries it on a printer of
+// `nozzle_nums` nozzles: one N x N matrix shared by every nozzle, or one N x N matrix per nozzle (Bambu Studio's
+// 2 x N x N), each zeroed with N its own size (flush_matrix_layout). Any other length is read as one
+// floor(sqrt(size)) square, as before.
+void zero_mixed_flush_rows_and_cols_for_nozzles(std::vector<double>        &flush_vol_matrix,
+                                                size_t                      nozzle_nums,
+                                                const MixedFilamentManager &mgr,
+                                                size_t                      num_physical);
+
 // True when a serialized mixed_filament_definitions row (semicolon-separated,
 // "component_a,component_b,enabled,...") names a physical slot ID outside
 // [1, num_physical] for an enabled, non-deleted row. Deleted rows ("d1" token) and

@@ -61,6 +61,20 @@ void zero_mixed_flush_rows_and_cols(std::vector<double>        &flush_vol_matrix
     }
 }
 
+void zero_mixed_flush_rows_and_cols_for_nozzles(std::vector<double>        &flush_vol_matrix,
+                                                size_t                      nozzle_nums,
+                                                const MixedFilamentManager &mgr,
+                                                size_t                      num_physical)
+{
+    const FlushMatrixLayout layout = flush_matrix_layout(flush_vol_matrix.size(), nozzle_nums);
+    const size_t            block  = layout.filaments * layout.filaments;
+    for (size_t b = 0; b < layout.blocks; ++b) {
+        std::vector<double> part(flush_vol_matrix.begin() + b * block, flush_vol_matrix.begin() + (b + 1) * block);
+        zero_mixed_flush_rows_and_cols(part, layout.filaments, mgr, num_physical);
+        std::copy(part.begin(), part.end(), flush_vol_matrix.begin() + b * block);
+    }
+}
+
 bool mixed_definitions_have_slot_without_filament(const std::string &serialized, size_t num_physical)
 {
     if (serialized.empty())
