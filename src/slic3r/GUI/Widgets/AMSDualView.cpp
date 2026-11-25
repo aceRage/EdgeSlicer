@@ -431,8 +431,13 @@ void AMSDualView::draw_unit_icon(wxDC &dc, const wxRect &r, const DualUnitView *
             };
             const std::vector<std::vector<int>> rows = GUI::AmsTypes::rack_preview_rows(unit->ref.type, n_cub);
             if (!rows.empty()) {
-                // AMS 3P (seven slots): Bambu Studio's two-row AMS_PREVIEW_SLOT_GRID. The AMS 3H
-                // keeps the one-row strip below so its Device-tab icon does not change.
+                // AMS 3P (seven slots): Bambu Studio's two-row AMS_PREVIEW_SLOT_GRID, looked up by
+                // can_id / slot id (0..63) so a missing or out-of-order tray still lands in the
+                // right cell. A count other than 7 falls through to the one-row strip below.
+                std::vector<int> slot_ids;
+                slot_ids.reserve(unit->slots.size());
+                for (const DualSlotView &sv : unit->slots)
+                    slot_ids.push_back(GUI::AmsTypes::parse_rack_slot_id(sv.slot_id));
                 int max_cols = 1;
                 for (const auto &row : rows)
                     max_cols = std::max(max_cols, int(row.size()));
@@ -444,8 +449,9 @@ void AMSDualView::draw_unit_icon(wxDC &dc, const wxRect &r, const DualUnitView *
                     int         x   = r.x + (r.width - cube.x * int(row.size())) / 2;
                     const int   y   = y0 + ri * cube.y;
                     for (int si : row) {
-                        if (si >= 0 && si < int(unit->slots.size()))
-                            draw_cube_at(x, y, cube, unit->slots[size_t(si)]);
+                        const int idx = GUI::AmsTypes::rack_preview_slot_index(slot_ids, si);
+                        if (idx >= 0)
+                            draw_cube_at(x, y, cube, unit->slots[size_t(idx)]);
                         x += cube.x;
                     }
                 }

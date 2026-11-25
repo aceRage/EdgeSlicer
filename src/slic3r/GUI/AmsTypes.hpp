@@ -165,6 +165,34 @@ inline std::vector<std::vector<int>> rack_preview_rows(int type, int slot_count)
     return {};
 }
 
+// Bambu Studio AMS_PREVIEW_SLOT_GRID looks up trays by can_id / slot id, not list position,
+// so a missing or out-of-order tray still lands in the right cell. Slot ids outside 0..63
+// (the tray-bit width) are ignored. -1: empty / unusable.
+inline int parse_rack_slot_id(const std::string &slot_id)
+{
+    if (slot_id.empty() || slot_id.size() > 2)
+        return -1;
+    int v = 0;
+    for (char c : slot_id) {
+        if (c < '0' || c > '9')
+            return -1;
+        v = v * 10 + (c - '0');
+    }
+    if (v > 63)
+        return -1;
+    return v;
+}
+
+inline int rack_preview_slot_index(const std::vector<int> &slot_ids, int cell)
+{
+    if (cell < 0 || cell > 63)
+        return -1;
+    for (int i = 0; i < int(slot_ids.size()); ++i)
+        if (slot_ids[i] == cell)
+            return i;
+    return -1;
+}
+
 // Where the picker opens next to its anchor (the filament it maps), all in screen pixels: below the
 // anchor, flipped above when it does not fit below, and moved left / up so it stays on the work
 // area (a wide AMS 3H row opened from a filament near the right edge stays reachable).

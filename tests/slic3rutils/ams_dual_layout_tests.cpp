@@ -445,8 +445,34 @@ TEST_CASE("AMS 3H is nine slots and AMS 3P is seven", "[AmsDual][AmsTypes]")
     CHECK(rack_preview_rows(RACK_A, 9).empty());
     CHECK(rack_preview_rows(RACK_B, 7) == std::vector<std::vector<int>>({{1, 3, 5}, {0, 2, 4, 6}}));
     CHECK(rack_preview_rows(RACK_B, 9).empty());
+    CHECK(rack_preview_rows(RACK_B, 6).empty());
+    CHECK(rack_preview_rows(RACK_B, 8).empty());
 
     CHECK(is_rack_virtual_slot(247));
     CHECK(is_rack_virtual_slot(255));
     CHECK_FALSE(is_rack_virtual_slot(246));
+}
+
+TEST_CASE("AMS 3P two-row cubes are placed by slot id, not list position", "[AmsDual][AmsTypes]")
+{
+    using namespace Slic3r::GUI::AmsTypes;
+    CHECK(parse_rack_slot_id("0") == 0);
+    CHECK(parse_rack_slot_id("6") == 6);
+    CHECK(parse_rack_slot_id("63") == 63);
+    CHECK(parse_rack_slot_id("64") == -1);
+    CHECK(parse_rack_slot_id("") == -1);
+    CHECK(parse_rack_slot_id("x") == -1);
+    CHECK(parse_rack_slot_id("-1") == -1);
+
+    const std::vector<int> out_of_order{5, 0, 6, 1, 2, 3, 4};
+    CHECK(rack_preview_slot_index(out_of_order, 5) == 0);
+    CHECK(rack_preview_slot_index(out_of_order, 0) == 1);
+    CHECK(rack_preview_slot_index(out_of_order, 6) == 2);
+    CHECK(rack_preview_slot_index(out_of_order, 4) == 6);
+
+    const std::vector<int> missing{0, 1, 2, 3, 4, 6};
+    CHECK(rack_preview_slot_index(missing, 5) == -1);
+    CHECK(rack_preview_slot_index(missing, 6) == 5);
+    CHECK(rack_preview_slot_index(missing, 64) == -1);
+    CHECK(rack_preview_slot_index(missing, -1) == -1);
 }
