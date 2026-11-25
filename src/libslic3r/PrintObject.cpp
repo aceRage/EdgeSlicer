@@ -1519,6 +1519,16 @@ SupportLayerPtrs::iterator PrintObject::insert_support_layer(SupportLayerPtrs::i
     return m_support_layers.insert(pos, new SupportLayer(id, interface_id, this, height, print_z, slice_z));
 }
 
+SupportLayer* PrintObject::new_detached_support_layer(size_t id, size_t interface_id, coordf_t height, coordf_t print_z, coordf_t slice_z)
+{
+    return new SupportLayer(id, interface_id, this, height, print_z, slice_z);
+}
+
+void PrintObject::delete_detached_support_layer(SupportLayer *layer)
+{
+    delete layer;
+}
+
 // Called by Print::apply().
 // This method only accepts PrintObjectConfig and PrintRegionConfig option keys.
 bool PrintObject::invalidate_state_by_config_options(
