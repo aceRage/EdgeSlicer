@@ -3065,7 +3065,8 @@ void SelectMachineDialog::on_rename_enter()
     wxString info_line;
 
     // Characters the host cannot take are removed from the name, with no prompt.
-    new_file_name = from_u8(Slic3r::sanitize_upload_filename(new_file_name.ToUTF8().data(), Slic3r::upload_name_rules::bambu()));
+    if (!wxString(new_file_name).Trim().empty()) // an empty / blank name keeps its own prompt below
+        new_file_name = from_u8(Slic3r::sanitize_upload_filename(new_file_name.ToUTF8().data(), Slic3r::upload_name_rules::bambu()));
     const std::string unusable_suffix = PresetCollection::get_suffix_modified(); //"(modified)";
 
     if (m_valid_type == Valid && new_file_name.find(unusable_suffix) != std::string::npos) {
