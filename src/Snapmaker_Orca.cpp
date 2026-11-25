@@ -3990,9 +3990,10 @@ int CLI::run(int argc, char **argv)
     // This runs AFTER the flush-volume block on purpose: that block is entered only when the
     // project already carries colours (or --filament-colour was given), and it sizes
     // flush_volumes_matrix filament_count x filament_count, which is a single-nozzle shape. Adding
-    // the colours before it would pull dual-nozzle slices into that branch and hand
-    // prepare_flush_matrices a matrix half the size it slices per nozzle. Leaving the branch alone
-    // keeps the 4x4 PrintConfig default, which every nozzle can be sliced out of.
+    // the colours before it would pull dual-nozzle slices into that branch. Leaving the branch alone
+    // keeps the 4x4 PrintConfig default; with another filament count prepare_flush_matrices reads
+    // it as the G-code writer does, one 4x4 square whose first filaments x filaments entries every
+    // nozzle uses.
     if (filament_count > 0) {
         ConfigOptionStrings *filament_colors_option = m_print_config.option<ConfigOptionStrings>("filament_colour", true);
         std::vector<std::string> &filament_colors = filament_colors_option->values;

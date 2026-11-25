@@ -115,11 +115,35 @@ TEST_CASE("get_flush_volumes_matrix gives every nozzle the whole of a single mat
         CHECK(get_flush_volumes_matrix(single, size_t(-1), 2, 3) == single);
         CHECK(get_flush_volumes_matrix(single) == single);
     }
-    SECTION("a too-short matrix is still cut in equal parts")
+    SECTION("the helper still cuts a too-short list in equal parts (the grouping no longer uses that cut, below)")
     {
         const std::vector<double> short_list = {1., 2., 3., 4., 5., 6.};
         CHECK(get_flush_volumes_matrix(short_list, 0, 2, 3) == std::vector<double>{1., 2., 3.});
         CHECK(get_flush_volumes_matrix(short_list, 1, 2, 3) == std::vector<double>{4., 5., 6.});
+    }
+}
+
+TEST_CASE("The grouping reads a list of another length as the G-code writer does", "[FlushMatrix][FilamentGroup]")
+{
+    // The command line's 4 x 4 default with three filaments on two extruders: 16 values, neither 3 x 3 nor 2 x 3 x 3.
+    // Both extruders read the top-left 3 x 3 of the 4 x 4 square, as the G-code writer's floor(sqrt) reading does;
+    // cutting the 16 values in halves gave the second extruder rows out of place.
+    const std::vector<double> four_by_four = numbered_blocks(4, 1);
+    PrintConfig config;
+    config.nozzle_diameter.values      = {0.4, 0.4};
+    config.filament_colour.values      = {"#FFFFFF", "#000000", "#FF0000"};
+    config.flush_volumes_matrix.values = four_by_four;
+    config.flush_multiplier.value      = 1.;
+    const std::vector<FlushMatrix> matrices = GroupReorder::prepare_flush_matrices(config);
+    REQUIRE(matrices.size() == 2);
+    for (size_t nozzle = 0; nozzle < 2; ++nozzle) {
+        REQUIRE(matrices[nozzle].size() == 3);
+        for (size_t from = 0; from < 3; ++from)
+            for (size_t to = 0; to < 3; ++to) {
+                INFO("nozzle " << nozzle << " from " << from << " to " << to);
+                CHECK(matrices[nozzle][from][to] == float(four_by_four[from * 4 + to]));
+                CHECK(double(matrices[nozzle][from][to]) == flush_volume_for_change(four_by_four, 2, {1, 2, 1}, from, to));
+            }
     }
 }
 
@@ -362,9 +386,22 @@ TEST_CASE("The per-nozzle layer order stays fast with sixteen filaments on one n
     const auto start = std::chrono::steady_clock::now();
     reorder_filaments_for_multi_nozzle_extruder(used, *grouping, layers, flush, {}, &sequences);
     const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    // About 0.2 s here and 0.5 s on a loaded VM; the solver without its cache took minutes. The margin is wide so a
+    // slow or busy machine does not fail it, and still catches the exponential case.
     INFO("seconds " << seconds);
-    CHECK(seconds < 5.);
+    CHECK(seconds < 60.);
     REQUIRE(sequences.size() == layers.size());
     for (size_t layer = 0; layer < layers.size(); ++layer)
         CHECK(sequences[layer].size() == layers[layer].size());
+
+    // The same plate by the H2D's routine (extruder by extruder, with the look-ahead for five filaments or fewer).
+    std::vector<std::vector<unsigned int>> by_extruder;
+    const auto start_h2d = std::chrono::steady_clock::now();
+    reorder_filaments_for_minimum_flush_volume(used, map, layers, flush, std::nullopt, &by_extruder);
+    const auto seconds_h2d = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_h2d).count();
+    INFO("seconds (H2D routine) " << seconds_h2d);
+    CHECK(seconds_h2d < 60.);
+    REQUIRE(by_extruder.size() == layers.size());
+    for (size_t layer = 0; layer < layers.size(); ++layer)
+        CHECK(by_extruder[layer].size() == layers[layer].size());
 }

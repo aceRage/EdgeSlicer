@@ -1768,10 +1768,23 @@ std::vector<FlushMatrix> prepare_flush_matrices(const PrintConfig& print_config)
     size_t extruder_nums = print_config.nozzle_diameter.values.size();
     size_t filament_nums = print_config.filament_colour.values.size();
     std::vector<FlushMatrix> nozzle_flush_mtx;
+    const std::vector<double> &values = print_config.flush_volumes_matrix.values;
+    // A list that is neither one filaments x filaments matrix nor one per nozzle (the command line's 4 x 4 default
+    // with another filament count) is read as the G-code writer reads it: one floor(sqrt) square, its first
+    // filaments x filaments entries for every nozzle. Cutting it in equal parts gave each nozzle rows out of place.
+    const FlushMatrixLayout layout  = flush_matrix_layout(values.size(), extruder_nums, filament_nums);
+    const bool              neither = extruder_nums > 1 && !layout.per_nozzle() && values.size() != filament_nums * filament_nums;
     for (size_t nozzle_id = 0; nozzle_id < extruder_nums; ++nozzle_id) {
         // One filaments x filaments matrix (as this fork writes two-extruder projects) is every nozzle's whole
         // matrix; Bambu Studio's one matrix per nozzle is cut per nozzle.
-        std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(print_config.flush_volumes_matrix.values, nozzle_id, extruder_nums, filament_nums)));
+        std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(values, nozzle_id, extruder_nums, filament_nums)));
+        if (neither) {
+            flush_matrix.assign(filament_nums * filament_nums, 0.f);
+            const size_t n = layout.filaments;
+            for (size_t from = 0; from < filament_nums && from < n; ++from)
+                for (size_t to = 0; to < filament_nums && to < n; ++to)
+                    flush_matrix[from * filament_nums + to] = float(values[from * n + to]);
+        }
         // A flush matrix shorter than filaments x filaments per nozzle (a preset written for another
         // extruder count) must not be sliced past its end below: missing entries flush nothing.
         if (flush_matrix.size() < filament_nums * filament_nums)
@@ -2234,8 +2247,23 @@ std::vector<std::vector<unsigned int>> ToolOrdering::order_layers_by_nozzle(cons
         return false;
     };
     std::vector<std::vector<unsigned int>> sequences;
-    reorder_filaments_for_multi_nozzle_extruder(std::vector<unsigned int>(used.begin(), used.end()), *grouping, layer_filaments, flush,
-                                                fixed, &sequences);
+    const std::vector<unsigned int>        used_list(used.begin(), used.end());
+    const bool rack = std::any_of(print_config.extruder_max_nozzle_count.values.begin(), print_config.extruder_max_nozzle_count.values.end(),
+                                  [](int count) { return count > 1; });
+    if (rack) {
+        // An extruder with several nozzles (the H2C rack): nozzle by nozzle, each from what it holds
+        // (reorder_filaments_for_multi_nozzle_extruder, ToolOrderUtils.cpp: no look-ahead on this path).
+        reorder_filaments_for_multi_nozzle_extruder(used_list, *grouping, layer_filaments, flush, fixed, &sequences);
+    } else {
+        // One nozzle per extruder (H2D, X2D): extruder by extruder, with the one-layer look-ahead where an extruder prints
+        // five filaments or fewer on both layers (reorder_filaments_for_minimum_flush_volume, ToolOrderUtils.cpp).
+        std::vector<int> extruder_of;
+        extruder_of.reserve(used_list.size());
+        for (unsigned int f : used_list)
+            extruder_of.push_back(grouping->get_nozzle_for_filament(int(f), -1)->extruder_id);
+        reorder_filaments_for_minimum_flush_volume(used_list, extruder_of, layer_filaments, flush,
+                                                   std::function<bool(int, std::vector<int> &)>(fixed), &sequences);
+    }
     // Every layer the solver orders must come back as the same filaments.
     if (sequences.size() != layer_filaments.size())
         return {};
@@ -2347,7 +2375,11 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
         // nozzle's matrix. A single matrix (or any other length) is read as the square it always was.
         const size_t nozzle_nums = print_config->nozzle_diameter.values.size();
         const bool   per_nozzle  = flush_matrix_layout(flush_matrix.size(), nozzle_nums).per_nozzle();
-        order_by_nozzle          = nozzle_nums == 2 && m_print != nullptr && (grouped_this_pass || per_nozzle);
+        // Not on a plate printed object by object (one object included): the export orders each object with its own
+        // ToolOrdering(const PrintObject&), which has no Print and keeps the classic solver, and the tower plan has to
+        // print the order the export prints.
+        order_by_nozzle = nozzle_nums == 2 && m_print != nullptr && print_config->print_sequence != PrintSequence::ByObject &&
+                          (grouped_this_pass || per_nozzle);
         if (per_nozzle) {
             wipe_volumes = flush_matrix_for_changes(print_config->flush_volumes_matrix.values, nozzle_nums, print_config->filament_map.values);
         } else {
