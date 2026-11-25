@@ -18,6 +18,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -50,7 +51,27 @@ indexed_triangle_set ps_union(const std::vector<indexed_triangle_set>& parts)
 {
     indexed_triangle_set out;
     REQUIRE(MeshBoolean::mfd::union_all(parts, out));
+    // The union comes back in floats: vertices Manifold kept apart can land on one float and leave a
+    // zero-area sliver, which is not part of the solid. Weld, drop those, and check the skin is closed.
     its_merge_vertices(out);
+    const int degenerate = its_remove_degenerate_faces(out);
+    its_compactify_vertices(out);
+    std::map<uint64_t, int> edge_use;
+    for (const Vec3i32& t : out.indices)
+        for (int k = 0; k < 3; ++k) {
+            int a = t[k], b = t[(k + 1) % 3];
+            if (a > b) std::swap(a, b);
+            ++edge_use[(uint64_t(uint32_t(a)) << 32) | uint32_t(b)];
+        }
+    int once = 0, many = 0;
+    for (const auto& [e, n] : edge_use) {
+        once += n == 1;
+        many += n > 2;
+    }
+    INFO("union: " << out.indices.size() << " faces, " << degenerate << " degenerate removed, " << once
+                   << " edges used once, " << many << " edges used more than twice");
+    REQUIRE(once == 0);
+    REQUIRE(many == 0);
     return out;
 }
 
