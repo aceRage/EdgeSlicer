@@ -849,7 +849,9 @@ TEST_CASE("H2C 0.4 with a 0.8 mounted and a 0.8/0.4/0.6 rack: each filament gets
     }
     SECTION("pinned to rack sizes, each filament prints with the process of its slot's size (chip scope per slot)")
     {
-        // Filament 2 on the right's 0.4 slots, filament 3 on its 0.6.
+        // Filament 2 on the right's 0.4 slots, filament 3 on its 0.6. The plate's map is set by hand: on an automatic map a 0.4 pin,
+        // which both extruders can take, is read on the left (rack pin rule R2) until the grouping has run.
+        b.project_config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(FilamentMapMode::fmmManual));
         b.project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values = { 0., 0.4, 0.6, 0. };
         const PresetBundle::NozzleToolProcess r06 = b.nozzle_tool_process_info(3);
         REQUIRE(r06.kind == PresetBundle::NozzleToolProcessKind::AutoPicked);

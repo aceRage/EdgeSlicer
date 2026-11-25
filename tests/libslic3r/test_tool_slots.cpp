@@ -219,6 +219,57 @@ TEST_CASE("A filament pinned to a rack nozzle size slices for that size", "[Tool
     CHECK_FALSE(has_mixed_rack_diameters(cfg));
 }
 
+// EdgeSlicerRS fixture h2c4_two_man_pn: an H2C with a 0.4, 0.6, 0.4, 0.6 rack on the right, two filaments, the manual map
+// 2,1 and filament 1 pinned to a 0.6 rack nozzle. The map puts filament 1 on the right, so it slices for the 0.6 and the
+// grouping keeps it on a right 0.6; the filament number (left, no rack) gave 0.4 and a right 0.4 nozzle.
+TEST_CASE("A two-filament H2C plate with a crossed manual map honours the rack pin of the mapped extruder", "[ToolSlots][Rack][FilamentMap]")
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_num_filaments(2);
+    cfg.option<ConfigOptionFloats>("nozzle_diameter", true)->values                = { 0.4, 0.4 };
+    cfg.option<ConfigOptionBool>("single_extruder_multi_material", true)->value    = false;
+    cfg.option<ConfigOptionStrings>("extruder_variant_list", true)->values         = { "Direct Drive Standard,Direct Drive High Flow",
+                                                                                       "Direct Drive Standard,Direct Drive High Flow" };
+    cfg.option<ConfigOptionInts>("filament_map", true)->values                     = { 2, 1 };
+    cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "", "0.4,0.6,0.4,0.6" };
+    cfg.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values  = { 0.6, 0. };
+    cfg.set_deserialize_strict("filament_map_mode", "Manual");
+    PrintConfig print_config;
+    print_config.apply(cfg, true);
+    REQUIRE(is_bambu_grouping_machine(cfg, 2));
+    REQUIRE(filament_map_decides_extruder(cfg, 2));
+
+    CHECK(physical_extruder_for_filament(print_config, 1) == 1);
+    CHECK(nozzle_diameter_for_filament(print_config, 1) == 0.6);
+    CHECK(nozzle_diameter_for_filament(print_config, 2) == 0.4);
+    CHECK(nozzle_diameter_for_filament(static_cast<const ConfigBase &>(cfg), 1) == 0.6);
+    CHECK(validate_rack_nozzle_diameters(print_config, { 0, 1 }).empty());
+
+    // Left 0.4 (id 0); right 0.4 x2 (ids 1, 2), 0.6 x2 (ids 3, 4).
+    std::vector<MultiNozzleUtils::NozzleInfo> list;
+    for (const auto &[d, e] : std::vector<std::pair<const char *, int>>{ { "0.4", 0 }, { "0.4", 1 }, { "0.4", 1 }, { "0.6", 1 }, { "0.6", 1 } }) {
+        MultiNozzleUtils::NozzleInfo n;
+        n.diameter    = d;
+        n.volume_type = nvtStandard;
+        n.extruder_id = e;
+        n.group_id    = int(list.size());
+        list.push_back(n);
+    }
+    // The manual grouping puts filament 1 on a right 0.4 and filament 2 on the left: filament 1 moves to a 0.6.
+    std::vector<int> map = { 1, 0 };
+    CHECK(pin_rack_nozzle_diameters(print_config, list, { 0, 1 }, map) == 1);
+    CHECK(map == std::vector<int>{ 3, 0 });
+    const auto group = MultiNozzleUtils::LayeredNozzleGroupResult::create(map, list, { 0, 1 });
+    REQUIRE(group);
+    CHECK(check_rack_nozzle_diameters(print_config, *group).empty());
+
+    // The uncrossed map 1,2 puts filament 1 on the left, which has no rack: it slices for the left 0.4 as before.
+    cfg.option<ConfigOptionInts>("filament_map")->values = { 1, 2 };
+    print_config.apply(cfg, true);
+    CHECK(physical_extruder_for_filament(print_config, 1) == 0);
+    CHECK(nozzle_diameter_for_filament(print_config, 1) == 0.4);
+}
+
 TEST_CASE("The extruder's own nozzle size must be in its rack", "[ToolSlots][Rack]")
 {
     DynamicPrintConfig cfg = h2c_rack();
