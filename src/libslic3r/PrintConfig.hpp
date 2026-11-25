@@ -3090,7 +3090,8 @@ bool hotend_as_extruder(const PrintConfig &config);
 // the rest of the per-extruder printer options are indexed by physical extruder, not by filament:
 // on an H2D/H2C (2 nozzles, up to 16 filaments) `nozzle_diameter.get_at(filament - 1)` silently
 // falls back to the FIRST nozzle for every filament past the second. filament_map (1-based) is the
-// assignment the tool orderer already computed. filament_id == 0 means "use whatever tool is
+// assignment the tool orderer already computed. On a Bambu grouping machine with a manual map it decides also when
+// the plate has no more filaments than nozzles (filament_map_decides_extruder). filament_id == 0 means "use whatever tool is
 // current" and resolves to extruder 0, matching what the old get_at(size_t(-1)) fallback did.
 // Ported from OrcaSlicer PR #13782 (LixNix, "Printing with different nozzle sizes"),
 // Flow.cpp::physical_extruder_for_filament.
@@ -3098,9 +3099,15 @@ size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int fi
 // The same mapping from the raw values, for callers that only hold a DynamicPrintConfig or the
 // preset bundle (the support overhang highlight in the 3D view).
 // `assignment` is filament_nozzle_assignment (per-nozzle process P2): a filament with an entry 1..nozzle_count
-// prints on that tool before any other rule.
+// prints on that tool before any other rule. `map_decides` is filament_map_decides_extruder(config, nozzle_count):
+// filament_map decides then whatever the filament count, where a printer with no more filaments than nozzles (a
+// toolchanger) otherwise prints each filament on its own tool. The PrintConfig overload passes it.
 size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &filament_map, unsigned int filament_id,
-                                      const std::vector<int> &assignment = {});
+                                      const std::vector<int> &assignment = {}, bool map_decides = false);
+// Whether filament_map gives every filament's extruder however few filaments there are: a Bambu grouping machine
+// (is_bambu_grouping_machine: H2D / H2C / X2D) with a manual map (filament_map_mode Manual or Nozzle Manual). An
+// automatic map is the grouping's result, written while slicing after the geometry was cut, so it does not decide here.
+bool filament_map_decides_extruder(const ConfigBase &config, size_t nozzle_count);
 // The 0-based tool filament_nozzle_assignment puts 1-based `filament_id` on, or -1 when it names none.
 int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozzle_count, unsigned int filament_id);
 // Per-nozzle process P4: the nozzle diameter 1-based `filament_id` prints with: nozzle_diameter of its physical

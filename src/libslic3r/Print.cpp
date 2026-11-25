@@ -2963,7 +2963,12 @@ static std::string extruder_reach_error(const Print &print, const ModelObject **
     const FilamentMapMode mode       = print.config().filament_map_mode.value;
     const bool            sequential = print.config().print_sequence == PrintSequence::ByObject && print.objects().size() > 1;
     const bool            binding    = mode == fmmManual || mode == fmmNozzleManual || sequential;
-    const std::vector<ReachViolation> violations = find_reach_violations(reaches, areas.count(), print.filament_map_input(), binding);
+    // R1 (rack pins): a by-object plate of an automatic map prints the map the pin rules move (rack_pin_filament_map, as
+    // GCode::_do_export writes it); check that one. The plate map itself everywhere else.
+    const std::vector<int> map = print.config().print_sequence == PrintSequence::ByObject ?
+                                     rack_pin_filament_map(print.config(), print.extruders(), print.filament_map_input()) :
+                                     print.filament_map_input();
+    const std::vector<ReachViolation> violations = find_reach_violations(reaches, areas.count(), map, binding);
     if (violations.empty())
         return {};
 

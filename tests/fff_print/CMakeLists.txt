@@ -54,6 +54,7 @@ add_executable(${_TEST_NAME}_tests
 	test_nozzle_override_gcode.cpp
 	test_nozzle_tool_process_gcode.cpp
 	test_nozzle_rack_slots_gcode.cpp
+	test_h2c_rack_pins_by_object.cpp
 	test_nozzle_layer_height_gcode.cpp
 	test_mixed_width_tower.cpp
 	test_bbs_tower_ramming.cpp

@@ -8,6 +8,7 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/BambuNozzleMappingRequest.hpp"
+#include "libslic3r/FilamentGroup.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
@@ -20,6 +21,7 @@
 
 #include <boost/filesystem.hpp>
 
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -436,4 +438,354 @@ TEST_CASE("The mixed rack diameter warning", "[H2CRackGroupId][MixedDiameterWarn
         CHECK(a->diameter != c->diameter);
         CHECK_FALSE(rack_group_mixes_nozzle_diameters(pc, *group));
     }
+}
+
+// ---- Rules S and P (owner 2026-11-22): pinned filaments spread over free nozzles of their size; a pin holds on an automatic map --
+
+namespace {
+
+// The rack of fixture h2c3_mix4_2211_pn: grouping nozzles 0 = L 0.4, 1 = R 0.4, 2 = R 0.6, 3 = R 0.4, 4 = R 0.6.
+const char *TWO_SIXES = "0.4,0.6,0.4,0.6";
+
+DynamicPrintConfig h2c_pins(const std::vector<int> &map, const std::vector<double> &sizes, const std::vector<int> &slots = { 0 },
+                            const std::string &mode = "Manual")
+{
+    DynamicPrintConfig cfg = h2c(TWO_SIXES);
+    cfg.set_num_filaments(unsigned(map.size()));
+    cfg.option<ConfigOptionInts>("filament_map", true)->values                    = map;
+    cfg.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values = sizes;
+    cfg.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values       = slots;
+    cfg.set_deserialize_strict("filament_map_mode", mode);
+    return cfg;
+}
+
+std::vector<int> pinned_map(const DynamicPrintConfig &cfg, std::vector<int> map)
+{
+    PrintConfig print_config;
+    print_config.apply(cfg, true);
+    const std::vector<NozzleInfo> list = grouping_nozzle_list(print_config, nozzle_groups(cfg));
+    REQUIRE(list.size() == 5);
+    std::vector<unsigned int> used;
+    for (size_t f = 0; f < map.size(); ++f)
+        used.push_back(unsigned(f));
+    pin_rack_nozzle_diameters(print_config, list, used, map);
+    // Whatever the pass does, every filament ends on a nozzle of the size it was sliced for.
+    const auto group = MultiNozzleUtils::LayeredNozzleGroupResult::create(map, list, used);
+    REQUIRE(group);
+    CHECK(check_rack_nozzle_diameters(print_config, *group).empty());
+    return map;
+}
+
+} // namespace
+
+TEST_CASE("Rule S: two filaments pinned to the 0.6 take the rack's two 0.6 nozzles", "[H2CRackGroupId][RackPins]")
+{
+    // Fixture h2c3_mix4_2211_pn: before the fix both ended on slot 2 and flushed into each other.
+    const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 1, 1 }, { 0.6, 0.6, 0., 0. });
+    CHECK(pinned_map(cfg, { 1, 3, 0, 0 }) == std::vector<int>{ 2, 4, 0, 0 });
+    CHECK(pinned_map(cfg, { 1, 1, 0, 0 }) == std::vector<int>{ 2, 4, 0, 0 });
+    CHECK(pinned_map(cfg, { 3, 1, 0, 0 }) == std::vector<int>{ 2, 4, 0, 0 });
+}
+
+TEST_CASE("Rule S: three filaments pinned to two 0.6 nozzles share the first, the same way every time", "[H2CRackGroupId][RackPins]")
+{
+    const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 2, 1 }, { 0.6, 0.6, 0.6, 0. });
+    CHECK(pinned_map(cfg, { 1, 1, 3, 0 }) == std::vector<int>{ 2, 4, 2, 0 });
+    CHECK(pinned_map(cfg, { 3, 1, 1, 0 }) == std::vector<int>{ 2, 4, 2, 0 });
+    // One already on a 0.6 keeps it; the others fill the free one, then share the first.
+    CHECK(pinned_map(cfg, { 1, 4, 3, 0 }) == std::vector<int>{ 2, 4, 2, 0 });
+}
+
+TEST_CASE("Rule S: a pinned filament already on a nozzle of its size stays there", "[H2CRackGroupId][RackPins]")
+{
+    const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 1 }, { 0.6, 0.6, 0. });
+    CHECK(pinned_map(cfg, { 4, 1, 0 }) == std::vector<int>{ 4, 2, 0 });
+    CHECK(pinned_map(cfg, { 2, 1, 0 }) == std::vector<int>{ 2, 4, 0 });
+    CHECK(pinned_map(cfg, { 2, 4, 0 }) == std::vector<int>{ 2, 4, 0 });
+}
+
+TEST_CASE("Rule S: two pinned filaments the grouping put on one nozzle of their size spread to a free one", "[H2CRackGroupId][RackPins]")
+{
+    // Fixture h2c4_onsize_2211: the grouping already put both on one 0.6; the second moves to the free 0.6.
+    const DynamicPrintConfig two = h2c_pins({ 2, 2, 1 }, { 0.6, 0.6, 0. });
+    CHECK(pinned_map(two, { 2, 2, 0 }) == std::vector<int>{ 2, 4, 0 });
+    CHECK(pinned_map(two, { 4, 4, 0 }) == std::vector<int>{ 4, 2, 0 });
+    // No free one left: the third keeps the nozzle it shares.
+    const DynamicPrintConfig three = h2c_pins({ 2, 2, 2, 1 }, { 0.6, 0.6, 0.6, 0. });
+    CHECK(pinned_map(three, { 4, 4, 4, 0 }) == std::vector<int>{ 4, 2, 4, 0 });
+    // Sharing with an unpinned filament is the grouping's choice: kept.
+    const DynamicPrintConfig one = h2c_pins({ 2, 2, 1 }, { 0.4, 0., 0. });
+    CHECK(pinned_map(one, { 1, 1, 0 }) == std::vector<int>{ 1, 1, 0 });
+}
+
+TEST_CASE("Rule S: slot pins keep their slot; a size pin avoids a slot that is taken", "[H2CRackGroupId][RackPins]")
+{
+    SECTION("two filaments pinned to slot 2 share it although slot 4 is free")
+    {
+        const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 1 }, { 0. }, { 2, 2, 0 });
+        CHECK(pinned_map(cfg, { 1, 3, 0 }) == std::vector<int>{ 2, 2, 0 });
+    }
+    SECTION("a slot pin on slot 2 and a size pin on 0.6")
+    {
+        const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 1 }, { 0., 0.6, 0. }, { 2, 0, 0 });
+        CHECK(pinned_map(cfg, { 1, 1, 0 }) == std::vector<int>{ 2, 4, 0 });
+    }
+}
+
+TEST_CASE("Rule S: filaments without pins move as before", "[H2CRackGroupId][RackPins][Identity]")
+{
+    // An unpinned filament the grouping put on a 0.6 goes to the first 0.4 of its extruder, shared or not (as before the rule).
+    const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 1 }, { 0. });
+    CHECK(pinned_map(cfg, { 2, 4, 0 }) == std::vector<int>{ 1, 1, 0 });
+    CHECK(pinned_map(cfg, { 1, 3, 0 }) == std::vector<int>{ 1, 3, 0 });
+}
+
+TEST_CASE("Rule P: on an automatic map a size pin is read on the extruder that has the size", "[H2CRackGroupId][RackPins][AutoMap]")
+{
+    // Fixture h2c3_mix2_auto_pn: saved map 1,2,1, filament 1 pinned to the 0.6, which only the right rack has.
+    const DynamicPrintConfig automatic = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, "Auto For Flush");
+    CHECK(rack_pins_follow_grouping(automatic));
+    CHECK_THAT(nozzle_diameter_for_filament(automatic, 1), Catch::Matchers::WithinAbs(0.6, 1e-6));
+    CHECK(rack_pin_extruder(automatic, 1, 0) == 1);
+    CHECK_THAT(nozzle_diameter_for_filament(automatic, 3), Catch::Matchers::WithinAbs(0.4, 1e-6)); // no pin: as before
+    CHECK(rack_pin_extruders(automatic, 1) == std::vector<bool>{ false, true });
+    CHECK(rack_pin_extruders(automatic, 3).empty());
+    PrintConfig print_config;
+    print_config.apply(automatic, true);
+    CHECK(validate_rack_nozzle_diameters(print_config, { 0, 1, 2 }).empty());
+
+    // A manual map is the user's: unchanged.
+    const DynamicPrintConfig manual = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. });
+    CHECK_FALSE(rack_pins_follow_grouping(manual));
+    CHECK(rack_pin_extruder(manual, 1, 0) == 0);
+    CHECK_THAT(nozzle_diameter_for_filament(manual, 1), Catch::Matchers::WithinAbs(0.4, 1e-6));
+}
+
+TEST_CASE("Rule P: the automatic grouping is barred from extruders that cannot take a pin", "[H2CRackGroupId][RackPins][AutoMap]")
+{
+    std::vector<std::set<int>> unprintable(2);
+    SECTION("a 0.6 pin bars the left (P) and keeps the unpinned filaments off the right (P2)")
+    {
+        const DynamicPrintConfig cfg = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, "Auto For Flush");
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable).empty());
+        CHECK(unprintable[0] == std::set<int>{ 0 });
+        CHECK(unprintable[1] == std::set<int>{ 1, 2 });
+    }
+    SECTION("a 0.4 pin bars nothing: both extruders have a 0.4")
+    {
+        const DynamicPrintConfig cfg = h2c_pins({ 1, 2, 1 }, { 0.4, 0., 0. }, { 0 }, "Auto For Match");
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable).empty());
+        CHECK(unprintable[0].empty());
+        CHECK(unprintable[1].empty());
+    }
+    SECTION("a slot pin bars every extruder but the slot's")
+    {
+        // Slot 2 of the right rack is a 0.6; the saved map has filament 3 on the left, which has no rack slots.
+        const DynamicPrintConfig cfg = h2c_pins({ 1, 2, 1 }, { 0. }, { 0, 0, 2 }, "Auto For Flush");
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable).empty());
+        CHECK(unprintable[0] == std::set<int>{ 2 });
+        CHECK(unprintable[1] == std::set<int>{ 0, 1 }); // P2: the right is set to 0.6 by the slot
+        CHECK_THAT(nozzle_diameter_for_filament(cfg, 3), Catch::Matchers::WithinAbs(0.6, 1e-6));
+        CHECK_THAT(filament_rack_pin(cfg, 3), Catch::Matchers::WithinAbs(0.6, 1e-6));
+    }
+    SECTION("a manual map bars nothing")
+    {
+        const DynamicPrintConfig cfg = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. });
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable).empty());
+        CHECK(unprintable[0].empty());
+    }
+    SECTION("a pin no extruder can take is an error, before and during the grouping")
+    {
+        const DynamicPrintConfig cfg = h2c_pins({ 1, 2, 1 }, { 0.8, 0., 0. }, { 0 }, "Auto For Flush");
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable) ==
+              "Filament 1 is pinned to a 0.8 mm rack nozzle, but no extruder that has one can print it.");
+        PrintConfig print_config;
+        print_config.apply(cfg, true);
+        CHECK(validate_rack_nozzle_diameters(print_config, { 0, 1, 2 }) == "Filament 1 asks for a 0.8 mm rack nozzle, but no extruder has one.");
+    }
+    SECTION("the only extruder with the size cannot print the filament: an error")
+    {
+        const DynamicPrintConfig cfg = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, "Auto For Flush");
+        unprintable[1].insert(0);
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable) ==
+              "Filament 1 is pinned to a 0.6 mm rack nozzle, but no extruder that has one can print it.");
+    }
+}
+
+TEST_CASE("Rule P: the flush grouping with the bar puts a 0.6 pin on the right, and the pass on a 0.6", "[H2CRackGroupId][RackPins][AutoMap]")
+{
+    const DynamicPrintConfig cfg = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, "Auto For Flush");
+    PrintConfig              print_config;
+    print_config.apply(cfg, true);
+    const std::vector<NozzleInfo>   list = grouping_nozzle_list(print_config, nozzle_groups(cfg));
+    const std::vector<unsigned int> used{ 0, 1, 2 };
+
+    FilamentGroupContext ctx;
+    ctx.model_info.flush_matrix.assign(2, FlushMatrix(3, std::vector<float>{ 100.f, 100.f, 100.f }));
+    for (FlushMatrix &m : ctx.model_info.flush_matrix)
+        for (size_t i = 0; i < 3; ++i)
+            m[i][i] = 0.f;
+    ctx.model_info.layer_filaments = { { 0, 1, 2 }, { 0, 1, 2 } };
+    for (const char *colour : { "#FFFFFF", "#202020", "#C12E1F" }) {
+        FilamentGroupUtils::FilamentInfo info;
+        info.color      = FilamentGroupUtils::Color(colour);
+        info.type       = "PLA";
+        info.is_support = false;
+        info.usage_type = FilamentUsageType::ModelOnly;
+        info.diameter   = 1.75f;
+        ctx.model_info.filament_info.push_back(info);
+    }
+    ctx.model_info.filament_ids = { "GFA00", "GFA00", "GFA00" };
+    ctx.model_info.unprintable_filaments.resize(2);
+    ctx.group_info.total_filament_num  = 3;
+    ctx.group_info.max_gap_threshold   = 0.01;
+    ctx.group_info.mode                = FGMode::FlushMode;
+    ctx.group_info.strategy            = FGStrategy::BestCost;
+    ctx.group_info.ignore_ext_filament = false;
+    ctx.group_info.filament_volume_map = std::vector<int>(3, int(nvtHybrid));
+    ctx.machine_info.max_group_size    = { 16, 16 };
+    ctx.machine_info.machine_filament_info.resize(2);
+    ctx.machine_info.prefer_non_model_filament = { false, false };
+    ctx.machine_info.master_extruder_id        = 1;
+    ctx.speed_info.extruder_change_time        = 0.;
+    ctx.speed_info.filament_change_time        = 0.;
+    ctx.speed_info.group_with_time             = false;
+    ctx.nozzle_info.nozzle_list                = list;
+    ctx.nozzle_info.extruder_nozzle_list       = FilamentGroupUtils::build_extruder_nozzle_list(list);
+
+    REQUIRE(bar_rack_pin_extruders(print_config, used, ctx.model_info.unprintable_filaments).empty());
+    FilamentGroup     fg(ctx);
+    std::vector<int>  map = fg.calc_filament_group();
+    REQUIRE(map.size() == 3);
+    REQUIRE(map[0] >= 0);
+    REQUIRE(size_t(map[0]) < list.size());
+    CHECK(list[size_t(map[0])].extruder_id == 1);
+    // P2: the unpinned filaments stay off the right rack, so it holds one size.
+    CHECK(list[size_t(map[1])].extruder_id == 0);
+    CHECK(list[size_t(map[2])].extruder_id == 0);
+    pin_rack_nozzle_diameters(print_config, list, used, map);
+    CHECK(list[size_t(map[0])].diameter == "0.6");
+    const auto group = MultiNozzleUtils::LayeredNozzleGroupResult::create(map, list, used);
+    REQUIRE(group);
+    CHECK(check_rack_nozzle_diameters(print_config, *group).empty());
+}
+
+TEST_CASE("Rule P2: an automatic map keeps other sizes off a rack the pins set to one size", "[H2CRackGroupId][RackPins][AutoMap]")
+{
+    std::vector<std::set<int>> unprintable(2);
+    SECTION("an unpinned filament the left cannot print may still use the right")
+    {
+        const DynamicPrintConfig cfg = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, "Auto For Flush");
+        unprintable[0].insert(1);
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable).empty());
+        CHECK(unprintable[0] == std::set<int>{ 0, 1 });
+        CHECK(unprintable[1] == std::set<int>{ 2 });
+    }
+    SECTION("forced pins putting two sizes on the right bar nothing more")
+    {
+        // f1 pinned 0.6 and f2 pinned to slot 1 (a 0.4): both can only go right.
+        const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 1 }, { 0.6, 0., 0. }, { 0, 1, 0 }, "Auto For Flush");
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable).empty());
+        CHECK(unprintable[0] == std::set<int>{ 0, 1 });
+        CHECK(unprintable[1].empty());
+    }
+    SECTION("a pin to the extruder's own size bars no unpinned filament")
+    {
+        const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 1 }, { 0.4, 0., 0. }, { 0 }, "Auto For Flush");
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable).empty());
+        CHECK(unprintable[0].empty());
+        CHECK(unprintable[1].empty());
+    }
+    SECTION("a FREE pin to another size the right also has is kept off it")
+    {
+        // f1 pinned 0.6 (right only: forced), f2 pinned 0.4 (both extruders: free): the right is set to 0.6.
+        const DynamicPrintConfig cfg = h2c_pins({ 2, 2, 1 }, { 0.6, 0.4, 0. }, { 0 }, "Auto For Flush");
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable).empty());
+        CHECK(unprintable[0] == std::set<int>{ 0 });
+        CHECK(unprintable[1] == std::set<int>{ 1, 2 });
+    }
+    SECTION("a manual map is untouched")
+    {
+        const DynamicPrintConfig cfg = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. });
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2 }, unprintable).empty());
+        CHECK(unprintable[0].empty());
+        CHECK(unprintable[1].empty());
+    }
+    SECTION("print by object: the plate map with the pin moves")
+    {
+        const DynamicPrintConfig cfg = h2c_pins({ 1, 1, 1 }, { 0., 0.6, 0. }, { 0 }, "Auto For Flush");
+        CHECK(rack_pin_filament_map(cfg, { 0, 1, 2 }, { 1, 1, 1 }) == std::vector<int>{ 1, 2, 1 });
+        CHECK(rack_pin_filament_map(cfg, { 0, 1, 2 }, { 2, 1, 2 }) == std::vector<int>{ 1, 2, 1 });
+        // An unused filament keeps its entry.
+        CHECK(rack_pin_filament_map(cfg, { 0, 1 }, { 2, 1, 2 }) == std::vector<int>{ 1, 2, 2 });
+        // A hand-set map and a plate without pins are untouched.
+        const DynamicPrintConfig manual = h2c_pins({ 1, 1, 1 }, { 0., 0.6, 0. });
+        CHECK(rack_pin_filament_map(manual, { 0, 1, 2 }, { 2, 1, 2 }) == std::vector<int>{ 2, 1, 2 });
+        const DynamicPrintConfig none = h2c_pins({ 1, 1, 1 }, { 0. }, { 0 }, "Auto For Flush");
+        CHECK(rack_pin_filament_map(none, { 0, 1, 2 }, { 2, 1, 2 }) == std::vector<int>{ 2, 1, 2 });
+    }
+}
+
+TEST_CASE("R2: on an automatic map the saved filament_map does not change the result", "[H2CRackGroupId][RackPins][AutoMap]")
+{
+    // Pins 0.6 (forced right) and 0.4 (free); saved maps 1,2,1,2 and 1,1,1,2 must give the same bars and the same moved map.
+    std::vector<std::vector<std::set<int>>> bars;
+    for (const std::vector<int> &saved : { std::vector<int>{ 1, 2, 1, 2 }, std::vector<int>{ 1, 1, 1, 2 } }) {
+        const DynamicPrintConfig cfg = h2c_pins(saved, { 0.6, 0.4, 0., 0. }, { 0 }, "Auto For Flush");
+        std::vector<std::set<int>> unprintable(2);
+        CHECK(bar_rack_pin_extruders(cfg, { 0, 1, 2, 3 }, unprintable).empty());
+        CHECK(rack_pin_filament_map(cfg, { 0, 1, 2, 3 }, saved) == std::vector<int>{ 2, 1, 1, 1 });
+        CHECK(rack_pin_extruder(cfg, 2, saved[1] - 1) == 0); // a FREE pin is read on the lowest extruder that can take it
+        bars.push_back(unprintable);
+    }
+    REQUIRE(bars.size() == 2);
+    CHECK(bars[0] == bars[1]);
+    CHECK(bars[0][0] == std::set<int>{ 0 });
+    CHECK(bars[0][1] == std::set<int>{ 1, 2, 3 });
+    // A slot pin belongs to the lowest extruder that shows the slot, whatever the saved map says.
+    const DynamicPrintConfig slot = h2c_pins({ 2, 1, 1 }, { 0. }, { 0, 0, 2 }, "Auto For Flush");
+    CHECK(rack_pin_extruders(slot, 3) == std::vector<bool>{ false, true });
+}
+
+TEST_CASE("R3: Manual and Nozzle Manual are set by hand; the Auto modes follow the grouping", "[H2CRackGroupId][RackPins]")
+{
+    CHECK(hand_set_filament_map(h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. })));
+    CHECK(hand_set_filament_map(h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, "Nozzle Manual")));
+    CHECK_FALSE(rack_pins_follow_grouping(h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, "Nozzle Manual")));
+    for (const char *mode : { "Auto For Flush", "Auto For Match", "Auto For Quality" }) {
+        CAPTURE(mode);
+        const DynamicPrintConfig cfg = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, mode);
+        CHECK_FALSE(hand_set_filament_map(cfg));
+        CHECK(rack_pins_follow_grouping(cfg));
+    }
+    // A Nozzle Manual map with a 0.6 pin on the left is not regrouped: it is refused (R4).
+    const DynamicPrintConfig nozzle_manual = h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, "Nozzle Manual");
+    CHECK(rack_pin_extruder(nozzle_manual, 1, 0) == 0);
+    std::vector<std::set<int>> unprintable(2);
+    CHECK(bar_rack_pin_extruders(nozzle_manual, { 0, 1, 2 }, unprintable).empty());
+    CHECK(unprintable[0].empty());
+    CHECK(unprintable[1].empty());
+}
+
+TEST_CASE("R4: a pin its hand-set extruder cannot take is refused", "[H2CRackGroupId][RackPins]")
+{
+    const auto validate = [](const DynamicPrintConfig &cfg) {
+        PrintConfig print_config;
+        print_config.apply(cfg, true);
+        return validate_rack_nozzle_diameters(print_config, { 0, 1, 2 });
+    };
+    for (const char *mode : { "Manual", "Nozzle Manual" }) {
+        CAPTURE(mode);
+        // The left has no rack and a 0.4: a 0.6 pin there was sliced at 0.4 with no message.
+        const std::string error = validate(h2c_pins({ 1, 2, 1 }, { 0.6, 0., 0. }, { 0 }, mode));
+        CHECK_THAT(error, Catch::Matchers::StartsWith("Filament 1 asks for a 0.6 mm rack nozzle, but the "));
+        CHECK_THAT(error, Catch::Matchers::EndsWith(" extruder has none."));
+        // Its own size is fine.
+        CHECK(validate(h2c_pins({ 1, 2, 1 }, { 0.4, 0., 0. }, { 0 }, mode)).empty());
+    }
+    // An extruder with a rack keeps the existing message; a slot pin the existing slot message.
+    CHECK(validate(h2c_pins({ 2, 2, 1 }, { 0.8, 0., 0. })) == "Filament 1 asks for a 0.8 mm rack nozzle, but extruder 2's rack has none.");
+    CHECK_THAT(validate(h2c_pins({ 1, 2, 1 }, { 0. }, { 2, 0, 0 })), Catch::Matchers::EndsWith("slot 2, but that rack has 0 nozzles."));
+    // On the right with the size: fine.
+    CHECK(validate(h2c_pins({ 2, 2, 1 }, { 0.6, 0., 0. })).empty());
 }

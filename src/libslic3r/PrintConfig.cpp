@@ -611,8 +611,27 @@ size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int fi
 {
     // A mixed filament prints through its components' nozzle (nozzle_filament_of, ToolSlots.hpp).
     filament_id = nozzle_filament_of(config, filament_id);
-    return physical_extruder_for_filament(config.nozzle_diameter.values.size(), config.filament_diameter.values.size(),
-                                          config.filament_map.values, filament_id, config.filament_nozzle_assignment.values);
+    const size_t nozzle_count   = config.nozzle_diameter.values.size();
+    const size_t filament_count = config.filament_diameter.values.size();
+    // filament_map_decides_extruder, looked up only where it changes the answer.
+    const bool map_decides = filament_count <= nozzle_count && nozzle_count >= 2 &&
+                             (config.filament_map_mode.value == fmmManual || config.filament_map_mode.value == fmmNozzleManual) &&
+                             is_bambu_grouping_machine(config, nozzle_count);
+    return physical_extruder_for_filament(nozzle_count, filament_count, config.filament_map.values, filament_id,
+                                          config.filament_nozzle_assignment.values, map_decides);
+}
+
+bool filament_map_decides_extruder(const ConfigBase &config, size_t nozzle_count)
+{
+    if (nozzle_count < 2)
+        return false;
+    // A manual map is the user's and the slice's grouping keeps it (ToolOrdering reads Print::filament_map_input()), so the
+    // extruder the geometry is cut for and the one the grouping prints on agree. An automatic map is only known once the
+    // grouping ran, after the geometry was cut: such a plate keeps the rule it always had.
+    const ConfigOption *mode = config.option("filament_map_mode");
+    if (mode == nullptr || (mode->getInt() != int(fmmManual) && mode->getInt() != int(fmmNozzleManual)))
+        return false;
+    return is_bambu_grouping_machine(config, nozzle_count);
 }
 
 int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozzle_count, unsigned int filament_id)
@@ -624,7 +643,7 @@ int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozz
 }
 
 size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &fmap, unsigned int filament_id,
-                                      const std::vector<int> &assignment)
+                                      const std::vector<int> &assignment, bool map_decides)
 {
     if (filament_id == 0)
         return 0;
@@ -638,8 +657,11 @@ size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count
     // When the printer has at least as many nozzles as filaments, every filament owns a physical
     // extruder (a toolchanger such as the U1, or any printer without an AMS sharing one nozzle),
     // so the filament index already IS the physical extruder. Only when more filaments share
-    // fewer nozzles do we need filament_map.
-    if (filament_count <= nozzle_count)
+    // fewer nozzles do we need filament_map - and on a Bambu grouping machine (H2D / H2C / X2D) with a
+    // manual map (filament_map_decides_extruder): there every filament comes from the AMS and the map puts
+    // it on the left or right extruder, also on a plate of one or two filaments (2,1 prints filament 1 on
+    // the right).
+    if (filament_count <= nozzle_count && !map_decides)
         return direct < nozzle_count ? direct : 0;
     if (direct < fmap.size() && fmap[direct] >= 1 && size_t(fmap[direct]) <= nozzle_count)
         return size_t(fmap[direct] - 1);
