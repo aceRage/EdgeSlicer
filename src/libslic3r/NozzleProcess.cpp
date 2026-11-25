@@ -255,7 +255,8 @@ bool zero_width_is_line_width(const std::string &width_key)
 }
 } // namespace
 
-size_t nozzle_for_filament(const ConfigBase &config, unsigned int filament_id)
+// The extruder the filament map gives 1-based `filament_id` (nozzle_for_filament before the rack pins).
+static size_t mapped_nozzle_for_filament(const ConfigBase &config, unsigned int filament_id)
 {
     // A mixed filament prints through its components' nozzle (nozzle_filament_of, ToolSlots.hpp).
     filament_id = nozzle_filament_of(config, filament_id);
@@ -2022,6 +2023,13 @@ std::string nozzle_process_missing_error(const ConfigBase &config, size_t extrud
                             "%2% mm nozzles. Choose a process for %1% on the Process tab, or change %1%'s nozzle.")) %
             tool % n)
         .str();
+}
+
+size_t nozzle_for_filament(const ConfigBase &config, unsigned int filament_id)
+{
+    // Rack pins (R1/R2): on an automatic map a pinned filament prints on the extruder its pin needs, so it takes that extruder's
+    // process (its rack size's tool). The filament map everywhere else.
+    return rack_pin_extruder(config, filament_id, mapped_nozzle_for_filament(config, filament_id));
 }
 
 } // namespace Slic3r

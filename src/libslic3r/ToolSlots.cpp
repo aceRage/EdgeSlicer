@@ -201,6 +201,13 @@ size_t physical_extruder_of(const ConfigBase &config, unsigned int filament_id)
                                           ints_of(config, "filament_nozzle_assignment"), filament_map_decides_extruder(config, nozzles.size()));
 }
 
+// Rule P: the extruder a pinned filament's pin is read on (rack_pin_extruder over the saved map). physical_extruder_of
+// everywhere else, and for every filament without a pin or on a manual map.
+size_t pin_extruder_of(const ConfigBase &config, unsigned int filament_id)
+{
+    return rack_pin_extruder(config, filament_id, physical_extruder_of(config, filament_id));
+}
+
 // Per-nozzle process P9: extruder `e`'s rack text, the project's (extruder_rack_nozzle_override) when it sets one for that
 // extruder, else the printer's (extruder_rack_nozzle_diameter). Empty when neither declares a rack.
 std::string rack_text_of(const ConfigBase &config, size_t e)
@@ -500,7 +507,7 @@ double filament_rack_pin(const ConfigBase &config, unsigned int filament_id)
     // Per-nozzle process P9: a filament pinned to a rack slot prints with that slot's size.
     if (const int slot = filament_rack_slot_pin(config, filament_id); slot > 0) {
         const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
-        const size_t                               e     = physical_extruder_of(config, filament_id);
+        const size_t                               e     = pin_extruder_of(config, filament_id);
         if (e < racks.size() && size_t(slot) <= racks[e].size())
             return racks[e][size_t(slot - 1)].diameter;
     }
@@ -518,7 +525,8 @@ double nozzle_diameter_for_filament(const ConfigBase &config, unsigned int filam
     const std::vector<double> nozzles = effective_nozzle_diameters(config);
     if (nozzles.empty())
         return 0.;
-    const size_t extruder = std::min(physical_extruder_of(config, filament_id), nozzles.size() - 1);
+    // Rule P: a pinned filament on an automatic map is read on the extruder the grouping will put it on.
+    const size_t extruder = std::min(pin_extruder_of(config, filament_id), nozzles.size() - 1);
     const double own      = nozzles[extruder];
     // P9: the project's rack (extruder_rack_nozzle_override) over the printer's.
     const std::string rack = rack_text_of(config, extruder);
@@ -622,16 +630,24 @@ int pin_rack_nozzle_diameters(const PrintConfig &config, const std::vector<Multi
     // P9: filaments pinned to a rack slot print on that slot's nozzle, also in a rack of one size (each slot can carry its own
     // process, and keeping filaments on their own nozzles saves purging).
     const bool slot_pins = has_filament_rack_slot_pins(config);
-    if (!has_mixed_rack_diameters(config) && !slot_pins)
+    const bool mixed     = has_mixed_rack_diameters(config);
+    if (!mixed && !slot_pins)
         return 0;
-    int moved = 0;
+    const auto on_list = [&](unsigned int f) {
+        return f < filament_nozzle_map.size() && filament_nozzle_map[f] >= 0 && size_t(filament_nozzle_map[f]) < nozzle_list.size();
+    };
+    const auto size_of = [&nozzle_list](size_t n) {
+        double d = 0.;
+        return parse_positive_number(nozzle_list[n].diameter, d) ? d : 0.;
+    };
+    int                       moved = 0;
+    std::vector<unsigned int> movers; // size-pinned filaments to place below (rule S)
+    std::vector<bool>         held(nozzle_list.size(), false); // nozzles a size-pinned filament stays on
     for (unsigned int f : used_filaments) {
-        if (f >= filament_nozzle_map.size())
+        if (!on_list(f))
             continue;
-        const int current = filament_nozzle_map[f];
-        if (current < 0 || size_t(current) >= nozzle_list.size())
-            continue;
-        const MultiNozzleUtils::NozzleInfo &now  = nozzle_list[current];
+        const int                           current = filament_nozzle_map[f];
+        const MultiNozzleUtils::NozzleInfo &now     = nozzle_list[current];
         if (const int slot = slot_pins ? filament_rack_slot_pin(config, f + 1) : 0; slot > 0) {
             const int target = rack_slot_nozzle_index(config, nozzle_list, size_t(std::max(0, now.extruder_id)), slot);
             if (target >= 0) {
@@ -642,16 +658,27 @@ int pin_rack_nozzle_diameters(const PrintConfig &config, const std::vector<Multi
                 continue;
             }
         }
-        if (!has_mixed_rack_diameters(config))
+        if (!mixed)
             continue;
-        const double                        want = nozzle_diameter_for_filament(config, f + 1);
-        double                              have = 0.;
-        if (parse_positive_number(now.diameter, have) && same_nozzle_diameter(have, want))
+        const double want   = nozzle_diameter_for_filament(config, f + 1);
+        const bool   pinned = filament_rack_pin(config, f + 1) > 0.;
+        if (same_nozzle_diameter(size_of(size_t(current)), want)) {
+            // Rule S: a size-pinned filament on its size stays, unless a lower-numbered size-pinned filament stays on that
+            // same nozzle; then it looks for a free one below (and keeps this one when there is none).
+            if (pinned && held[size_t(current)])
+                movers.push_back(f);
+            else if (pinned)
+                held[size_t(current)] = true;
             continue;
+        }
+        if (pinned) {
+            movers.push_back(f);
+            continue;
+        }
+        // Not pinned (it wants its extruder's own size): the first nozzle of that size, as before.
         int same_type = -1, any = -1;
         for (size_t n = 0; n < nozzle_list.size(); ++n) {
-            double d = 0.;
-            if (nozzle_list[n].extruder_id != now.extruder_id || !parse_positive_number(nozzle_list[n].diameter, d) || !same_nozzle_diameter(d, want))
+            if (nozzle_list[n].extruder_id != now.extruder_id || !same_nozzle_diameter(size_of(n), want))
                 continue;
             if (any < 0)
                 any = int(n);
@@ -660,6 +687,35 @@ int pin_rack_nozzle_diameters(const PrintConfig &config, const std::vector<Multi
         }
         const int target = same_type >= 0 ? same_type : any;
         if (target >= 0) {
+            filament_nozzle_map[f] = target;
+            ++moved;
+        }
+    }
+    // Rule S (owner 2026-11-22): the grouping does not know sizes, so it can leave two filaments pinned to the 0.6 on one 0.6
+    // (they flush into each other on every change) while another 0.6 stands unused. A size-pinned filament goes to a nozzle
+    // of its size on its extruder that no other used filament is on: the same volume type first, then a free nozzle, then
+    // the lowest index. When all are taken it shares the first, as before. A mover not placed yet does not hold its nozzle.
+    for (size_t i = 0; i < movers.size(); ++i) {
+        const unsigned int                  f    = movers[i];
+        const MultiNozzleUtils::NozzleInfo &now  = nozzle_list[size_t(filament_nozzle_map[f])];
+        const double                        want = nozzle_diameter_for_filament(config, f + 1);
+        std::vector<bool>                   in_use(nozzle_list.size(), false);
+        for (unsigned int g : used_filaments)
+            if (g != f && on_list(g) && std::find(movers.begin() + i, movers.end(), g) == movers.end())
+                in_use[size_t(filament_nozzle_map[g])] = true;
+        int                               target = -1;
+        std::tuple<bool, bool, bool, int> best;
+        for (size_t n = 0; n < nozzle_list.size(); ++n) {
+            if (nozzle_list[n].extruder_id != now.extruder_id || !same_nozzle_diameter(size_of(n), want))
+                continue;
+            const std::tuple<bool, bool, bool, int> key(nozzle_list[n].volume_type != now.volume_type, bool(in_use[n]),
+                                                        int(n) != filament_nozzle_map[f], int(n));
+            if (target < 0 || key < best) {
+                target = int(n);
+                best   = key;
+            }
+        }
+        if (target >= 0 && target != filament_nozzle_map[f]) {
             filament_nozzle_map[f] = target;
             ++moved;
         }
@@ -713,6 +769,184 @@ bool rack_group_mixes_nozzle_diameters(const PrintConfig &config, const MultiNoz
     return false;
 }
 
+bool hand_set_filament_map(const ConfigBase &config)
+{
+    // R3: Manual and Nozzle Manual are maps the user set by hand (Print.cpp's reach checks and the live-AMS guard treat both as
+    // binding); Auto For Flush, Auto For Match and Auto For Quality are grouped by the engine. A config without the key: Manual.
+    const ConfigOption *mode = config.option("filament_map_mode");
+    return mode == nullptr || mode->getInt() == int(FilamentMapMode::fmmManual) || mode->getInt() == int(FilamentMapMode::fmmNozzleManual);
+}
+
+bool rack_pins_follow_grouping(const ConfigBase &config)
+{
+    // Two extruders (the grouping engine's limit) of which one shows rack slots (H2C), on an automatic map.
+    const size_t extruders = floats_of(config, "nozzle_diameter").size();
+    if (extruders != 2 || hand_set_filament_map(config))
+        return false;
+    for (size_t e = 0; e < extruders; ++e)
+        if (rack_slot_count(config, e) > 0)
+            return true;
+    return false;
+}
+
+bool has_used_rack_pins(const ConfigBase &config, const std::vector<unsigned int> &used_filaments)
+{
+    const std::vector<double> sizes = floats_of(config, "filament_rack_nozzle_diameter");
+    for (unsigned int f : used_filaments) {
+        const unsigned int id = nozzle_filament_of_impl(config, f + 1);
+        if (filament_rack_slot_pin(config, id) > 0 || (id >= 1 && id <= sizes.size() && sizes[id - 1] > 0.))
+            return true;
+    }
+    return false;
+}
+
+std::vector<bool> rack_pin_extruders(const ConfigBase &config, unsigned int filament_id)
+{
+    filament_id            = nozzle_filament_of_impl(config, filament_id);
+    const size_t extruders = floats_of(config, "nozzle_diameter").size();
+    if (filament_id == 0 || extruders == 0)
+        return {};
+    if (const int slot = filament_rack_slot_pin(config, filament_id); slot > 0) {
+        // A slot is a position of one extruder's rack: the lowest extruder that shows that slot (R2: not the saved map's).
+        std::vector<bool> out(extruders, false);
+        for (size_t e = 0; e < extruders; ++e)
+            if (rack_slot_count(config, e) >= size_t(slot)) {
+                out[e] = true;
+                break;
+            }
+        return out;
+    }
+    const std::vector<double> pins = floats_of(config, "filament_rack_nozzle_diameter");
+    const double              pin  = filament_id <= pins.size() ? pins[filament_id - 1] : 0.;
+    if (!(pin > 0.))
+        return {};
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    const std::vector<double>                  own   = effective_nozzle_diameters(config);
+    std::vector<bool>                          out(extruders, false);
+    for (size_t e = 0; e < extruders; ++e) {
+        if (e < racks.size() && !racks[e].empty())
+            out[e] = std::any_of(racks[e].begin(), racks[e].end(), [pin](const RackNozzle &n) { return same_nozzle_diameter(n.diameter, pin); });
+        else
+            out[e] = e < own.size() && same_nozzle_diameter(own[e], pin);
+    }
+    return out;
+}
+
+size_t rack_pin_extruder(const ConfigBase &config, unsigned int filament_id, size_t map_extruder)
+{
+    if (!rack_pins_follow_grouping(config))
+        return map_extruder;
+    // R2: the lowest extruder that can take the pin, whatever the saved map says (the only one for a FORCED pin; for a FREE
+    // pin every candidate has the pinned size, and the grouping picks among them).
+    const std::vector<bool> can = rack_pin_extruders(config, filament_id);
+    for (size_t e = 0; e < can.size(); ++e)
+        if (can[e])
+            return e;
+    return map_extruder; // no pin, or no extruder can take it: validate_rack_nozzle_diameters refuses the slice
+}
+
+std::string bar_rack_pin_extruders(const ConfigBase &config, const std::vector<unsigned int> &used_filaments,
+                                   std::vector<std::set<int>> &unprintable)
+{
+    if (!rack_pins_follow_grouping(config))
+        return {};
+    const size_t extruders = floats_of(config, "nozzle_diameter").size();
+    if (unprintable.size() < extruders)
+        unprintable.resize(extruders);
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    // The size 0-based `f` is pinned to; a slot pin reads it on its slot's extruder `e`. 0 when it has no pin.
+    const auto pin_size = [&](unsigned int f, size_t e) {
+        const unsigned int id = nozzle_filament_of_impl(config, f + 1);
+        if (const int slot = filament_rack_slot_pin(config, id); slot > 0)
+            return e < racks.size() && size_t(slot) <= racks[e].size() ? racks[e][size_t(slot - 1)].diameter : 0.;
+        const std::vector<double> pins = floats_of(config, "filament_rack_nozzle_diameter");
+        return id >= 1 && id <= pins.size() && pins[id - 1] > 0. ? pins[id - 1] : 0.;
+    };
+    // P: each pinned filament barred from the extruders that cannot take its pin.
+    // pinned[f]: (forced: exactly one extruder can take it, that extruder, the pinned size).
+    struct Pin
+    {
+        bool   forced;
+        size_t extruder;
+        double size;
+    };
+    std::map<unsigned int, Pin> pinned;
+    for (unsigned int f : used_filaments) {
+        const std::vector<bool> can = rack_pin_extruders(config, f + 1);
+        if (can.empty())
+            continue;
+        bool   any = false;
+        size_t candidates = 0, first = extruders;
+        for (size_t e = 0; e < extruders; ++e) {
+            if (e < can.size() && can[e]) {
+                any |= unprintable[e].count(int(f)) == 0;
+                ++candidates;
+                first = std::min(first, e);
+            } else
+                unprintable[e].insert(int(f));
+        }
+        if (!any) {
+            if (const int slot = filament_rack_slot_pin(config, f + 1); slot > 0)
+                return "Filament " + std::to_string(f + 1) + " is pinned to rack slot " + std::to_string(slot) +
+                       ", but no extruder with that slot can print it.";
+            return "Filament " + std::to_string(f + 1) + " is pinned to a " + format_diameter_to_str(filament_rack_pin(config, f + 1)) +
+                   " mm rack nozzle, but no extruder that has one can print it.";
+        }
+        pinned[f] = { candidates == 1, first, pin_size(f, first) };
+    }
+    // P2 (owner 2026-11-22): H2C firmware refuses a change between rack nozzles of two sizes during a print. An extruder that
+    // FORCED pins put on exactly one size d keeps every other used filament that would print there with another size off it
+    // (an unpinned one prints with the extruder's own size, a pinned one with its pinned size), unless that leaves the
+    // filament no extruder at all. R2: only forced pins set an extruder's size, so the saved map plays no part.
+    const std::vector<double> own = effective_nozzle_diameters(config);
+    for (size_t e = 0; e < extruders; ++e) {
+        std::vector<double> sizes;
+        for (const auto &[f, pin] : pinned)
+            if (pin.forced && pin.extruder == e && pin.size > 0. &&
+                std::none_of(sizes.begin(), sizes.end(), [&](double d) { return same_nozzle_diameter(d, pin.size); }))
+                sizes.push_back(pin.size);
+        if (sizes.size() != 1)
+            continue;
+        const double d = sizes.front();
+        for (unsigned int g : used_filaments) {
+            if (unprintable[e].count(int(g)) != 0)
+                continue;
+            const auto   it   = pinned.find(g);
+            const double size = it != pinned.end() ? it->second.size : (e < own.size() ? own[e] : 0.);
+            if (!(size > 0.) || same_nozzle_diameter(size, d))
+                continue;
+            bool elsewhere = false;
+            for (size_t o = 0; o < extruders; ++o)
+                elsewhere |= o != e && unprintable[o].count(int(g)) == 0;
+            if (elsewhere)
+                unprintable[e].insert(int(g));
+        }
+    }
+    return {};
+}
+
+std::vector<int> rack_pin_filament_map(const ConfigBase &config, const std::vector<unsigned int> &used_filaments, std::vector<int> map)
+{
+    // R1: a plate grouped on its own map (print by object) on an automatic map: every used filament the pin rules bar from its
+    // map extruder goes to the lowest extruder they leave it. One function, so the reach check, the G-code and the grouping
+    // read the same map.
+    if (!rack_pins_follow_grouping(config) || !has_used_rack_pins(config, used_filaments))
+        return map;
+    std::vector<std::set<int>> barred;
+    if (!bar_rack_pin_extruders(config, used_filaments, barred).empty())
+        return map; // the grouping refuses it
+    for (unsigned int f : used_filaments) {
+        if (f >= map.size() || map[f] < 1 || size_t(map[f]) > barred.size() || barred[size_t(map[f] - 1)].count(int(f)) == 0)
+            continue;
+        for (size_t e = 0; e < barred.size(); ++e)
+            if (barred[e].count(int(f)) == 0) {
+                map[f] = int(e) + 1;
+                break;
+            }
+    }
+    return map;
+}
+
 std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std::vector<unsigned int> &used_filaments)
 {
     const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
@@ -725,13 +959,35 @@ std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std:
             return "Extruder " + std::to_string(e + 1) + ": its nozzle diameter " + format_diameter_to_str(own) +
                    " mm is not one of its rack nozzle diameters.";
     }
+    const bool follow_grouping = rack_pins_follow_grouping(config);
+    // R4: a pin is never ignored silently, also on a hand-set map. Only on printers whose filaments are grouped onto nozzles
+    // (a rack somewhere, or Bambu's two-extruder machines), so a pin left over in a project for another printer does no harm.
+    const size_t nozzle_count = config.nozzle_diameter.values.size();
+    const bool   pins_matter  = std::any_of(racks.begin(), racks.end(), [](const std::vector<RackNozzle> &r) { return !r.empty(); }) ||
+                             (nozzle_count >= 2 && is_bambu_grouping_machine(config, nozzle_count));
     for (unsigned int f : used_filaments) {
         const double pin = filament_rack_pin(config, f + 1);
         if (pin <= 0.)
             continue;
-        const size_t e = physical_extruder_for_filament(config, f + 1);
-        if (e >= racks.size() || racks[e].empty())
+        const size_t saved = physical_extruder_for_filament(config, f + 1);
+        // Rule P: on an automatic map the grouping can put the filament on any extruder that has the size; none has it.
+        if (follow_grouping && filament_rack_slot_pin(config, f + 1) <= 0) {
+            const std::vector<bool> can = rack_pin_extruders(config, f + 1);
+            if (!can.empty() && std::none_of(can.begin(), can.end(), [](bool b) { return b; }))
+                return "Filament " + std::to_string(f + 1) + " asks for a " + format_diameter_to_str(pin) + " mm rack nozzle, but no extruder has one.";
+        }
+        const size_t e = rack_pin_extruder(config, f + 1, saved);
+        if (e >= racks.size() || racks[e].empty()) {
+            // R4: an extruder without a rack prints only its own nozzle size.
+            if (pins_matter && filament_rack_slot_pin(config, f + 1) <= 0 && e < nozzle_count &&
+                !same_nozzle_diameter(config.nozzle_diameter.get_at(e), pin)) {
+                const std::string name = nozzle_count == 2 && is_bambu_grouping_machine(config, 2) ? std::string(e == 0 ? "Left" : "Right") :
+                                                                                                     "T" + std::to_string(e + 1);
+                return "Filament " + std::to_string(f + 1) + " asks for a " + format_diameter_to_str(pin) + " mm rack nozzle, but the " + name +
+                       " extruder has none.";
+            }
             continue;
+        }
         const bool found = std::any_of(racks[e].begin(), racks[e].end(), [pin](const RackNozzle &n) { return same_nozzle_diameter(n.diameter, pin); });
         if (!found)
             return "Filament " + std::to_string(f + 1) + " asks for a " + format_diameter_to_str(pin) + " mm rack nozzle, but extruder " +
@@ -742,7 +998,7 @@ std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std:
         const int slot = filament_rack_slot_pin(config, f + 1);
         if (slot <= 0)
             continue;
-        const size_t e = physical_extruder_for_filament(config, f + 1);
+        const size_t e = rack_pin_extruder(config, f + 1, physical_extruder_for_filament(config, f + 1));
         if (e >= racks.size() || size_t(slot) > racks[e].size())
             return "Filament " + std::to_string(f + 1) + " is set to print on " + rack_slot_name(config, e, slot) + ", but that rack has " +
                    std::to_string(e < racks.size() ? racks[e].size() : 0) + " nozzles.";
@@ -901,7 +1157,7 @@ int filament_rack_slot(const ConfigBase &config, unsigned int filament_id)
 {
     filament_id = nozzle_filament_of_impl(config, filament_id);
     const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
-    const size_t                               e     = physical_extruder_of(config, filament_id);
+    const size_t                               e     = pin_extruder_of(config, filament_id);
     if (e >= racks.size() || rack_slot_count(config, e) == 0)
         return 0;
     if (const int pin = filament_rack_slot_pin(config, filament_id); pin > 0 && size_t(pin) <= racks[e].size())
