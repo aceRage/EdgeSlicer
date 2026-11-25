@@ -97,8 +97,11 @@ LineShow line_show(const ViewFilter &filter, const std::vector<std::string> &opt
     if (!filter.bambu())
         return line_mode <= filter.level ? LineShow::Shown : LineShow::Hidden;
 
-    // Bambu view. Our Developer lines never show (Developer mode itself turns the filter off).
-    if (line_mode == comDevelop)
+    // Bambu view. Our Developer lines are never part of it (support_air_filtration is Advanced in Bambu
+    // Studio but Developer here); with Developer mode on, one still shows as an exception (changed or
+    // revealed), like any line outside Bambu Studio's list. Without Developer mode it stays hidden.
+    const bool develop_line = line_mode == comDevelop;
+    if (develop_line && filter.level < comDevelop)
         return LineShow::Hidden;
 
     bool listed = false, exception = false;
@@ -112,7 +115,7 @@ LineShow line_show(const ViewFilter &filter, const std::vector<std::string> &opt
                  (filter.revealed != nullptr && filter.revealed->count(key) != 0))
             exception = true;
     }
-    if (listed)
+    if (listed && !develop_line)
         return LineShow::Shown;
     return exception ? LineShow::ShownNotInBambu : LineShow::Hidden;
 }

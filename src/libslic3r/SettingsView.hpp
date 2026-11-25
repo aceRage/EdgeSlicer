@@ -3,11 +3,13 @@
 
 // Settings views: which option lines the settings tabs show (tests/design_view_modes.md).
 //
-// The level (ConfigOptionMode, AppConfig "user_mode": simple / advanced / develop) stays what it always
-// was. The "Bambu" view is an orthogonal key filter (AppConfig "settings_view" = "bambu"): it shows the
-// options Bambu Studio shows with its Advanced switch on (Format/BambuUiKeys.cpp), on EdgeSlicer's own
-// pages, plus any option outside that list whose value differs from the system preset it inherits
-// from ("changed"), or that the user revealed from search. Developer mode wins over the view.
+// The level (ConfigOptionMode) is what it always was: Simple for Basic, Advanced for Advanced, and
+// Develop when Preferences > Developer mode is on (Advanced or Bambu view). The "Bambu" view is an
+// orthogonal key filter (AppConfig "settings_view" = "bambu"): it shows the options Bambu Studio shows
+// with its Advanced switch on (Format/BambuUiKeys.cpp), on EdgeSlicer's own pages, plus any option
+// outside that list whose value differs from the system preset it inherits from ("changed"), or that
+// the user revealed from search. The view applies in Developer mode too (owner, 2026-11-25): Developer
+// mode only raises the level, so our Developer lines show in Advanced, and in Bambu only as exceptions.
 //
 // This file is GUI-free: the GUI asks line_show() per option line and keeps the "changed" and
 // "revealed" sets; the tests exercise every rule here.
@@ -51,15 +53,15 @@ ViewChoiceConfig view_choice_config(ViewChoice choice);
 
 struct ViewFilter
 {
-    ConfigOptionMode level       = comSimple;             // user_mode
+    ConfigOptionMode level       = comSimple;             // effective level (user_mode + Developer mode)
     SettingsView     view        = SettingsView::Default; // settings_view
     bool             bbl_printer = false;                 // current printer is a Bambu Lab printer (design D15)
     // Base option keys (no "#index") shown in the Bambu view although Bambu Studio does not show them:
     const std::set<std::string> *changed  = nullptr; // differ from the system preset / overridden by the object
     const std::set<std::string> *revealed = nullptr; // revealed from search in this session
 
-    // The Bambu filter is in force: Bambu view and not Developer mode.
-    bool bambu() const { return view == SettingsView::Bambu && level != comDevelop; }
+    // The Bambu filter is in force (in Developer mode too).
+    bool bambu() const { return view == SettingsView::Bambu; }
 };
 
 enum class LineShow {
