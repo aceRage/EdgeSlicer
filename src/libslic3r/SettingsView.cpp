@@ -147,7 +147,7 @@ std::set<std::string> options_differing_from_defaults(const ConfigBase &config)
     for (const std::string &key : config.keys()) {
         const ConfigOptionDef *opt_def = def->get(key);
         const ConfigOption    *value   = config.option(key);
-        if (opt_def == nullptr || value == nullptr || opt_def->default_value == nullptr)
+        if (opt_def == nullptr || value == nullptr || !opt_def->default_value)
             continue;
         const ConfigOption *dflt = opt_def->default_value.get();
         if (value->type() != dflt->type())
