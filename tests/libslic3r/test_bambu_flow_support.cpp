@@ -547,3 +547,45 @@ TEST_CASE("H2D, left Standard and right High Flow: each filament slices its nozz
         }
     }
 }
+
+// Snapmaker #1173: resetting one flow type of an object setting keeps the override while another still differs.
+TEST_CASE("Flow-variant slots of an object setting are compared one by one", "[FlowVariant][Snap1173]")
+{
+    const ConfigOptionFloats process({ 200., 300. });
+
+    SECTION("a slot that still differs keeps the override")
+    {
+        // Standard was reset to the process value, High Flow is still the object's own.
+        const ConfigOptionFloats edited({ 200., 150. });
+        CHECK(flow_variant_slots_differ(&edited, &process, 2));
+    }
+    SECTION("every slot back at the process value drops it")
+    {
+        const ConfigOptionFloats edited({ 200., 300. });
+        CHECK_FALSE(flow_variant_slots_differ(&edited, &process, 2));
+    }
+    SECTION("a process list shorter than the slots reads its last value")
+    {
+        const ConfigOptionFloats short_process({ 200. });
+        const ConfigOptionFloats same({ 200., 200. });
+        const ConfigOptionFloats other({ 200., 150. });
+        CHECK_FALSE(flow_variant_slots_differ(&same, &short_process, 2));
+        CHECK(flow_variant_slots_differ(&other, &short_process, 2));
+    }
+    SECTION("slots past the flow types are not compared")
+    {
+        const ConfigOptionFloats edited({ 200., 300., 99. });
+        CHECK_FALSE(flow_variant_slots_differ(&edited, &process, 2));
+    }
+    SECTION("an edited list shorter than the flow types, a scalar or a missing option never keeps it")
+    {
+        const ConfigOptionFloats edited({ 150. });
+        const ConfigOptionFloat  scalar(150.);
+        const ConfigOptionFloats empty;
+        CHECK_FALSE(flow_variant_slots_differ(&edited, &process, 2));
+        CHECK_FALSE(flow_variant_slots_differ(&scalar, &process, 2));
+        CHECK_FALSE(flow_variant_slots_differ(nullptr, &process, 2));
+        CHECK_FALSE(flow_variant_slots_differ(&process, nullptr, 2));
+        CHECK_FALSE(flow_variant_slots_differ(&empty, &process, 2));
+    }
+}
