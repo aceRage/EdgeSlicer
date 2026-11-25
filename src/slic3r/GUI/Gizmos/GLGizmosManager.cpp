@@ -822,7 +822,10 @@ bool GLGizmosManager::gizmos_toolbar_on_mouse(const wxMouseEvent &mouse_event) {
                 GLGizmoBase *gizmo_emboss = m_gizmos[Emboss].get();
                 dynamic_cast<GLGizmoEmboss *>(gizmo_emboss)->on_shortcut_key();
             } else {
-                open_gizmo(gizmo);
+                // Paint Split asks before a click drops its selection (D13).
+                auto *paint_split = m_current == PaintSplit ? dynamic_cast<GLGizmoPaintSplit *>(m_gizmos[PaintSplit].get()) : nullptr;
+                if (paint_split == nullptr || !paint_split->defer_close([this, gizmo]() { open_gizmo(gizmo); }))
+                    open_gizmo(gizmo);
             }
             return true;
         }
@@ -992,6 +995,9 @@ bool GLGizmosManager::on_char(wxKeyEvent& evt)
             if (m_current != Undefined) {
                 if ((m_current == Measure || m_current == Assembly) && gizmo_event(SLAGizmoEventType::Escape)) {
                     // do nothing
+                } else if (m_current == PaintSplit &&
+                           dynamic_cast<GLGizmoPaintSplit *>(m_gizmos[PaintSplit].get())->defer_close([this]() { reset_all_states(); })) {
+                    // asked "Discard?" first (D13)
                 } else
                 //if ((m_current != SlaSupports) || !gizmo_event(SLAGizmoEventType::DiscardChanges))
                     reset_all_states();

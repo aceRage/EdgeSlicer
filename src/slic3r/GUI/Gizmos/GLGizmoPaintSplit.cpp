@@ -113,14 +113,8 @@ bool GLGizmoPaintSplit::has_selection() const
 
 void GLGizmoPaintSplit::on_set_state()
 {
-    const bool turning_off = get_state() == Off && m_was_on;
-    if (turning_off && !m_close_confirmed && has_selection() && on_is_activable() && m_c->selection_info() &&
-        m_c->selection_info()->model_object() != nullptr && !m_parent.get_gizmos_manager().is_serializing()) {
-        // D13: the selection lives only in the gizmo. Refuse to close for now and ask.
-        m_state = On;
-        ask_discard_then_close();
-        return;
-    }
+    // Never refuses to close: programmatic closes (undo, object replaced or deleted, a repair) must
+    // happen at once. The user's own closes (toolbar, Esc) ask first through defer_close().
     if (get_state() == On && !m_was_on) {
         // A fresh session: an undo that re-opens the gizmo loads its mask right after this (on_load).
         m_committed.clear();
@@ -133,16 +127,23 @@ void GLGizmoPaintSplit::on_set_state()
         m_close_confirmed = false;
 }
 
-void GLGizmoPaintSplit::ask_discard_then_close()
+bool GLGizmoPaintSplit::defer_close(std::function<void()> close)
 {
-    wxGetApp().CallAfter([this]() {
+    if (get_state() != On || !has_selection())
+        return false;
+    if (m_close_prompt_pending)
+        return true; // one question at a time
+    m_close_prompt_pending = true;
+    wxGetApp().CallAfter([this, close]() {
         MessageDialog dlg(wxGetApp().mainframe, _L("Discard the Paint Split selection?"), _L("Paint Split"),
                           wxICON_QUESTION | wxYES | wxNO);
-        if (dlg.ShowModal() == wxID_YES) {
-            m_close_confirmed = true;
-            m_parent.reset_all_gizmos();
-        }
+        const bool yes         = dlg.ShowModal() == wxID_YES;
+        m_close_prompt_pending = false;
+        // The gizmo may have been closed meanwhile (undo, the object removed): then there is nothing to do.
+        if (yes && get_state() == On)
+            close();
     });
+    return true;
 }
 
 void GLGizmoPaintSplit::on_save(cereal::BinaryOutputArchive &ar) const

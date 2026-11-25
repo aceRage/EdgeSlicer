@@ -13,6 +13,7 @@
 
 #include "slic3r/GUI/GLModel.hpp"
 
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -29,6 +30,9 @@ public:
 
     // Whether any part has selected surface.
     bool has_selection() const;
+    // D13: a close the USER asked for (toolbar button, Esc). With a selection this asks "Discard?" and runs
+    // `close` on Yes, returning true (the caller does nothing now); without one it returns false.
+    bool defer_close(std::function<void()> close);
 
 protected:
     void on_set_state() override;
@@ -63,7 +67,7 @@ private:
     void pick(int mesh_id, size_t facet, const Vec3f &hit, bool clear);
     void clear_selection();
     void apply();
-    void ask_discard_then_close();
+
 
     // The preview: the selection's region, the fitted planes and the tint, rebuilt when anything changes.
     void refresh_preview();
@@ -96,6 +100,7 @@ private:
     bool  m_cut_only_painted_part{ false };
 
     bool  m_close_confirmed{ false };
+    bool  m_close_prompt_pending{ false };
     bool  m_was_on{ false };
 
     // Preview state.
