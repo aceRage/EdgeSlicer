@@ -607,6 +607,10 @@ public:
     SupportLayer*   get_support_layer_at_printz(coordf_t print_z, coordf_t epsilon);
     SupportLayer*   add_support_layer(int id, int interface_id, coordf_t height, coordf_t print_z);
     SupportLayerPtrs::iterator insert_support_layer(SupportLayerPtrs::iterator pos, size_t id, size_t interface_id, coordf_t height, coordf_t print_z, coordf_t slice_z);
+    // A support layer of this object that the object does not hold: a per-object prime tower keeps its tower-only layers
+    // in its WipeTowerData (virtual_support_layers) and frees them with delete_detached_support_layer().
+    SupportLayer*   new_detached_support_layer(size_t id, size_t interface_id, coordf_t height, coordf_t print_z, coordf_t slice_z);
+    static void     delete_detached_support_layer(SupportLayer *layer);
 
     // Initialize the layer_height_profile from the model_object's layer_height_profile, from model_object's layer height table, or from slicing parameters.
     // Returns true, if the layer_height_profile was changed.
@@ -1192,10 +1196,24 @@ struct WipeTowerData
         Polygon bottom;
     };
     std::optional<WipeTowerMeshData>                      wipe_tower_mesh_data;
+    // The tower-only layers of a per-object prime tower (a tower layer that prints neither object nor support, between
+    // the raft and the object), sorted by print_z. They belong to this tower alone: GCode::collect_layers_to_print(object,
+    // warn, tower) merges them into that copy's layers only. The plate tower leaves this empty and inserts its
+    // tower-only layers into the first object's support layers, as before. Owned here, freed by clear().
+    SupportLayerPtrs                                      virtual_support_layers;
 
     void construct_mesh(float width, float depth, float height, float brim_width, bool is_rib_wipe_tower, float rib_width, float rib_length, bool fillet_wall, float cone_angle = 0.f);
 
+    ~WipeTowerData() { clear_virtual_support_layers(); }
+
+    void clear_virtual_support_layers() {
+        for (SupportLayer *layer : virtual_support_layers)
+            PrintObject::delete_detached_support_layer(layer);
+        virtual_support_layers.clear();
+    }
+
     void clear() {
+        clear_virtual_support_layers();
         priming.reset(nullptr);
         tool_changes.clear();
         local_z_tool_changes.clear();
@@ -1220,6 +1238,7 @@ private:
 	// Only allow the WipeTowerData to be instantiated internally by Print, 
 	// as this WipeTowerData shares reference to Print::m_tool_ordering.
 	friend class Print;
+	friend struct WipeTowerDataTestAccess;
 	WipeTowerData(ToolOrdering &tool_ordering) : tool_ordering(tool_ordering) { clear(); }
 	WipeTowerData(const WipeTowerData & /* rhs */) = delete;
 	WipeTowerData &operator=(const WipeTowerData & /* rhs */) = delete;
@@ -1647,7 +1666,9 @@ public:
     // Re-run clearance with current instance / tower / z_offset / toolhead values and
     // copy the matching TCR into wipe_tower_data().final_purge. Safe when the tower
     // step was skipped (N2: drag object or tower, change clearance, change z_offset).
-    void                        select_final_purge_variant();
+    void                        select_final_purge_variant() { this->select_final_purge_variant(m_wipe_tower_data); }
+    // The same for the plate tower generated into data (_make_wipe_tower(data, nullptr, pos)).
+    void                        select_final_purge_variant(WipeTowerData &data);
     const ToolOrdering& 		tool_ordering() const { return m_tool_ordering; }
     // Orca/BambuStudio: the 0-based physical filaments the first layer prints with (first_layer = true), or the
     // whole print (false). Set when the skirt and brim are made.
@@ -1779,7 +1800,16 @@ private:
     // (it used to run in GCode::_do_export), then the per-copy plan (m_by_object_plan).
     void                group_print_by_object();
     void                plan_print_by_object();
-    void                _make_wipe_tower();
+    // Generate a prime tower into data, its left front corner at pos (mm, plate coordinates as wipe_tower_x / y).
+    // - inst == nullptr: the plate tower. process() calls it with m_wipe_tower_data and the plate's wipe_tower_x / y;
+    //   it plans from the plate's tool ordering, inserts the tower-only layers into the first object's support layers,
+    //   and sets up the fake tower and the final purge choice, as before.
+    // - inst != nullptr: a tower for that printed copy alone (per-object prime towers). It plans from the copy's ordering
+    //   in the by-object plan, keeps its tower-only layers in data.virtual_support_layers, and leaves the plate's fake
+    //   tower and final purge alone. Nothing calls it this way yet.
+    void                _make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, const Vec2d &pos);
+    // The plate tower's position, the left front corner (wipe_tower_x / wipe_tower_y of this plate).
+    Vec2d               plate_wipe_tower_position() const;
     void                finalize_first_layer_convex_hull();
 
     static void append_model_object_extruders(const ModelObject &mo, std::vector<unsigned int> &extruders);
@@ -1898,6 +1928,8 @@ private:
     friend class GCode;
     // Allow PrintObject to access m_mutex and m_cancel_callback.
     friend class PrintObject;
+    // Tests of _make_wipe_tower(data, inst, pos) (tests/fff_print/test_wipe_tower_data.cpp).
+    friend struct WipeTowerDataTestAccess;
 
 public:
     //BBS: this was a print config and now seems to be useless so we move it to here

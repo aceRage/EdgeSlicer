@@ -1518,9 +1518,19 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
                        Vec3d                                  plate_origin,
                        const std::vector<std::vector<float>>& wiping_matrix,
                        size_t                                 initial_tool)
+    : WipeTower2(config, default_region_config, Vec2d(config.wipe_tower_x.get_at(plate_idx), config.wipe_tower_y.get_at(plate_idx)),
+                 plate_origin, wiping_matrix, initial_tool)
+{}
+
+WipeTower2::WipeTower2(const PrintConfig&                     config,
+                       const PrintRegionConfig&               default_region_config,
+                       const Vec2d                           &wipe_tower_pos,
+                       Vec3d                                  plate_origin,
+                       const std::vector<std::vector<float>>& wiping_matrix,
+                       size_t                                 initial_tool)
     : m_semm(config.single_extruder_multi_material.value)
     , m_enable_filament_ramming(config.enable_filament_ramming.value)
-    , m_wipe_tower_pos(config.wipe_tower_x.get_at(plate_idx), config.wipe_tower_y.get_at(plate_idx))
+    , m_wipe_tower_pos(wipe_tower_pos.x(), wipe_tower_pos.y())
     , m_wipe_tower_width(float(config.prime_tower_width))
     , m_wipe_tower_rotation_angle(float(config.wipe_tower_rotation_angle))
     , m_wipe_tower_brim_width(float(config.prime_tower_brim_width))
