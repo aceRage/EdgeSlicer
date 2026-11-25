@@ -2282,8 +2282,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionIntsNullable,        filament_flush_temp_fast))  // prime_volume_mode Fast; 0 = range high
     ((ConfigOptionFloatsNullable,      filament_flush_volumetric_speed))  // 0 = use filament_max_volumetric_speed
     ((ConfigOptionFloatsNullable,      filament_cooling_before_tower))  // °C below the print temperature
-    // BBS 2.9.2 P3C: idle-nozzle floor in C during pre-cooling (negative = no extra floor).
-    ((ConfigOptionFloats,              min_temperature_when_ec))
     ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
     ((ConfigOptionInts,                filament_pre_cooling_temperature))  // BBS: extruder-change pre-cool target, 0 = off
     // BBS 2.9.1: the tower's nozzle-change ramming (WipeTower::ramming): length rammed by the outgoing filament
@@ -2559,10 +2557,20 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,               enable_tower_interface_cooldown_during_tower))
 )
 
+// BBS 2.9.2 P3C idle-nozzle floor, a class of its own: GCodeConfig and PrintConfig are at
+// MSVC's limit of macro nesting (fatal error C1009 with one option more). Same split as
+// PrintTowerConfig above.
+PRINT_CONFIG_CLASS_DEFINE(
+    PrintIdleFloorConfig,
+
+    // BBS 2.9.2 P3C: idle-nozzle floor in C during pre-cooling (negative = no extra floor).
+    ((ConfigOptionFloats,              min_temperature_when_ec))
+)
+
 // This object is mapped to Perl as Slic3r::Config::Print.
 PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     PrintConfig,
-    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig),
+    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintIdleFloorConfig),
 
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))
