@@ -299,6 +299,13 @@ public:
     // reorder_extruders_for_minimum_flush_volume(); this groups it from the plate's own filament
     // map (manual mode) for the given per-layer filament lists. See GCode::_do_export.
     static MultiNozzleUtils::LayeredNozzleGroupResult group_by_plate_map(Print *print, const std::vector<std::vector<unsigned int>> &layer_filaments);
+    // A print-by-object plate on a one-extruder printer whose rack hotends count as extruders (H3C,
+    // handle_hotend_as_extruder) skips that grouping too, and group_by_plate_map does not cover it. This
+    // groups it as the by-layer pass does (the plate's grouping mode, the unprintable filaments, the rack
+    // nozzle size check) from the per-layer filament lists of the objects in print order, stores the result
+    // on the Print and writes the filament map into its configs, as Bambu Studio's ByObjectPrintData::build
+    // does for a plate without a dynamic nozzle map. A null result is stored when nothing is printed.
+    static void group_print_by_object_hotends(Print *print, const std::vector<std::vector<unsigned int>> &layer_filaments);
 
     // True when this extruder (as it appears in LayerTools::extruders - this already
     // covers support / support-interface extruders and anything the wipe tower touches

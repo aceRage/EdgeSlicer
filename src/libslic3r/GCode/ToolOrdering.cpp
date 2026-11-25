@@ -1970,6 +1970,52 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::group_by_plate_map(Prin
                                          std::vector<std::set<int>>(extruders), std::map<int, std::set<NozzleVolumeType>>());
 }
 
+// Bambu Studio 2.9.1 ByObjectPrintData::build (ByObjectPrintData.cpp:86-208, the branch without a dynamic
+// nozzle map, which is the H3C's: one extruder): the whole plate's filaments in object print order, grouped
+// by the plate's mode before the per-object tool orderings print it. The mode, the unprintable filaments,
+// the rack size check and the config writes are the by-layer pass's (reorder_extruders_for_minimum_flush_volume),
+// so a by-object plate is grouped as the same plate printed by layer is.
+void ToolOrdering::group_print_by_object_hotends(Print *print, const std::vector<std::vector<unsigned int>> &layer_filaments)
+{
+    if (print == nullptr)
+        return;
+    std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> stored;
+    const std::vector<unsigned int> used_filaments = collect_sorted_used_filaments(layer_filaments);
+    if (!used_filaments.empty()) {
+        const PrintConfig    &print_config = print->config();
+        const FilamentMapMode config_mode  = print_config.filament_map_mode.value;
+        const bool            manual       = config_mode == FilamentMapMode::fmmManual || config_mode == FilamentMapMode::fmmNozzleManual;
+        const FilamentMapMode group_mode   = (!manual && print->get_ultra_force_match_mode()) ? FilamentMapMode::fmmAutoForMatch : config_mode;
+        auto grouping = get_recommended_filament_maps(print, layer_filaments, group_mode, print->get_physical_unprintable_filaments(used_filaments),
+                                                      print->get_geometric_unprintable_filaments(), print->get_filament_unprintable_flow(used_filaments));
+        if (!grouping.get_used_filaments().empty()) {
+            // Per-nozzle process P4: the geometry was cut for each filament's rack nozzle size.
+            if (const std::string mismatch = check_rack_nozzle_diameters(print_config, grouping); !mismatch.empty())
+                throw Slic3r::SlicingError(mismatch);
+            stored = std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(grouping);
+        }
+    }
+    // Always replace: a result from an earlier by-layer slice of this Print must not describe this one.
+    print->set_nozzle_group_result(stored);
+    if (!stored)
+        return;
+    // The by-layer pass's writes: the 1-based filament -> extruder map into the print config (the G-code) and the
+    // full config (the "; filament_map" header line), then the flow type of each filament's nozzle.
+    const std::vector<int> em = stored->get_extruder_map(false);
+    if (em.empty())
+        return;
+    const_cast<PrintConfig &>(print->config()).filament_map.values = em;
+    auto &full_config = const_cast<DynamicPrintConfig &>(print->full_print_config());
+    if (auto *opt = full_config.option<ConfigOptionInts>("filament_map", true))
+        opt->values = em;
+    if (BambuFlowSupport::apply_filament_volume_types_from_map(const_cast<PrintConfig &>(print->config())))
+        full_config.option<ConfigOptionEnumsGeneric>("filament_volume_type", true)->values = print->config().filament_volume_type.values;
+    std::string map_str;
+    for (int n : stored->get_nozzle_map())
+        map_str += std::to_string(n) + " ";
+    BOOST_LOG_TRIVIAL(warning) << "[H3C] print-by-object hotend grouping: filament->nozzle " << map_str;
+}
+
 MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filament_maps(
     Print*                                            print,
     const std::vector<std::vector<unsigned int>>&     layer_filaments,
