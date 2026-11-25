@@ -21,6 +21,7 @@
 
 #include <float.h>
 #include <assert.h>
+#include <mutex>
 #include <regex>
 #include <cctype>
 #include <cerrno>
@@ -841,6 +842,15 @@ const std::vector<std::pair<GCodeProcessor::EProducer, std::string>> GCodeProces
 
 unsigned int GCodeProcessor::s_result_id = 0;
 
+// Orca #17540: results can be reset on several threads at once, as the layer cooling resets its own processor
+// during an export.
+static unsigned int next_result_id(unsigned int &last_id)
+{
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    return ++ last_id;
+}
+
 bool GCodeProcessor::contains_reserved_tag(const std::string& gcode, std::string& found_tag)
 {
     bool ret = false;
@@ -1459,7 +1469,7 @@ void GCodeProcessor::reset()
     m_used_filaments.reset();
 
     m_result.reset();
-    m_result.id = ++s_result_id;
+    m_result.id = next_result_id(s_result_id);
 
     m_last_default_color_id = 0;
 
@@ -1545,7 +1555,7 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
 
     // process gcode
     m_result.filename = filename;
-    m_result.id = ++s_result_id;
+    m_result.id = next_result_id(s_result_id);
     // 1st move must be a dummy move
     m_result.moves.emplace_back(GCodeProcessorResult::MoveVertex());
     size_t parse_line_callback_cntr = 10000;
@@ -1573,7 +1583,7 @@ void GCodeProcessor::initialize(const std::string& filename)
 
     // process gcode
     m_result.filename = filename;
-    m_result.id = ++s_result_id;
+    m_result.id = next_result_id(s_result_id);
     // 1st move must be a dummy move
     m_result.moves.emplace_back(GCodeProcessorResult::MoveVertex());
 }
@@ -1641,6 +1651,12 @@ void GCodeProcessor::finalize(bool post_process)
 
     if (post_process)
         run_post_process();
+}
+
+float GCodeProcessor::get_planning_time(PrintEstimatedStatistics::ETimeMode mode) const
+{
+    return (mode < PrintEstimatedStatistics::ETimeMode::Count) ?
+        float(m_time_processor.machines[static_cast<size_t>(mode)].planning_time) : 0.0f;
 }
 
 float GCodeProcessor::get_time(PrintEstimatedStatistics::ETimeMode mode) const
