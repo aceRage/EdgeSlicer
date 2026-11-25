@@ -2365,7 +2365,8 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
             to_piece            = inside >= 0. && (piece_inside ? inside : 1. - inside) > 0.5;
         }
         (to_piece ? rep.other_parts_to_piece : rep.other_parts_to_body)++;
-        add_side(whole, volume, to_piece, to_piece ? "_A" : "_B");
+        // Not cut, so not renamed: a part keeps its name through any number of paint splits.
+        add_side(whole, volume, to_piece, std::string());
     }
 
     ModelObjectPtrs cut_object_ptrs;

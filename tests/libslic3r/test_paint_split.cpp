@@ -530,6 +530,15 @@ TEST_CASE("Paint split picking: pick colour takes every island, pick segment one
     const PaintSplitRegion rs = paint_split_region(sp, segment);
     REQUIRE(rs.error == PaintSplitError::None);
     CHECK(rs.num_components() == 1);
+
+    // What the gizmo does on a click: the state under the hit, then the segment from the hit itself.
+    const Vec3i32& t   = sp.indices[seed_px];
+    const Vec3f    hit = (sp.vertices[t[0]] + sp.vertices[t[1]] + sp.vertices[t[2]]) / 3.f;
+    CHECK(paint_split_state_at(tm, data, seed_px, hit) == EnforcerBlockerType::Extruder2);
+    const auto from_hit = paint_split_mask_from_paint(tm, data, EnforcerBlockerType::Extruder2, seed_px, &hit);
+    CHECK_THAT(paint_split_mask_area(tm, from_hit), WithinRel(area_px, 1e-6));
+    // The unpainted state is pickable too (state NONE: here nothing is unpainted).
+    CHECK(paint_split_mask_area(tm, paint_split_mask_from_paint(tm, data, EnforcerBlockerType::NONE)) < 1e-9);
 }
 
 // ------------------------------------------------------------------------------------------- 12 Cut path

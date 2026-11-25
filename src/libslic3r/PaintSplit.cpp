@@ -701,7 +701,7 @@ double paint_split_inside_fraction(const indexed_triangle_set& mesh, const index
 
 TriangleSelector::TriangleSplittingData paint_split_mask_from_paint(const TriangleMesh& mesh,
                                                                     const TriangleSelector::TriangleSplittingData& paint,
-                                                                    EnforcerBlockerType state, int seed_facet)
+                                                                    EnforcerBlockerType state, int seed_facet, const Vec3f* hit_in)
 {
     TriangleSelector sel(mesh);
     sel.deserialize(paint, /*needs_reset=*/true);
@@ -711,8 +711,8 @@ TriangleSelector::TriangleSplittingData paint_split_mask_from_paint(const Triang
         // over that state (no crease stops), recoloured to a scratch state.
         std::vector<int>           src;
         const indexed_triangle_set leaves = sel.get_facets_strict(state, &src);
-        Vec3f                      hit    = Vec3f::Zero();
-        bool                       found  = false;
+        Vec3f                      hit    = hit_in != nullptr ? *hit_in : Vec3f::Zero();
+        bool                       found  = hit_in != nullptr;
         for (size_t i = 0; i < leaves.indices.size() && !found; ++i)
             if (src.size() > i && src[i] == seed_facet) {
                 const Vec3i32& t = leaves.indices[i];
@@ -734,6 +734,44 @@ TriangleSelector::TriangleSplittingData paint_split_mask_from_paint(const Triang
     sel.remap_triangle_state(map);
     sel.garbage_collect();
     return sel.serialize();
+}
+
+EnforcerBlockerType paint_split_state_at(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& paint,
+                                         int facet, const Vec3f& hit)
+{
+    if (facet < 0 || size_t(facet) >= mesh.its.indices.size())
+        return EnforcerBlockerType::NONE;
+    TriangleSelector sel(mesh);
+    sel.deserialize(paint, true);
+    // Every state's leaves on this facet; the one whose triangle holds the hit (closest when none does exactly).
+    EnforcerBlockerType best_state = EnforcerBlockerType::NONE;
+    double              best       = std::numeric_limits<double>::max();
+    const Vec3d         p          = hit.cast<double>();
+    for (size_t s = 0; s < paint.used_states.size() || s == 0; ++s) {
+        if (s > 0 && !paint.used_states[s])
+            continue;
+        std::vector<int>           src;
+        const indexed_triangle_set leaves = sel.get_facets_strict(EnforcerBlockerType(s), &src);
+        for (size_t i = 0; i < leaves.indices.size(); ++i) {
+            if (i >= src.size() || src[i] != facet)
+                continue;
+            const Vec3i32& t = leaves.indices[i];
+            const Vec3d    a = leaves.vertices[t[0]].cast<double>(), b = leaves.vertices[t[1]].cast<double>(),
+                        c = leaves.vertices[t[2]].cast<double>();
+            // Distance from p to the triangle, measured in its plane (p lies on the facet).
+            const Vec3d n  = (b - a).cross(c - a);
+            const double nn = n.squaredNorm();
+            if (nn <= 0.)
+                continue;
+            const double w0 = (b - p).cross(c - p).dot(n) / nn, w1 = (c - p).cross(a - p).dot(n) / nn, w2 = 1. - w0 - w1;
+            const double out = std::max({ 0., -w0, -w1, -w2 });
+            if (out < best) {
+                best       = out;
+                best_state = EnforcerBlockerType(s);
+            }
+        }
+    }
+    return best_state;
 }
 
 double paint_split_mask_area(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& mask)

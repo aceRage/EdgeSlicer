@@ -211,10 +211,15 @@ double paint_split_inside_fraction(const indexed_triangle_set& mesh, const index
 
 // Pick colour: every facet (and sub-facet) of `state` in `paint` becomes selected in the returned mask.
 // Pick segment: with `seed_facet` >= 0 only the region of that state connected (across edges) to the seed.
-// The mask is a one-state TriangleSplittingData against the same mesh.
+// The mask is a one-state TriangleSplittingData against the same mesh. `hit` (mesh coordinates, on the seed
+// facet) picks the sub-facet the user clicked; without it the first sub-facet of `state` on the seed is used.
 TriangleSelector::TriangleSplittingData paint_split_mask_from_paint(const TriangleMesh& mesh,
                                                                     const TriangleSelector::TriangleSplittingData& paint,
-                                                                    EnforcerBlockerType state, int seed_facet = -1);
+                                                                    EnforcerBlockerType state, int seed_facet = -1,
+                                                                    const Vec3f* hit = nullptr);
+// The painted state under `hit` (mesh coordinates) on `facet`: NONE where the facet is unpainted there.
+EnforcerBlockerType paint_split_state_at(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& paint,
+                                         int facet, const Vec3f& hit);
 // The selected area of a one-state mask on `mesh` (mesh units squared).
 double paint_split_mask_area(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& mask);
 
