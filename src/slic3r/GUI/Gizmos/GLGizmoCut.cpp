@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <optional>
 #include <cmath>
 
 #include "slic3r/GUI/GUI_App.hpp"
@@ -505,9 +506,20 @@ bool GLGizmoCut3D::on_mouse(const wxMouseEvent &mouse_event)
             // (GLShaderProgram::set_uniform is a no-op for an unknown name). Nothing the
             // classification does could reach those pixels.
             // Check the internal part raycasters.
-            if (! m_part_selection.valid())
+            // Orca #17200: a right click on empty space must not build the cut parts, which changes the preview
+            // and disables "Cut to parts" and Reset.
+            const bool had_part_selection = m_part_selection.valid();
+            if (! had_part_selection) {
+                if (! is_mouse_over_selected_object(mouse_pos))
+                    return true;
                 process_contours();
-            m_part_selection.toggle_selection(mouse_pos);
+            }
+            if (! m_part_selection.toggle_selection(mouse_pos)) {
+                // The click hit the object but none of its cut parts: leave contour cutting as it was.
+                if (! had_part_selection)
+                    reset_cut_by_contours();
+                return true;
+            }
             check_and_update_connectors_state(); // after a contour is deactivated, its connectors are inside the object
             return true;
         }
@@ -524,6 +536,24 @@ bool GLGizmoCut3D::on_mouse(const wxMouseEvent &mouse_event)
     else if (pending_right_up && mouse_event.RightUp()) {
         pending_right_up = false;
         return true;
+    }
+    return false;
+}
+
+// Orca #17200: whether the mouse is over the object being cut, the cut plane ignored. Only tells whether building
+// the cut parts for a right click is worth it.
+bool GLGizmoCut3D::is_mouse_over_selected_object(const Vec2d& mouse_pos) const
+{
+    const Selection& selection = m_parent.get_selection();
+    const Camera&    camera    = wxGetApp().plater()->get_camera();
+    Vec3f position, normal;
+    for (unsigned int id : selection.get_volume_idxs()) {
+        const GLVolume* volume = selection.get_volume(id);
+        // Without the original raycaster the cut-part hit test decides.
+        if (volume == nullptr || volume->mesh_raycaster == nullptr)
+            return true;
+        if (volume->mesh_raycaster->closest_hit(mouse_pos, volume->world_matrix(), camera, position, normal))
+            return true;
     }
     return false;
 }
@@ -6980,7 +7010,7 @@ std::vector<Cut::Part> GLGizmoCut3D::PartSelection::get_cut_parts()
 }
 
 
-void GLGizmoCut3D::PartSelection::toggle_selection(const Vec2d& mouse_pos)
+bool GLGizmoCut3D::PartSelection::toggle_selection(const Vec2d& mouse_pos)
 {
     // FIXME: Cache the transforms.
     const Camera& camera     = wxGetApp().plater()->get_camera();
@@ -7016,7 +7046,9 @@ void GLGizmoCut3D::PartSelection::toggle_selection(const Vec2d& mouse_pos)
             }
             ++cont_id;
         }
+        return true;
     }
+    return false;
 }
 
 void GLGizmoCut3D::PartSelection::turn_over_selection()
@@ -9038,10 +9070,17 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
 
             ImGui::SameLine(1.5f * m_control_width);
 
-            m_imgui->disabled_begin(is_cut_plane_init && !has_connectors);
+            // Orca #17200: Reset also clears the upper/lower assignment of the cut parts, so it stays available
+            // while there is one.
+            m_imgui->disabled_begin(is_cut_plane_init && !has_connectors && !m_part_selection.valid());
                 act_name = _u8L("Reset cut");
-                if (m_imgui->button(wxString::FromUTF8(act_name), _L("Reset cutting plane and remove connectors"))) {
-                    Plater::TakeSnapshot snapshot(wxGetApp().plater(), act_name, UndoRedo::SnapshotType::GizmoAction);
+                if (m_imgui->button(wxString::FromUTF8(act_name),
+                                    // TRN: Part assignments are the upper/lower cut groups changed by right-clicking parts.
+                                    _L("Reset the cutting plane, remove connectors, and clear part assignments."))) {
+                    // The part assignment is not in the undo snapshots, so clearing it alone takes none.
+                    std::optional<Plater::TakeSnapshot> snapshot;
+                    if (!is_cut_plane_init || has_connectors)
+                        snapshot.emplace(wxGetApp().plater(), act_name, UndoRedo::SnapshotType::GizmoAction);
                     reset_cut_plane();
                     reset_connectors();
                     m_curved_sheet.reset();

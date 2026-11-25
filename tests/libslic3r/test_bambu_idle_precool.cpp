@@ -634,7 +634,12 @@ TEST_CASE("H2C: the change template's temperature compensation uses the rates of
     for (const auto &[map, ratio] : std::vector<std::pair<const char *, double>>{ { "2,2,2", 13.3 / 3.4 }, { "1,1,1", 3.5 / 1.6 } }) {
         DYNAMIC_SECTION("filament_map " << map)
         {
-            const DynamicPrintConfig cfg = machine_config(H2C, { { "filament_map_mode", "Manual" }, { "filament_map", map } });
+            DynamicPrintConfig cfg = machine_config(H2C, { { "filament_map_mode", "Manual" }, { "filament_map", map } });
+            // On the right extruder the three filaments share one rack nozzle, so its changes flush (and the template's
+            // compensation runs): with the flush matrix read whole (PR 1169) the manual rack grouping spreads them over
+            // three rack nozzles, which hold their own filaments and flush nothing (PR 1160).
+            if (std::string(map) == "2,2,2")
+                cfg.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values = { 1, 1, 1 };
             REQUIRE(cfg.option<ConfigOptionFloats>("hotend_cooling_rate")->values.size() == 5);
             Print print;
             Model model;

@@ -333,6 +333,13 @@ private:
     void                mark_skirt_layers(const PrintConfig &config, coordf_t max_layer_height);
     void 				collect_extruder_statistics(bool prime_multi_material);
     void                reorder_extruders_for_minimum_flush_volume();
+    // Every layer's filament order, nozzle by nozzle, by Bambu Studio's reorder_filaments_for_multi_nozzle_extruder (the
+    // routine the filament grouping scores its maps with): each nozzle's filaments ordered by its extruder's flush matrix
+    // from what that nozzle holds. The first layer, layers that keep their order and the layers get_custom_seq names keep
+    // theirs. Empty when it does not apply (no grouping result, a filament outside the matrices).
+    std::vector<std::vector<unsigned int>> order_layers_by_nozzle(const PrintConfig                          &print_config,
+                                                                  const std::function<bool(int, std::vector<int> &)> &get_custom_seq,
+                                                                  bool                                                grouped);
 
     // Ultra (dual-nozzle): per-slice grouping inputs, and the compute entry that turns them into a
     // filament->nozzle grouping result. Only invoked for grouping-model machines (H2D/H2C/X2D); classic
@@ -405,6 +412,13 @@ FlushOrderCacheKey make_flush_order_cache_key(const std::vector<unsigned int> &e
 // Out-of-range entries, duplicates and non-numeric tokens are dropped, so a partially valid string
 // still orders the filaments it does name. Exposed for unit testing.
 std::vector<unsigned int> parse_cyclic_order(const std::string& str, unsigned int number_of_extruders);
+
+namespace GroupReorder {
+// Each extruder's filaments x filaments flush matrix the filament grouping scores maps with, times its flush
+// multiplier: one flush_volumes_matrix block per nozzle, or the single matrix whole for every nozzle. Exposed for
+// unit testing.
+std::vector<std::vector<std::vector<float>>> prepare_flush_matrices(const PrintConfig &print_config);
+} // namespace GroupReorder
 
 // Classic DP flush-volume solver used by reorder_extruders_for_minimum_flush_volume.
 // Snapmaker #754: exposed so Catch2 can drive the wipe_volumes OOB guard without constructing a Print.
