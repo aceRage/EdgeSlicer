@@ -4,7 +4,6 @@
 #include <wx/panel.h>
 
 class ComboBox;
-class Label;
 
 namespace Slic3r {
 namespace GUI {
@@ -13,8 +12,8 @@ class SegmentedToggle;
 
 // The Basic | Advanced | Bambu selector that replaced the "Advance" switch in the sidebar header and in
 // the filament / printer tab header (tests/design_view_modes.md, D1). A three-segment pill when the
-// header row has room, a compact dropdown when it does not; while Preferences > Developer mode is on it
-// shows a disabled "Developer" instead. Choosing writes AppConfig through GUI_App::save_view_choice().
+// header row has room, a compact dropdown when it does not. It stays enabled in Developer mode, which is
+// a flag on top of the view (owner, 2026-11-25). Choosing writes AppConfig through GUI_App::save_view_choice().
 class SettingsViewSelector : public wxPanel
 {
 public:
@@ -33,9 +32,7 @@ private:
 
     SegmentedToggle* m_toggle    = nullptr;
     ComboBox*        m_combo     = nullptr;
-    Label*           m_developer = nullptr;
     bool             m_narrow    = false;
-    bool             m_is_developer = false;
     bool             m_layout_pending = false;
 };
 

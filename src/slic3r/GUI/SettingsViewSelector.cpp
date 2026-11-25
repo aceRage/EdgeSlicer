@@ -68,15 +68,10 @@ SettingsViewSelector::SettingsViewSelector(wxWindow* parent)
                         settings_view_segment_tip(1) + "\nBambu: " + settings_view_segment_tip(2));
     m_combo->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { choose(m_combo->GetSelection()); });
 
-    m_developer = new Label(this, Label::Body_12, _L("Developer"));
-    m_developer->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#6B6B6B")));
-    m_developer->SetToolTip(_L("Developer mode is on: every setting is shown. Turn it off in Preferences to choose a view."));
-    m_developer->SetName(_L("Settings view") + ": " + _L("Developer"));
 
     auto* sizer = new wxBoxSizer(wxHORIZONTAL);
     sizer->Add(m_toggle, 0, wxALIGN_CENTER_VERTICAL);
     sizer->Add(m_combo, 0, wxALIGN_CENTER_VERTICAL);
-    sizer->Add(m_developer, 0, wxALIGN_CENTER_VERTICAL);
     SetSizer(sizer);
 
     // The header rows are crowded (the sidebar also holds Global / Objects and three icons): fall back to
@@ -98,20 +93,16 @@ void SettingsViewSelector::choose(int index)
 void SettingsViewSelector::update_from_app()
 {
     const ViewChoice choice = wxGetApp().get_view_choice();
-    m_is_developer          = choice == ViewChoice::Developer;
-    if (!m_is_developer) {
-        m_toggle->setSelected(int(choice));
-        if (m_combo->GetSelection() != int(choice))
-            m_combo->SetSelection(int(choice));
-    }
+    m_toggle->setSelected(int(choice));
+    if (m_combo->GetSelection() != int(choice))
+        m_combo->SetSelection(int(choice));
     apply_visibility();
 }
 
 void SettingsViewSelector::apply_visibility()
 {
-    m_toggle->Show(!m_is_developer && !m_narrow);
-    m_combo->Show(!m_is_developer && m_narrow);
-    m_developer->Show(m_is_developer);
+    m_toggle->Show(!m_narrow);
+    m_combo->Show(m_narrow);
     Layout();
     Fit();
     if (wxWindow* parent = GetParent())
@@ -133,7 +124,7 @@ void SettingsViewSelector::on_parent_size(wxSizeEvent& evt)
 void SettingsViewSelector::update_layout()
 {
     wxWindow* parent = GetParent();
-    if (parent == nullptr || parent->GetSizer() == nullptr || m_is_developer)
+    if (parent == nullptr || parent->GetSizer() == nullptr)
         return;
     const int available   = parent->GetClientSize().x;
     const int toggle_w    = m_toggle->GetBestSize().x;
@@ -160,7 +151,6 @@ void SettingsViewSelector::msw_rescale()
 void SettingsViewSelector::sys_color_changed()
 {
     SetBackgroundColour(GetParent()->GetBackgroundColour());
-    m_developer->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#6B6B6B")));
     m_combo->Rescale();
     Refresh();
 }

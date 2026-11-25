@@ -32,24 +32,28 @@ SettingsView settings_view_from_string(const std::string &value);
 // Default -> "" (the key is removed / left absent), Bambu -> "bambu".
 std::string  settings_view_to_string(SettingsView view);
 
-// The selector in the sidebar and tab headers (Basic | Advanced | Bambu). Developer is not a segment:
-// it is Preferences > Developer mode (user_mode "develop"), which disables the selector.
-enum class ViewChoice { Basic, Advanced, Bambu, Developer };
+// The selector in the sidebar and tab headers (Basic | Advanced | Bambu). Preferences > Developer mode
+// (AppConfig "developer_mode") is a separate flag on top of the chosen view (owner, 2026-11-25): it
+// never changes the view and never disables the selector.
+enum class ViewChoice { Basic, Advanced, Bambu };
 // What the selector shows for AppConfig "user_mode" / "settings_view" (either may be absent: "").
-// user_mode develop -> Developer; settings_view bambu -> Bambu; user_mode advanced -> Advanced; else Basic
-// (an absent or unknown user_mode reads as simple, as GUI_App::get_mode()).
+// settings_view bambu -> Bambu; user_mode advanced -> Advanced; the legacy user_mode "develop" (written
+// by builds before this change) -> Advanced; else Basic (absent or unknown reads as simple).
 ViewChoice   view_choice(const std::string &user_mode, const std::string &settings_view);
 // What choosing a segment writes. settings_view empty = remove the key. Bambu is Bambu Studio's Advanced
-// list, so it writes user_mode "advanced" (design D2): every reader of the level (search, G-code
-// viewer, hub, web views) sees Advanced, and an older build without views shows Advanced.
-// Developer keeps settings_view (keep_settings_view): leaving Developer mode returns to the view.
+// list, so it writes user_mode "advanced" (design D2): an older build without views shows Advanced.
 struct ViewChoiceConfig
 {
     std::string user_mode;
     std::string settings_view;
-    bool        keep_settings_view = false;
 };
 ViewChoiceConfig view_choice_config(ViewChoice choice);
+// The level the settings show (GUI_App::get_mode()): Basic -> Simple; Advanced and Bambu -> Advanced,
+// or Develop with Developer mode on (the Bambu filter then still applies, see line_show()).
+ConfigOptionMode effective_level(ViewChoice choice, bool developer_mode);
+// Migration of builds where Developer mode wrote user_mode "develop": becomes user_mode "advanced"
+// with developer_mode on. Returns true when it changed something.
+bool         migrate_legacy_developer_user_mode(std::string &user_mode, bool &developer_mode);
 
 struct ViewFilter
 {

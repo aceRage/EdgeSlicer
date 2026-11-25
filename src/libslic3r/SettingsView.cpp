@@ -22,22 +22,35 @@ std::string settings_view_to_string(SettingsView view)
 
 ViewChoice view_choice(const std::string &user_mode, const std::string &settings_view)
 {
-    if (user_mode == "develop")
-        return ViewChoice::Developer;
     if (settings_view_from_string(settings_view) == SettingsView::Bambu)
         return ViewChoice::Bambu;
-    return user_mode == "advanced" ? ViewChoice::Advanced : ViewChoice::Basic;
+    return user_mode == "advanced" || user_mode == "develop" ? ViewChoice::Advanced : ViewChoice::Basic;
 }
 
 ViewChoiceConfig view_choice_config(ViewChoice choice)
 {
     switch (choice) {
-    case ViewChoice::Basic: return { "simple", "", false };
-    case ViewChoice::Advanced: return { "advanced", "", false };
-    case ViewChoice::Bambu: return { "advanced", settings_view_to_string(SettingsView::Bambu), false };
-    case ViewChoice::Developer: break;
+    case ViewChoice::Basic: return { "simple", "" };
+    case ViewChoice::Advanced: return { "advanced", "" };
+    case ViewChoice::Bambu: break;
     }
-    return { "develop", "", true };
+    return { "advanced", settings_view_to_string(SettingsView::Bambu) };
+}
+
+ConfigOptionMode effective_level(ViewChoice choice, bool developer_mode)
+{
+    if (choice == ViewChoice::Basic)
+        return comSimple;
+    return developer_mode ? comDevelop : comAdvanced;
+}
+
+bool migrate_legacy_developer_user_mode(std::string &user_mode, bool &developer_mode)
+{
+    if (user_mode != "develop")
+        return false;
+    user_mode      = "advanced";
+    developer_mode = true;
+    return true;
 }
 
 namespace SettingsViewKeys {

@@ -864,7 +864,10 @@ public:
     Tab*            get_plate_tab();
     Tab*            get_model_tab(bool part = false);
     Tab*            get_layer_tab();
+    // The settings level: the chosen view plus Developer mode (see GUI_App.cpp).
     ConfigOptionMode get_mode();
+    // Preferences > Developer mode (AppConfig "developer_mode"; legacy user_mode "develop" counts too).
+    bool            developer_mode_on();
     std::string     get_mode_str();
     void            save_mode(const /*ConfigOptionMode*/int mode) ;
     void            update_mode();

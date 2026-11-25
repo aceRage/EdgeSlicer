@@ -8659,31 +8659,34 @@ Tab* GUI_App::get_layer_tab()
     return model_tabs_list[2];
 }
 
+// Settings views (owner, 2026-11-25): the level is the chosen view (user_mode simple / advanced,
+// settings_view bambu) plus Preferences > Developer mode as a flag on top: Basic stays Simple, Advanced
+// and Bambu become comDevelop with Developer mode on. The legacy user_mode "develop" (older builds)
+// reads as Advanced with Developer mode on; MainFrame migrates it on start.
+bool GUI_App::developer_mode_on()
+{
+    return app_config->get_bool("developer_mode") || app_config->get("user_mode") == "develop";
+}
+
 ConfigOptionMode GUI_App::get_mode()
 {
-    if (!app_config->has("user_mode"))
-        return comSimple;
-    //BBS
-    const auto mode = app_config->get("user_mode");
-    return mode == "advanced" ? comAdvanced :
-           mode == "simple" ? comSimple :
-           mode == "develop" ? comDevelop : comSimple;
+    return effective_level(get_view_choice(), developer_mode_on());
 }
 
 std::string GUI_App::get_mode_str()
 {
-    if (!app_config->has("user_mode"))
-        return "simple";
-    return app_config->get("user_mode");
+    // The effective level (hub payloads, logs), as before: simple / advanced / develop.
+    const ConfigOptionMode mode = get_mode();
+    return mode == comAdvanced ? "advanced" : mode == comDevelop ? "develop" : "simple";
 }
 
 void GUI_App::save_mode(const /*ConfigOptionMode*/int mode)
 {
-    //BBS
-    const std::string mode_str = mode == comAdvanced ? "advanced" :
-                                 mode == comSimple ? "simple" :
-                                 mode == comDevelop ? "develop" : "simple";
-    app_config->set("user_mode", mode_str);
+    // The level only: settings_view is kept. comDevelop (no caller since Preferences stopped using it)
+    // means Advanced with Developer mode on.
+    app_config->set("user_mode", mode == comSimple ? "simple" : "advanced");
+    if (mode == comDevelop)
+        app_config->set_bool("developer_mode", true);
     update_mode();
 }
 
@@ -8694,23 +8697,22 @@ SettingsView GUI_App::get_settings_view()
 
 ViewChoice GUI_App::get_view_choice()
 {
-    return view_choice(get_mode_str(), app_config->get("settings_view"));
+    return view_choice(app_config->get("user_mode"), app_config->get("settings_view"));
 }
 
 void GUI_App::save_view_choice(ViewChoice choice)
 {
-    if (choice == ViewChoice::Developer || choice == get_view_choice())
-        return; // Developer is Preferences > Developer mode, not a segment
+    if (choice == get_view_choice())
+        return;
     const ViewChoiceConfig cfg = view_choice_config(choice);
     BOOST_LOG_TRIVIAL(info) << "Settings view: user_mode " << cfg.user_mode << ", settings_view "
                             << (cfg.settings_view.empty() ? std::string("(none)") : cfg.settings_view);
+    // Developer mode (a separate flag) is left as it is.
     app_config->set("user_mode", cfg.user_mode);
-    if (!cfg.keep_settings_view) {
-        if (cfg.settings_view.empty())
-            app_config->erase("app", "settings_view");
-        else
-            app_config->set("settings_view", cfg.settings_view);
-    }
+    if (cfg.settings_view.empty())
+        app_config->erase("app", "settings_view");
+    else
+        app_config->set("settings_view", cfg.settings_view);
     m_settings_view_revealed.clear();
     update_mode();
 }
@@ -8768,7 +8770,11 @@ void GUI_App::update_mode()
 
 bool GUI_App::curved_tops_developer_lines_shown()
 {
-    return app_config->get_bool("developer_mode") && get_mode() == comDevelop;
+    // Developer mode on and the Developer lines shown: the Advanced view (comDevelop). Not in Basic (Simple
+    // level), and not in the Bambu view, where Developer lines are hidden unless changed: the overrides
+    // must never be in force with their lines hidden, so in Bambu they are ignored and their lines toggled
+    // off (ConfigManipulation).
+    return developer_mode_on() && get_mode() == comDevelop && get_settings_view() != SettingsView::Bambu;
 }
 
 void GUI_App::update_internal_development() {

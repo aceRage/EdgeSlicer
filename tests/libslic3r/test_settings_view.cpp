@@ -413,8 +413,8 @@ TEST_CASE("Selector choice <-> AppConfig user_mode + settings_view", "[SettingsV
     CHECK(view_choice("advanced", "") == ViewChoice::Advanced);
     CHECK(view_choice("advanced", "bambu") == ViewChoice::Bambu);
     CHECK(view_choice("simple", "bambu") == ViewChoice::Bambu);
-    CHECK(view_choice("develop", "") == ViewChoice::Developer);
-    CHECK(view_choice("develop", "bambu") == ViewChoice::Developer); // Developer wins while on
+    CHECK(view_choice("develop", "") == ViewChoice::Advanced);    // legacy Developer mode: Advanced
+    CHECK(view_choice("develop", "bambu") == ViewChoice::Bambu);  // the view is kept
     CHECK(view_choice("something", "") == ViewChoice::Basic);
     CHECK(view_choice("advanced", "newer-view") == ViewChoice::Advanced); // unknown view from a newer build
 
@@ -422,21 +422,58 @@ TEST_CASE("Selector choice <-> AppConfig user_mode + settings_view", "[SettingsV
     const ViewChoiceConfig basic = view_choice_config(ViewChoice::Basic);
     CHECK(basic.user_mode == "simple");
     CHECK(basic.settings_view.empty());
-    CHECK_FALSE(basic.keep_settings_view);
     const ViewChoiceConfig advanced = view_choice_config(ViewChoice::Advanced);
     CHECK(advanced.user_mode == "advanced");
     CHECK(advanced.settings_view.empty());
     const ViewChoiceConfig bambu_cfg = view_choice_config(ViewChoice::Bambu);
     CHECK(bambu_cfg.user_mode == "advanced");
     CHECK(bambu_cfg.settings_view == "bambu");
-    CHECK(view_choice_config(ViewChoice::Developer).keep_settings_view);
 
     // Round trip: every selectable choice reads back as itself (restart keeps the choice).
     for (ViewChoice c : { ViewChoice::Basic, ViewChoice::Advanced, ViewChoice::Bambu }) {
         const ViewChoiceConfig cfg = view_choice_config(c);
         CHECK(view_choice(cfg.user_mode, cfg.settings_view) == c);
     }
-    // Preferences > Developer mode off writes user_mode "advanced" and leaves settings_view: a Bambu
-    // view survives a Developer on/off (design 5.11).
-    CHECK(view_choice("advanced", bambu_cfg.settings_view) == ViewChoice::Bambu);
+}
+
+TEST_CASE("Developer mode is a flag on top of the view", "[SettingsView][AppConfig][Developer]")
+{
+    // Developer mode off: today's levels.
+    CHECK(effective_level(ViewChoice::Basic, false) == comSimple);
+    CHECK(effective_level(ViewChoice::Advanced, false) == comAdvanced);
+    CHECK(effective_level(ViewChoice::Bambu, false) == comAdvanced);
+    // Developer mode on: Basic stays Simple; Advanced and Bambu reach comDevelop (Bambu still filtered).
+    CHECK(effective_level(ViewChoice::Basic, true) == comSimple);
+    CHECK(effective_level(ViewChoice::Advanced, true) == comDevelop);
+    CHECK(effective_level(ViewChoice::Bambu, true) == comDevelop);
+    // Toggling Developer mode writes only developer_mode: the chosen view reads back unchanged.
+    for (ViewChoice c : { ViewChoice::Basic, ViewChoice::Advanced, ViewChoice::Bambu }) {
+        const ViewChoiceConfig cfg = view_choice_config(c);
+        CHECK(view_choice(cfg.user_mode, cfg.settings_view) == c);
+        CHECK(effective_level(view_choice(cfg.user_mode, cfg.settings_view), true) == (c == ViewChoice::Basic ? comSimple : comDevelop));
+    }
+}
+
+TEST_CASE("Migration: user_mode develop loads as Advanced with Developer mode on", "[SettingsView][AppConfig][Developer]")
+{
+    std::string user_mode = "develop";
+    bool        developer = false;
+    CHECK(migrate_legacy_developer_user_mode(user_mode, developer));
+    CHECK(user_mode == "advanced");
+    CHECK(developer);
+    CHECK(view_choice(user_mode, "") == ViewChoice::Advanced);
+    CHECK(effective_level(view_choice(user_mode, ""), developer) == comDevelop); // same lines as before
+    // A Bambu view written next to it survives.
+    std::string um2 = "develop";
+    bool        dev2 = true;
+    CHECK(migrate_legacy_developer_user_mode(um2, dev2));
+    CHECK(view_choice(um2, "bambu") == ViewChoice::Bambu);
+    // Nothing else is touched.
+    for (const char *m : { "simple", "advanced", "", "something" }) {
+        std::string u = m;
+        bool        d = false;
+        CHECK_FALSE(migrate_legacy_developer_user_mode(u, d));
+        CHECK(u == m);
+        CHECK_FALSE(d);
+    }
 }
