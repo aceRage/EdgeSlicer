@@ -3717,16 +3717,23 @@ bool PresetBundle::filament_nozzle_assignment_supported() const
 
 std::vector<size_t> PresetBundle::filament_nozzles() const
 {
-    const auto *nozzles = this->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
+    const auto *nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter");
     const auto *fmap    = this->project_config.option<ConfigOptionInts>("filament_map");
     const auto *assign  = this->project_config.option<ConfigOptionInts>("filament_nozzle_assignment");
     static const std::vector<int> none;
-    const bool   assignable = this->filament_nozzle_assignment_supported();
-    const size_t count      = this->filament_presets.size();
+    const bool   assignable   = this->filament_nozzle_assignment_supported();
+    const size_t count        = this->filament_presets.size();
+    const size_t nozzle_count = nozzles != nullptr ? nozzles->values.size() : 0;
+    // A Bambu grouping machine (H2D / H2C) with a manual map: filament_map decides also for one or two filaments
+    // (filament_map_decides_extruder; the mode is the project's, the variants the printer's).
+    const auto  *mode         = this->project_config.option("filament_map_mode");
+    const bool   manual       = mode != nullptr && (mode->getInt() == int(fmmManual) || mode->getInt() == int(fmmNozzleManual));
+    const bool   grouping     = manual && is_bambu_grouping_machine(printer, nozzle_count);
     std::vector<size_t> out(count, 0);
     for (size_t f = 0; f < count; ++f)
-        out[f] = physical_extruder_for_filament(nozzles != nullptr ? nozzles->values.size() : 0, count, fmap != nullptr ? fmap->values : none,
-                                                unsigned(f + 1), assignable && assign != nullptr ? assign->values : none);
+        out[f] = physical_extruder_for_filament(nozzle_count, count, fmap != nullptr ? fmap->values : none, unsigned(f + 1),
+                                                assignable && assign != nullptr ? assign->values : none, grouping);
     return out;
 }
 
