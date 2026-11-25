@@ -38,6 +38,7 @@ add_executable(${_TEST_NAME}_tests
 	test_appconfig_trailing_newline.cpp
 	test_appconfig_auto_slice.cpp
 	test_appconfig_recent_projects.cpp
+	test_upload_name.cpp
 	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
