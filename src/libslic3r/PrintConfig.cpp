@@ -12251,10 +12251,9 @@ double min_temperature_when_ec_at(const ConfigBase &config, unsigned int filamen
     const auto *opt = dynamic_cast<const ConfigOptionFloats *>(config.option("min_temperature_when_ec"));
     if (opt == nullptr || opt->values.empty())
         return 0.;
-    size_t idx = get_config_idx(config, ConfigFlowDomain::Filament, filament_id);
-    if (idx >= opt->values.size())
-        idx = 0;
-    const double v = opt->values[idx];
+    // Not a flow-variant key: PresetBundle stores one value per filament. Packed get_config_idx
+    // would skip slots on a P3C Std+HF filament (step_size 2) and read filament 0's floor for 1+.
+    const double v = opt->get_at(filament_id);
     return v >= 0. ? v : 0.;
 }
 
