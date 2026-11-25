@@ -79,6 +79,9 @@ SettingsViewSelector::SettingsViewSelector(wxWindow* parent)
     parent->Bind(wxEVT_SIZE, &SettingsViewSelector::on_parent_size, this);
 
     update_from_app();
+
+    // One more pass once the window is shown and the parent row has its real size.
+    CallAfter([this]() { update_layout(); });
 }
 
 void SettingsViewSelector::choose(int index)
@@ -103,6 +106,11 @@ void SettingsViewSelector::apply_visibility()
 {
     m_toggle->Show(!m_narrow);
     m_combo->Show(m_narrow);
+    // Best sizes cached while the window was not yet laid out / sized are stale: drop them so the pill
+    // gets the same final size on the first layout as after any later one.
+    m_toggle->InvalidateBestSize();
+    m_combo->InvalidateBestSize();
+    InvalidateBestSize();
     Layout();
     Fit();
     if (wxWindow* parent = GetParent())
@@ -126,6 +134,11 @@ void SettingsViewSelector::update_layout()
     wxWindow* parent = GetParent();
     if (parent == nullptr || parent->GetSizer() == nullptr)
         return;
+    // Always re-measure and re-fit: the first layout ran before the parent row had its final size, so a
+    // size that differs from the best size must be corrected even when the narrow flag does not change.
+    m_toggle->InvalidateBestSize();
+    m_combo->InvalidateBestSize();
+    InvalidateBestSize();
     const int available   = parent->GetClientSize().x;
     const int toggle_w    = m_toggle->GetBestSize().x;
     const int combo_w     = m_combo->GetBestSize().x;
@@ -136,6 +149,10 @@ void SettingsViewSelector::update_layout()
     if (narrow != m_narrow) {
         m_narrow = narrow;
         apply_visibility();
+    } else if (GetSize() != GetBestSize()) {
+        Layout();
+        Fit();
+        parent->Layout();
     }
 }
 

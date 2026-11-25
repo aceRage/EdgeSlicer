@@ -190,6 +190,9 @@ void SegmentedToggle::setButtonMinWidth(int width_dip)
     for (Button* btn : m_buttons)
         if (btn != nullptr)
             btn->SetMinSize(wxSize(FromDIP(width_dip), btn->GetMinSize().y));
+    if (m_pContainer != nullptr)
+        m_pContainer->InvalidateBestSize();
+    InvalidateBestSize();
     Layout();
     Fit();
 }
