@@ -571,7 +571,17 @@ TEST_CASE("H3C print by object: each colour gets its own rack hotend, pre-heated
     const Replay r = check_held_rule(print, gcode, false);
     CHECK(r.checked >= 10); // both objects, every layer
     CHECK(r.flushes == 0);
-    CHECK(r.cross_nozzle_changes == r.checked);
+    // Every change to another filament swaps the hotend. (The first layer's change_filament_gcode for the filament the start
+    // G-code loaded is a change from a filament to itself, as on every H3C plate, by layer too.)
+    size_t colour_changes = 0;
+    {
+        int first = -1;
+        for (const Change &c : changes_of(gcode, first))
+            if (c.from != c.to)
+                ++colour_changes;
+    }
+    CHECK(colour_changes + 1 == r.checked);
+    CHECK(r.cross_nozzle_changes == colour_changes);
     CHECK(r.no_flush_held_same > 0);
 
     // Each hotend swap after the first gets its pre-heat (as the same plate by layer: 98 pre-heats for 99 swaps), each
@@ -579,7 +589,7 @@ TEST_CASE("H3C print by object: each colour gets its own rack hotend, pre-heated
     const HotendLines h     = hotend_lines(gcode);
     const size_t      swaps = hotend_swaps(gcode);
     INFO("swaps " << swaps << ", pre-heats " << h.pre_heats << ", pre-cools " << h.pre_cools);
-    CHECK(swaps == r.checked);
+    CHECK(swaps == colour_changes);
     CHECK(h.pre_heats > 0);
     CHECK(h.pre_heats <= swaps);
     CHECK(h.pre_heats + 1 >= swaps);
