@@ -12253,7 +12253,10 @@ double min_temperature_when_ec_at(const ConfigBase &config, unsigned int filamen
         return 0.;
     // Not a flow-variant key: PresetBundle stores one value per filament. Packed get_config_idx
     // would skip slots on a P3C Std+HF filament (step_size 2) and read filament 0's floor for 1+.
-    const double v = opt->get_at(filament_id);
+    // Past the end is no floor (BambuStudio indexes by filament id), not get_at's fallback to slot 0.
+    if (filament_id >= opt->values.size())
+        return 0.;
+    const double v = opt->values[filament_id];
     return v >= 0. ? v : 0.;
 }
 

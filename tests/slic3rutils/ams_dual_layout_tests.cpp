@@ -453,7 +453,7 @@ TEST_CASE("AMS 3H is nine slots and AMS 3P is seven", "[AmsDual][AmsTypes]")
     CHECK_FALSE(is_rack_virtual_slot(246));
 }
 
-TEST_CASE("AMS 3P two-row cubes are placed by slot id, not list position", "[AmsDual][AmsTypes]")
+TEST_CASE("AMS 3P two-row cubes are placed by slot id not list position", "[AmsDual][AmsTypes]")
 {
     using namespace Slic3r::GUI::AmsTypes;
     CHECK(parse_rack_slot_id("0") == 0);

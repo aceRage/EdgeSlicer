@@ -217,7 +217,7 @@ TEST_CASE("min_temperature_when_ec is dumped only when a used filament sets a re
     }
 }
 
-TEST_CASE("min_temperature_when_ec is one value per filament, not a packed flow-variant slot", "[BblP3C][GCode]")
+TEST_CASE("min_temperature_when_ec is one value per filament not a packed flow-variant slot", "[BblP3C][GCode]")
 {
     CHECK_FALSE(is_filament_flow_variant_option("min_temperature_when_ec"));
 
@@ -237,9 +237,15 @@ TEST_CASE("min_temperature_when_ec is one value per filament, not a packed flow-
     CHECK(min_temperature_when_ec_at(three, 0) == 80.);
     CHECK(min_temperature_when_ec_at(three, 1) == 0.);
     CHECK(min_temperature_when_ec_at(three, 2) == 0.);
+
+    // Past the end is no floor (0), not get_at's fallback to filament 0's 80.
+    DynamicPrintConfig one;
+    one.set_key_value("min_temperature_when_ec", new ConfigOptionFloats{80.});
+    CHECK(min_temperature_when_ec_at(one, 0) == 80.);
+    CHECK(min_temperature_when_ec_at(one, 1) == 0.);
 }
 
-TEST_CASE("A P3C job with floors 80, -1 and 0 keeps each filament's idle floor", "[BblP3C][GCode]")
+TEST_CASE("A P3C job with floors 80 -1 0 keeps each filament idle floor", "[BblP3C][GCode]")
 {
     DynamicPrintConfig cfg = selected_config("Bambu Lab P3C 0.4 nozzle", "0.20mm Standard @BBL P3C", "Bambu PLA Basic @BBL P3C", 3);
     const auto *steps = cfg.option<ConfigOptionInts>("filament_flow_step_size");
@@ -266,7 +272,7 @@ TEST_CASE("A P3C job with floors 80, -1 and 0 keeps each filament's idle floor",
         CHECK(config_block_line(config_block_dump(cfg), "min_temperature_when_ec") == "; min_temperature_when_ec = 80,-1,0");
     }
 
-    SECTION("each tool's idle M104 floor matches that filament")
+    SECTION("each tool idle M104 floor matches that filament")
     {
         Print             print;
         Model             model;
@@ -281,10 +287,20 @@ TEST_CASE("A P3C job with floors 80, -1 and 0 keeps each filament's idle floor",
 
         CHECK(config_block_line(gcode, "min_temperature_when_ec") == "; min_temperature_when_ec = 80,-1,0");
 
+        // M104 I is the G-code tool. Map it to a filament; do not treat I as a filament index.
+        const std::vector<int> filament_tools = filament_output_tools(print.config(), print.extruders());
+        const std::vector<int> tool_filaments = output_tool_filaments(filament_tools);
+        auto filament_of_tool = [&](int tool) -> int {
+            if (tool < 0)
+                return -1;
+            if (!tool_filaments.empty() && size_t(tool) < tool_filaments.size() && tool_filaments[size_t(tool)] >= 0)
+                return tool_filaments[size_t(tool)];
+            return tool;
+        };
+
         const std::regex re_idle(R"(^M104 I(\d+) S(\d+) N0 C ;Multi extruder pre cooling)");
         const double     floor[3] = {80., 0., 0.};
         std::map<int, int> min_s;
-        std::map<int, int> seen;
         std::istringstream ss(gcode);
         for (std::string line; std::getline(ss, line);) {
             if (!line.empty() && line.back() == '\r')
@@ -292,17 +308,21 @@ TEST_CASE("A P3C job with floors 80, -1 and 0 keeps each filament's idle floor",
             std::smatch m;
             if (!std::regex_search(line, m, re_idle))
                 continue;
-            const int f = std::stoi(m[1].str());
+            const int f = filament_of_tool(std::stoi(m[1].str()));
             const int s = std::stoi(m[2].str());
-            ++seen[f];
+            if (f < 0 || f >= 3)
+                continue;
             if (!min_s.count(f) || s < min_s[f])
                 min_s[f] = s;
-            if (f >= 0 && f < 3)
-                CHECK(double(s) >= floor[f]);
         }
-        REQUIRE(seen[0] + seen[1] + seen[2] > 0);
-        for (int f = 0; f < 3; ++f)
-            if (min_s.count(f))
-                CHECK(double(min_s[f]) >= floor[f]);
+        REQUIRE(min_s.count(0));
+        REQUIRE(min_s.count(1));
+        REQUIRE(min_s.count(2));
+        CHECK(min_s[0] >= int(floor[0]));
+        // The old packed-index bug only raised floors (filament 1/2 read 80). S >= floor would still pass.
+        CHECK(min_s[1] < int(floor[0]));
+        CHECK(min_s[2] < int(floor[0]));
+        CHECK(min_s[1] >= int(floor[1]));
+        CHECK(min_s[2] >= int(floor[2]));
     }
 }

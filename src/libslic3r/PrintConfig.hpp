@@ -890,8 +890,9 @@ inline double filament_flow_ratio_at(const ConfigBase &config, unsigned int fila
 double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra);
 
 // BBS 2.9.2: idle-nozzle floor in C (min_temperature_when_ec). One value per filament, not a
-// packed flow-variant slot (the key is not in filament_flow_variant_options). Negative or missing
-// reads as 0, matching this tree's previous hardcoded floor so H2D / H3C G-code stays unchanged.
+// packed flow-variant slot (the key is not in filament_flow_variant_options). Negative, missing,
+// or past the end of the vector reads as 0 (no floor), matching BambuStudio's filament-id index.
+// Do not use get_at: an out-of-range id would fall back to filament 0.
 double min_temperature_when_ec_at(const ConfigBase &config, unsigned int filament_id);
 
 // Packed flow-variant vectors are segmented by filament_flow_step_size. Filament / tool id
