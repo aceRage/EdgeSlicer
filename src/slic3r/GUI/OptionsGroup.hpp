@@ -58,6 +58,9 @@ public:
 	std::string	label_path;
     bool        undo_to_sys{false}; // BBS: object config
     bool        toggle_visible{true}; // BBS: hide some line
+    // EdgeSlicer settings views: the level a widget-only row (no option) shows from; comSimple (every
+    // level) unless set. A row with options takes its first option's mode instead (line_mode()).
+    ConfigOptionMode widget_mode{comSimple};
 
     size_t		full_width {0}; 
     widget_t	widget {nullptr};

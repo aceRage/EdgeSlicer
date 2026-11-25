@@ -93,9 +93,10 @@ size_t bambu_list_size();
 // (the mode of its first option, as today). A line with no option (a widget-only row) is decided by the
 // group: see widget_line_show().
 LineShow line_show(const ViewFilter &filter, const std::vector<std::string> &option_ids, ConfigOptionMode line_mode);
-// A widget-only line: shown in every level as today; in the Bambu view only while its group shows at
-// least one option line, so a widget does not survive alone in an emptied group.
-LineShow widget_line_show(const ViewFilter &filter, bool group_has_visible_option_line);
+// A widget-only line: shown from its own level (widget_mode, comSimple unless the row sets one, as
+// today); in the Bambu view only while its group shows at least one option line, so a widget does not
+// survive alone in an emptied group.
+LineShow widget_line_show(const ViewFilter &filter, bool group_has_visible_option_line, ConfigOptionMode widget_mode = comSimple);
 inline bool shown(LineShow s) { return s != LineShow::Hidden; }
 
 // Whether an option group shows anything, for the pages that are not on screen (the page tree only asks

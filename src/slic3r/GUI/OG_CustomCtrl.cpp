@@ -519,7 +519,7 @@ bool OG_CustomCtrl::update_visibility(const ViewFilter& filter)
     bool has_visible_lines = false;
     for (CtrlLine& line : ctrl_lines) {
         line.update_visibility(line.og_line.get_options().empty() ?
-                                   widget_line_show(filter, has_visible_option_line) :
+                                   widget_line_show(filter, has_visible_option_line, line_mode(line.og_line)) :
                                    line_show(filter, line_option_ids(line.og_line), line_mode(line.og_line)));
         if (line.is_visible) {
             v_pos += (wxCoord)line.height;

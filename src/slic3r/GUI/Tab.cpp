@@ -4046,6 +4046,8 @@ void TabPrint::build()
                                              L("Sets the prime tower settings of this process to Bambu Studio's defaults for the "
                                                "selected printer. Lists every change before applying it. Filament settings are not changed.") };
             tower_defaults_line.widget = [this](wxWindow* parent) { return tower_defaults_create_widget(parent); };
+            // Owner 2026-11-25: not in Basic (widget-only rows otherwise show at every level).
+            tower_defaults_line.widget_mode = comAdvanced;
             optgroup->append_line(tower_defaults_line);
         }
         optgroup->append_single_option_line("prime_tower_width", "multimaterial_settings_prime_tower#width");

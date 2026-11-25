@@ -258,7 +258,7 @@ bool line_is_legend(const Line& line)
 ConfigOptionMode line_mode(const Line& line)
 {
     const std::vector<Option>& options = line.get_options();
-    return options.empty() ? comSimple : options.front().opt.mode;
+    return options.empty() ? line.widget_mode : options.front().opt.mode;
 }
 
 std::vector<std::string> line_option_ids(const Line& line)

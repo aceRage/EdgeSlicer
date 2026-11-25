@@ -133,10 +133,10 @@ LineShow line_show(const ViewFilter &filter, const std::vector<std::string> &opt
     return exception ? LineShow::ShownNotInBambu : LineShow::Hidden;
 }
 
-LineShow widget_line_show(const ViewFilter &filter, bool group_has_visible_option_line)
+LineShow widget_line_show(const ViewFilter &filter, bool group_has_visible_option_line, ConfigOptionMode widget_mode)
 {
     if (!filter.bambu())
-        return comSimple <= filter.level ? LineShow::Shown : LineShow::Hidden;
+        return widget_mode <= filter.level ? LineShow::Shown : LineShow::Hidden;
     return group_has_visible_option_line ? LineShow::Shown : LineShow::Hidden;
 }
 

@@ -477,3 +477,33 @@ TEST_CASE("Migration: user_mode develop loads as Advanced with Developer mode on
         CHECK_FALSE(d);
     }
 }
+
+TEST_CASE("Basic hides Z-buckling bias, the Thin features group and the Bambu defaults row", "[SettingsView][Basic]")
+{
+    // Owner 2026-11-25. The Thin features group's lines (Tab.cpp TabPrint::build, Quality page): all
+    // Advanced, so the group (and its full-width Fine detail note) is hidden in Basic.
+    const char *thin_features[] = { "fine_detail", "thin_feature_line_width", "thin_feature_min_size", "fine_detail_speed",
+                                    "min_feature_size", "min_bead_width", "initial_layer_min_bead_width", "min_length_factor" };
+    std::vector<ConfigOptionMode> thin_modes;
+    for (const char *k : thin_features) {
+        INFO(k);
+        CHECK(mode_of(k) >= comAdvanced);
+        thin_modes.push_back(mode_of(k));
+    }
+    CHECK_FALSE(group_visible(level(comSimple), thin_modes, {}));
+    CHECK(group_visible(level(comAdvanced), thin_modes, {}));
+
+    CHECK(mode_of("gyroid_optimized") == comAdvanced);
+    CHECK(show(level(comSimple), "gyroid_optimized") == LineShow::Hidden);
+    CHECK(show(level(comAdvanced), "gyroid_optimized") == LineShow::Shown);
+
+    // "Use Bambu defaults" is a widget-only row with widget_mode comAdvanced: hidden in Basic, shown in
+    // Advanced; in the Bambu view it still follows its group, as before.
+    CHECK(widget_line_show(level(comSimple), true, comAdvanced) == LineShow::Hidden);
+    CHECK(widget_line_show(level(comAdvanced), true, comAdvanced) == LineShow::Shown);
+    CHECK(widget_line_show(level(comDevelop), true, comAdvanced) == LineShow::Shown);
+    CHECK(widget_line_show(bambu(), true, comAdvanced) == LineShow::Shown);
+    CHECK(widget_line_show(bambu(), false, comAdvanced) == LineShow::Hidden);
+    // Other widget-only rows keep showing at every level.
+    CHECK(widget_line_show(level(comSimple), false) == LineShow::Shown);
+}
