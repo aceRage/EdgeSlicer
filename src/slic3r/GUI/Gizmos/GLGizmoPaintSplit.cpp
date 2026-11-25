@@ -760,16 +760,15 @@ void GLGizmoPaintSplit::on_render_input_window(float x, float y, float bottom_li
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_w);
         m_imgui->warning_text(_L(paint_split_error_message(m_region.error)));
         ImGui::PopTextWrapPos();
-        if (m_region.error == PaintSplitError::OpenMesh || m_region.error == PaintSplitError::NonManifold) {
-            if (m_imgui->button(_L("Repair"))) {
-                wxGetApp().CallAfter([this]() {
-                    m_close_confirmed = true;
-                    m_parent.reset_all_gizmos();
-                    wxGetApp().obj_list()->fix_through_netfabb();
-                });
-            }
-        }
+        // No Repair button: Fix model clears the painting before it repairs (Plater::clear_before_change_mesh),
+        // and an open part is repaired by Apply itself. What is left here is a part that repair cannot close.
     } else {
+        // Owner 2026-11-25: holes no longer block the split; Apply closes them and keeps the painting.
+        if (m_region.repaired) {
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_w);
+            m_imgui->text(_L("Holes will be repaired while splitting. The painting is kept."));
+            ImGui::PopTextWrapPos();
+        }
         for (size_t c = 0; c < m_region.num_components(); ++c) {
             const wxString line = format_wxstr(_L("Region %1%: %2% edge(s), %3% cm²"), c + 1, m_region.loops[c].size(),
                                                wxString::Format("%.1f", m_region.area[c] / 100.));
