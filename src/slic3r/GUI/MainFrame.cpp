@@ -2420,12 +2420,17 @@ std::vector<MainFrame::PrintSelectType> MainFrame::available_print_actions() con
         return actions;
     }
 
-    // BBL vendor (LAN or cloud): Print plate, optional Multi-device, both sliced-file exports,
-    // Export G-code. No Print all / Send / Send all on Edge. The native print flow is ePrintPlate
-    // / EVT_GLTOOLBAR_PRINT_PLATE (SelectMachineDialog). eSendGcode is the third-party print-host
+    // BBL vendor (LAN or cloud): Print plate, Send / Send all (upload to the printer's storage
+    // without starting a print, SendToPrinterDialog), optional Multi-device, both sliced-file
+    // exports, Export G-code. No Print all on Edge. The native print flow is ePrintPlate /
+    // EVT_GLTOOLBAR_PRINT_PLATE (SelectMachineDialog). eSendGcode is the third-party print-host
     // flow and additionally gates on can_send_gcode(); keep the label and the enum in sync with
-    // set_print_button_to_default(ePrintPlate) and the Ctrl+Shift+G shortcut.
+    // set_print_button_to_default(ePrintPlate) and the Ctrl+Shift+G shortcut. eSendToPrinter(All)
+    // are enabled by get_enable_print_status() and share Plater::send_gcode with Print plate, so
+    // the uploaded 3MF is the same file.
     actions.push_back(ePrintPlate);
+    actions.push_back(eSendToPrinter);
+    actions.push_back(eSendToPrinterAll);
     if (enable_multi_machine)
         actions.push_back(ePrintMultiMachine);
     actions.push_back(eExportSlicedFile);
@@ -5022,6 +5027,8 @@ void MainFrame::set_print_button_to_default(PrintSelectType select_type)
     case eExportSlicedFile:
     case eExportAllSlicedFile:
     case ePrintMultiMachine:
+    case eSendToPrinter:
+    case eSendToPrinterAll:
     case eSendToBambuConnect:
         apply_print_select_state(select_type);
         // Only the print-host flow (eSendGcode) needs a host. Export actions, eExportGcode
@@ -5034,8 +5041,7 @@ void MainFrame::set_print_button_to_default(PrintSelectType select_type)
         }
         break;
     default:
-        // unsupported from this entry point (ePrintAll / eSendToPrinter / eSendToPrinterAll /
-        // eUploadGcode are never offered on Edge).
+        // unsupported from this entry point (ePrintAll / eUploadGcode are never offered on Edge).
         return;
     }
 }
