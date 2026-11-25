@@ -10,6 +10,7 @@
 
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/PaintSplit.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include "slic3r/GUI/GLModel.hpp"
 
@@ -27,6 +28,8 @@ public:
 
     void render_painter_gizmo() override;
     bool gizmo_event(SLAGizmoEventType action, const Vec2d &mouse_position, bool shift_down, bool alt_down, bool control_down) override;
+    // Ctrl+click in the pick modes adds a patch (the painter base keeps Ctrl clicks for the camera).
+    bool on_mouse(const wxMouseEvent &mouse_event) override;
 
     // Whether any part has selected surface.
     bool has_selection() const;
@@ -64,15 +67,19 @@ private:
 
     bool pick_mode() const { return m_mode == Mode::PickColour || m_mode == Mode::PickSegment; }
     bool raycast(const Vec2d &mouse_position, int &mesh_id, size_t &facet, Vec3f &hit) const;
-    void pick(int mesh_id, size_t facet, const Vec3f &hit, bool clear);
+    // `clear`: Shift+click empties the part. `add`: Ctrl+click adds the patch, or takes it out when the click
+    // lands on the selection (owner 2026-11-25).
+    void pick(int mesh_id, size_t facet, const Vec3f &hit, bool clear, bool add);
     void clear_selection();
     void apply();
 
 
-    // The preview: the selection's region, the fitted planes and the tint, rebuilt when anything changes.
+    // The preview: the selection's region (rebuilt when the mask or the hole fill changes), the fitted planes,
+    // their cut faces and the tint (rebuilt when the cut style changes too).
     void refresh_preview();
     void rebuild_preview();
     void render_preview();
+    PaintSplitPlaneParams plane_params() const;
     int  masked_part(int *count = nullptr) const;
     Transform3d part_to_cut_frame(int part) const;
 
@@ -104,13 +111,17 @@ private:
     bool  m_was_on{ false };
 
     // Preview state.
-    bool                         m_preview_dirty{ true };
+    bool                         m_preview_dirty{ true }; // planes, caps, tint
+    bool                         m_region_dirty{ true };  // the region itself
     Transform3d                  m_preview_trafo{ Transform3d::Identity() };
     int                          m_preview_part{ -1 };
     int                          m_masked_parts{ 0 };
     PaintSplitRegion             m_region;     // of m_preview_part, in the cut frame
-    std::vector<PaintSplitPlane> m_planes;     // per component
-    GLModel                      m_plane_fill;
+    std::vector<std::vector<PaintSplitPlane>> m_planes; // per component, per loop
+    std::vector<int>             m_caps_missing;        // per component: loops whose plane misses the part
+    TriangleMesh                 m_cut_mesh;            // m_preview_part's mesh in the cut frame
+    std::vector<Vec3i32>         m_cut_neighbors;       // its facet neighbours (the tint's flood)
+    GLModel                      m_plane_fill;          // the cut faces Apply makes (or discs where none)
     GLModel                      m_plane_outline;
     GLModel                      m_tint;
     Vec3d                        m_world_offset{ Vec3d::Zero() };

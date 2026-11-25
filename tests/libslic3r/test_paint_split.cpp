@@ -11,11 +11,13 @@
 #include <libslic3r/MeshBoolean.hpp>
 #include <libslic3r/Model.hpp>
 #include <libslic3r/PaintSplit.hpp>
+#include <libslic3r/PrintConfig.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/TriangleSelector.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <map>
@@ -237,7 +239,7 @@ TEST_CASE("Paint split region: a sphere cap painted by a sphere cursor gives one
         CHECK(aabb.squared_distance(s.pos) < 1e-8);
 }
 
-TEST_CASE("Paint split region: bands are refused, small holes are filled at 10 % and kept at 0 %", "[PaintSplit]")
+TEST_CASE("Paint split region: bands are cut, small holes are filled at 10 % and kept at 0 %", "[PaintSplit]")
 {
     const double               R  = 20.;
     const indexed_triangle_set sp = its_make_sphere(R, 2. * PS_PI / 60.);
@@ -248,8 +250,16 @@ TEST_CASE("Paint split region: bands are refused, small holes are filled at 10 %
         REQUIRE(r.error == PaintSplitError::None);
         REQUIRE(r.num_components() == 1);
         CHECK(r.loops[0].size() == 2);
-        CHECK(r.comp_error[0] == PaintSplitError::Band);
-        CHECK_FALSE(r.component_ok(0));
+        // Owner 2026-11-25 (D7 reversed): a band is cut as two cuts, each facing into the band.
+        CHECK(r.component_ok(0));
+        const std::vector<PaintSplitPlane> planes = paint_split_fit_planes(r, 0);
+        REQUIRE(planes.size() == 2);
+        for (const PaintSplitPlane& pl : planes) {
+            REQUIRE(pl.valid);
+            CHECK(std::abs(pl.normal.z()) > 0.99);
+            // Pointing at the band: from z = +-4 towards z = 0.
+            CHECK(pl.normal.z() * pl.point.z() < 0.);
+        }
     }
     // Everything above z = -10, except two small unpainted islands round the +Z and +X directions.
     auto island = [&](const Vec3d& g) {
@@ -265,14 +275,14 @@ TEST_CASE("Paint split region: bands are refused, small holes are filled at 10 %
         CHECK(r.loops[0].size() == 1);
         CHECK(r.component_ok(0));
     }
-    SECTION("two islands, kept at 0 %: three loops, refused") {
+    SECTION("two islands, kept at 0 %: three loops, cut as three cuts") {
         PaintSplitRegionParams p;
         p.fill_holes_pct = 0.;
         const PaintSplitRegion r = paint_split_region(sp, mask, p);
         REQUIRE(r.error == PaintSplitError::None);
         CHECK(r.holes_filled[0] == 0);
         CHECK(r.loops[0].size() == 3);
-        CHECK(r.comp_error[0] == PaintSplitError::MultiLoop);
+        CHECK(r.component_ok(0));
     }
 }
 
@@ -516,6 +526,7 @@ TEST_CASE("Paint split refusals: unrepairable mesh, empty mask, bad component; a
     SECTION("every message is non-empty") {
         for (PaintSplitError e : { PaintSplitError::OpenMesh, PaintSplitError::NonManifold, PaintSplitError::EmptyMask,
                                    PaintSplitError::NoBoundary, PaintSplitError::Band, PaintSplitError::MultiLoop,
+                                   PaintSplitError::CutCrossesRegion,
                                    PaintSplitError::BadComponent, PaintSplitError::BooleanFailed, PaintSplitError::EmptyPiece,
                                    PaintSplitError::EmptyBody, PaintSplitError::RepairFailed })
             CHECK(std::string(paint_split_error_message(e)).size() > 10);
@@ -868,4 +879,362 @@ TEST_CASE("Paint split repair: float slivers are welded, not refused", "[PaintSp
     CHECK_THAT(p.body_volume, WithinRel(48000., 1e-4));
     CHECK(its_num_open_edges(p.piece) == 0);
     CHECK(its_num_open_edges(p.body) == 0);
+}
+
+// ------------------------------------------------------------------------------------------- several loops
+// Owner hand test 2026-11-25 (a painted figure: trousers between a belt and the legs, a hat trim with holes):
+// D7 reversed. A region with N edges is split off as its own piece with one cut per edge; the rest falls into
+// however many connected pieces result.
+
+namespace {
+
+// A closed cylinder of radius r round the Z axis from z0 to z1, with `rings` rings of side facets (so a band
+// can be painted on it) and fanned caps. Outward winding.
+indexed_triangle_set ps_ring_cylinder(double r, double z0, double z1, int rings, int seg = 48)
+{
+    indexed_triangle_set its;
+    for (int k = 0; k <= rings; ++k) {
+        const double z = z0 + (z1 - z0) * double(k) / double(rings);
+        for (int i = 0; i < seg; ++i) {
+            const double a = 2. * PS_PI * double(i) / double(seg);
+            its.vertices.emplace_back(float(r * std::cos(a)), float(r * std::sin(a)), float(z));
+        }
+    }
+    auto V = [seg](int k, int i) { return k * seg + (i % seg); };
+    for (int k = 0; k < rings; ++k)
+        for (int i = 0; i < seg; ++i) {
+            its.indices.emplace_back(V(k, i), V(k, i + 1), V(k + 1, i + 1));
+            its.indices.emplace_back(V(k, i), V(k + 1, i + 1), V(k + 1, i));
+        }
+    const int bottom = int(its.vertices.size());
+    its.vertices.emplace_back(0.f, 0.f, float(z0));
+    const int top = int(its.vertices.size());
+    its.vertices.emplace_back(0.f, 0.f, float(z1));
+    for (int i = 0; i < seg; ++i) {
+        its.indices.emplace_back(bottom, V(0, i + 1), V(0, i));
+        its.indices.emplace_back(top, V(rings, i), V(rings, i + 1));
+    }
+    return its;
+}
+
+double ps_polygon_disc_area(double r, int seg) { return 0.5 * double(seg) * r * r * std::sin(2. * PS_PI / double(seg)); }
+
+double ps_its_area(const indexed_triangle_set& its)
+{
+    double a = 0.;
+    for (int i = 0; i < int(its.indices.size()); ++i)
+        a += ps_facet_area(its, i);
+    return a;
+}
+
+} // namespace
+
+TEST_CASE("Paint split loops: a band round a cylinder splits into three pieces with two cuts", "[PaintSplit]")
+{
+    const double R = 10.;
+    const int    SEG = 48;
+    // z 0..40 in 2 mm rings; the band is z 16..24 (the trousers between the belt and the legs).
+    const indexed_triangle_set cyl  = ps_ring_cylinder(R, 0., 40., 20, SEG);
+    const auto                 mask = ps_mask_where(cyl, [](int, const Vec3d& g) { return g.z() > 16. && g.z() < 24. && std::hypot(g.x(), g.y()) > 5.; });
+    const PaintSplitRegion     r    = paint_split_region(cyl, mask);
+    REQUIRE(r.error == PaintSplitError::None);
+    REQUIRE(r.num_components() == 1);
+    REQUIRE(r.loops[0].size() == 2);
+    REQUIRE(r.component_ok(0));
+
+    const std::vector<PaintSplitPlane> planes = paint_split_fit_planes(r, 0);
+    REQUIRE(planes.size() == 2);
+    for (const PaintSplitPlane& pl : planes) {
+        REQUIRE(pl.valid);
+        CHECK(std::abs(pl.normal.z()) > 0.999);
+        CHECK(pl.normal.z() * (pl.point.z() - 20.) < 0.); // each faces into the band
+    }
+
+    SECTION("the cut faces are the cylinder's cross-sections") {
+        // 1 mm into the band, so the plane runs between rings of vertices.
+        PaintSplitPlaneParams in1;
+        in1.offset = 1.;
+        for (size_t l = 0; l < planes.size(); ++l) {
+            const PaintSplitPlane      pl  = paint_split_fit_loop_plane(r, 0, int(l), in1);
+            const indexed_triangle_set cap = paint_split_cap(cyl, pl, r.loops[0][l]);
+            REQUIRE(!cap.indices.empty());
+            CHECK_THAT(ps_its_area(cap), WithinRel(ps_polygon_disc_area(R, SEG), 1e-3));
+            for (int f = 0; f < int(cap.indices.size()); ++f)
+                CHECK(its_face_normal(cap, f).cast<double>().dot(pl.normal) > 0.99);
+        }
+        // A plane moved past the part's end has no cut face.
+        PaintSplitPlaneParams pp;
+        pp.offset = 30.;
+        const PaintSplitPlane far = paint_split_fit_loop_plane(r, 0, 0, pp);
+        CHECK(paint_split_cap(cyl, far, r.loops[0][0]).indices.empty());
+    }
+
+    SECTION("engine: piece, body and one loose piece; volumes add up") {
+        const PaintSplitPieces p = paint_split_assign_loops(cyl, r, 0, planes);
+        REQUIRE(p.ok());
+        REQUIRE(p.loose.size() == 1); // 3 pieces: the band, and the two ends
+        const double disc = ps_polygon_disc_area(R, SEG);
+        CHECK_THAT(p.piece_volume, WithinRel(disc * 8., 1e-3));
+        CHECK_THAT(p.body_volume, WithinRel(disc * 16., 1e-3));
+        CHECK_THAT(p.loose_volume, WithinRel(disc * 16., 1e-3));
+        CHECK_THAT(p.piece_volume + p.body_volume + p.loose_volume, WithinRel(p.source_volume, 1e-6));
+        const BoundingBoxf3 pb = ps_bbox(p.piece);
+        CHECK_THAT(pb.min.z(), WithinAbs(16., 1e-3));
+        CHECK_THAT(pb.max.z(), WithinAbs(24., 1e-3));
+    }
+
+    SECTION("engine: the body hint picks which end stays the body") {
+        PaintSplitAssignParams ap;
+        ap.body_hints = { Vec3d(0., 0., 40.) }; // the top cap's centre vertex
+        const PaintSplitPieces p = paint_split_assign_loops(cyl, r, 0, planes, ap);
+        REQUIRE(p.ok());
+        CHECK(ps_bbox(p.body).min.z() > 23.);
+        REQUIRE(p.loose.size() == 1);
+        CHECK(ps_bbox(p.loose.front()).max.z() < 17.);
+    }
+
+    SECTION("a cut that passes through the region is refused, naming the loop") {
+        // Offset 9: each cut moves 9 mm into the band, past its other edge, so no cut leaves the band whole.
+        PaintSplitPlaneParams pp;
+        pp.offset = 9.;
+        const PaintSplitPieces p = paint_split_assign_loops(cyl, r, 0, paint_split_fit_planes(r, 0, pp));
+        CHECK_FALSE(p.ok());
+        CHECK(p.bad_loop >= 0);
+    }
+
+    SECTION("through Cut, painted: new objects or parts, colours kept") {
+        Model        model;
+        ModelObject* mo  = model.add_object();
+        mo->name         = "figure";
+        ModelVolume* vol = mo->add_volume(TriangleMesh(cyl));
+        vol->name        = "figure";
+        mo->add_instance();
+        // The trousers in colour 2, everything else colour 3.
+        {
+            TriangleSelector sel(vol->mesh());
+            for (int i = 0; i < int(cyl.indices.size()); ++i) {
+                const Vec3i32& t = cyl.indices[i];
+                const Vec3d    g = (cyl.vertices[t[0]] + cyl.vertices[t[1]] + cyl.vertices[t[2]]).cast<double>() / 3.;
+                sel.set_facet(i, g.z() > 16. && g.z() < 24. && std::hypot(g.x(), g.y()) > 5. ? EnforcerBlockerType::Extruder2 :
+                                                                                               EnforcerBlockerType::Extruder3);
+            }
+            vol->mmu_segmentation_facets.set_data(sel.serialize());
+        }
+        PaintSplitKeep keep;
+        keep.mask_volume_idx = 0;
+        keep.region          = &r;
+        keep.component       = 0;
+        keep.planes          = planes;
+        const ModelObjectCutAttributes base = ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                                              ModelObjectCutAttribute::KeepPaint;
+        const double band_area = 2. * R * std::sin(PS_PI / SEG) * SEG * 8.; // the prism's side, 8 mm high
+
+        SECTION("new object") {
+            Cut              cut(mo, 0, Transform3d::Identity(), base);
+            PaintSplitReport rep;
+            const ModelObjectPtrs& res = cut.perform_with_paint_split_planes(keep, &rep);
+            REQUIRE(rep.error == PaintSplitError::None);
+            REQUIRE(res.size() == 2);
+            int parts0 = 0, parts1 = 0;
+            for (const ModelVolume* v : res[0]->volumes) parts0 += v->is_model_part();
+            for (const ModelVolume* v : res[1]->volumes) parts1 += v->is_model_part();
+            CHECK(parts0 == 1);
+            CHECK(parts1 == 2); // the body and the "_loose1" rest piece, which the job makes an object
+            bool tagged = false;
+            for (const ModelVolume* v : res[1]->volumes)
+                tagged = tagged || v->name == "figure_loose1";
+            CHECK(tagged);
+            CHECK_THAT(ps_volume_of(res[0]), WithinRel(ps_polygon_disc_area(R, SEG) * 8., 1e-3));
+            // The piece keeps the trousers' colour; the ends keep theirs.
+            CHECK_THAT(ps_painted_area(res[0], EnforcerBlockerType::Extruder2), WithinRel(band_area, 0.03));
+            CHECK(ps_painted_area(res[1], EnforcerBlockerType::Extruder2) < 0.03 * band_area);
+            CHECK(ps_painted_area(res[1], EnforcerBlockerType::Extruder3) > 2. * band_area);
+        }
+        SECTION("keep as parts") {
+            Cut              cut(mo, 0, Transform3d::Identity(), base | ModelObjectCutAttribute::KeepAsParts);
+            PaintSplitReport rep;
+            const ModelObjectPtrs& res = cut.perform_with_paint_split_planes(keep, &rep);
+            REQUIRE(rep.error == PaintSplitError::None);
+            REQUIRE(res.size() == 1);
+            int parts = 0;
+            for (const ModelVolume* v : res[0]->volumes)
+                parts += v->is_model_part();
+            CHECK(parts == 3);
+            CHECK_THAT(ps_volume_of(res[0]), WithinRel(ps_polygon_disc_area(R, SEG) * 40., 1e-3));
+        }
+    }
+}
+
+TEST_CASE("Paint split loops: a cap with two holes left open is cut along its three edges", "[PaintSplit]")
+{
+    const double               R  = 20.;
+    const indexed_triangle_set sp = its_make_sphere(R, 2. * PS_PI / 60.);
+    // Everything above z = -10, except two unpainted islands round +Z and +X (the hat trim's holes).
+    auto island = [&](const Vec3d& g) {
+        const Vec3d d = g.normalized();
+        return d.dot(Vec3d::UnitZ()) > std::cos(15. * PS_PI / 180.) || d.dot(Vec3d::UnitX()) > std::cos(15. * PS_PI / 180.);
+    };
+    const auto             mask = ps_mask_where(sp, [&](int, const Vec3d& g) { return g.z() > -10. && !island(g); });
+    PaintSplitRegionParams rp;
+    rp.fill_holes_pct = 0.;
+    const PaintSplitRegion r = paint_split_region(sp, mask, rp);
+    REQUIRE(r.error == PaintSplitError::None);
+    REQUIRE(r.num_components() == 1);
+    REQUIRE(r.loops[0].size() == 3);
+    REQUIRE(r.component_ok(0));
+
+    const std::vector<PaintSplitPlane> planes = paint_split_fit_planes(r, 0);
+    REQUIRE(planes.size() == 3);
+    // The outer edge (z = -10) faces up into the region; each hole's cut faces away from its island.
+    CHECK(planes[0].normal.z() > 0.99);
+    for (size_t l = 1; l < 3; ++l) {
+        const Vec3d c = planes[l].point.normalized();
+        CHECK(planes[l].normal.dot(c) < -0.95);
+    }
+
+    const PaintSplitPieces p = paint_split_assign_loops(sp, r, 0, planes);
+    REQUIRE(p.ok());
+    // The cap, plus the rest: the bottom below z = -10 and one plug per hole.
+    CHECK(p.loose.size() == 2);
+    CHECK_THAT(p.piece_volume + p.body_volume + p.loose_volume, WithinRel(p.source_volume, 1e-6));
+    CHECK(p.body_volume > p.loose_volume);
+    // The piece has no material at the poles of the islands.
+    const AABBMesh piece(p.piece);
+    CHECK(piece.squared_distance(Vec3d(0., 0., R)) > 0.25);
+    CHECK(piece.squared_distance(Vec3d(R, 0., 0.)) > 0.25);
+    CHECK(piece.squared_distance(Vec3d(0., R, 0.)) < 0.01);
+}
+
+TEST_CASE("Paint split pick: a click takes the connected patch, Ctrl+click adds and removes patches", "[PaintSplit]")
+{
+    // Colour 2 on two islands (+X and -X), colour 3 on the top, colour 1 elsewhere.
+    const indexed_triangle_set sp = its_make_sphere(20., 2. * PS_PI / 48.);
+    const TriangleMesh         tm(sp);
+    TriangleSelector           paint(tm);
+    const double               c20 = std::cos(20. * PS_PI / 180.);
+    double                     area_px = 0., area_mx = 0., area_top = 0.;
+    int                        seed_px = -1, seed_mx = -1, seed_top = -1;
+    for (int i = 0; i < int(sp.indices.size()); ++i) {
+        const Vec3i32& t = sp.indices[i];
+        const Vec3d    d = ((sp.vertices[t[0]] + sp.vertices[t[1]] + sp.vertices[t[2]]).cast<double>() / 3.).normalized();
+        if (d.x() > c20) {
+            paint.set_facet(i, EnforcerBlockerType::Extruder2);
+            area_px += ps_facet_area(sp, i);
+            if (seed_px < 0) seed_px = i;
+        } else if (d.x() < -c20) {
+            paint.set_facet(i, EnforcerBlockerType::Extruder2);
+            area_mx += ps_facet_area(sp, i);
+            if (seed_mx < 0) seed_mx = i;
+        } else if (d.z() > c20) {
+            paint.set_facet(i, EnforcerBlockerType::Extruder3);
+            area_top += ps_facet_area(sp, i);
+            if (seed_top < 0) seed_top = i;
+        } else
+            paint.set_facet(i, EnforcerBlockerType::Extruder1);
+    }
+    REQUIRE(seed_px >= 0);
+    REQUIRE(seed_mx >= 0);
+    REQUIRE(seed_top >= 0);
+    const auto data   = paint.serialize();
+    auto       centre = [&](int f) {
+        const Vec3i32& t = sp.indices[f];
+        return Vec3f((sp.vertices[t[0]] + sp.vertices[t[1]] + sp.vertices[t[2]]) / 3.f);
+    };
+
+    // A plain click on colour 2 takes only the patch under it, not the other island of that colour.
+    EnforcerBlockerType picked = EnforcerBlockerType::NONE;
+    auto mask = paint_split_pick(tm, data, TriangleSelector::TriangleSplittingData(), seed_px, centre(seed_px), false, &picked);
+    CHECK(picked == EnforcerBlockerType::Extruder2);
+    CHECK_THAT(paint_split_mask_area(tm, mask), WithinRel(area_px, 1e-6));
+    REQUIRE(paint_split_region(sp, mask).num_components() == 1);
+
+    // Ctrl+click on the other island adds it.
+    mask = paint_split_pick(tm, data, mask, seed_mx, centre(seed_mx), true);
+    CHECK_THAT(paint_split_mask_area(tm, mask), WithinRel(area_px + area_mx, 1e-4));
+    // Ctrl+click on a different colour adds that patch too (a region of several colours).
+    mask = paint_split_pick(tm, data, mask, seed_top, centre(seed_top), true, &picked);
+    CHECK(picked == EnforcerBlockerType::Extruder3);
+    CHECK_THAT(paint_split_mask_area(tm, mask), WithinRel(area_px + area_mx + area_top, 1e-4));
+    // Ctrl+click on a selected patch takes it out again.
+    mask = paint_split_pick(tm, data, mask, seed_px, centre(seed_px), true);
+    CHECK_THAT(paint_split_mask_area(tm, mask), WithinRel(area_mx + area_top, 1e-4));
+    // A plain click replaces the selection.
+    mask = paint_split_pick(tm, data, mask, seed_top, centre(seed_top), false);
+    CHECK_THAT(paint_split_mask_area(tm, mask), WithinRel(area_top, 1e-6));
+
+    // Combining a brushed (sub-facet) mask keeps its partial facets.
+    TriangleSelector brush(tm);
+    brush.select_patch(seed_px, std::make_unique<TriangleSelector::Sphere>(centre(seed_px), Vec3f(5.f * centre(seed_px)), 2.f,
+                                                                            Transform3d::Identity(), TriangleSelector::ClippingPlane()),
+                       EnforcerBlockerType::ENFORCER, Transform3d::Identity(), true, 0.f);
+    const auto   brushed = brush.serialize();
+    const double ab      = paint_split_mask_area(tm, brushed);
+    REQUIRE(ab > 0.);
+    const auto both = paint_split_mask_combine(tm, brushed, mask, PaintSplitMaskOp::Union);
+    CHECK_THAT(paint_split_mask_area(tm, both), WithinRel(ab + area_top, 0.05));
+}
+
+// The owner's painted figure (not committed): run by hand with PAINT_SPLIT_GRINCH=<copy of the 3MF>.
+// Every connected patch of every colour with two or more edges is split; the report lists what happened.
+TEST_CASE("Paint split loops: owner's painted figure", "[.][PaintSplitGrinch]")
+{
+    const char* path = std::getenv("PAINT_SPLIT_GRINCH");
+    if (path == nullptr || *path == 0) {
+        WARN("PAINT_SPLIT_GRINCH not set");
+        return;
+    }
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Enable };
+    Model                     model = Model::read_from_file(path, &config, &ctxt, LoadStrategy::LoadModel | LoadStrategy::Silence);
+    REQUIRE(!model.objects.empty());
+    const ModelVolume* mv = nullptr;
+    for (const ModelObject* o : model.objects)
+        for (const ModelVolume* v : o->volumes)
+            if (v->is_model_part() && !v->mmu_segmentation_facets.empty() && (mv == nullptr || v->mesh().its.indices.size() > mv->mesh().its.indices.size()))
+                mv = v;
+    REQUIRE(mv != nullptr);
+    const TriangleMesh&                           tm    = mv->mesh();
+    const TriangleSelector::TriangleSplittingData paint = mv->mmu_segmentation_facets.get_data();
+    WARN("facets " << tm.its.indices.size());
+    // One seed per connected patch: walk the leaves of each state, skipping those an earlier patch covered.
+    TriangleSelector sel(tm);
+    sel.deserialize(paint, true);
+    int tried = 0;
+    for (size_t s = 0; s < paint.used_states.size() && tried < 40; ++s) {
+        if (!paint.used_states[s])
+            continue;
+        std::vector<int>           src;
+        const indexed_triangle_set leaves = sel.get_facets_strict(EnforcerBlockerType(s), &src);
+        std::vector<char>          covered(tm.its.indices.size(), 0);
+        for (size_t i = 0; i < leaves.indices.size() && tried < 40; ++i) {
+            if (src[i] < 0 || covered[size_t(src[i])])
+                continue;
+            const Vec3i32& t   = leaves.indices[i];
+            const Vec3f    hit = (leaves.vertices[t[0]] + leaves.vertices[t[1]] + leaves.vertices[t[2]]) / 3.f;
+            const auto     mask = paint_split_pick(tm, paint, TriangleSelector::TriangleSplittingData(), src[i], hit, false);
+            {
+                TriangleSelector m(tm);
+                m.deserialize(mask, true);
+                std::vector<int> msrc;
+                m.get_facets_strict(EnforcerBlockerType::ENFORCER, &msrc);
+                for (int f : msrc)
+                    if (f >= 0)
+                        covered[size_t(f)] = 1;
+            }
+            const PaintSplitRegion r = paint_split_region(tm.its, mask);
+            if (r.error != PaintSplitError::None || r.num_components() != 1)
+                continue;
+            const size_t edges = r.loops[0].size();
+            if (edges < 2 || r.area[0] < 100.)
+                continue;
+            ++tried;
+            const PaintSplitPieces p = paint_split_assign_loops(tm.its, r, 0, paint_split_fit_planes(r, 0));
+            WARN("state " << s << ": " << edges << " edges, " << r.holes_filled[0] << " holes filled, area " << r.area[0] << " mm2 -> "
+                          << (p.ok() ? "ok" : paint_split_error_message(p.error)) << " bad_loop " << p.bad_loop << ", pieces "
+                          << (p.ok() ? 2 + p.loose.size() : 0) << ", piece vol " << p.piece_volume << ", body vol " << p.body_volume
+                          << ", loose vol " << p.loose_volume);
+            CHECK(p.ok());
+        }
+    }
+    CHECK(tried > 0);
 }

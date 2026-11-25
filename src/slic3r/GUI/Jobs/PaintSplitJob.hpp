@@ -5,7 +5,8 @@
 //
 // process() runs Cut::perform_with_cutter_solid() off the UI thread on a COPY of the object taken when
 // the job was made, once per selected region (one piece each, D8), each next cut on the body the last
-// one left. finalize() (UI thread) re-finds the source object by id and replaces it with the results
+// one left. A region with several edges is cut once per edge; the rest pieces become parts (Keep as parts)
+// or objects of their own. finalize() (UI thread) re-finds the source object by id and replaces it with the results
 // under ONE undo snapshot, so one Ctrl+Z brings the uncut object back.
 
 #include "Job.hpp"
@@ -24,8 +25,9 @@ class Plater;
 
 struct PaintSplitApplyPiece
 {
-    int                  component{ 0 };
-    indexed_triangle_set cutter;           // in the cut frame (the instance without its offset)
+    int                          component{ 0 };
+    std::vector<PaintSplitPlane> planes;   // one per loop of the component, in the cut frame (the instance without its offset)
+    std::vector<Vec3d>           body_hints; // the later regions' selected skin: the rest piece holding it stays the body
     std::string          label;            // "Region 1", or the picked filament's name
     int                  filament{ 0 };    // 1-based extruder for the piece (D6), 0 = inherit
 };
@@ -61,6 +63,9 @@ private:
     std::vector<PaintSplitWarning> m_warnings;
     int                 m_returned{ 0 };
     int                 m_attached{ 0 };
+    int                 m_bad_loop{ -1 };
+    int                 m_rest_count{ 0 };
+    std::string         m_bad_label;
 };
 
 }} // namespace Slic3r::GUI

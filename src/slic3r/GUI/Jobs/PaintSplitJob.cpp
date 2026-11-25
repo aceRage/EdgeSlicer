@@ -71,13 +71,17 @@ void PaintSplitJob::process(Ctl &ctl)
         keep.mask_volume_idx = mask_idx;
         keep.region          = &m_plan.region;
         keep.component       = p.component;
+        keep.planes          = p.planes;
+        keep.assign.body_hints = p.body_hints;
         keep.cut_only_painted_part = m_plan.cut_only_painted_part;
 
         Cut                    cut(current, m_plan.instance, Transform3d::Identity(), attrs);
         PaintSplitReport       rep;
-        const ModelObjectPtrs &res = cut.perform_with_cutter_solid(p.cutter, true, keep, &rep);
+        const ModelObjectPtrs &res = cut.perform_with_paint_split_planes(keep, &rep);
         if (rep.error != PaintSplitError::None || res.empty()) {
-            m_error = rep.error != PaintSplitError::None ? rep.error : PaintSplitError::BooleanFailed;
+            m_error     = rep.error != PaintSplitError::None ? rep.error : PaintSplitError::BooleanFailed;
+            m_bad_loop  = rep.bad_loop;
+            m_bad_label = p.label;
             return;
         }
         m_returned += rep.returned_components;
@@ -95,6 +99,13 @@ void PaintSplitJob::process(Ctl &ctl)
             mask_idx = find_volume(*obj, std::string(PAINT_SPLIT_TAG) + "_B");
             if (mask_idx >= 0)
                 obj->volumes[size_t(mask_idx)]->name = PAINT_SPLIT_TAG;
+            // A band's rest pieces: parts of their own beside the body.
+            for (int r = 1;; ++r) {
+                const int l = find_volume(*obj, std::string(PAINT_SPLIT_TAG) + "_loose" + std::to_string(r));
+                if (l < 0)
+                    break;
+                obj->volumes[size_t(l)]->name = mask_name + " - " + GUI::format(_u8L("Rest %1%"), ++m_rest_count);
+            }
             current = obj;
         } else {
             if (res.size() < 2) {
@@ -108,6 +119,23 @@ void PaintSplitJob::process(Ctl &ctl)
             if (int a = find_volume(*piece, PAINT_SPLIT_TAG); a >= 0)
                 set_piece(*piece->volumes[size_t(a)], piece->name, p.filament);
             pieces.push_back(piece);
+            // A band's rest pieces: objects of their own (the body keeps the other parts and modifiers).
+            for (int r = 1;; ++r) {
+                const int l = find_volume(*body, std::string(PAINT_SPLIT_TAG) + "_loose" + std::to_string(r));
+                if (l < 0)
+                    break;
+                ModelObject *rest = m_source.add_object(*body);
+                for (int v = int(rest->volumes.size()) - 1; v >= 0; --v)
+                    if (v != l)
+                        rest->delete_volume(size_t(v));
+                body->delete_volume(size_t(l));
+                rest->name = m_name + " - " + GUI::format(_u8L("Rest %1%"), ++m_rest_count);
+                if (!rest->volumes.empty())
+                    rest->volumes.front()->name = rest->name;
+                rest->invalidate_bounding_box();
+                pieces.push_back(rest);
+            }
+            body->invalidate_bounding_box();
             mask_idx = find_volume(*body, PAINT_SPLIT_TAG);
             current  = body;
         }
@@ -150,7 +178,9 @@ void PaintSplitJob::finalize(bool canceled, std::exception_ptr &eptr)
     if (m_error != PaintSplitError::None || m_results.empty()) {
         notes->push_plater_warning_notification(
             format(_u8L("Paint Split did not split \"%1%\": %2%"), m_name,
-                   m_error != PaintSplitError::None ? _u8L(paint_split_error_message(m_error)) : _u8L("nothing to split.")));
+                   m_error == PaintSplitError::None ? _u8L("nothing to split.") :
+            m_bad_loop >= 0 ? GUI::format(_u8L("%1%, edge %2%: %3%"), m_bad_label, m_bad_loop + 1, _u8L(paint_split_error_message(m_error))) :
+                              _u8L(paint_split_error_message(m_error))));
         return;
     }
 
