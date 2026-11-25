@@ -651,7 +651,7 @@ void GLGizmoPaintSplit::apply()
         piece.component = int(c);
         piece.cutter    = paint_split_half_space(m_planes[c], bbox);
         piece.filament  = filament;
-        piece.label     = filament > 0 ? format(_u8L("Filament %1%"), filament) : format(_u8L("Region %1%"), ++n);
+        piece.label     = filament > 0 ? GUI::format(_u8L("Filament %1%"), filament) : GUI::format(_u8L("Region %1%"), ++n);
         if (filament > 0 && m_planes.size() > 1)
             piece.label += " " + std::to_string(++n);
         plan.pieces.push_back(std::move(piece));
