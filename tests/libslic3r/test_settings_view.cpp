@@ -218,7 +218,9 @@ TEST_CASE("Changed rule A: compared with the system preset the edited one inheri
     SECTION("the system preset itself")
     {
         REQUIRE(filaments.select_preset_by_name("Sys PLA", true));
-        REQUIRE(settings_view_reference(filaments) == filaments.find_preset("Sys PLA", false));
+        // find_preset() answers the edited copy for the selected name; the reference is the stored preset.
+        REQUIRE(settings_view_reference(filaments) == &filaments.get_selected_preset());
+        REQUIRE(filaments.get_selected_preset().is_system);
         CHECK(settings_view_changed_options(filaments).count("nozzle_temperature") == 0);
         filaments.get_edited_preset().config.option<ConfigOptionFloats>("filament_flow_ratio")->values = { 0.5 };
         CHECK(settings_view_changed_options(filaments).count("filament_flow_ratio") == 1);
