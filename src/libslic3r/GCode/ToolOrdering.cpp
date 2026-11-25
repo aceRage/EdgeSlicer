@@ -2083,7 +2083,7 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
             auto manual_filament_map = print->filament_map_input();
             std::transform(manual_filament_map.begin(), manual_filament_map.end(), manual_filament_map.begin(), [](int v) { return v - 1; });
             // R1: a by-object plate of an automatic map is grouped on its own map (group_by_plate_map); the filaments the pin rules
-            // bar from their extruder there move, exactly as GCode::_do_export and the reach check move them (rack_pin_filament_map
+            // bar from their extruder there move, exactly as Print::group_print_by_object and the reach check move them (rack_pin_filament_map
             // over the print's filaments). A no-op on a hand-set map, without pins and on printers without a rack.
             if (rack_pins_follow_grouping(print_config)) {
                 std::vector<int> one_based = rack_pin_filament_map(print_config, print->extruders(), print->filament_map_input());
