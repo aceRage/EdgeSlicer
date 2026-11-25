@@ -352,6 +352,10 @@ public:
     // `edge_limit`) and sampled again. Facets flagged in `skip` are left unpainted and unsampled
     // (their painting is copied in by the caller — a cut's uncut facets, or the cap of the cut).
     void resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit, const std::vector<bool> *skip = nullptr);
+    // The same, with the original facet each sample lies on passed to the sampler as well (so it
+    // can look at that facet's normal: repair / remesh paint carry, RepairPaint.hpp).
+    void resample_facets(const std::function<SampledState(const Vec3f &, int)> &sampler, float edge_limit,
+                         const std::vector<bool> *skip = nullptr);
 
     // Select all triangles fully inside the circle, subdivide where needed.
     void select_patch(int                       facet_start,                   // facet of the original mesh (unsplit) that the hit point belongs to

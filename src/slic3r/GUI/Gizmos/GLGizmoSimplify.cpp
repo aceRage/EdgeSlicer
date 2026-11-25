@@ -10,10 +10,13 @@
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/QuadricEdgeCollapse.hpp"
+#include "libslic3r/RepairPaint.hpp"
 
 #include <glad/gl.h>
 
 #include <thread>
+
+#include <wx/utils.h>
 
 namespace Slic3r::GUI {
 
@@ -542,13 +545,20 @@ void GLGizmoSimplify::apply_simplify() {
 
     auto plater = wxGetApp().plater();
     plater->take_snapshot(GUI::format("Simplify %1%", m_volume->name));
-    plater->clear_before_change_mesh(object_idx);
+    // No clear_before_change_mesh(): the painting (supports, seam, colour, fuzzy skin) is
+    // resampled from the old surface onto the simplified facets, and the object's other parts
+    // keep theirs as they are.
 
     ModelVolume* mv = get_model_volume(selection, wxGetApp().model());
     assert(mv == m_volume);
 
+    const RepairPaint::Saved saved(*mv);
     mv->set_mesh(std::move(*m_state.result));
     m_state.result.reset();
+    if (saved.has_painting() || mv->airbrush_field) {
+        wxBusyCursor wait;
+        RepairPaint::restore(saved, *mv);
+    }
     mv->calculate_convex_hull();
     mv->invalidate_convex_hull_2d();
     mv->set_new_unique_id();

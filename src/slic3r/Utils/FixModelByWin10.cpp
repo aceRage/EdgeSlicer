@@ -34,6 +34,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Airbrush/AirbrushBake.hpp"
+#include "libslic3r/RepairPaint.hpp"
 #include "../GUI/GUI.hpp"
 #include "../GUI/I18N.hpp"
 #include "../GUI/MsgDialog.hpp"
@@ -401,12 +402,12 @@ bool fix_model_by_win10_sdk_gui(ModelObject &model_object, int volume_idx, GUI::
 	 			meshes_repaired.emplace_back(std::move(model.objects.front()->volumes.front()->mesh()));
 			}
 			for (size_t i = 0; i < volumes.size(); ++ i) {
-				// Edge (Airbrush P3, A4): the repaired mesh keeps positions; re-bake the colour field on it.
-				const std::shared_ptr<const TriangleMesh>         old_mesh  = volumes[i]->mesh_ptr();
-				const TriangleSelector::TriangleSplittingData     old_paint = volumes[i]->mmu_segmentation_facets.get_data();
+				// The repaired mesh keeps positions but not the facet order: carry the painting
+				// (supports, seam, colour, fuzzy skin) from the old surface onto the new facets,
+				// and re-bake an airbrush field on it (Airbrush P3, A4).
+				const RepairPaint::Saved saved(*volumes[i]);
 				volumes[i]->set_mesh(std::move(meshes_repaired[i]));
-				if (volumes[i]->airbrush_field)
-					Airbrush::airbrush_after_mesh_replaced(*volumes[i], old_mesh->its, old_paint);
+				RepairPaint::restore(saved, *volumes[i]);
 				volumes[i]->calculate_convex_hull();
 				volumes[i]->invalidate_convex_hull_2d();
 				volumes[i]->set_new_unique_id();
