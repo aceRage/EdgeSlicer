@@ -127,6 +127,16 @@ TEST_CASE("A rack adds a strip group and never changes the column", "[ToolTempLa
         CHECK(p.strip[0].cols == 9);
         CHECK(p.strip[0].rows == 1);
     }
+    SECTION("P3C: one extruder row plus a seven-slot rack strip")
+    {
+        const ToolTempLayoutPlan p = tool_temp_layout(1, 7);
+        CHECK(p.column == ToolColumn::Single);
+        CHECK(p.uses_fixed_rows());
+        REQUIRE(p.strip.size() == 1);
+        CHECK(p.strip[0].what == ToolStripGroup::What::Rack);
+        CHECK(p.strip[0].cols == 7);
+        CHECK(p.strip[0].rows == 1);
+    }
     SECTION("two extruders and a rack keep the two rows")
     {
         const ToolTempLayoutPlan p = tool_temp_layout(2, 6);

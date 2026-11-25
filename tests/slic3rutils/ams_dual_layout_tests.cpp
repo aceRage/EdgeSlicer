@@ -12,6 +12,7 @@
 
 #include "slic3r/GUI/AmsDrying.hpp"
 #include "slic3r/GUI/AmsDualLayout.hpp"
+#include "slic3r/GUI/AmsTypes.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -407,4 +408,45 @@ TEST_CASE("Start and Stop send exactly what Bambu Studio sends", "[AmsDrying]")
     CHECK(j["print"]["rotate_tray"].is_boolean());
     CHECK(j["print"]["sequence_id"].is_string());
     CHECK(j["print"].size() == 11);
+}
+
+TEST_CASE("AMS 3H is nine slots and AMS 3P is seven", "[AmsDual][AmsTypes]")
+{
+    using namespace Slic3r::GUI::AmsTypes;
+    CHECK(RACK_A == 6);
+    CHECK(RACK_B == 7);
+    CHECK(is_rack_ams(RACK_A));
+    CHECK(is_rack_ams(RACK_B));
+    CHECK(can_auto_feed(RACK_A));
+    CHECK_FALSE(can_auto_feed(RACK_B));
+    CHECK_FALSE(can_auto_retract(RACK_A));
+    CHECK_FALSE(can_auto_retract(RACK_B));
+
+    CHECK(display_name(RACK_A) == "AMS 3H");
+    CHECK(display_name(RACK_B) == "AMS 3P");
+    CHECK(rack_slot_where(RACK_A, 0) == "AMS 3H slot 1");
+    CHECK(rack_slot_where(RACK_B, 6) == "AMS 3P slot 7");
+
+    CHECK(tray_bit(RACK_A, 32, 0) == 28);
+    CHECK(tray_bit(RACK_A, 32, 8) == 36);
+    CHECK(tray_bit(RACK_B, 32, 0) == 37);
+    CHECK(tray_bit(RACK_B, 32, 6) == 43);
+    CHECK(mapping_tray_index(RACK_A, 32, 8) == 36);
+    CHECK(mapping_tray_index(RACK_B, 32, 6) == 43);
+    CHECK(rack_tray_label(28) == "1");
+    CHECK(rack_tray_label(36) == "9");
+    CHECK(rack_tray_label(37) == "1");
+    CHECK(rack_tray_label(43) == "7");
+
+    CHECK(mapping_container_width_dip(9) == 9 * 54 + 20);
+    CHECK(mapping_container_width_dip(7) == 7 * 54 + 20);
+    CHECK(mapping_container_width_dip(4) == 230);
+
+    CHECK(rack_preview_rows(RACK_A, 9).empty());
+    CHECK(rack_preview_rows(RACK_B, 7) == std::vector<std::vector<int>>({{1, 3, 5}, {0, 2, 4, 6}}));
+    CHECK(rack_preview_rows(RACK_B, 9).empty());
+
+    CHECK(is_rack_virtual_slot(247));
+    CHECK(is_rack_virtual_slot(255));
+    CHECK_FALSE(is_rack_virtual_slot(246));
 }
