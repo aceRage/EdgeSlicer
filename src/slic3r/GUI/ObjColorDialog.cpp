@@ -139,7 +139,8 @@ ObjColorDialog::ObjColorDialog(wxWindow *                      parent,
                                const std::vector<std::string> &extruder_colours,
                                std::vector<unsigned char> &    filament_ids,
                                unsigned char &                 first_extruder_id,
-                               Slic3r::ObjColorMixChoice *     mix_choice)
+                               Slic3r::ObjColorMixChoice *     mix_choice,
+                               size_t                          num_physical)
     : DPIDialog(parent ? parent : static_cast<wxWindow *>(wxGetApp().mainframe),
                 wxID_ANY,
                 _(L("Obj file Import color")),
@@ -158,7 +159,7 @@ ObjColorDialog::ObjColorDialog(wxWindow *                      parent,
     this->SetBackgroundColour(*wxWHITE);
     this->SetMinSize(wxSize(MIN_OBJCOLOR_DIALOG_WIDTH, -1));
 
-    m_panel_ObjColor = new ObjColorPanel(this, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id, mix_choice);
+    m_panel_ObjColor = new ObjColorPanel(this, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id, mix_choice, num_physical);
 
     auto main_sizer = new wxBoxSizer(wxVERTICAL);
     main_sizer->Add(m_line_top, 0, wxEXPAND, 0);
@@ -219,12 +220,14 @@ ObjColorPanel::ObjColorPanel(wxWindow *                       parent,
                              const std::vector<std::string>&  extruder_colours,
                              std::vector<unsigned char> &    filament_ids,
                              unsigned char &                 first_extruder_id,
-                             Slic3r::ObjColorMixChoice *     mix_choice)
+                             Slic3r::ObjColorMixChoice *     mix_choice,
+                             size_t                          num_physical)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize /*,wxBORDER_RAISED*/)
     , m_input_colors(input_colors)
     , m_filament_ids(filament_ids)
     , m_first_extruder_id(first_extruder_id)
     , m_mix_choice(mix_choice)
+    , m_num_physical(num_physical)
 {
     if (input_colors.size() == 0) { return; }
     for (const std::string& color : extruder_colours) {
@@ -401,7 +404,6 @@ bool ObjColorPanel::is_ok() {
 void ObjColorPanel::update_filament_ids()
 {
     const int existing_filament_count = static_cast<int>(m_colours.size());
-    std::map<int, int> appended_filament_id_map;
 
     if (!m_new_add_colors.empty()) {
         std::vector<int> selected_appended_indices;
@@ -415,7 +417,6 @@ void ObjColorPanel::update_filament_ids()
         std::sort(selected_appended_indices.begin(), selected_appended_indices.end());
         selected_appended_indices.erase(std::unique(selected_appended_indices.begin(), selected_appended_indices.end()), selected_appended_indices.end());
 
-        int next_filament_id = existing_filament_count + 1;
         for (int combo_selection : selected_appended_indices) {
             const int new_color_idx = combo_selection - existing_filament_count - 1;
             if (new_color_idx < 0 || new_color_idx >= static_cast<int>(m_new_add_colors.size())) {
@@ -423,29 +424,31 @@ void ObjColorPanel::update_filament_ids()
             }
 
             wxGetApp().sidebar().add_custom_filament(m_new_add_colors[new_color_idx]);
-            appended_filament_id_map.emplace(combo_selection, next_filament_id++);
         }
     }
 
-    auto resolve_filament_id = [&appended_filament_id_map](int mapped_filament_id) {
-        const auto it = appended_filament_id_map.find(mapped_filament_id);
-        const int resolved_filament_id = it == appended_filament_id_map.end() ? mapped_filament_id : it->second;
-        return static_cast<unsigned char>(resolved_filament_id);
+    // The new filaments are physical: they take the ids after the physical filaments and push the
+    // listed mixed filaments up (the list used to be counted as all physical, which sent colours
+    // to the wrong filament whenever a mixed filament was listed and a colour was kept).
+    const std::vector<unsigned char> cluster_ids =
+        Slic3r::obj_color_selection_ids(m_cluster_map_filaments, std::min(m_num_physical, m_colours.size()), m_colours.size());
+    auto resolve_filament_id = [&cluster_ids](size_t cluster) {
+        return cluster < cluster_ids.size() ? cluster_ids[cluster] : static_cast<unsigned char>(1);
     };
 
     m_filament_ids.clear();
     m_filament_ids.reserve(m_input_colors_size);
     for (size_t i = 0; i < m_input_colors_size; i++) {
         auto label = m_cluster_labels_from_algo[i];
-        m_filament_ids.emplace_back(resolve_filament_id(m_cluster_map_filaments[label]));
+        m_filament_ids.emplace_back(resolve_filament_id(size_t(label)));
     }
-    m_first_extruder_id = resolve_filament_id(m_cluster_map_filaments[0]);
+    m_first_extruder_id = resolve_filament_id(0);
 
     if (m_mix_choice != nullptr) {
         *m_mix_choice = Slic3r::ObjColorMixChoice();
         for (size_t i = 0; i < m_cluster_colors_from_algo.size() && i < m_cluster_map_filaments.size(); ++i) {
             m_mix_choice->colors.push_back(m_cluster_colors_from_algo[i]);
-            m_mix_choice->filament_ids.push_back(resolve_filament_id(m_cluster_map_filaments[i]));
+            m_mix_choice->filament_ids.push_back(resolve_filament_id(i));
             const bool mix = i < m_result_icon_list.size() && m_result_icon_list[i]->mix_box != nullptr &&
                              m_result_icon_list[i]->mix_box->GetValue();
             m_mix_choice->mix.push_back(mix);

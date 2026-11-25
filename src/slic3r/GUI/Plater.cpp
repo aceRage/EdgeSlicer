@@ -14336,6 +14336,26 @@ static bool import_may_have_texture(const boost::filesystem::path &path)
     return false;
 }
 
+// The filaments a colour import may map colours to: the physical ones, then the mixed filaments -
+// but none from the first image row on. An image row prints a picture (or a model's own texture) on
+// the part it was made for; as a paint colour it is only its layer cycle, so a re-import that mapped
+// colours to the row an earlier import left behind printed in plain bands.
+static std::vector<std::string> import_filament_colours(size_t &num_physical)
+{
+    std::vector<std::string> colours = wxGetApp().plater()->get_extruder_colors_from_plater_config(nullptr, false);
+    num_physical = colours.size();
+    if (wxGetApp().preset_bundle == nullptr)
+        return colours;
+    for (const MixedFilament &mf : wxGetApp().preset_bundle->mixed_filaments.mixed_filaments()) {
+        if (!mf.enabled || mf.deleted)
+            continue;
+        if (mf.distribution_mode == int(MixedFilament::ImageWeighted) || !mf.image_fill_ref.empty())
+            break;
+        colours.push_back(mf.display_color);
+    }
+    return colours;
+}
+
 static void offer_texture_dual_wall(Plater *q, const std::vector<size_t> &obj_idxs, const ObjColorMixChoice *choice = nullptr)
 {
     PresetBundle *bundle = wxGetApp().preset_bundle;
@@ -15268,14 +15288,17 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     if (!boost::iends_with(path.string(), ".obj") &&
                         !boost::iends_with(path.string(), ".glb") &&
                         !boost::iends_with(path.string(), ".gltf")) { return; }
-                    const std::vector<std::string> extruder_colours = wxGetApp().plater()->get_extruder_colors_from_plater_config();
+                    size_t                         num_physical = 0;
+                    const std::vector<std::string> extruder_colours = import_filament_colours(num_physical);
                     // Nobody is at the PC - a phone-started import, or a hidden instance. Opening
                     // ObjColorDialog here would block on a window no one can answer, so match the
                     // colours ourselves and carry on. Same rule for OBJ as for glTF: both arrive
                     // through this lambda.
                     if (RemoteAccess::dialog_mode() != RemoteAccess::Mode::Interactive) {
                         ObjColorAutoMatchInfo info;
-                        if (!obj_color_auto_match_headless(input_colors, is_single_color, extruder_colours,
+                        // New slots are physical filaments, so only those are matched against.
+                        const std::vector<std::string> physical(extruder_colours.begin(), extruder_colours.begin() + std::min(num_physical, extruder_colours.size()));
+                        if (!obj_color_auto_match_headless(input_colors, is_single_color, physical,
                                                            filament_ids, first_extruder_id, info)) {
                             filament_ids.clear();
                             return;
@@ -15296,7 +15319,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     }
                     const bool                     textured = import_may_have_texture(path);
                     ObjColorDialog                 color_dlg(nullptr, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id,
-                                                             textured ? &import_mix_choice : nullptr);
+                                                             textured ? &import_mix_choice : nullptr, num_physical);
                     if (color_dlg.ShowModal() != wxID_OK) { 
                         filament_ids.clear();
                         import_mix_choice = ObjColorMixChoice();
@@ -18063,14 +18086,16 @@ void Plater::priv::reload_from_disk()
             if (!boost::iends_with(path, ".obj") &&
                 !boost::iends_with(path, ".glb") &&
                 !boost::iends_with(path, ".gltf")) { return; }
-            const std::vector<std::string> extruder_colours = wxGetApp().plater()->get_extruder_colors_from_plater_config();
+            size_t                         num_physical = 0;
+            const std::vector<std::string> extruder_colours = import_filament_colours(num_physical);
             // Nobody is at the PC - a phone-started import, or a hidden instance. Opening
             // ObjColorDialog here would block on a window no one can answer, so match the
             // colours ourselves and carry on. Same rule for OBJ as for glTF: both arrive
             // through this lambda.
             if (RemoteAccess::dialog_mode() != RemoteAccess::Mode::Interactive) {
                 ObjColorAutoMatchInfo info;
-                if (!obj_color_auto_match_headless(input_colors, is_single_color, extruder_colours,
+                const std::vector<std::string> physical(extruder_colours.begin(), extruder_colours.begin() + std::min(num_physical, extruder_colours.size()));
+                if (!obj_color_auto_match_headless(input_colors, is_single_color, physical,
                                                    filament_ids, first_extruder_id, info)) {
                     filament_ids.clear();
                     return;
@@ -18089,7 +18114,8 @@ void Plater::priv::reload_from_disk()
                     "auto");
                 return;
             }
-            ObjColorDialog                 color_dlg(nullptr, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id);
+            ObjColorDialog                 color_dlg(nullptr, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id,
+                                                     nullptr, num_physical);
             if (color_dlg.ShowModal() != wxID_OK) { filament_ids.clear(); }
         };
         wxBusyCursor wait;

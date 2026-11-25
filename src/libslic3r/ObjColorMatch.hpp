@@ -70,6 +70,14 @@ struct ObjColorMixChoice
 // filament is further away than the tolerance a headless import would have reused it at.
 bool obj_color_default_mix(const RGBA &group, const RGBA &mapped_filament, float tolerance = OBJ_COLOR_MATCH_TOLERANCE);
 
+// The colour dialog lists the physical filaments first, then the mixed filaments, and lets the user
+// add new filaments ("Keep color"). A row's selection is 1-based into that list; a selection above
+// `num_listed` is the n-th new filament. New filaments become physical ones, so they take the ids
+// right after the physical filaments and push every mixed filament up. Returns the filament id each
+// selection has once the new filaments that are actually selected exist (added in rising order of
+// selection); 0 for a selection below 1.
+std::vector<unsigned char> obj_color_selection_ids(const std::vector<int> &selections, size_t num_physical, size_t num_listed);
+
 using ObjColorDistanceFn = std::function<float(const RGBA &, const RGBA &)>;
 
 // Cluster `input_colors` the way ObjColorPanel does and map every cluster to a filament slot.

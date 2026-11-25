@@ -27,7 +27,8 @@ public:
                   const std::vector<std::string> &      extruder_colours,
                   std::vector<unsigned char> &    filament_ids,
                   unsigned char &                 first_extruder_id,
-                  Slic3r::ObjColorMixChoice *     mix_choice = nullptr);
+                  Slic3r::ObjColorMixChoice *     mix_choice = nullptr,
+                  size_t                          num_physical = size_t(-1));
     void msw_rescale();
     bool is_ok();
     void update_filament_ids();
@@ -104,6 +105,8 @@ private:
     unsigned char&             m_first_extruder_id;
     std::vector<unsigned char> &m_filament_ids;
     Slic3r::ObjColorMixChoice * m_mix_choice{nullptr};
+    // How many of the listed colours are physical filaments; the rest are mixed filaments.
+    size_t                      m_num_physical{size_t(-1)};
 };
 
 // What the headless match did, for the API response and the log.
@@ -131,7 +134,8 @@ public:
                    const std::vector<std::string> &   extruder_colours,
                    std::vector<unsigned char>&        filament_ids,
                    unsigned char &                 first_extruder_id,
-                   Slic3r::ObjColorMixChoice *     mix_choice = nullptr);
+                   Slic3r::ObjColorMixChoice *     mix_choice = nullptr,
+                   size_t                          num_physical = size_t(-1));
     wxBoxSizer* create_btn_sizer(long flags);
     void on_dpi_changed(const wxRect &suggested_rect) override;
 private:
