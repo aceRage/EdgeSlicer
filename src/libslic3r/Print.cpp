@@ -6621,7 +6621,7 @@ void Print::plan_print_by_object()
         block.ordering               = current;
         block.first_extruder         = ordering.first_extruder();
         block.last_extruder          = ordering.last_extruder();
-        for (const LayerTools &lt : ordering.layer_tools())
+        for (const LayerTools &lt : ordering)
             for (unsigned int filament : lt.extruders)
                 load(filament);
         plan.blocks.push_back(std::move(block));

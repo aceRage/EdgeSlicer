@@ -726,7 +726,7 @@ DynamicPrintConfig h2c_pinned_by_object()
 std::vector<std::vector<unsigned int>> layer_extruders(const ToolOrdering &ordering)
 {
     std::vector<std::vector<unsigned int>> out;
-    for (const LayerTools &lt : ordering.layer_tools())
+    for (const LayerTools &lt : ordering)
         out.push_back(lt.extruders);
     return out;
 }
