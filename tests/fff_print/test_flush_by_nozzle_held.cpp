@@ -664,3 +664,262 @@ TEST_CASE("Print by object on other printers: no hotend grouping is added", "[Fl
         CHECK(header_value(gcode, "filament_map") == "2,1");
     }
 }
+
+// ---- Print by object: grouping and per-copy plan made by Print::process (per-object prime towers, PR 1) ----------------
+// The by-object nozzle grouping (two-extruder Bambu printers, with the rack pins' map move, and the H3C rack) used to run in
+// GCode::_do_export. It now runs in Print::process before the prime tower step, which also stores every copy's chained
+// tool ordering (ByObjectPlan); the export prints with the stored orderings. The G-code is unchanged.
+
+namespace {
+
+const Machine A1{ "Bambu Lab A1 0.4 nozzle", "0.20mm Standard @BBL A1", "Bambu PLA Basic @BBL A1" };
+
+// slice_two_colour_objects without the export: Print::process only.
+void process_two_colour_objects(Print &print, Model &model, const DynamicPrintConfig &cfg, const std::vector<int> &walls,
+                                const std::vector<int> &infills)
+{
+    for (size_t i = 0; i < walls.size(); ++i) {
+        TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
+        cube.scale(Vec3f(1.f, 1.f, 0.1f));
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(cube);
+        object->volumes.front()->name = object->name;
+        object->config.set("wall_filament", walls[i]);
+        object->config.set("sparse_infill_filament", infills[i]);
+        object->config.set("solid_infill_filament", infills[i]);
+        object->add_instance();
+        object->center_around_origin();
+        object->instances.front()->set_offset(Vec3d(130. + 60. * double(i), 160., 0.));
+        object->ensure_on_bed();
+    }
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    const StringObjectException error = print.validate();
+    REQUIRE(error.string.empty());
+    print.set_status_silent();
+    print.process();
+}
+
+DynamicPrintConfig by_object(DynamicPrintConfig cfg)
+{
+    cfg.set_deserialize_strict({ { "print_sequence", "by object" } });
+    return cfg;
+}
+
+// H2C, three filaments, rack 0.4,0.6,0.4,0.6 on the right, filament 1 pinned to the 0.6, automatic map 1,2,1 (as
+// test_h2c_rack_pins_by_object.cpp): the pin rules move filament 1 to the right extruder.
+DynamicPrintConfig h2c_pinned_by_object()
+{
+    DynamicPrintConfig cfg = by_object(machine_config(H2C, 3, false, ""));
+    cfg.set_deserialize_strict({ { "filament_map_mode", "Auto For Flush" }, { "filament_map", "1,2,1" } });
+    cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = { "", "0.4,0.6,0.4,0.6" };
+    cfg.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values  = { 0.6, 0., 0. };
+    return cfg;
+}
+
+std::vector<std::vector<unsigned int>> layer_extruders(const ToolOrdering &ordering)
+{
+    std::vector<std::vector<unsigned int>> out;
+    for (const LayerTools &lt : ordering.layer_tools())
+        out.push_back(lt.extruders);
+    return out;
+}
+
+// The plan: one block per copy in print order, each chained from the block before it, and every stored ordering equal to
+// the one the export would build (ToolOrdering(object, first filament asked for)).
+void check_plan(const Print &print, size_t copies)
+{
+    const ByObjectPlan &plan = print.by_object_plan();
+    REQUIRE_FALSE(plan.empty());
+    REQUIRE(plan.blocks.size() == copies);
+    unsigned int last = (unsigned int) -1;
+    for (size_t i = 0; i < plan.blocks.size(); ++i) {
+        const ByObjectBlock &block = plan.blocks[i];
+        INFO("block " << i);
+        REQUIRE(block.instance != nullptr);
+        REQUIRE(block.ordering >= 0);
+        const ByObjectPlan::Ordering &stored = plan.orderings[size_t(block.ordering)];
+        CHECK(stored.object == block.instance->print_object);
+        CHECK(block.first_extruder == stored.tool_ordering.first_extruder());
+        CHECK(block.last_extruder == stored.tool_ordering.last_extruder());
+        CHECK(block.first_extruder != (unsigned int) -1);
+        if (i == 0) {
+            CHECK(stored.first_extruder == (unsigned int) -1);
+        } else {
+            // Another object: always a new ordering, chained from the previous block's last filament.
+            CHECK(block.rebuilt);
+            CHECK(block.chained_from == last);
+            CHECK(stored.first_extruder == last);
+        }
+        const ToolOrdering fresh(*stored.object, stored.first_extruder);
+        CHECK(layer_extruders(fresh) == layer_extruders(stored.tool_ordering));
+        CHECK(fresh.first_extruder() == stored.tool_ordering.first_extruder());
+        CHECK(fresh.last_extruder() == stored.tool_ordering.last_extruder());
+        last = block.last_extruder;
+    }
+}
+
+} // namespace
+
+TEST_CASE("Print by object: process() groups a two-extruder plate before the export", "[ByObjectPlan]")
+{
+    // H2D, manual map 2,1: the grouping exists after process() alone and puts each filament on its map's extruder.
+    DynamicPrintConfig cfg = by_object(machine_config(H2D, 2, false, "2,1"));
+    Print              print;
+    Model              model;
+    process_two_colour_objects(print, model, cfg, { 1, 1 }, { 2, 2 });
+    const auto group = print.get_layered_nozzle_group_result();
+    REQUIRE(group != nullptr);
+    CHECK(group->get_extruder_id(0, -1) == 1);
+    CHECK(group->get_extruder_id(1, -1) == 0);
+    check_plan(print, 2);
+
+    // The two nozzles carry what they last held from block to block: both filaments print in the first block.
+    const ByObjectPlan &plan = print.by_object_plan();
+    CHECK(plan.blocks[0].nozzle_status_before.get_nozzle_filament_map().empty());
+    const int left = group->get_nozzle_id(1, -1), right = group->get_nozzle_id(0, -1);
+    CHECK(left != right);
+    CHECK(plan.blocks[1].nozzle_status_before.get_filament_in_nozzle(left) == 1);
+    CHECK(plan.blocks[1].nozzle_status_before.get_filament_in_nozzle(right) == 0);
+    CHECK(plan.nozzle_status_after.get_filament_in_nozzle(left) == 1);
+    CHECK(plan.nozzle_status_after.get_filament_in_nozzle(right) == 0);
+
+    // The export prints with the stored orderings and the header names the grouping's map.
+    const std::string gcode = Test::gcode(print);
+    CHECK(print.by_object_plan_misses() == 0);
+    CHECK(header_value(gcode, "filament_map") == "2,1");
+}
+
+TEST_CASE("Print by object: process() writes the map the H2C rack pins move", "[ByObjectPlan][RackPins]")
+{
+    DynamicPrintConfig cfg = h2c_pinned_by_object();
+    Print              print;
+    Model              model;
+    // Object 1 prints filament 1 (pinned to the rack's 0.6), object 2 filament 2.
+    process_two_colour_objects(print, model, cfg, { 1, 2 }, { 1, 2 });
+    // Moved by process() itself, before the export.
+    CHECK(print.config().filament_map.values == std::vector<int>{ 2, 1, 1 });
+    CHECK(print.full_print_config().option<ConfigOptionInts>("filament_map")->values == std::vector<int>{ 2, 1, 1 });
+    const auto group = print.get_layered_nozzle_group_result();
+    REQUIRE(group != nullptr);
+    CHECK(group->get_extruder_id(0, -1) == 1);
+    CHECK(group->get_extruder_id(1, -1) == 0);
+    check_plan(print, 2);
+    // One filament per object: each block prints only its object's filament, so the blocks start with filaments 1 and 2.
+    const ByObjectPlan &plan = print.by_object_plan();
+    CHECK(plan.blocks[0].first_extruder == plan.blocks[0].last_extruder);
+    CHECK(plan.blocks[1].first_extruder == plan.blocks[1].last_extruder);
+    CHECK(std::set<unsigned int>{ plan.blocks[0].first_extruder, plan.blocks[1].first_extruder } == std::set<unsigned int>{ 0, 1 });
+
+    const std::string gcode = Test::gcode(print);
+    CHECK(print.by_object_plan_misses() == 0);
+    CHECK(header_value(gcode, "filament_map") == "2,1,1");
+    // A second export of the same slice (process() with nothing to redo) moves nothing twice and gives the same G-code.
+    const std::string again = Test::gcode(print);
+    CHECK(print.config().filament_map.values == std::vector<int>{ 2, 1, 1 });
+    CHECK(header_value(again, "filament_map") == "2,1,1");
+    CHECK(print.by_object_plan_misses() == 0);
+}
+
+TEST_CASE("Print by object: process() groups an H3C plate onto its rack hotends", "[ByObjectPlan]")
+{
+    DynamicPrintConfig cfg = h3c_config(2, false, "by object");
+    Print              print;
+    Model              model;
+    process_two_colour_objects(print, model, cfg, { 1, 1 }, { 2, 2 });
+    const auto group = print.get_layered_nozzle_group_result();
+    REQUIRE(group != nullptr);
+    const int hotend0 = group->get_nozzle_id(0, -1), hotend1 = group->get_nozzle_id(1, -1);
+    CHECK(hotend0 != hotend1);
+    check_plan(print, 2);
+    // Every hotend keeps its filament across the blocks.
+    const ByObjectPlan &plan = print.by_object_plan();
+    CHECK(plan.blocks[1].nozzle_status_before.get_filament_in_nozzle(hotend0) == 0);
+    CHECK(plan.blocks[1].nozzle_status_before.get_filament_in_nozzle(hotend1) == 1);
+
+    const std::string gcode  = Test::gcode(print);
+    CHECK(print.by_object_plan_misses() == 0);
+    const std::vector<int> nozzle = nozzle_map_of(gcode);
+    REQUIRE(nozzle.size() == 2);
+    CHECK(nozzle[0] == hotend0);
+    CHECK(nozzle[1] == hotend1);
+}
+
+TEST_CASE("Print by object on one-nozzle printers: a plan, no grouping", "[ByObjectPlan]")
+{
+    for (const Machine *m : { &X1C, &A1 }) {
+        DYNAMIC_SECTION(m->printer)
+        {
+            DynamicPrintConfig cfg = by_object(machine_config(*m, 2, false, ""));
+            Print              print;
+            Model              model;
+            process_two_colour_objects(print, model, cfg, { 1, 1 }, { 2, 2 });
+            CHECK(print.get_layered_nozzle_group_result() == nullptr);
+            check_plan(print, 2);
+            // The one nozzle holds the last filament of the block before.
+            const ByObjectPlan &plan = print.by_object_plan();
+            CHECK(plan.blocks[1].nozzle_status_before.get_filament_in_nozzle(0) == int(plan.blocks[0].last_extruder));
+            CHECK(plan.nozzle_status_after.get_filament_in_nozzle(0) == int(plan.blocks[1].last_extruder));
+
+            const std::string gcode = Test::gcode(print);
+            CHECK(print.by_object_plan_misses() == 0);
+            CHECK(print.get_layered_nozzle_group_result() == nullptr);
+            CHECK(gcode.find(";Multi extruder pre heating") == std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("Print by object: two copies of one object share the plan's ordering when they can", "[ByObjectPlan]")
+{
+    // One two-colour object, two copies (X1C): the second copy is the same object; it reuses the ordering only when that
+    // starts with the filament the first copy ended with, else it gets one chained from that filament.
+    DynamicPrintConfig cfg = by_object(machine_config(X1C, 2, false, ""));
+    Print              print;
+    Model              model;
+    {
+        TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
+        cube.scale(Vec3f(1.f, 1.f, 0.1f));
+        ModelObject *object = model.add_object();
+        object->name        = "cube";
+        object->add_volume(cube);
+        object->volumes.front()->name = object->name;
+        object->config.set("wall_filament", 1);
+        object->config.set("sparse_infill_filament", 2);
+        object->config.set("solid_infill_filament", 2);
+        object->add_instance();
+        object->add_instance();
+        object->center_around_origin();
+        object->instances[0]->set_offset(Vec3d(110., 160., 0.));
+        object->instances[1]->set_offset(Vec3d(190., 160., 0.));
+        object->ensure_on_bed();
+    }
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    REQUIRE(print.validate().string.empty());
+    print.set_status_silent();
+    print.process();
+    const ByObjectPlan &plan = print.by_object_plan();
+    REQUIRE(plan.blocks.size() == 2);
+    const ByObjectBlock &b0 = plan.blocks[0], &b1 = plan.blocks[1];
+    CHECK(b0.instance->print_object == b1.instance->print_object);
+    if (plan.orderings[size_t(b0.ordering)].tool_ordering.first_extruder() == b0.last_extruder) {
+        CHECK_FALSE(b1.rebuilt);
+        CHECK(b1.ordering == b0.ordering);
+    } else {
+        CHECK(b1.rebuilt);
+        CHECK(b1.chained_from == b0.last_extruder);
+    }
+    Test::gcode(print);
+    CHECK(print.by_object_plan_misses() == 0);
+}
+
+TEST_CASE("Print by layer: no by-object plan", "[ByObjectPlan]")
+{
+    DynamicPrintConfig cfg = machine_config(X1C, 2, true, "");
+    Print              print;
+    Model              model;
+    process_two_colour_objects(print, model, cfg, { 1, 1 }, { 2, 2 });
+    CHECK(print.by_object_plan().empty());
+    CHECK(print.by_object_plan().blocks.empty());
+}
