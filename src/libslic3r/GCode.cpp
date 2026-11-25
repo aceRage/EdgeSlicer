@@ -11115,8 +11115,21 @@ void GCode::append_full_config(const Print& print, std::string& str)
     // BBS: the idle-nozzle pre-heating keys are dumped (as Bambu Studio does) only for a printer that
     // pre-heats; every other printer's config block stays as it was before the keys existed.
     static const std::set<std::string_view> pre_heating_keys({"enable_pre_heating"sv, "filament_pre_cooling_temperature"sv,
-                                                              "filament_preheat_temperature_delta"sv, "min_temperature_when_ec"sv});
+                                                              "filament_preheat_temperature_delta"sv});
     const bool dump_pre_heating_keys = print.config().enable_pre_heating.value;
+    // P3C (Bambu Studio 2.9.2): dump min_temperature_when_ec only when a used filament sets a real
+    // idle floor (> 0, the P3C template's 80). Missing, negative (H2D / H2C default -1) or 0 (H3C)
+    // still read as no floor, so those printers keep the config block they had before the key existed.
+    bool dump_min_temperature_when_ec = false;
+    {
+        const DynamicPrintConfig &full = print.full_print_config();
+        for (unsigned int filament_id : print.extruders(true)) {
+            if (min_temperature_when_ec_at(full, filament_id) > 0.) {
+                dump_min_temperature_when_ec = true;
+                break;
+            }
+        }
+    }
     // Likewise the bed-slinger mass model keys: only for a printer that models it (the A2L sets both).
     static const std::set<std::string_view> mass_model_keys({"machine_max_force_Y"sv, "machine_bed_mass_Y"sv});
     const bool dump_mass_model_keys = print.config().machine_max_force_Y.value > 0. || print.config().machine_bed_mass_Y.value > 0.;
@@ -11151,6 +11164,8 @@ void GCode::append_full_config(const Print& print, std::string& str)
             (key == "line_width_nozzle_diameter" && print.config().line_width_nozzle_diameter.value == 0.))
             continue;
         if (!dump_pre_heating_keys && pre_heating_keys.find(key) != pre_heating_keys.end())
+            continue;
+        if (key == "min_temperature_when_ec" && !dump_min_temperature_when_ec)
             continue;
         // Per-nozzle process P4: its keys only when a job uses them, so every other job's config block stays as it was.
         if (per_nozzle_p4_key_unused(cfg, key))

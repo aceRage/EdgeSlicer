@@ -356,6 +356,8 @@ SCENARIO("H2D: the idle hotend is pre-cooled and pre-heated in time", "[BambuPre
                 CHECK(config_value(gcode, "enable_pre_heating") == "1");
                 CHECK(config_value(gcode, "filament_pre_cooling_temperature") != "<missing>");
                 CHECK(config_value(gcode, "filament_preheat_temperature_delta") != "<missing>");
+                // H2D's idle floor is the default -1: not a real floor, so the P3C key stays out.
+                CHECK(config_value(gcode, "min_temperature_when_ec") == "<missing>");
             }
         }
     }

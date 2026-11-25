@@ -1,9 +1,14 @@
 #include <catch2/catch.hpp>
 
+#include "libslic3r/GCode.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Utils.hpp"
+
+#include "../fff_print/test_data.hpp"
 
 #include <boost/filesystem.hpp>
 
@@ -32,6 +37,33 @@ PresetBundle &p3c_bundle()
         return b;
     }();
     return *bundle;
+}
+
+DynamicPrintConfig selected_config(const char *printer, const char *process, const char *filament)
+{
+    PresetBundle &b = p3c_bundle();
+    REQUIRE(b.printers.select_preset_by_name(printer, true));
+    REQUIRE(b.prints.select_preset_by_name(process, true));
+    REQUIRE(b.filaments.select_preset_by_name(filament, true));
+    b.filament_presets = {filament};
+    b.set_num_filaments(1, std::vector<std::string>{"#E01919"});
+    b.filament_presets = {filament};
+    return b.full_config_secure();
+}
+
+std::string config_block_dump(const DynamicPrintConfig &cfg)
+{
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, cfg);
+    std::string dump;
+    GCode::append_full_config(print, dump);
+    return dump;
+}
+
+bool config_block_has(const std::string &dump, const std::string &key)
+{
+    return dump.find("; " + key + " = ") != std::string::npos;
 }
 
 } // namespace
@@ -117,4 +149,29 @@ TEST_CASE("P3C TPU 2.85 mm presets keep the Direct Drive TPU285 path", "[BblP3C]
 
     const Preset *tpu = b.filaments.find_preset("Bambu TPU 75A(2.85mm) @BBL P3C", false);
     REQUIRE(tpu != nullptr);
+}
+
+TEST_CASE("min_temperature_when_ec is dumped only when a used filament sets a real idle floor", "[BblP3C][GCode]")
+{
+    SECTION("H2D and H3C floors are <= 0, so the key stays out of the config block")
+    {
+        const DynamicPrintConfig h2d = selected_config("Bambu Lab H2D 0.4 nozzle", "0.20mm Standard @BBL H2D", "Bambu PLA Basic @BBL H2D");
+        CHECK_FALSE(config_block_has(config_block_dump(h2d), "min_temperature_when_ec"));
+        const DynamicPrintConfig h3c = selected_config("Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Bambu PLA Basic @BBL H3C");
+        CHECK_FALSE(config_block_has(config_block_dump(h3c), "min_temperature_when_ec"));
+        DynamicPrintConfig zero = h2d;
+        zero.set_deserialize_strict({{"min_temperature_when_ec", "0"}});
+        CHECK_FALSE(config_block_has(config_block_dump(zero), "min_temperature_when_ec"));
+        DynamicPrintConfig neg = h2d;
+        neg.set_deserialize_strict({{"min_temperature_when_ec", "-1"}});
+        CHECK_FALSE(config_block_has(config_block_dump(neg), "min_temperature_when_ec"));
+    }
+    SECTION("P3C's floor of 80 is written")
+    {
+        const DynamicPrintConfig p3c = selected_config("Bambu Lab P3C 0.4 nozzle", "0.20mm Standard @BBL P3C", "Bambu PLA Basic @BBL P3C");
+        const std::string        dump = config_block_dump(p3c);
+        const size_t             pos  = dump.find("; min_temperature_when_ec = ");
+        REQUIRE(pos != std::string::npos);
+        CHECK(dump.find("80", pos) != std::string::npos);
+    }
 }
