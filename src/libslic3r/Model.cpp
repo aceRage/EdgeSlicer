@@ -17,6 +17,7 @@
 #include "Format/svg.hpp"
 // BBS
 #include "ImageFill.hpp"
+#include <limits>
 #include "FaceDetector.hpp"
 
 #include "libslic3r/Geometry/ConvexHull.hpp"
@@ -352,9 +353,22 @@ Model Model::read_from_file(const std::string&                                  
                 const int         depth = 2;   // 16 samples a triangle, as for glTF
                 std::vector<RGBA> face_colors, sub_face_colors;
                 std::string       texture_warning;
+                std::vector<uint8_t> texture_png;
                 const bool sampled = sample_obj_textures(boost::filesystem::path(input_file).parent_path().string(),
                                                          face_texture, obj_info.uvs, obj_info.face_colors, depth,
-                                                         face_colors, sub_face_colors, texture_warning);
+                                                         face_colors, sub_face_colors, texture_warning, &texture_png);
+                // Keep the texture and the UVs with the part, so its walls can follow the texture
+                // itself. The store's convention is glTF's (v down); untextured faces get no UV.
+                if (sampled && !texture_png.empty()) {
+                    const float  none = std::numeric_limits<float>::quiet_NaN();
+                    ImageFillUVs uvs(obj_info.uvs.size());
+                    for (size_t fi = 0; fi < uvs.size(); ++fi)
+                        for (size_t k = 0; k < 3; ++k)
+                            uvs[fi][k] = face_texture[fi].empty() ? Vec2f(none, none)
+                                                                  : Vec2f(obj_info.uvs[fi][k].x(), 1.f - obj_info.uvs[fi][k].y());
+                    image_fill_set_volume_texture(*model.objects.back()->volumes[0], model.image_assets,
+                                                  std::move(texture_png), uvs);
+                }
                 if (!texture_warning.empty() && import_warning != nullptr)
                     *import_warning = texture_warning;
                 if (!sampled)

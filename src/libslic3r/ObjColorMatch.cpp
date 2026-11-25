@@ -43,6 +43,36 @@ float obj_color_distance(const RGBA &a, const RGBA &b)
                              (la[2] - lb[2]) * (la[2] - lb[2]));
 }
 
+std::vector<unsigned char> obj_color_selection_ids(const std::vector<int> &selections, size_t num_physical, size_t num_listed)
+{
+    num_physical = std::min(num_physical, num_listed);
+    std::vector<int> added;
+    for (int s : selections)
+        if (s > int(num_listed))
+            added.push_back(s);
+    std::sort(added.begin(), added.end());
+    added.erase(std::unique(added.begin(), added.end()), added.end());
+
+    std::vector<unsigned char> ids;
+    ids.reserve(selections.size());
+    for (int s : selections) {
+        int id = 0;
+        if (s > int(num_listed))
+            id = int(num_physical) + 1 + int(std::lower_bound(added.begin(), added.end(), s) - added.begin());
+        else if (s > int(num_physical))
+            id = s + int(added.size());   // a mixed filament, pushed up by the new physical ones
+        else if (s >= 1)
+            id = s;
+        ids.push_back((unsigned char) std::min(id, 255));
+    }
+    return ids;
+}
+
+bool obj_color_default_mix(const RGBA &group, const RGBA &mapped_filament, float tolerance)
+{
+    return obj_color_distance(group, mapped_filament) > tolerance;
+}
+
 bool obj_color_auto_match(const std::vector<RGBA> &input_colors,
                           bool                     is_single_color,
                           const std::vector<RGBA> &existing_colors,

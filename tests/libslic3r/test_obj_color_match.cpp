@@ -223,3 +223,31 @@ TEST_CASE("OBJ vertex colour import skips the first extruder", "[objcolor]")
         serialised += volume->mmu_segmentation_facets.get_triangle_as_string(i);
     REQUIRE(serialised.empty());
 }
+
+// The colour dialog lists physical filaments, then mixed ones, and can add new filaments. New ones
+// are physical: they follow the physical filaments and push the mixed ones up.
+TEST_CASE("Colour dialog selections become filament ids", "[objcolor]")
+{
+    SECTION("only physical filaments listed: new ones follow them")
+    {
+        const std::vector<unsigned char> ids = obj_color_selection_ids({1, 4, 6, 5, 6}, 4, 4);
+        CHECK(ids == std::vector<unsigned char>({1, 4, 6, 5, 6}));
+    }
+    SECTION("a mixed filament listed and two colours kept: the mixed one moves up")
+    {
+        // 5 physical + 1 mixed listed (selection 6); selections 7 and 8 are new filaments.
+        const std::vector<unsigned char> ids = obj_color_selection_ids({1, 7, 8, 6, 3}, 5, 6);
+        CHECK(ids == std::vector<unsigned char>({1, 6, 7, 8, 3}));
+    }
+    SECTION("an unselected new filament is not added, so it takes no id")
+    {
+        // Selection 7 was offered but nothing uses it; 8 becomes the only new filament.
+        const std::vector<unsigned char> ids = obj_color_selection_ids({8, 6, 2}, 5, 6);
+        CHECK(ids == std::vector<unsigned char>({6, 7, 2}));
+    }
+    SECTION("nothing selected gives 0")
+    {
+        const std::vector<unsigned char> ids = obj_color_selection_ids({0, 2}, 3, 3);
+        CHECK(ids == std::vector<unsigned char>({0, 2}));
+    }
+}

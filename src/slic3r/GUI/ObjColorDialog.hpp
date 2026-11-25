@@ -3,6 +3,7 @@
 
 #include "GUI_Utils.hpp"
 #include "libslic3r/Color.hpp"
+#include "libslic3r/ObjColorMatch.hpp"
 #include <wx/sizer.h>
 #include <wx/spinctrl.h>
 #include <wx/stattext.h>
@@ -25,7 +26,9 @@ public:
                   std::vector<Slic3r::RGBA> &     input_colors,bool  is_single_color,
                   const std::vector<std::string> &      extruder_colours,
                   std::vector<unsigned char> &    filament_ids,
-                  unsigned char &                 first_extruder_id);
+                  unsigned char &                 first_extruder_id,
+                  Slic3r::ObjColorMixChoice *     mix_choice = nullptr,
+                  size_t                          num_physical = size_t(-1));
     void msw_rescale();
     bool is_ok();
     void update_filament_ids();
@@ -33,6 +36,7 @@ public:
     {
         ComboBox *bitmap_combox{nullptr};
         Button *  keep_color_btn{nullptr};
+        wxCheckBox *mix_box{nullptr};   // textured imports only: dither this colour instead
         bool      is_map{false}; // int id{0};
     };
 private:
@@ -57,6 +61,10 @@ private:
     int find_filament_selection_by_color(const wxColour &color) const;
     int append_new_filament_option(const wxColour &color);
     void update_keep_color_buttons();
+    // Textured imports: tick "Mix" where the mapped filament is not close to the colour.
+    void update_mix_default(int id);
+    void update_mix_defaults();
+    bool mapped_filament_colour(int id, wxColour &out) const;
     static bool colors_are_equal(const wxColour &lhs, const wxColour &rhs);
 private:
     //view ui
@@ -96,6 +104,9 @@ private:
     //result
     unsigned char&             m_first_extruder_id;
     std::vector<unsigned char> &m_filament_ids;
+    Slic3r::ObjColorMixChoice * m_mix_choice{nullptr};
+    // How many of the listed colours are physical filaments; the rest are mixed filaments.
+    size_t                      m_num_physical{size_t(-1)};
 };
 
 // What the headless match did, for the API response and the log.
@@ -122,7 +133,9 @@ public:
                    std::vector<Slic3r::RGBA>&   input_colors, bool is_single_color,
                    const std::vector<std::string> &   extruder_colours,
                    std::vector<unsigned char>&        filament_ids,
-                   unsigned char &                 first_extruder_id);
+                   unsigned char &                 first_extruder_id,
+                   Slic3r::ObjColorMixChoice *     mix_choice = nullptr,
+                   size_t                          num_physical = size_t(-1));
     wxBoxSizer* create_btn_sizer(long flags);
     void on_dpi_changed(const wxRect &suggested_rect) override;
 private:

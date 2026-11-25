@@ -122,6 +122,13 @@ struct ImageRowWallContext
     std::shared_ptr<const std::vector<DwdPair>> dwd_table;
     std::vector<int>                 dwd_physical;   // table filament index -> physical 1-based id
     int                              layer_index = 0;
+
+    // ---- Mesh UV (a textured model) ------------------------------------------------------------------
+    // Set when the row's projection is MeshUV and the part still carries UVs that fit its mesh:
+    // a wall point then takes the texture's colour at the nearest surface point. `params.asset`
+    // is the PART's own texture in that case (one row can serve several parts). Null with a
+    // MeshUV row means the part has no usable texture, and its walls keep the part's own filament.
+    std::shared_ptr<const ImageFillUvLookup> uv_lookup;
 };
 
 // Phase 5a: the part's own filament for `region` on this layer - see ImageRowWallContext::

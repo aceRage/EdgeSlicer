@@ -573,6 +573,8 @@ set(lisbslic3r_sources
     PrimeTowerDefaults.hpp
     FineDetail.cpp
     FineDetail.hpp
+    MixedPatternWalls.cpp
+    MixedPatternWalls.hpp
     ThinFeatures.cpp
     ThinFeatures.hpp
     NSVGUtils.cpp

@@ -163,7 +163,10 @@ public:
         SlicingCurvedTopsHeadCheck,
         // Thin features (ThinFeatures.hpp): features the wall generator skipped, or printed wider than the model.
         // Raised in the wall step, one notice per object; appended, own id.
-        SlicingThinFeatures
+        SlicingThinFeatures,
+        // Mixed filament wall patterns (MixedPatternWalls.hpp): a pattern with one group per wall is used where fewer
+        // walls print (Wall loops too low, or thin areas). Raised in the wall step, one notice per object; appended, own id.
+        SlicingMixedPatternTooFewWalls
     };
 
     typedef size_t TimeStamp;

@@ -24,6 +24,7 @@
 #include "MixedFilament.hpp"
 #include "ExtruderAreas.hpp"
 #include "ThinFeatures.hpp"
+#include "MixedPatternWalls.hpp"
 #include "libslic3r.h"
 
 #include <Eigen/Geometry>
@@ -840,6 +841,8 @@ public:
     bool               curved_tops_clipped() const { return m_curved_tops_clipped; }
     // EdgeSlicer, thin feature notice: what the last wall step skipped or widened (ThinFeatures.hpp).
     const ThinFeatureSummary &thin_feature_summary() const { return m_thin_feature_summary; }
+    // EdgeSlicer, mixed filament wall patterns: where the last wall step printed fewer walls than a pattern needs.
+    const std::vector<MixedPatternWallShortfall> &mixed_pattern_wall_shortfalls() const { return m_mixed_pattern_wall_shortfalls; }
     void               set_curved_tops_clipped(bool clipped);
     const std::string &curved_tops_guard_inputs_used() const { return m_curved_tops_guard_inputs; }
     void               set_curved_tops_guard_inputs_used(std::string inputs);
@@ -876,6 +879,7 @@ public:
 
 private:
     void make_perimeters();
+    std::vector<MixedPatternWallShortfall> find_mixed_pattern_wall_shortfalls() const;
     // Mixed-layer-height band merge (BambuStudio v02.09.01.70 PrintObject::compute_adaptive_merge_groups()).
     // Decides which layers each wall region keeps and records the decision in
     // LayerRegion::adaptive_merge_patches. It may mutate LayerRegion::slices, so it is only safe to call from the
@@ -957,6 +961,8 @@ private:
     bool                                    m_curved_tops_clipped { false };
     // EdgeSlicer, thin feature notice: written by make_perimeters() after its parallel loop.
     ThinFeatureSummary                      m_thin_feature_summary;
+    // EdgeSlicer, mixed filament wall patterns: written by make_perimeters() after its parallel loop.
+    std::vector<MixedPatternWallShortfall>  m_mixed_pattern_wall_shortfalls;
     std::string                             m_curved_tops_guard_inputs;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;

@@ -14309,6 +14309,171 @@ static void notify_bambu_mixed_import(NotificationManager *notifications, const 
 }
 
 // BBS: backup & restore
+// Dual wall dithering on a textured model: a part that arrived with its own texture and UVs
+// (glTF, OBJ) can print its walls from that texture. Asks once per import; "Yes" creates one image
+// row that reads the model's own texture coordinates and binds it to the parts' walls.
+// Whether a colour import of this file may end in the dual wall dither offer below: a glTF with a
+// base colour texture, or an OBJ whose material file names a texture. Only decides whether the
+// colour dialog shows its "Mix" column, so a cheap look at the file is enough.
+static bool import_may_have_texture(const boost::filesystem::path &path)
+{
+    auto contains = [](const boost::filesystem::path &file, const char *needle) {
+        std::ifstream in(file.native(), std::ios::binary);
+        if (!in.good())
+            return false;
+        std::string head(size_t(4) << 20, char(0));
+        in.read(head.data(), std::streamsize(head.size()));
+        head.resize(size_t(std::max<std::streamsize>(0, in.gcount())));
+        return head.find(needle) != std::string::npos;
+    };
+    if (boost::iends_with(path.string(), ".glb") || boost::iends_with(path.string(), ".gltf"))
+        return contains(path, "baseColorTexture");
+    if (boost::iends_with(path.string(), ".obj")) {
+        boost::filesystem::path mtl = path;
+        mtl.replace_extension(".mtl");
+        return contains(mtl, "map_Kd");
+    }
+    return false;
+}
+
+// The filaments a colour import may map colours to: the physical ones, then the mixed filaments -
+// but none from the first image row on. An image row prints a picture (or a model's own texture) on
+// the part it was made for; as a paint colour it is only its layer cycle, so a re-import that mapped
+// colours to the row an earlier import left behind printed in plain bands.
+static std::vector<std::string> import_filament_colours(size_t &num_physical)
+{
+    std::vector<std::string> colours = wxGetApp().plater()->get_extruder_colors_from_plater_config(nullptr, false);
+    num_physical = colours.size();
+    if (wxGetApp().preset_bundle == nullptr)
+        return colours;
+    for (const MixedFilament &mf : wxGetApp().preset_bundle->mixed_filaments.mixed_filaments()) {
+        if (!mf.enabled || mf.deleted)
+            continue;
+        if (mf.distribution_mode == int(MixedFilament::ImageWeighted) || !mf.image_fill_ref.empty())
+            break;
+        colours.push_back(mf.display_color);
+    }
+    return colours;
+}
+
+static void offer_texture_dual_wall(Plater *q, const std::vector<size_t> &obj_idxs, const ObjColorMixChoice *choice = nullptr)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (q == nullptr || bundle == nullptr)
+        return;
+    std::vector<ModelVolume *> textured;
+    for (size_t idx : obj_idxs)
+        if (idx < q->model().objects.size())
+            for (ModelVolume *v : q->model().objects[idx]->volumes)
+                if (v->is_model_part() && image_fill_volume_has_texture(*v, q->model().image_assets))
+                    textured.push_back(v);
+    if (textured.empty())
+        return;
+    const ConfigOptionStrings *colours = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+    const size_t num_physical = colours != nullptr ? colours->values.size() : 0;
+    if (num_physical < 2)
+        return;
+
+    // The colour dialog's per-colour choices. Every colour set to its filament: nothing to dither.
+    const bool has_choice = choice != nullptr && !choice->empty();
+    if (has_choice && choice->mixed() == 0)
+        return;
+    // The row's filaments: the ones the colours were mapped to, those of mixed colours first (the
+    // colour model takes 9 at most, the part's own filament included); without choices, the first four.
+    std::vector<unsigned int> ids;
+    if (has_choice) {
+        for (int pass = 0; pass < 2; ++pass)
+            for (size_t i = 0; i < choice->filament_ids.size(); ++i) {
+                const unsigned int id = choice->filament_ids[i];
+                if (choice->mix[i] == (pass == 0) && id >= 1 && id <= num_physical && ids.size() < 8 &&
+                    std::find(ids.begin(), ids.end(), id) == ids.end())
+                    ids.push_back(id);
+            }
+        for (unsigned int id = 1; id <= num_physical && ids.size() < 2; ++id)
+            if (std::find(ids.begin(), ids.end(), id) == ids.end())
+                ids.push_back(id);
+        std::sort(ids.begin(), ids.end());
+    } else {
+        for (size_t i = 0; i < std::min<size_t>(num_physical, 4); ++i)
+            ids.push_back(unsigned(i) + 1);
+    }
+
+    // What in the current process settings will spoil it, named before the user says yes.
+    wxString issues;
+    {
+        const DynamicPrintConfig &process = bundle->prints.get_edited_preset().config;
+        if (const auto *loops = process.option<ConfigOptionInt>("wall_loops"); loops != nullptr && loops->value < 2)
+            issues += "\n- " + _L("Wall loops is 1: it will print as plain colour runs until there are at least 2.");
+        if (const auto *gen = process.option<ConfigOptionEnum<PerimeterGeneratorType>>("wall_generator");
+            gen != nullptr && gen->value == PerimeterGeneratorType::Arachne)
+            issues += "\n- " + _L("The wall generator is Arachne: classic walls are safer.");
+        if (const auto *height = process.option<ConfigOptionFloat>("layer_height"); height != nullptr && height->value > 0.125)
+            issues += "\n- " + _L("The layer height is above 0.12 mm: the colour bands will be visible.");
+        if (!issues.empty())
+            issues = "\n\n" + _L("With the current settings") + ":" + issues;
+    }
+    MessageDialog dlg(q,
+                      _L("This model has a texture. Print its walls with dual wall dithering (experimental)?") + "\n\n" +
+                          _L("The outer wall and the wall behind it change filament layer by layer, so their colours mix "
+                             "into the texture's colours. It needs semi-translucent filaments, classic walls, at least 2 "
+                             "wall loops and thin layers, and it adds many filament changes.") + "\n\n" +
+                          (has_choice ? format_wxstr(_L("%1% of %2% colours are set to Mix and are dithered from %3% filaments; the "
+                                                        "others print in their mapped filament. To change or remove this later, "
+                                                        "use Image fill on the part."),
+                                                     choice->mixed(), choice->colors.size(), ids.size())
+                                      : _L("The first four filaments are used. To change or remove this later, use Image fill on the part.")) +
+                              issues,
+                      _L("Dual wall dithering"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
+    if (dlg.ShowModal() != wxID_YES)
+        return;
+
+    ImageFillParams params;
+    params.projection  = ImageFillProjection::MeshUV;
+    params.faces       = ImageFillFaces::All;
+    params.surfaces    = IMAGE_FILL_SURFACE_WALLS;
+    params.wall_method = IMAGE_FILL_WALL_DWD;
+    params.allowed.assign(ids.begin(), ids.end());
+    if (has_choice)
+        for (size_t i = 0; i < choice->colors.size(); ++i) {
+            ImageFillColorChoice c;
+            c.color = {choice->colors[i][0], choice->colors[i][1], choice->colors[i][2]};
+            // A colour whose filament did not fit in the row is mixed like the rest.
+            const unsigned int id = choice->filament_ids[i];
+            c.filament = !choice->mix[i] && std::find(ids.begin(), ids.end(), id) != ids.end() ? int(id) : 0;
+            params.color_choices.push_back(c);
+        }
+
+    MixedFilamentManager &mixed_mgr = bundle->mixed_filaments;
+    const size_t          before    = mixed_mgr.mixed_filaments().size();
+    mixed_mgr.add_custom_filament(ids[0], ids[1], 50, colours->values);
+    if (mixed_mgr.mixed_filaments().size() <= before) {
+        q->get_notification_manager()->push_plater_warning_notification(
+            _u8L("Dual wall dithering was not set: no room for another mixed filament."));
+        return;
+    }
+    MixedFilament &row         = mixed_mgr.mixed_filaments().back();
+    row.enabled                = true;
+    row.distribution_mode      = int(MixedFilament::ImageWeighted);
+    row.gradient_component_ids = MixedFilamentManager::encode_gradient_component_ids(ids);
+    row.component_a            = ids[0];
+    row.component_b            = ids[1];
+    row.image_fill_ref         = MixedFilamentManager::encode_image_fill_ref(params.to_string());
+    const unsigned int virtual_id =
+        mixed_mgr.filament_id_from_mixed_index(mixed_mgr.mixed_filaments().size() - 1, num_physical);
+    if (virtual_id == 0)
+        return;
+    for (ModelVolume *v : textured)
+        v->config.set_key_value("wall_filament", new ConfigOptionInt(int(virtual_id)));
+
+    const std::string serialized = mixed_mgr.serialize_custom_entries();
+    if (ConfigOptionString *opt = bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
+        opt->value = serialized;
+    else
+        bundle->project_config.set_key_value("mixed_filament_definitions", new ConfigOptionString(serialized));
+    q->sidebar().update_mixed_filament_panel(false);
+    q->update();
+}
+
 std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi,
                                              bool* config_loaded_out)
 {
@@ -14432,6 +14597,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         hasRawGeometryImport = hasRawGeometryImport || shouldInitializeAssemblyPosition;
 
         Slic3r::Model model;
+        // A textured import: what the colour dialog chose per colour, for the dual wall dither offer.
+        ObjColorMixChoice import_mix_choice;
         // BBS: add auxiliary files related logic
         bool load_aux = strategy & LoadStrategy::LoadAuxiliary, load_old_project = false;
         if (load_model && load_config && type_3mf) {
@@ -15116,19 +15283,22 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 Semver                file_version;
                 
                 //ObjImportColorFn obj_color_fun=nullptr;
-                auto obj_color_fun = [this, &path](std::vector<RGBA> &input_colors, bool is_single_color, std::vector<unsigned char> &filament_ids,
+                auto obj_color_fun = [this, &path, &import_mix_choice](std::vector<RGBA> &input_colors, bool is_single_color, std::vector<unsigned char> &filament_ids,
                                                    unsigned char &first_extruder_id) {
                     if (!boost::iends_with(path.string(), ".obj") &&
                         !boost::iends_with(path.string(), ".glb") &&
                         !boost::iends_with(path.string(), ".gltf")) { return; }
-                    const std::vector<std::string> extruder_colours = wxGetApp().plater()->get_extruder_colors_from_plater_config();
+                    size_t                         num_physical = 0;
+                    const std::vector<std::string> extruder_colours = import_filament_colours(num_physical);
                     // Nobody is at the PC - a phone-started import, or a hidden instance. Opening
                     // ObjColorDialog here would block on a window no one can answer, so match the
                     // colours ourselves and carry on. Same rule for OBJ as for glTF: both arrive
                     // through this lambda.
                     if (RemoteAccess::dialog_mode() != RemoteAccess::Mode::Interactive) {
                         ObjColorAutoMatchInfo info;
-                        if (!obj_color_auto_match_headless(input_colors, is_single_color, extruder_colours,
+                        // New slots are physical filaments, so only those are matched against.
+                        const std::vector<std::string> physical(extruder_colours.begin(), extruder_colours.begin() + std::min(num_physical, extruder_colours.size()));
+                        if (!obj_color_auto_match_headless(input_colors, is_single_color, physical,
                                                            filament_ids, first_extruder_id, info)) {
                             filament_ids.clear();
                             return;
@@ -15147,9 +15317,12 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             "auto");
                         return;
                     }
-                    ObjColorDialog                 color_dlg(nullptr, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id);
+                    const bool                     textured = import_may_have_texture(path);
+                    ObjColorDialog                 color_dlg(nullptr, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id,
+                                                             textured ? &import_mix_choice : nullptr, num_physical);
                     if (color_dlg.ShowModal() != wxID_OK) { 
                         filament_ids.clear();
+                        import_mix_choice = ObjColorMixChoice();
                     }
                 };
                 if (boost::iends_with(path.string(), ".stp") ||
@@ -15437,6 +15610,13 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(", before load_model_objects, count %1%")%model.objects.size();
             auto loaded_idxs = load_model_objects(model.objects, is_project_file);
             obj_idxs.insert(obj_idxs.end(), loaded_idxs.begin(), loaded_idxs.end());
+            // A textured import keeps its texture and UVs as image assets on the model it was read
+            // into; they have to come across with the objects.
+            for (const auto &asset : model.image_assets.assets())
+                if (!q->model().image_assets.contains(asset.first))
+                    q->model().image_assets.add(asset.second.bytes);
+            if (!is_project_file && RemoteAccess::dialog_mode() == RemoteAccess::Mode::Interactive)
+                offer_texture_dual_wall(q, loaded_idxs, &import_mix_choice);
             if (shouldInitializeAssemblyPosition)
             {
                 ModelObjectPtrs loadedObjects;
@@ -17906,14 +18086,16 @@ void Plater::priv::reload_from_disk()
             if (!boost::iends_with(path, ".obj") &&
                 !boost::iends_with(path, ".glb") &&
                 !boost::iends_with(path, ".gltf")) { return; }
-            const std::vector<std::string> extruder_colours = wxGetApp().plater()->get_extruder_colors_from_plater_config();
+            size_t                         num_physical = 0;
+            const std::vector<std::string> extruder_colours = import_filament_colours(num_physical);
             // Nobody is at the PC - a phone-started import, or a hidden instance. Opening
             // ObjColorDialog here would block on a window no one can answer, so match the
             // colours ourselves and carry on. Same rule for OBJ as for glTF: both arrive
             // through this lambda.
             if (RemoteAccess::dialog_mode() != RemoteAccess::Mode::Interactive) {
                 ObjColorAutoMatchInfo info;
-                if (!obj_color_auto_match_headless(input_colors, is_single_color, extruder_colours,
+                const std::vector<std::string> physical(extruder_colours.begin(), extruder_colours.begin() + std::min(num_physical, extruder_colours.size()));
+                if (!obj_color_auto_match_headless(input_colors, is_single_color, physical,
                                                    filament_ids, first_extruder_id, info)) {
                     filament_ids.clear();
                     return;
@@ -17932,7 +18114,8 @@ void Plater::priv::reload_from_disk()
                     "auto");
                 return;
             }
-            ObjColorDialog                 color_dlg(nullptr, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id);
+            ObjColorDialog                 color_dlg(nullptr, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id,
+                                                     nullptr, num_physical);
             if (color_dlg.ShowModal() != wxID_OK) { filament_ids.clear(); }
         };
         wxBusyCursor wait;
@@ -31688,8 +31871,15 @@ void Plater::apply_image_fill(const wxString &image_path)
                              volume->mmu_segmentation_facets.get_data(), painted, initial_row_surfaces);
     if (dlg.ShowModal() != wxID_OK)
         return;
-    const ImageFillParams params       = dlg.params();
-    const int             row_surfaces = dlg.image_row_surfaces();
+    ImageFillParams params       = dlg.params();
+    const int       row_surfaces = dlg.image_row_surfaces();
+    // A textured model: its own texture coordinates, kept by the importer, are what "The model's
+    // own texture coordinates" projects through.
+    if (params.uv_asset.empty())
+        params.uv_asset = initial.uv_asset;
+    ImageFillUVs mesh_uvs;
+    if (params.projection == ImageFillProjection::MeshUV)
+        image_fill_volume_uvs(*volume, model().image_assets, mesh_uvs);
 
     std::vector<std::array<float, 3>> colors;
     std::vector<int>                  ids;
@@ -31703,7 +31893,7 @@ void Plater::apply_image_fill(const wxString &image_path)
     // Phase 2's facet painting always runs, whether or not the image-row boxes are ticked - the
     // dialog's own tooltips explain why (a printer/slicer that never reads the row still gets a
     // correct, if coarser, result).
-    const ImageFillResult res = image_fill_apply(*volume, params, model().image_assets, colors, ids);
+    const ImageFillResult res = image_fill_apply(*volume, params, model().image_assets, colors, ids, mesh_uvs);
     if (!res.ok) {
         show_error(this, from_u8(res.error.empty() ? "The image could not be applied." : res.error));
         return;
@@ -31790,6 +31980,8 @@ void Plater::apply_image_fill(const wxString &image_path)
                 ImageFillParams pv;
                 if (image_fill_params_of(*v, pv) && !pv.asset.empty())
                     keep.push_back(pv.asset);
+                if (!pv.uv_asset.empty())
+                    keep.push_back(pv.uv_asset);
             }
         model().image_assets.retain(keep);
     }

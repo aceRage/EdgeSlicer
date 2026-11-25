@@ -81,7 +81,10 @@ bool sample_obj_textures(const std::string                       &base_dir,
                          int                                      depth,
                          std::vector<RGBA>                       &face_colors,
                          std::vector<RGBA>                       &sub_face_colors,
-                         std::string                             &warning);
+                         std::string                             &warning,
+                         // Mesh UV at slice time: when every textured face uses the SAME image, that
+                         // image as PNG bytes for the image asset store. Left empty otherwise.
+                         std::vector<uint8_t>                    *single_texture_png = nullptr);
 
 } // namespace Slic3r
 

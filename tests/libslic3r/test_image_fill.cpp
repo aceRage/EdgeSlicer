@@ -2315,6 +2315,40 @@ TEST_CASE("Image Fill: the XY dither turns a sampled ramp into filament runs", "
     }
 }
 
+// A parrot's dark teal body is darker than white, magenta, yellow and cyan can mix. The error such
+// a colour leaves must not pile up: it used to keep white from printing on the white belly behind it.
+TEST_CASE("Image Fill: the XY dither recovers after a colour the filaments cannot reach", "[imagefill][imagerow][dither]")
+{
+    const std::vector<std::array<float, 3>> colours = {{1.f, 1.f, 1.f}, {1.f, 0.f, 1.f}, {1.f, 1.f, 0.f}, {0.f, 1.f, 1.f}};
+    const std::vector<int>                  ids     = {1, 2, 3, 4};
+    const int                               n_teal  = 400;
+    const int                               n_white = 400;
+
+    std::vector<ImageRowSample> samples;
+    for (int i = 0; i < n_teal + n_white; ++i) {
+        ImageRowSample s;
+        s.s         = float(i) * 0.4f;
+        s.has_color = true;
+        s.color     = i < n_teal ? std::array<float, 3>{4.f / 255.f, 134.f / 255.f, 134.f / 255.f} :
+                                   std::array<float, 3>{232.f / 255.f, 232.f / 255.f, 237.f / 255.f};
+        samples.push_back(s);
+    }
+    const auto runs = image_fill_dither_segment(samples, colours, ids, 0.f);
+
+    const float white_from = float(n_teal) * 0.4f;
+    float       teal_cyan  = 0.f;
+    float       white_len  = 0.f;
+    for (const ImageRowRun &r : runs) {
+        if (r.filament_id == 4 && r.s1 <= white_from)
+            teal_cyan += r.length() + 0.4f;
+        if (r.filament_id == 1 && r.s0 >= white_from)
+            white_len += r.length() + 0.4f;
+    }
+    // Each run covers its samples; a run of k samples is (k - 1) * 0.4 long.
+    CHECK(teal_cyan > 0.8f * float(n_teal) * 0.4f);
+    CHECK(white_len > 0.6f * float(n_white) * 0.4f);
+}
+
 TEST_CASE("Image Fill: the box face a normal belongs to", "[imagefill][box]")
 {
     // The predicate on its own, stated against the numbering the rest of the tests use:
