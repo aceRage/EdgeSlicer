@@ -1,0 +1,162 @@
+// R1 of the rack pin rules (review of PR 1163): an H2C plate printed by object on an automatic filament map, with a filament
+// pinned to the rack's 0.6. The pin rules move it to the right extruder (and keep the unpinned filament on the left); the moved
+// map is the slice's map: the G-code is the one the same plate gives with that map set by hand (header filament_map and
+// filament_nozzle_map, start tool, pre-heat lines, rack nozzle changes), and the reach check reads it too.
+
+#include <catch2/catch.hpp>
+
+#include "libslic3r/Model.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Utils.hpp"
+
+#include "test_data.hpp"
+
+#include <boost/filesystem.hpp>
+
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using namespace Slic3r;
+
+namespace {
+
+PresetBundle &pins_bundle()
+{
+    static std::unique_ptr<PresetBundle> bundle;
+    if (bundle)
+        return *bundle;
+    const std::string             saved_data_dir = data_dir();
+    const boost::filesystem::path scratch        = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("h2cpins_%%%%-%%%%");
+    boost::filesystem::create_directories(scratch);
+    set_data_dir(scratch.string());
+    const std::string profiles = (boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles").string();
+    auto              library  = std::make_unique<PresetBundle>();
+    library->load_vendor_configs_from_json(profiles, PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
+                                           ForwardCompatibilitySubstitutionRule::EnableSilent);
+    bundle = std::make_unique<PresetBundle>();
+    bundle->load_vendor_configs_from_json(profiles, "BBL", PresetBundle::LoadSystem, ForwardCompatibilitySubstitutionRule::EnableSilent,
+                                          library.get());
+    set_data_dir(saved_data_dir);
+    return *bundle;
+}
+
+// H2C, three filaments, rack 0.4,0.6,0.4,0.6 on the right, filament 1 pinned to the 0.6, print by object, no tower.
+DynamicPrintConfig h2c_by_object(const std::string &mode, const std::string &map)
+{
+    PresetBundle &b = pins_bundle();
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab H2C 0.4 nozzle", true));
+    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL H2C", true));
+    REQUIRE(b.filaments.select_preset_by_name("Bambu PLA Basic @BBL H2C", true));
+    b.set_num_filaments(3, std::vector<std::string>{ "#E01919", "#1943E0", "#19E043" });
+    b.filament_presets = std::vector<std::string>(3, "Bambu PLA Basic @BBL H2C");
+    DynamicPrintConfig cfg = b.full_config_secure();
+    cfg.set_deserialize_strict({
+        { "enable_prime_tower", "0" },
+        { "print_sequence", "by object" },
+        { "filament_map_mode", mode },
+        { "filament_map", map },
+        { "gcode_comments", 0 },
+    });
+    cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = { "", "0.4,0.6,0.4,0.6" };
+    cfg.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values  = { 0.6, 0., 0. };
+    return cfg;
+}
+
+// Two flat cubes: the first printed with filament 1 (pinned), the second with filament 2. `first_x`: the first one's centre.
+void add_objects(Model &model, double first_x)
+{
+    for (int i = 0; i < 2; ++i) {
+        TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
+        cube.scale(Vec3f(1.f, 1.f, 0.1f));
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(cube);
+        object->volumes.front()->name = object->name;
+        object->config.set("extruder", i + 1);
+        object->add_instance();
+        object->center_around_origin();
+        object->instances.front()->set_offset(Vec3d(i == 0 ? first_x : 200., 140., 0.));
+        object->ensure_on_bed();
+    }
+}
+
+std::string slice(const DynamicPrintConfig &cfg, Print &print)
+{
+    Model model;
+    add_objects(model, 150.);
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    const StringObjectException error = print.validate();
+    REQUIRE(error.string.empty());
+    print.set_status_silent();
+    return Test::gcode(print);
+}
+
+std::string header_value(const std::string &gcode, const std::string &key)
+{
+    const std::string tag = "; " + key + " = ";
+    const size_t      at  = gcode.find(tag);
+    if (at == std::string::npos)
+        return {};
+    const size_t end = gcode.find('\n', at);
+    return gcode.substr(at + tag.size(), end - at - tag.size());
+}
+
+// The G-code without the lines that name the map mode, the time it was made or the model's object ids (two models).
+std::string comparable(const std::string &gcode)
+{
+    std::istringstream ss(gcode);
+    std::string        out;
+    for (std::string line; std::getline(ss, line);)
+        if (line.find("filament_map_mode") == std::string::npos && line.find("generated by") == std::string::npos &&
+            line.find("label id") == std::string::npos)
+            out += line + "\n";
+    return out;
+}
+
+size_t count_lines_starting(const std::string &gcode, const std::string &prefix)
+{
+    std::istringstream ss(gcode);
+    size_t             n = 0;
+    for (std::string line; std::getline(ss, line);)
+        n += line.rfind(prefix, 0) == 0;
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("R1: a by-object H2C plate on an automatic map prints the map the rack pins move", "[RackPins][ByObject]")
+{
+    Print       automatic_print;
+    std::string automatic = slice(h2c_by_object("Auto For Flush", "1,2,1"), automatic_print);
+    // The pin moved filament 1 to the right (its 0.6); P2 keeps filament 2 on the left; filament 3 is unused.
+    CHECK(header_value(automatic, "filament_map") == "2,1,1");
+    CHECK(header_value(automatic, "filament_nozzle_map").rfind("2,0,", 0) == 0); // filament 3 is unused
+    CHECK(automatic_print.config().filament_map.values == std::vector<int>{ 2, 1, 1 });
+
+    // The same plate with that map set by hand gives the same G-code (start tool, pre-heat lines, rack nozzle changes and all).
+    Print       manual_print;
+    std::string manual = slice(h2c_by_object("Manual", "2,1,1"), manual_print);
+    CHECK(header_value(manual, "filament_nozzle_map") == header_value(automatic, "filament_nozzle_map"));
+    CHECK(count_lines_starting(automatic, "M104 T") == count_lines_starting(manual, "M104 T"));
+    CHECK(count_lines_starting(automatic, "M632") == count_lines_starting(manual, "M632"));
+    CHECK(count_lines_starting(automatic, "M104 T") > 0);
+    CHECK(comparable(automatic) == comparable(manual));
+}
+
+TEST_CASE("R1: the reach check reads the map the rack pins move", "[RackPins][ByObject]")
+{
+    // The pinned filament's object sits where only the left nozzle reaches; the pins move it to the right: refused.
+    Print model_print;
+    Model model;
+    add_objects(model, 12.);
+    model_print.is_BBL_printer() = true;
+    model_print.apply(model, h2c_by_object("Auto For Flush", "1,2,1"));
+    const StringObjectException error = model_print.validate();
+    CHECK_THAT(error.string, Catch::Matchers::Contains("Filament 1 is assigned to the right nozzle"));
+    CHECK_THAT(error.string, Catch::Matchers::Contains("outside what that nozzle can reach"));
+}

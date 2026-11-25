@@ -1092,6 +1092,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
         void finalize(bool post_process);
 
         float get_time(PrintEstimatedStatistics::ETimeMode mode) const;
+        // EDGE: the time without the estimate-only time (add_estimate_only_time, a Bambu firmware flush) and
+        // without the machine's prepare time: for what decides G-code, such as the layer cooling (Orca #17540).
+        float get_planning_time(PrintEstimatedStatistics::ETimeMode mode) const;
         float get_prepare_time(PrintEstimatedStatistics::ETimeMode mode) const;
         float get_first_layer_time(PrintEstimatedStatistics::ETimeMode mode) const;
         std::string get_time_dhm(PrintEstimatedStatistics::ETimeMode mode) const;

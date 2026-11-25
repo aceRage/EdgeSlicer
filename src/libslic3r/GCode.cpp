@@ -4205,6 +4205,16 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // its grouping, from Print::_make_wipe_tower; keep that one.)
     if (is_bbl_printers && print.config().print_sequence == PrintSequence::ByObject && print.config().nozzle_diameter.size() >= 2 &&
         (print.objects().size() > 1 || !print.has_wipe_tower())) {
+        // R1 (rack pins, review of PR 1163): on an automatic map the pin rules can move a filament off the plate map's extruder
+        // (rack_pin_filament_map; the reach check and the grouping read the same). The moved map is the slice's map: write it
+        // where the header, the logical extruders, the temperatures and the start G-code read filament_map, as
+        // ToolOrdering::reorder_extruders_for_minimum_flush_volume does for a by-layer plate. Unchanged without pins.
+        if (const std::vector<int> moved = rack_pin_filament_map(print.config(), print.extruders(), print.filament_map_input());
+            moved != print.filament_map_input()) {
+            const_cast<PrintConfig &>(print.config()).filament_map.values = moved;
+            if (auto *opt = const_cast<DynamicPrintConfig &>(print.full_print_config()).option<ConfigOptionInts>("filament_map", true))
+                opt->values = moved;
+        }
         std::vector<std::vector<unsigned int>> layer_filaments;
         for (const PrintObject *object : print.objects()) {
             ToolOrdering object_ordering(*object, (unsigned int) -1);
@@ -5313,6 +5323,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     // Write the custom start G-code
     file.writeln(machine_start_gcode);
+    // Orca #17540: the layer cooling times the layers with the motion limits the start G-code sets.
+    m_cooling_buffer->remember_motion_settings(machine_start_gcode);
     // BBS: mark the end of the machine start G-code for the idle-nozzle pre-cooling (BambuStudio
     // GCode.cpp:2991). Written only when it applies, so no other printer's G-code changes.
     m_pre_cooling_markers = PreCooling::pre_cooling_active(print);

@@ -2,7 +2,11 @@
 #define slic3r_CoolingBuffer_hpp_
 
 #include "../libslic3r.h"
+#include "../PrintConfig.hpp"
+#include "GCodeProcessor.hpp"
 #include <map>
+#include <utility>
+#include <vector>
 #include <string>
 #include <cfloat>
 
@@ -30,6 +34,9 @@ public:
     // (output_tool_filaments); a T<n> is read back as that filament.
     void        set_output_tool_filaments(std::vector<int> tool_filaments) { m_output_tool_filaments = std::move(tool_filaments); }
     std::string process_layer(std::string &&gcode, size_t layer_id, bool flush);
+    // Orca #17540: remembers the motion limits that G-code outside the layers sets, such as the start G-code,
+    // to time the layers.
+    void        remember_motion_settings(const std::string &gcode);
     // True when the layer flushed by the last process_layer() call had at least one extrusion
     // slowed down to reach slow_down_layer_time, i.e. the F words in the returned G-code carry
     // the cooling speeds rather than the profile speeds. A downstream stage that retunes
@@ -38,8 +45,16 @@ public:
 
 private:
 	CoolingBuffer& operator=(const CoolingBuffer&) = delete;
-    std::vector<PerExtruderAdjustments> parse_layer_gcode(const std::string &gcode, std::vector<float> &current_pos) const;
-    float       calculate_layer_slowdown(std::vector<PerExtruderAdjustments> &per_extruder_adjustments);
+    std::vector<PerExtruderAdjustments> parse_layer_gcode(const std::string &gcode, std::vector<float> &current_pos);
+    // The slowdown aims at time_scale times each minimum layer time, in the time at the feed rates.
+    float       calculate_layer_slowdown(std::vector<PerExtruderAdjustments> &per_extruder_adjustments, float time_scale);
+    // Orca #17540: slows the layer down to the minimum layer time as the time estimate gives it, and returns that time.
+    float       slow_down_layer(const std::string &gcode, std::vector<PerExtruderAdjustments> &per_extruder_adjustments);
+    // The time of the layer's timed part, with acceleration, as the preview estimates it.
+    float       estimate_layer_time(const std::string &gcode, const std::vector<PerExtruderAdjustments> &per_extruder_adjustments);
+    void        remember_motion_setting(const std::string &line);
+    // The G-code that puts the layer timer in the machine state with this filament at this position.
+    std::string timer_setup(unsigned int extruder, const std::vector<float> &position) const;
     // Apply slow down over G-code lines stored in per_extruder_adjustments, enable fan if needed.
     // Returns the adjusted G-code.
     std::string apply_layer_cooldown(const std::string &gcode, size_t layer_id, float layer_time, std::vector<PerExtruderAdjustments> &per_extruder_adjustments);
@@ -77,6 +92,17 @@ private:
     bool                        m_last_layer_slowed_down { false };
     // Edge (min_layer_time_pause): the layer flushed last kept its pause.
     bool                        m_last_layer_paused { false };
+
+    // Orca #17540: times the layers. Its config leaves out filament changes, which the layer time does not count.
+    GCodeProcessor              m_layer_timer;
+    PrintConfig                 m_layer_timer_config;
+    // The last line of each kind that sets an acceleration or another motion limit, and its order.
+    std::map<std::string, std::pair<size_t, std::string>> m_motion_settings;
+    size_t                      m_motion_settings_count { 0 };
+    // Where the layer's timed part starts in its G-code, and the G-code that sets the timer up for it. The whole
+    // layer is timed, unless a filament change comes before its first extrusion: then it is timed from that extrusion.
+    size_t                      m_timed_from { std::string::npos };
+    std::string                 m_timer_setup;
 };
 
 }

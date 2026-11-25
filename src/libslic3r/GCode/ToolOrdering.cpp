@@ -2007,10 +2007,28 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
 
     if (has_multiple_extruder || has_multiple_nozzle) {
         auto context = build_filament_group_context(print, layer_filaments, physical_unprintables, geometric_unprintables, unprintable_volumes, mode, nozzle_status);
+        // Rule P (owner 2026-11-22): on an automatic map the grouping decides the extruder, so a rack-pinned filament may only
+        // go to an extruder that can take its pin (a nozzle of its size, or its slot's extruder); pin_rack_nozzle_diameters
+        // below then puts it on such a nozzle. A no-op on a manual map, without pins and on printers without a rack.
+        if (has_multiple_nozzle && mode != FilamentMapMode::fmmManual && mode != FilamentMapMode::fmmNozzleManual)
+            if (const std::string error = bar_rack_pin_extruders(print_config, used_filaments, context.model_info.unprintable_filaments); !error.empty())
+                throw Slic3r::SlicingError(error);
 
-        if (has_multiple_nozzle && mode == FilamentMapMode::fmmManual) {
+        // R3: a Nozzle Manual map is set by hand too; with rack pins it is grouped as Manual (its extruders kept), so the pins read
+        // on it hold. Without pins Nozzle Manual is grouped as before (for flush), so such plates slice as they did.
+        const bool hand_set = mode == FilamentMapMode::fmmManual ||
+                              (mode == FilamentMapMode::fmmNozzleManual && has_multiple_nozzle && has_used_rack_pins(print_config, used_filaments));
+        if (has_multiple_nozzle && hand_set) {
             auto manual_filament_map = print->filament_map_input();
             std::transform(manual_filament_map.begin(), manual_filament_map.end(), manual_filament_map.begin(), [](int v) { return v - 1; });
+            // R1: a by-object plate of an automatic map is grouped on its own map (group_by_plate_map); the filaments the pin rules
+            // bar from their extruder there move, exactly as GCode::_do_export and the reach check move them (rack_pin_filament_map
+            // over the print's filaments). A no-op on a hand-set map, without pins and on printers without a rack.
+            if (rack_pins_follow_grouping(print_config)) {
+                std::vector<int> one_based = rack_pin_filament_map(print_config, print->extruders(), print->filament_map_input());
+                if (one_based.size() == manual_filament_map.size())
+                    std::transform(one_based.begin(), one_based.end(), manual_filament_map.begin(), [](int v) { return v - 1; });
+            }
             {
                 std::string map_str, used_str;
                 for (int v : manual_filament_map) map_str += std::to_string(v) + " ";
