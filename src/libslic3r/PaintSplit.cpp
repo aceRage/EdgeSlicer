@@ -32,6 +32,7 @@ const char* paint_split_error_message(PaintSplitError err)
     switch (err) {
     case PaintSplitError::None: return "";
     case PaintSplitError::OpenMesh: return L("The part has holes (open edges). Repair it before splitting.");
+    case PaintSplitError::RepairFailed: return L("The part has holes or broken edges that could not be repaired automatically.");
     case PaintSplitError::NonManifold: return L("The part is not a clean solid (non-manifold). Repair it before splitting.");
     case PaintSplitError::EmptyMask: return L("Nothing is selected. Select the region to split off first.");
     case PaintSplitError::NoBoundary: return L("The selection covers a whole shell; there is no boundary to cut along.");
@@ -54,6 +55,7 @@ const char* paint_split_warning_message(PaintSplitWarning w)
     case PaintSplitWarning::ComponentsReturned: return L("Cut pieces without selected surface were left on the body.");
     case PaintSplitWarning::PiecesAttached: return L("Material hanging only from the piece was attached to it.");
     case PaintSplitWarning::LoosePieces: return L("Material hanging only from the piece became loose parts.");
+    case PaintSplitWarning::Repaired: return L("Holes in the part were repaired while splitting.");
     }
     return "";
 }
@@ -182,31 +184,218 @@ std::vector<PaintSplitLoop> ps_loops(const indexed_triangle_set& its, const std:
 
 } // namespace
 
+// -------------------------------------------------------------------------------------------- repair
+
+namespace {
+
+// Uses of every undirected edge of `its`.
+std::unordered_map<uint64_t, int> ps_edge_use(const indexed_triangle_set& its)
+{
+    std::unordered_map<uint64_t, int> use;
+    use.reserve(its.indices.size() * 2);
+    for (const Vec3i32& t : its.indices)
+        for (int i = 0; i < 3; ++i)
+            ++use[ps_edge_key(t[i], t[(i + 1) % 3])];
+    return use;
+}
+
+bool ps_degenerate(const Vec3i32& t) { return t[0] == t[1] || t[1] == t[2] || t[2] == t[0]; }
+
+} // namespace
+
+bool paint_split_repair(const indexed_triangle_set& in, indexed_triangle_set& out, std::vector<int>* old_to_new,
+                        PaintSplitRepairStats& st)
+{
+    st  = PaintSplitRepairStats();
+    out = in;
+    its_merge_vertices(out); // exact duplicates; the face order is kept
+    if (old_to_new != nullptr) {
+        old_to_new->resize(in.indices.size());
+        std::iota(old_to_new->begin(), old_to_new->end(), 0);
+    }
+    {
+        bool closed = std::none_of(out.indices.begin(), out.indices.end(), ps_degenerate);
+        if (closed)
+            for (const auto& [e, n] : ps_edge_use(out))
+                if (n != 2) {
+                    closed = false;
+                    break;
+                }
+        if (closed)
+            return true;
+    }
+    st.needed = true;
+
+    // 1. Tolerance weld: vertices a float apart (the slivers a boolean exported in floats leaves) become one.
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : out.vertices)
+        bb.merge(v.cast<double>());
+    const double tol = std::max(1e-5, 1e-7 * bb.size().norm());
+    {
+        struct CellHash
+        {
+            size_t operator()(const Vec3i64& c) const { return size_t(c.x() * 73856093) ^ size_t(c.y() * 19349663) ^ size_t(c.z() * 83492791); }
+        };
+        std::unordered_map<Vec3i64, std::vector<int>, CellHash> grid;
+        std::vector<int>                                         remap(out.vertices.size());
+        for (int v = 0; v < int(out.vertices.size()); ++v) {
+            const Vec3d   p = out.vertices[v].cast<double>();
+            const Vec3i64 c(int64_t(std::floor(p.x() / tol)), int64_t(std::floor(p.y() / tol)), int64_t(std::floor(p.z() / tol)));
+            int           rep = -1;
+            for (int dx = -1; dx <= 1 && rep < 0; ++dx)
+                for (int dy = -1; dy <= 1 && rep < 0; ++dy)
+                    for (int dz = -1; dz <= 1 && rep < 0; ++dz) {
+                        const auto it = grid.find(Vec3i64(c.x() + dx, c.y() + dy, c.z() + dz));
+                        if (it != grid.end())
+                            for (int w : it->second)
+                                if ((out.vertices[w].cast<double>() - p).norm() <= tol) {
+                                    rep = w;
+                                    break;
+                                }
+                    }
+            if (rep < 0) {
+                grid[c].push_back(v);
+                rep = v;
+            } else
+                ++st.welded;
+            remap[v] = rep;
+        }
+        for (Vec3i32& t : out.indices)
+            for (int k = 0; k < 3; ++k)
+                t[k] = remap[t[k]];
+    }
+
+    // 2. Drop the faces the weld collapsed; the others keep their order.
+    {
+        std::vector<Vec3i32> kept;
+        kept.reserve(out.indices.size());
+        for (size_t f = 0; f < out.indices.size(); ++f) {
+            const bool drop = ps_degenerate(out.indices[f]);
+            if (old_to_new != nullptr)
+                (*old_to_new)[f] = drop ? -1 : int(kept.size());
+            if (drop)
+                ++st.degenerate_removed;
+            else
+                kept.push_back(out.indices[f]);
+        }
+        out.indices = std::move(kept);
+    }
+
+    // 3. Close every boundary loop with a fan around its centroid. A boundary half-edge a->b belongs to the one
+    //    face using that edge; the fill runs b->a, so the patch faces the same way as the skin around it.
+    {
+        const auto                 use = ps_edge_use(out);
+        std::multimap<int, int>    from; // a -> b of each boundary half-edge
+        for (const Vec3i32& t : out.indices)
+            for (int i = 0; i < 3; ++i) {
+                const int a = t[i], b = t[(i + 1) % 3];
+                if (use.at(ps_edge_key(a, b)) == 1)
+                    from.emplace(a, b);
+            }
+        auto fill = [&](const std::vector<int>& loop) {
+            const int k = int(loop.size());
+            if (k < 3) {
+                st.ok = false;
+                return;
+            }
+            if (k == 3) {
+                out.indices.emplace_back(loop[1], loop[0], loop[2]);
+                ++st.faces_added;
+            } else {
+                Vec3d c = Vec3d::Zero();
+                for (int v : loop)
+                    c += out.vertices[v].cast<double>();
+                c /= double(k);
+                const int ci = int(out.vertices.size());
+                out.vertices.push_back(c.cast<float>());
+                for (int i = 0; i < k; ++i)
+                    out.indices.emplace_back(loop[(i + 1) % k], loop[i], ci);
+                st.faces_added += k;
+            }
+            ++st.holes_filled;
+        };
+        // Walk the boundary; whenever the walk comes back to a vertex already on it, the part from there is a
+        // loop of its own. That splits holes that touch at one vertex (a pinch) into simple loops.
+        while (!from.empty()) {
+            std::vector<int>                path;
+            std::unordered_map<int, size_t> pos;
+            int                             cur = from.begin()->first;
+            for (size_t guard = 0; guard <= 2 * out.indices.size() + 8; ++guard) {
+                const auto it = from.find(cur);
+                if (it == from.end()) {
+                    st.ok = false; // a dangling boundary: not a loop
+                    break;
+                }
+                pos[cur] = path.size();
+                path.push_back(cur);
+                const int next = it->second;
+                from.erase(it);
+                const auto back = pos.find(next);
+                if (back == pos.end()) {
+                    cur = next;
+                    continue;
+                }
+                const size_t j = back->second;
+                fill(std::vector<int>(path.begin() + j, path.end()));
+                for (size_t q = j; q < path.size(); ++q)
+                    pos.erase(path[q]);
+                path.resize(j);
+                if (path.empty())
+                    break;
+                cur = next;
+            }
+        }
+    }
+    its_compactify_vertices(out);
+
+    for (const auto& [e, n] : ps_edge_use(out))
+        if (n != 2) {
+            st.ok = false;
+            if (n > 2)
+                ++st.nonmanifold_edges;
+        }
+    return st.ok;
+}
+
+TriangleSelector::TriangleSplittingData paint_split_remap_mask(const TriangleSelector::TriangleSplittingData& mask,
+                                                               const std::vector<int>& old_to_new)
+{
+    TriangleSelector::TriangleSplittingData out = mask;
+    out.triangles_to_split.clear();
+    for (const TriangleSelector::TriangleBitStreamMapping& m : mask.triangles_to_split)
+        if (m.triangle_idx >= 0 && size_t(m.triangle_idx) < old_to_new.size() && old_to_new[size_t(m.triangle_idx)] >= 0)
+            out.triangles_to_split.emplace_back(old_to_new[size_t(m.triangle_idx)], m.bitstream_start_idx);
+    return out;
+}
+
 // -------------------------------------------------------------------------------------------- region
 
 PaintSplitRegion paint_split_region(const indexed_triangle_set& mesh, const TriangleSelector::TriangleSplittingData& mask,
                                     const PaintSplitRegionParams& params)
 {
     PaintSplitRegion r;
-    {
-        indexed_triangle_set welded = mesh;
-        its_merge_vertices(welded);
-        if (welded.indices.empty() || its_num_open_edges(welded) != 0) {
-            r.error = PaintSplitError::OpenMesh;
-            return r;
-        }
-    }
     bool any_state = false;
     for (size_t s = 1; s < mask.used_states.size(); ++s)
         any_state = any_state || mask.used_states[s];
-    if (!any_state && mask.triangles_to_split.empty()) {
+    if (mesh.indices.empty() || (!any_state && mask.triangles_to_split.empty())) {
         r.error = PaintSplitError::EmptyMask;
         return r;
     }
 
+    // An open part is closed for the split (owner 2026-11-25), the mask carried onto the closed mesh.
+    indexed_triangle_set                    fixed;
+    std::vector<int>                        old_to_new;
+    if (!paint_split_repair(mesh, fixed, &old_to_new, r.repair)) {
+        r.error = PaintSplitError::RepairFailed;
+        return r;
+    }
+    r.repaired = r.repair.needed;
+    const indexed_triangle_set&                   src      = r.repaired ? fixed : mesh;
+    const TriangleSelector::TriangleSplittingData src_mask = r.repaired ? paint_split_remap_mask(mask, old_to_new) : mask;
+
     ColorPatches patches;
     try {
-        patches = extract_color_patches(mesh, mask);
+        patches = extract_color_patches(src, src_mask);
     } catch (const ColorSplitError&) {
         r.error = PaintSplitError::NonManifold;
         return r;
@@ -490,10 +679,21 @@ PaintSplitPieces paint_split_assign(const indexed_triangle_set& mesh, const Pain
             sel.emplace_back(ps_tri_centroid(region.surface, f), ps_tri_area(region.surface, f));
     const double sel_area = region.area[comp];
 
+    // An open part is closed for the split (owner 2026-11-25); its painting is carried by the caller.
+    indexed_triangle_set  fixed;
+    PaintSplitRepairStats repair;
+    if (!paint_split_repair(mesh, fixed, nullptr, repair)) {
+        out.error = PaintSplitError::RepairFailed;
+        return out;
+    }
+    if (repair.needed)
+        out.warnings.push_back(PaintSplitWarning::Repaired);
+    const indexed_triangle_set& src = repair.needed ? fixed : mesh;
+
     manifold::ExecutionContext ctx;
     Manifold                   M;
     try {
-        M = ColorSplitDetail::to_manifold64(mesh, ctx);
+        M = ColorSplitDetail::to_manifold64(src, ctx);
     } catch (...) {
         out.error = PaintSplitError::NonManifold;
         return out;
@@ -682,8 +882,12 @@ PaintSplitPieces paint_split_assign(const indexed_triangle_set& mesh, const Pain
 double paint_split_inside_fraction(const indexed_triangle_set& mesh, const indexed_triangle_set& cutter)
 {
     try {
+        indexed_triangle_set  fixed;
+        PaintSplitRepairStats repair;
+        if (!paint_split_repair(mesh, fixed, nullptr, repair))
+            return -1.;
         manifold::ExecutionContext ctx;
-        const Manifold             M = ColorSplitDetail::to_manifold64(mesh, ctx);
+        const Manifold             M = ColorSplitDetail::to_manifold64(repair.needed ? fixed : mesh, ctx);
         const Manifold             C = ColorSplitDetail::to_manifold64(cutter, ctx);
         if (M.Status() != Manifold::Error::NoError || C.Status() != Manifold::Error::NoError)
             return -1.;
