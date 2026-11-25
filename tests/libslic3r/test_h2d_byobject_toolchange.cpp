@@ -354,9 +354,10 @@ SCENARIO("H2D print by object: tool changes and temperatures name the real hoten
                 check_flushes_follow_the_nozzle_contents(changes, cfg, changes.front().current_i);
                 continue;
             }
-            // With the tower a change onto the other extruder tells the firmware to flush nothing on this branch (the
-            // tower path; draft PR 1160 changes that), so only the changes on the extruder printing are checked here:
-            // each flushes by that nozzle's own block.
+            // With the tower a change onto the other extruder flushes the tower's purge for what that nozzle held (PR
+            // 1160: the matrix volume less the filament change's grab, at least 100 mm3; test_flush_by_nozzle_held.cpp),
+            // not the matrix entry itself, so only the changes on the extruder printing are checked here: each flushes
+            // by that nozzle's own block.
             int    active      = changes.front().current_i;
             size_t same_nozzle = 0;
             for (const Change &c : changes) {
