@@ -107,10 +107,14 @@ public:
         const std::vector<std::vector<WipeTower::ToolChangeResult>> &local_z_tool_changes,
         const std::vector<std::vector<WipeTower::box_coordinates>>  &local_z_reserve_boxes,
         const WipeTower::ToolChangeResult                           &final_purge,
-        bool                                                         final_purge_drop = false) :
+        bool                                                         final_purge_drop = false,
+        // Per-object prime towers: the copy's tower position (front left corner, plate coordinates). Null: the plate
+        // tower's wipe_tower_x / wipe_tower_y.
+        const Vec2d                                                 *position = nullptr) :
         m_left(/*float(print_config.wipe_tower_x.value)*/ 0.f),
         m_right(float(/*print_config.wipe_tower_x.value +*/ print_config.prime_tower_width.value)),
-        m_wipe_tower_pos(float(print_config.wipe_tower_x.get_at(plate_idx)), float(print_config.wipe_tower_y.get_at(plate_idx))),
+        m_wipe_tower_pos(position != nullptr ? Vec2f(float(position->x()), float(position->y())) :
+                                               Vec2f(float(print_config.wipe_tower_x.get_at(plate_idx)), float(print_config.wipe_tower_y.get_at(plate_idx)))),
         m_wipe_tower_rotation(float(print_config.wipe_tower_rotation_angle)),
         m_extruder_offsets(print_config.extruder_offset.values),
         m_priming(priming),
@@ -797,6 +801,15 @@ private:
     bool                                      m_pa_reset_in_band { false };
 
     std::unique_ptr<WipeTowerIntegration> m_wipe_tower;
+    // Per-object prime towers: the plate asks for them (Print::object_towers_requested()). enable_prime_tower is then on
+    // for the whole plate (normalize_fdm_2 kept it), but only the blocks printing beside a tower have one.
+    bool                                  m_object_tower_plate { false };
+    // What enable_prime_tower means to the tool change code: a tower takes the changes. On a plate with per-object
+    // towers, only while a copy's tower is printing (m_wipe_tower set); otherwise the config value, as before.
+    bool                                  prime_tower_takes_changes() const
+    {
+        return m_object_tower_plate ? m_wipe_tower != nullptr : m_config.enable_prime_tower.value;
+    }
 
     std::unique_ptr<SmallAreaInfillFlowCompensator> m_small_area_infill_flow_compensator;
     

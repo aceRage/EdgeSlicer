@@ -4035,6 +4035,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("single_extruder_multi_material_priming", "multimaterial_settings_prime_tower");
         // H2 preload: only shown for dual-extruder Bambu machines (see ConfigManipulation).
         optgroup->append_single_option_line("preload_all_filaments", "multimaterial_settings_prime_tower");
+        // Per-object prime towers (print by object; shown with the tower on).
+        optgroup->append_single_option_line("prime_tower_per_object", "multimaterial_settings_prime_tower");
 
         optgroup = page->new_optgroup(L("Filament for Features"), L"param_filament_for_features");
         optgroup->append_single_option_line("wall_filament", "multimaterial_settings_filament_for_features#walls");

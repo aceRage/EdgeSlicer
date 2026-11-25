@@ -7749,6 +7749,13 @@ int CLI::run(int argc, char **argv)
                     id_bboxes.emplace_back(std::move(data));
                 }
             }
+            // Per-object prime towers: each one prints on the first layer too.
+            for (const Points &corners : print->object_towers_first_layer_corners()) {
+                BBoxData data = wipe_tower_first_layer_bbox_data(corners, orig2d, part_plate->get_index(),
+                                                                 float(print->config().initial_layer_print_height.value));
+                bbox_all.merge(BoundingBoxf(Vec2d(data.bbox[0], data.bbox[1]), Vec2d(data.bbox[2], data.bbox[3])));
+                id_bboxes.emplace_back(std::move(data));
+            }
             plate_bbox->bbox_all = { bbox_all.min.x(),bbox_all.min.y(),bbox_all.max.x(),bbox_all.max.y() };
 
             PlateData *plate_data = plate_data_list[i];

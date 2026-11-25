@@ -7,6 +7,7 @@
 #include "format.hpp"
 
 #include "GCode/Thumbnails.hpp"
+#include "GCode/WipeTowerEstimate.hpp"
 #include "Format/BambuKeyAliases.hpp"
 #include "ToolSlots.hpp"
 #include <algorithm>
@@ -9912,6 +9913,16 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Per-object prime towers (tests/design_per_object_prime_towers.md, PR 3): print by object with more than one copy
+    // turns the prime tower off (normalize_fdm_2). With this on, a Bambu-style (Type 1) tower stays on and every copy
+    // that changes filament gets its own small tower beside it, printed inside that copy's block.
+    def = this->add("prime_tower_per_object", coBool);
+    def->label = L("Prime tower per object");
+    def->tooltip = L("With print sequence By object, give each multi-colour object its own small prime tower beside it, "
+                     "printed with that object. At most 2 towers per plate.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("flush_volumes_vector", coFloats);
     // BBS: remove _L()
     def->label = ("Purging volumes - load/unload volumes");
@@ -13090,6 +13101,22 @@ void DynamicPrintConfig::normalize_fdm_1()
     return;
 }
 
+bool DynamicPrintConfig::keeps_object_prime_towers(const ConfigBase &config, int num_copies, int used_filaments)
+{
+    if (num_copies < 2 || used_filaments < 2)
+        return false;
+    const ConfigOption *per_object = config.option("prime_tower_per_object");
+    if (per_object == nullptr || !per_object->getBool())
+        return false;
+    const ConfigOption *sequence = config.option("print_sequence");
+    if (sequence == nullptr || PrintSequence(sequence->getInt()) != PrintSequence::ByObject)
+        return false;
+    if (const ConfigOption *spiral = config.option("spiral_mode"); spiral != nullptr && spiral->getBool())
+        return false;
+    // Type 2 towers (U1, Voron, Prusa MMU) per object come in a later PR: they keep today's "no tower".
+    return resolve_wipe_tower_type(config) == WipeTowerType::Type1;
+}
+
 t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int used_filaments)
 {
     t_config_option_keys changed_keys;
@@ -13101,7 +13128,8 @@ t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int us
         // as ConfigOptionEnumGeneric, where a typed downcast would be UB.
         const bool by_object = this->has("print_sequence") && this->opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject;
         const bool is_smooth_timelapse = this->has("timelapse_type") && this->opt_enum<TimelapseType>("timelapse_type") == TimelapseType::tlSmooth;
-        if (!is_smooth_timelapse && (used_filaments == 1 || (by_object && num_objects > 1))) {
+        if (!is_smooth_timelapse && (used_filaments == 1 || (by_object && num_objects > 1 &&
+                                                              !keeps_object_prime_towers(*this, num_objects, used_filaments)))) {
             if (ept_opt->value) {
                 ept_opt->value = false;
                 changed_keys.push_back("enable_prime_tower");

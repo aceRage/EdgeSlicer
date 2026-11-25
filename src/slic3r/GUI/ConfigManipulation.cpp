@@ -1235,6 +1235,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         resolve_wipe_tower_type(preset_bundle->printers.get_edited_preset().config) == WipeTowerType::Type2;
     for (auto el : { "prime_tower_width", "prime_tower_brim_width"})
         toggle_line(el, have_prime_tower);
+    // Per-object prime towers only matter when printing by object (the plate's own sequence can differ from the
+    // process', so the line stays visible with the tower on).
+    toggle_line("prime_tower_per_object", have_prime_tower);
 
     // H2 preload (preload_all_filaments): dual-extruder Bambu machines (H2D/H2C/X2D) only - the same
     // DynamicPrintConfig::support_different_extruders() gate ToolOrdering uses - and only meaningful
