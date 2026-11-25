@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -402,4 +403,264 @@ TEST_CASE("Single nozzle with AMS: every change flushes from the outgoing filame
     }
     CHECK(changes >= 4);
     CHECK(flushed == changes);
+}
+
+// ---- H3C, print by object ------------------------------------------------------------------------------------------
+// The H3C has one extruder whose nine rack hotends count as extruders (handle_hotend_as_extruder). A multi-colour plate
+// printed by object got no hotend grouping (the by-object grouping shim needs two extruders): a one-entry
+// filament_nozzle_map, no pre-heat / pre-cool of the rack hotends, while the printer still put the colours in separate
+// hotends (owner's H3C stopped at 97 %, tests: h3c_stuck, 2026-11-23). Such a plate is now grouped as by layer.
+
+namespace {
+
+const Machine H3C{ "Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Bambu PLA Basic @BBL H3C" };
+
+DynamicPrintConfig h3c_config(size_t filaments, bool tower, const char *sequence)
+{
+    PresetBundle &b = held_bundle();
+    REQUIRE(b.printers.select_preset_by_name(H3C.printer, true));
+    REQUIRE(b.prints.select_preset_by_name(H3C.process, true));
+    REQUIRE(b.filaments.select_preset_by_name(H3C.filament, true));
+    b.filament_presets = { H3C.filament };
+    const std::vector<std::string> colours{ "#E01919", "#1943E0", "#19E043", "#E0D019" };
+    b.set_num_filaments(unsigned(filaments), std::vector<std::string>(colours.begin(), colours.begin() + filaments));
+    b.filament_presets = std::vector<std::string>(filaments, H3C.filament);
+    DynamicPrintConfig cfg = b.full_config_secure();
+    cfg.set_deserialize_strict({
+        { "enable_prime_tower", tower ? "1" : "0" },
+        { "wipe_tower_x", 40. },
+        { "wipe_tower_y", 220. },
+        { "wipe_tower_rotation_angle", 0 },
+        { "flush_volumes_matrix", flush_matrix(filaments) },
+        { "flush_multiplier", "1" },
+        { "flush_into_infill", "0" },
+        { "flush_into_objects", "0" },
+        { "flush_into_support", "0" },
+        { "gcode_comments", 0 },
+        { "print_sequence", sequence },
+    });
+    return cfg;
+}
+
+// Two-colour 20 x 20 x 2 mm cubes, 60 mm apart: object i has walls in filament walls[i] and infill in infills[i] (1-based),
+// so every layer of every object changes colour.
+std::string slice_two_colour_objects(Print &print, Model &model, const DynamicPrintConfig &cfg, const std::vector<int> &walls,
+                                     const std::vector<int> &infills)
+{
+    for (size_t i = 0; i < walls.size(); ++i) {
+        TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
+        cube.scale(Vec3f(1.f, 1.f, 0.1f));
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(cube);
+        object->volumes.front()->name = object->name;
+        object->config.set("wall_filament", walls[i]);
+        object->config.set("sparse_infill_filament", infills[i]);
+        object->config.set("solid_infill_filament", infills[i]);
+        object->add_instance();
+        object->center_around_origin();
+        object->instances.front()->set_offset(Vec3d(130. + 60. * double(i), 160., 0.));
+        object->ensure_on_bed();
+    }
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    print.validate();
+    print.set_status_silent();
+    return Test::gcode(print);
+}
+
+std::vector<std::string> gcode_lines(const std::string &gcode)
+{
+    std::vector<std::string> lines;
+    std::istringstream       ss(gcode);
+    for (std::string line; std::getline(ss, line);) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        lines.push_back(line);
+    }
+    return lines;
+}
+
+std::string header_value(const std::string &gcode, const std::string &key)
+{
+    for (const std::string &line : gcode_lines(gcode))
+        if (line.rfind("; " + key + " = ", 0) == 0)
+            return line.substr(key.size() + 5);
+    return "<missing>";
+}
+
+// Bambu Studio 2.9.1's rack hotend pre-heat ("M632 S<f> N R W" / "M104 I<f> S<t> N0 W ;Multi extruder pre heating" / "M633")
+// and pre-cool ("M104 I<f> S<t> N0 C ;Multi extruder pre cooling"), never inside a change_filament_gcode span.
+struct HotendLines
+{
+    size_t pre_heats = 0, pre_cools = 0, m632 = 0, m633 = 0, bad_pre_heats = 0, inside_change = 0, nozzle_change_tags = 0;
+};
+
+HotendLines hotend_lines(const std::string &gcode)
+{
+    static const std::regex  m632(R"(^M632 S(\d+) N R W$)");
+    static const std::regex  heat(R"(^M104 I(\d+) S\d+ N0 W ;Multi extruder pre heating$)");
+    const std::vector<std::string> lines = gcode_lines(gcode);
+    HotendLines h;
+    bool        in_change = false;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const std::string &l = lines[i];
+        std::smatch        m, m2;
+        if (l == "; FilamentChangeGCodeStart")
+            in_change = true;
+        else if (l == "; FilamentChangeGCodeEnd")
+            in_change = false;
+        if (l.rfind("; NOZZLE_CHANGE_START", 0) == 0)
+            ++h.nozzle_change_tags;
+        if (l.rfind("M632 ", 0) == 0)
+            ++h.m632;
+        if (l == "M633")
+            ++h.m633;
+        if (std::regex_match(l, m, heat)) {
+            ++h.pre_heats;
+            if (in_change)
+                ++h.inside_change;
+            // The pre-heat names the filament the M632 before it prepares, and an M633 closes it.
+            if (i == 0 || !std::regex_match(lines[i - 1], m2, m632) || m2[1].str() != m[1].str() || i + 1 >= lines.size() ||
+                lines[i + 1] != "M633")
+                ++h.bad_pre_heats;
+        } else if (l.rfind("M104 I", 0) == 0 && l.find(" N0 C ;Multi extruder pre cooling") != std::string::npos) {
+            ++h.pre_cools;
+            if (in_change)
+                ++h.inside_change;
+        }
+    }
+    return h;
+}
+
+// The number of changes that swap the rack hotend (the header's filament -> hotend map).
+size_t hotend_swaps(const std::string &gcode)
+{
+    int                       first   = -1;
+    const std::vector<Change> changes = changes_of(gcode, first);
+    const std::vector<int>    nozzle  = nozzle_map_of(gcode);
+    size_t                    swaps   = 0;
+    for (const Change &c : changes)
+        if (c.from >= 0 && c.to >= 0 && size_t(c.from) < nozzle.size() && size_t(c.to) < nozzle.size() && nozzle[size_t(c.from)] != nozzle[size_t(c.to)])
+            ++swaps;
+    return swaps;
+}
+
+} // namespace
+
+TEST_CASE("H3C print by object: each colour gets its own rack hotend, pre-heated and pre-cooled", "[FlushByNozzleHeld][GCode][H3CByObject]")
+{
+    // The owner's plate: two objects, both printing both colours on every layer.
+    DynamicPrintConfig cfg = h3c_config(2, false, "by object");
+    REQUIRE(cfg.opt_bool("handle_hotend_as_extruder"));
+    Print             print;
+    Model             model;
+    const std::string gcode = slice_two_colour_objects(print, model, cfg, { 1, 1 }, { 2, 2 });
+
+    // The header describes the grouping the body prints with: one extruder, a hotend per filament.
+    CHECK(header_value(gcode, "print_sequence") == "by object");
+    CHECK(header_value(gcode, "filament_map") == "1,1");
+    const std::vector<int> nozzle = nozzle_map_of(gcode);
+    REQUIRE(nozzle.size() == 2);
+    CHECK(nozzle[0] != nozzle[1]);
+    REQUIRE(print.get_layered_nozzle_group_result() != nullptr);
+    for (int f = 0; f < 2; ++f)
+        CHECK(print.get_layered_nozzle_group_result()->get_nozzle_id(f, -1) == nozzle[size_t(f)]);
+
+    // Every change goes into a hotend that already holds its filament (or none yet): nothing flushes.
+    const Replay r = check_held_rule(print, gcode, false);
+    CHECK(r.checked >= 10); // both objects, every layer
+    CHECK(r.flushes == 0);
+    // Every change to another filament swaps the hotend. (The first layer's change_filament_gcode for the filament the start
+    // G-code loaded is a change from a filament to itself, as on every H3C plate, by layer too.)
+    size_t colour_changes = 0;
+    {
+        int first = -1;
+        for (const Change &c : changes_of(gcode, first))
+            if (c.from != c.to)
+                ++colour_changes;
+    }
+    CHECK(colour_changes + 1 == r.checked);
+    CHECK(r.cross_nozzle_changes == colour_changes);
+    CHECK(r.no_flush_held_same > 0);
+
+    // Each hotend swap after the first gets its pre-heat (as the same plate by layer: 98 pre-heats for 99 swaps), each
+    // wrapped in M632 / M633; the idle hotend is pre-cooled.
+    const HotendLines h     = hotend_lines(gcode);
+    const size_t      swaps = hotend_swaps(gcode);
+    INFO("swaps " << swaps << ", pre-heats " << h.pre_heats << ", pre-cools " << h.pre_cools);
+    CHECK(swaps == colour_changes);
+    CHECK(h.pre_heats > 0);
+    CHECK(h.pre_heats <= swaps);
+    CHECK(h.pre_heats + 1 >= swaps);
+    CHECK(h.pre_cools > 0);
+    CHECK(h.m632 == h.pre_heats);
+    CHECK(h.m633 == h.pre_heats);
+    CHECK(h.bad_pre_heats == 0);
+    CHECK(h.inside_change == 0);
+    // As Bambu Studio's set_extruder (and this tree's by-layer plate without a tower), the tower-less change writes no
+    // NOZZLE_CHANGE markers; those come from the prime tower's nozzle change.
+    CHECK(h.nozzle_change_tags == 0);
+}
+
+TEST_CASE("H3C print by object: a hotend shared by two filaments flushes from the filament it holds", "[FlushByNozzleHeld][GCode][H3CByObject]")
+{
+    // Two rack hotends for three filaments: two of them share one, and each change into it flushes from what it holds.
+    DynamicPrintConfig cfg = h3c_config(3, false, "by object");
+    cfg.set_deserialize_strict({ { "extruder_max_nozzle_count", "2" } });
+    Print             print;
+    Model             model;
+    const std::string gcode  = slice_two_colour_objects(print, model, cfg, { 1, 3 }, { 2, 2 });
+    const auto        nozzle = nozzle_map_of(gcode);
+    REQUIRE(nozzle.size() == 3);
+    INFO("filament_nozzle_map " << header_value(gcode, "filament_nozzle_map"));
+    REQUIRE(std::set<int>(nozzle.begin(), nozzle.end()).size() == 2);
+    const Replay r = check_held_rule(print, gcode, false);
+    CHECK(r.flushes > 0);
+    CHECK(r.no_flush_held_same > 0);
+    const HotendLines h = hotend_lines(gcode);
+    CHECK(h.pre_heats > 0);
+    CHECK(h.bad_pre_heats == 0);
+    CHECK(h.inside_change == 0);
+}
+
+TEST_CASE("H3C print by layer keeps its hotend grouping and tower nozzle changes", "[FlushByNozzleHeld][GCode][H3CByObject]")
+{
+    // Control: the same plate by layer with a prime tower (the owner's working print) is grouped by the by-layer pass.
+    DynamicPrintConfig cfg = h3c_config(2, true, "by layer");
+    Print             print;
+    Model             model;
+    const std::string gcode  = slice_two_colour_objects(print, model, cfg, { 1, 1 }, { 2, 2 });
+    const auto        nozzle = nozzle_map_of(gcode);
+    REQUIRE(nozzle.size() == 2);
+    CHECK(nozzle[0] != nozzle[1]);
+    const Replay r = check_held_rule(print, gcode, true);
+    CHECK(r.flushes == 0);
+    const HotendLines h = hotend_lines(gcode);
+    CHECK(h.pre_heats > 0);
+    CHECK(h.bad_pre_heats == 0);
+    CHECK(h.nozzle_change_tags > 0);
+}
+
+TEST_CASE("Print by object on other printers: no hotend grouping is added", "[FlushByNozzleHeld][GCode][H3CByObject]")
+{
+    // X1 Carbon (one nozzle, AMS): a by-object plate still has no grouping result and no pre-heat lines.
+    {
+        DynamicPrintConfig cfg = machine_config(X1C, 2, false, "");
+        cfg.set_deserialize_strict({ { "print_sequence", "by object" } });
+        Print             print;
+        Model             model;
+        const std::string gcode = slice_two_colour_objects(print, model, cfg, { 1, 1 }, { 2, 2 });
+        CHECK(print.get_layered_nozzle_group_result() == nullptr);
+        CHECK(gcode.find(";Multi extruder pre heating") == std::string::npos);
+    }
+    // H2D (two extruders): a by-object plate keeps the plate's manual map (the existing two-extruder shim).
+    {
+        DynamicPrintConfig cfg = machine_config(H2D, 2, false, "2,1");
+        cfg.set_deserialize_strict({ { "print_sequence", "by object" } });
+        Print             print;
+        Model             model;
+        const std::string gcode = slice_two_colour_objects(print, model, cfg, { 1, 1 }, { 2, 2 });
+        CHECK(header_value(gcode, "filament_map") == "2,1");
+    }
 }
