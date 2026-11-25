@@ -5586,9 +5586,20 @@ void TabPrintModel::on_value_change(const std::string& opt_key, const boost::any
     // always add object config
     bool set   = true; // *m_config->option(k) != *m_prints.get_selected_preset().config.option(k) || inull != m_null_keys.end();
     if (m_back_to_sys) {
-        for (auto config : m_object_configs)
-            config.second->erase(k);
-        m_all_keys.erase(std::remove(m_all_keys.begin(), m_all_keys.end(), k), m_all_keys.end());
+        // Snapmaker #1173: resetting the shown flow type must keep the object's override while another flow
+        // type of the option still differs from the process.
+        const bool keep_override = m_flow_variant_view && m_flow_variant_view->is_option(k) &&
+            flow_variant_slots_differ(m_config->option(k, false), m_prints.get_selected_preset().config.option(k),
+                                      m_flow_variant_view->modes.size());
+        if (keep_override) {
+            for (auto config : m_object_configs)
+                config.second->apply_only(*m_config, {k});
+            m_all_keys = concat(m_all_keys, {k});
+        } else {
+            for (auto config : m_object_configs)
+                config.second->erase(k);
+            m_all_keys.erase(std::remove(m_all_keys.begin(), m_all_keys.end(), k), m_all_keys.end());
+        }
     } else if (set) {
         for (auto config : m_object_configs)
             config.second->apply_only(*m_config, {k});
