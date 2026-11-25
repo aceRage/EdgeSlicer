@@ -171,6 +171,12 @@ void process(Print &print, Model &model, const DynamicPrintConfig &cfg, const Ma
 
 void write_tcr(std::ostream &ss, const WipeTower::ToolChangeResult &t)
 {
+    if (t.gcode.empty() && t.extrusions.empty()) {
+        // An empty result (the Type 2 tower's "no final purge", WipeTower::ToolChangeResult{}): its Eigen positions are
+        // never initialized, so only say it is empty.
+        ss << "tcr empty\n";
+        return;
+    }
     ss << "tcr z=" << t.print_z << " h=" << t.layer_height << " start=" << t.start_pos.x() << ',' << t.start_pos.y() << " end=" << t.end_pos.x()
        << ',' << t.end_pos.y() << " priming=" << t.priming << " purge=" << t.purge_volume << " tools=" << t.initial_tool << "->" << t.new_tool
        << " extrusions=" << t.extrusions.size() << " wipe=" << t.wipe_path.size() << '\n'
