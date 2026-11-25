@@ -41,13 +41,6 @@ struct ViewFilter
 
     // The Bambu filter is in force: Bambu view and not Developer mode.
     bool bambu() const { return view == SettingsView::Bambu && level != comDevelop; }
-    // Same filter decision for every key (used to skip work when nothing changed).
-    bool operator==(const ViewFilter &rhs) const
-    {
-        return level == rhs.level && view == rhs.view && bbl_printer == rhs.bbl_printer && changed == rhs.changed &&
-               revealed == rhs.revealed;
-    }
-    bool operator!=(const ViewFilter &rhs) const { return !(*this == rhs); }
 };
 
 enum class LineShow {

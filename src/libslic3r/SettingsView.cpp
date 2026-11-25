@@ -138,6 +138,8 @@ std::set<std::string> options_differing_from_defaults(const ConfigBase &config)
         if (opt_def == nullptr || value == nullptr || opt_def->default_value == nullptr)
             continue;
         const ConfigOption *dflt = opt_def->default_value.get();
+        if (value->type() != dflt->type())
+            continue; // operator== throws on a type mismatch; such a key is not a setting line anyway
         if (value->is_vector() && dflt->is_vector()) {
             const auto *vec = static_cast<const ConfigOptionVectorBase *>(value);
             std::unique_ptr<ConfigOption> sized(dflt->clone());
