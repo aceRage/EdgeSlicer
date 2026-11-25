@@ -1393,7 +1393,7 @@ double estimated_layer_time(const DynamicPrintConfig &config, const std::string 
     timer.apply_config(print_config);
     // The millisecond dwell makes the processor plan the last moves to a stop.
     timer.process_buffer("T0\nM83\nG92 X0 Y0 Z0 E0\n" + layer_gcode + "\nG4 P1\n");
-    return double(timer.get_time(PrintEstimatedStatistics::ETimeMode::Normal)) - 0.001;
+    return double(timer.get_planning_time(PrintEstimatedStatistics::ETimeMode::Normal)) - 0.001;
 }
 
 // One layer through a CoolingBuffer set up from `config`, as layer `layer_id`, flushed. Relative E.

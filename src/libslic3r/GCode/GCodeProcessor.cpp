@@ -1653,6 +1653,12 @@ void GCodeProcessor::finalize(bool post_process)
         run_post_process();
 }
 
+float GCodeProcessor::get_planning_time(PrintEstimatedStatistics::ETimeMode mode) const
+{
+    return (mode < PrintEstimatedStatistics::ETimeMode::Count) ?
+        float(m_time_processor.machines[static_cast<size_t>(mode)].planning_time) : 0.0f;
+}
+
 float GCodeProcessor::get_time(PrintEstimatedStatistics::ETimeMode mode) const
 {
     // Ultra: include the machine's fixed prepare time in the total estimate.

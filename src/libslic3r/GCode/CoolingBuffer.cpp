@@ -1012,7 +1012,9 @@ float CoolingBuffer::estimate_layer_time(const std::string &gcode, const std::ve
     m_layer_timer.initialize(std::string());
     m_layer_timer.apply_config(m_layer_timer_config);
     m_layer_timer.process_buffer(timed);
-    return std::max(0.f, m_layer_timer.get_time(PrintEstimatedStatistics::ETimeMode::Normal) - 0.001f);
+    // Edge: the planning time, which leaves out the firmware flush time that only the estimate counts (H2C, H2D,
+    // H3C ";VG1" moves and "SYNC T" waits). That time must never move a G-code line (owner, 2026-11-23).
+    return std::max(0.f, m_layer_timer.get_planning_time(PrintEstimatedStatistics::ETimeMode::Normal) - 0.001f);
 }
 
 float CoolingBuffer::slow_down_layer(const std::string &gcode, std::vector<PerExtruderAdjustments> &per_extruder_adjustments)
