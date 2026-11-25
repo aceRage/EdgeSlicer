@@ -46,6 +46,14 @@ struct WipeTowerDataTestAccess
     {
         print._make_wipe_tower(data, inst, pos);
     }
+    static std::vector<GCode::LayerToPrint> layers(const PrintObject &object)
+    {
+        return GCode::collect_layers_to_print(object);
+    }
+    static std::vector<GCode::LayerToPrint> layers(const PrintObject &object, bool warn, const WipeTowerData *tower)
+    {
+        return GCode::collect_layers_to_print(object, warn, tower);
+    }
     static SupportLayer *new_virtual_layer(PrintObject &object, WipeTowerData &data, coordf_t height, coordf_t print_z)
     {
         SupportLayer *layer = object.new_detached_support_layer(size_t(-1), 0, height, print_z, print_z - 0.5 * height);
@@ -345,7 +353,7 @@ TEST_CASE("WipeTowerData: collect_layers_to_print merges a copy's tower-only lay
     PrintObject &object = *const_cast<PrintObject *>(print.objects().front());
     REQUIRE(object.layers().size() >= 3);
 
-    const std::vector<GCode::LayerToPrint> plain = GCode::collect_layers_to_print(object);
+    const std::vector<GCode::LayerToPrint> plain = Access::layers(object);
     auto same = [](const std::vector<GCode::LayerToPrint> &a, const std::vector<GCode::LayerToPrint> &b) {
         if (a.size() != b.size())
             return false;
@@ -355,12 +363,12 @@ TEST_CASE("WipeTowerData: collect_layers_to_print merges a copy's tower-only lay
         return true;
     };
     // The defaults are today's call.
-    CHECK(same(plain, GCode::collect_layers_to_print(object, true, nullptr)));
-    CHECK(same(plain, GCode::collect_layers_to_print(object, false, nullptr)));
+    CHECK(same(plain, Access::layers(object, true, nullptr)));
+    CHECK(same(plain, Access::layers(object, false, nullptr)));
 
     // A tower with no tower-only layers changes nothing.
     Access::Tower tower;
-    CHECK(same(plain, GCode::collect_layers_to_print(object, true, tower.data.get())));
+    CHECK(same(plain, Access::layers(object, true, tower.data.get())));
 
     // One tower-only layer on an object layer's print_z pairs with it; one above the object's top is a layer of its own.
     const size_t        support_before = object.support_layer_count();
@@ -368,7 +376,7 @@ TEST_CASE("WipeTowerData: collect_layers_to_print merges a copy's tower-only lay
     const Layer        *top            = object.layers().back();
     const SupportLayer *at_third       = Access::new_virtual_layer(object, *tower.data, third->height, third->print_z);
     const SupportLayer *above_top      = Access::new_virtual_layer(object, *tower.data, top->height, top->print_z + top->height);
-    const std::vector<GCode::LayerToPrint> merged = GCode::collect_layers_to_print(object, true, tower.data.get());
+    const std::vector<GCode::LayerToPrint> merged = Access::layers(object, true, tower.data.get());
     REQUIRE(merged.size() == plain.size() + 1);
     for (size_t i = 0; i + 1 < merged.size(); ++i) {
         INFO("layer " << i);
@@ -383,11 +391,11 @@ TEST_CASE("WipeTowerData: collect_layers_to_print merges a copy's tower-only lay
     CHECK(merged.back().support_layer == above_top);
     // The object itself is untouched, and the plain call still sees only its own layers.
     CHECK(object.support_layer_count() == support_before);
-    CHECK(same(plain, GCode::collect_layers_to_print(object)));
+    CHECK(same(plain, Access::layers(object)));
 
     tower.data->clear();
     CHECK(tower.data->virtual_support_layers.empty());
-    CHECK(same(plain, GCode::collect_layers_to_print(object, true, tower.data.get())));
+    CHECK(same(plain, Access::layers(object, true, tower.data.get())));
 }
 
 TEST_CASE("WipeTowerData: a copy's tower keeps its raft gap layer to itself", "[WipeTowerData]")
@@ -408,7 +416,7 @@ TEST_CASE("WipeTowerData: a copy's tower keeps its raft gap layer to itself", "[
     REQUIRE(object.support_layer_count() > 0);
     const size_t      support_before = object.support_layer_count();
     const std::string fake_before    = fake_signature(print.get_fake_wipe_tower());
-    const std::vector<GCode::LayerToPrint> plain = GCode::collect_layers_to_print(object);
+    const std::vector<GCode::LayerToPrint> plain = Access::layers(object);
     const PrintInstance *inst = print.by_object_plan().blocks.front().instance;
     REQUIRE(inst == &object.instances().front());
 
@@ -431,7 +439,7 @@ TEST_CASE("WipeTowerData: a copy's tower keeps its raft gap layer to itself", "[
     CHECK(print.wipe_tower_data().tool_changes.empty());
     CHECK(fake_signature(print.get_fake_wipe_tower()) == fake_before);
     // Only this copy's layers carry the gap layer.
-    const std::vector<GCode::LayerToPrint> with_tower = GCode::collect_layers_to_print(object, true, tower.data.get());
+    const std::vector<GCode::LayerToPrint> with_tower = Access::layers(object, true, tower.data.get());
     CHECK(with_tower.size() == plain.size() + tower.data->virtual_support_layers.size());
     size_t found = 0;
     for (const GCode::LayerToPrint &layer : with_tower)
@@ -439,5 +447,5 @@ TEST_CASE("WipeTowerData: a copy's tower keeps its raft gap layer to itself", "[
             if (layer.support_layer == virt)
                 ++found;
     CHECK(found == tower.data->virtual_support_layers.size());
-    CHECK(GCode::collect_layers_to_print(object).size() == plain.size());
+    CHECK(Access::layers(object).size() == plain.size());
 }

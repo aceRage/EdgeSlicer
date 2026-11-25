@@ -981,6 +981,8 @@ private:
     friend class WipeTowerIntegration;
     friend class PressureEqualizer;
     friend class Print;
+    // tests/fff_print/test_wipe_tower_data.cpp: collect_layers_to_print(object, warn, tower).
+    friend struct WipeTowerDataTestAccess;
     friend class SmallAreaInfillFlowCompensator;
 };
 
