@@ -97,6 +97,8 @@ set(lisbslic3r_sources
     PaintDepth.hpp
     PaintTransfer.cpp
     PaintTransfer.hpp
+    RepairPaint.cpp
+    RepairPaint.hpp
     PaintWire.cpp
     PaintWire.hpp
     ColorSplit.cpp

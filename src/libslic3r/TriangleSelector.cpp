@@ -338,11 +338,14 @@ EnforcerBlockerType TriangleSelector::leaf_state_at(int facet_idx, const Vec3f &
 namespace {
 struct ResamplePlanner
 {
-    const std::function<TriangleSelector::SampledState(const Vec3f &)> &sampler;
-    float                                                               edge_limit_sqr;
-    std::vector<int16_t>                                               &plan;
+    const std::function<TriangleSelector::SampledState(const Vec3f &, int)> &sampler_facet;
+    int                                                                      facet;
+    float                                                                    edge_limit_sqr;
+    std::vector<int16_t>                                                    &plan;
 
     using S = TriangleSelector::SampledState;
+
+    S sampler(const Vec3f &pt) const { return sampler_facet(pt, facet); }
 
     void run(const Vec3f &a, const Vec3f &b, const Vec3f &c, const S &sa, const S &sb, const S &sc, int depth)
     {
@@ -384,8 +387,8 @@ struct ResamplePlanner
         plan.push_back(-1);
         if (depth < 6) {
             std::array<std::vector<int16_t>, 4> sub;
-            ResamplePlanner p0{ sampler, edge_limit_sqr, sub[0] }, p1{ sampler, edge_limit_sqr, sub[1] },
-                            p2{ sampler, edge_limit_sqr, sub[2] }, p3{ sampler, edge_limit_sqr, sub[3] };
+            ResamplePlanner p0{ sampler_facet, facet, edge_limit_sqr, sub[0] }, p1{ sampler_facet, facet, edge_limit_sqr, sub[1] },
+                            p2{ sampler_facet, facet, edge_limit_sqr, sub[2] }, p3{ sampler_facet, facet, edge_limit_sqr, sub[3] };
             tbb::parallel_invoke([&] { p0.run(a, mab, mca, sa, sab, sca, depth + 1); },
                                  [&] { p1.run(mab, b, mbc, sab, sb, sbc, depth + 1); },
                                  [&] { p2.run(mbc, c, mca, sbc, sc, sca, depth + 1); },
@@ -404,6 +407,12 @@ struct ResamplePlanner
 
 void TriangleSelector::resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit, const std::vector<bool> *skip)
 {
+    resample_facets([&sampler](const Vec3f &pt, int) { return sampler(pt); }, edge_limit, skip);
+}
+
+void TriangleSelector::resample_facets(const std::function<SampledState(const Vec3f &, int)> &sampler, float edge_limit,
+                                       const std::vector<bool> *skip)
+{
     reset();
     set_edge_limit(edge_limit);
 
@@ -416,8 +425,8 @@ void TriangleSelector::resample(const std::function<SampledState(const Vec3f &)>
             }
             const std::array<int, 3> &vi = m_triangles[facet_idx].verts_idxs;
             const Vec3f a = m_vertices[vi[0]].v, b = m_vertices[vi[1]].v, c = m_vertices[vi[2]].v;
-            ResamplePlanner planner{ sampler, m_edge_limit_sqr, plans[facet_idx] };
-            planner.run(a, b, c, sampler(a), sampler(b), sampler(c), 0);
+            ResamplePlanner planner{ sampler, facet_idx, m_edge_limit_sqr, plans[facet_idx] };
+            planner.run(a, b, c, planner.sampler(a), planner.sampler(b), planner.sampler(c), 0);
         }
     });
 
