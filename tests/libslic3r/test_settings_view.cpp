@@ -122,19 +122,59 @@ TEST_CASE("Bambu view shows Bambu's list and hides the rest", "[SettingsView]")
     CHECK(line_show(f, { off_list, on_list_simple }, comAdvanced) == LineShow::Shown);
 }
 
-TEST_CASE("Bambu view never shows our Developer lines; Developer mode ignores the view", "[SettingsView]")
+TEST_CASE("Bambu view never shows our Developer lines without Developer mode", "[SettingsView]")
 {
     const std::set<std::string> changed = { "support_air_filtration", off_list };
     // support_air_filtration is Advanced in Bambu Studio but Developer here: kept out (design 3.3 rule 2).
     REQUIRE(mode_of("support_air_filtration") == comDevelop);
     REQUIRE(SettingsViewKeys::on_bambu_list("support_air_filtration"));
-    CHECK(show(bambu(&changed), "support_air_filtration") == LineShow::Hidden);
+    CHECK(show(bambu(), "support_air_filtration") == LineShow::Hidden);
+    CHECK(show(bambu(&changed), "support_air_filtration") == LineShow::Hidden); // even changed
+}
 
-    ViewFilter dev = bambu(&changed);
-    dev.level      = comDevelop;
-    CHECK_FALSE(dev.bambu());
-    CHECK(show(dev, "support_air_filtration") == LineShow::Shown);
-    CHECK(show(dev, off_list) == LineShow::Shown);
+TEST_CASE("Developer mode on: the view still applies", "[SettingsView][Developer]")
+{
+    // Developer mode raises the level to comDevelop in Advanced and Bambu; Basic stays Simple.
+    const char *develop_key = "support_air_filtration"; // our Developer line, on Bambu's list
+    REQUIRE(mode_of(develop_key) == comDevelop);
+
+    SECTION("Basic + Developer mode: Simple lines only, as today")
+    {
+        const ViewFilter f = level(comSimple);
+        CHECK(show(f, on_list_simple) == LineShow::Shown);
+        CHECK(show(f, on_list_advanced) == LineShow::Hidden);
+        CHECK(show(f, develop_key) == LineShow::Hidden);
+    }
+    SECTION("Advanced + Developer mode: adds our Developer lines")
+    {
+        const ViewFilter f = level(comDevelop);
+        CHECK(show(f, on_list_advanced) == LineShow::Shown);
+        CHECK(show(f, off_list) == LineShow::Shown);
+        CHECK(show(f, develop_key) == LineShow::Shown);
+        CHECK(show(f, "curved_tops_dev_angle_ceiling") == LineShow::Shown);
+    }
+    SECTION("Bambu + Developer mode: the Bambu filter applies; Developer lines only as exceptions")
+    {
+        ViewFilter f = bambu();
+        f.level      = comDevelop;
+        REQUIRE(f.bambu());
+        CHECK(show(f, on_list_simple) == LineShow::Shown);
+        CHECK(show(f, on_list_advanced) == LineShow::Shown);
+        CHECK(show(f, off_list) == LineShow::Hidden);
+        CHECK(show(f, develop_key) == LineShow::Hidden); // listed by Bambu, but a Developer line here
+        CHECK(show(f, "curved_tops_dev_angle_ceiling") == LineShow::Hidden);
+
+        const std::set<std::string> changed  = { develop_key, off_list };
+        const std::set<std::string> revealed = { "curved_tops_dev_angle_ceiling" };
+        ViewFilter                  g        = bambu(&changed, &revealed);
+        g.level                              = comDevelop;
+        CHECK(show(g, develop_key) == LineShow::ShownNotInBambu);
+        CHECK(show(g, off_list) == LineShow::ShownNotInBambu);
+        CHECK(show(g, "curved_tops_dev_angle_ceiling") == LineShow::ShownNotInBambu);
+        // Widget-only lines still follow their group.
+        CHECK(widget_line_show(g, false) == LineShow::Hidden);
+        CHECK(widget_line_show(g, true) == LineShow::Shown);
+    }
 }
 
 TEST_CASE("Bambu view shows changed and revealed options outside the list, marked", "[SettingsView]")
