@@ -3,6 +3,7 @@
 #include "I18N.hpp"
 
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/UploadName.hpp"
 #include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Thread.hpp"
@@ -3063,16 +3064,9 @@ void SelectMachineDialog::on_rename_enter()
     auto     m_valid_type = Valid;
     wxString info_line;
 
-    const char* unusable_symbols = "<>[]:/\\|?*\"";
-
+    // Characters the host cannot take are removed from the name, with no prompt.
+    new_file_name = from_u8(Slic3r::sanitize_upload_filename(new_file_name.ToUTF8().data(), Slic3r::upload_name_rules::bambu()));
     const std::string unusable_suffix = PresetCollection::get_suffix_modified(); //"(modified)";
-    for (size_t i = 0; i < std::strlen(unusable_symbols); i++) {
-        if (new_file_name.find_first_of(unusable_symbols[i]) != std::string::npos) {
-            info_line = _L("Name is invalid;") + "\n" + _L("illegal characters:") + " " + unusable_symbols;
-            m_valid_type = NoValid;
-            break;
-        }
-    }
 
     if (m_valid_type == Valid && new_file_name.find(unusable_suffix) != std::string::npos) {
         info_line = _L("Name is invalid;") + "\n" + _L("illegal suffix:") + "\n\t" + from_u8(PresetCollection::get_suffix_modified());
