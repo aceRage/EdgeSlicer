@@ -26,7 +26,6 @@
 #include <cstddef>
 #include <array>
 #include <cctype>
-#include <cstring>
 #include <cstdlib>
 #include <algorithm>
 #include <atomic>
@@ -592,10 +591,10 @@ static void collect_filament_slots_from_model_config(
             used_slots_0_based.insert(extruder_id - 1);
     }
 
-    // Support/feature filaments
+    collect_support_filament_slots_from_model_config(config, num_filaments, collect_support_keys, used_slots_0_based);
+
+    // Feature filaments (support_* keys go through collect_support_filament_slots_from_model_config)
     static const std::vector<const char*> feature_keys = {
-        "support_filament",
-        "support_interface_filament",
         "wall_filament",
         "sparse_infill_filament",
         "solid_infill_filament",
@@ -606,9 +605,6 @@ static void collect_filament_slots_from_model_config(
     };
     for (const char* key : feature_keys)
     {
-        if (!collect_support_keys &&
-            (strcmp(key, "support_filament") == 0 || strcmp(key, "support_interface_filament") == 0))
-            continue;
         if (config.has(key))
         {
             const int val = config.opt_int(key);
