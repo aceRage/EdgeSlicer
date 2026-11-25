@@ -5,16 +5,13 @@
 #include "Plater.hpp"
 
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/CoalescingWorker.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/ZipOpen.hpp"
 
-#include <atomic>
 #include <memory>
-#include <mutex>
-#include <optional>
 #include <set>
-#include <thread>
 #include <vector>
 
 #include <boost/log/trivial.hpp>
@@ -43,12 +40,6 @@ struct Request
     ZipWorkCleaner::Options options;
 };
 
-std::mutex             s_mutex;
-std::thread            s_thread;
-bool                   s_running  = false;
-bool                   s_shutdown = false;
-std::optional<Request> s_pending;
-std::atomic<bool>      s_cancel{false};
 // UI thread only.
 std::set<fs::path>     s_sessions;
 Listener               s_listener;
@@ -64,37 +55,34 @@ void lower_thread_priority()
 #endif
 }
 
-void worker()
+// The worker thread and its queue. Defined after everything the passes use, so that it is destroyed
+// first at process exit. Its destructor cancels and joins the thread: shutdown() normally ran long
+// before (MainFrame::shutdown, GUI_App::OnExit), but an exit that skipped both must not end in
+// std::terminate() on a still-joinable thread.
+CoalescingWorker s_worker(lower_thread_priority);
+
+void run_pass(const Request& req)
 {
-    lower_thread_priority();
-    for (;;) {
-        Request req;
-        {
-            std::lock_guard<std::mutex> lock(s_mutex);
-            if (!s_pending || s_shutdown) {
-                s_running = false;
-                return;
-            }
-            req = std::move(*s_pending);
-            s_pending.reset();
-        }
-        std::shared_ptr<ZipWorkCleaner::Result> result;
-        try {
-            if (req.mode != Mode::UsageOnly)
-                result = std::make_shared<ZipWorkCleaner::Result>(ZipWorkCleaner::clean(req.options));
-            const ZipWorkCleaner::Usage usage = ZipWorkCleaner::usage(req.options.root, req.options.cancelled);
-            if (s_cancel.load())
-                continue;
+    std::shared_ptr<ZipWorkCleaner::Result> result;
+    try {
+        if (req.mode != Mode::UsageOnly)
+            result = std::make_shared<ZipWorkCleaner::Result>(ZipWorkCleaner::clean(req.options));
+        const ZipWorkCleaner::Usage usage = ZipWorkCleaner::usage(req.options.root, req.options.cancelled);
+        // Handed to the UI thread only while the clean-up is not shut down: after shutdown() nothing
+        // reaches the app (the listener's page, wxTheApp) from this thread any more.
+        s_worker.run_unless_stopped([&usage, &result]() {
             if (wxTheApp != nullptr)
                 wxTheApp->CallAfter([usage, result]() {
                     if (s_listener)
                         s_listener(usage, result.get());
                 });
-        } catch (const std::exception& e) {
+        });
+    } catch (const std::exception& e) {
+        if (!s_worker.cancelled())
             BOOST_LOG_TRIVIAL(error) << "ZIP work folder clean-up failed: " << e.what();
-        } catch (...) {
+    } catch (...) {
+        if (!s_worker.cancelled())
             BOOST_LOG_TRIVIAL(error) << "ZIP work folder clean-up failed";
-        }
     }
 }
 
@@ -139,6 +127,8 @@ void note_session(const fs::path& session)
 
 void start(Mode mode)
 {
+    if (s_worker.cancelled())
+        return; // shut down: the app is closing, its Plater may be going away
     AppConfig* cfg = wxGetApp().app_config;
     if (cfg == nullptr)
         return;
@@ -152,42 +142,24 @@ void start(Mode mode)
     req.options.max_age_days    = mode == Mode::Now ? 0 : zip_cleanup_days_from_value(cfg->get(ZIP_WORK_CLEANUP_DAYS_KEY));
     req.options.now             = std::time(nullptr);
     req.options.in_use          = paths_in_use();
-    req.options.cancelled       = []() { return s_cancel.load(); };
+    req.options.cancelled       = []() { return s_worker.cancelled(); };
     if (req.options.root.empty())
         return;
 
-    std::lock_guard<std::mutex> lock(s_mutex);
-    if (s_shutdown)
-        return;
     // A stronger request wins; equal or stronger replaces the pending one with fresh settings.
-    if (!s_pending || rank(mode) >= rank(s_pending->mode))
-        s_pending = std::move(req);
-    if (s_running)
-        return;
-    if (s_thread.joinable())
-        s_thread.join(); // the previous pass has finished (s_running is false)
-    s_running = true;
-    try {
-        s_thread = std::thread(worker);
-    } catch (const std::exception& e) {
-        s_running = false;
-        BOOST_LOG_TRIVIAL(error) << "Could not start the ZIP work folder clean-up: " << e.what();
-    }
+    auto request = std::make_shared<Request>(std::move(req));
+    if (!s_worker.submit(rank(mode), [request]() { run_pass(*request); }) && !s_worker.cancelled())
+        BOOST_LOG_TRIVIAL(error) << "Could not start the ZIP work folder clean-up";
 }
 
 void set_listener(Listener listener) { s_listener = std::move(listener); }
 
 void shutdown()
 {
-    {
-        std::lock_guard<std::mutex> lock(s_mutex);
-        s_shutdown = true;
-        s_pending.reset();
-    }
-    s_cancel = true;
+    // Cancelled between files, so the join is quick. Idempotent: MainFrame::shutdown() and
+    // GUI_App::OnExit() both call it.
+    s_worker.shutdown();
     s_listener = {};
-    if (s_thread.joinable())
-        s_thread.join();
 }
 
 } // namespace ZipCleanup

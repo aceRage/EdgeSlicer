@@ -703,6 +703,37 @@ bool GizmoObjectManipulation::reset_zero_button(ImGuiWrapper *imgui_wrapper, boo
      return result;
 }
 
+// "Apply Transform" next to the (?) icon at the bottom of the Move, Rotate and Scale windows. It opens
+// the same dialog as the right-click menu, with the box of the open tool ticked.
+void GizmoObjectManipulation::render_apply_transform_button(ImGuiWrapper *imgui_wrapper)
+{
+    Plater *plater = wxGetApp().plater();
+    if (plater == nullptr)
+        return;
+    const GLGizmosManager::EType type      = m_glcanvas.get_gizmos_manager().get_current_type();
+    const bool                   available = plater->can_apply_transformation(false);
+
+    ImGui::SameLine();
+    imgui_wrapper->disabled_begin(!available);
+    const bool clicked = imgui_wrapper->button(_L("Apply Transform"));
+    imgui_wrapper->disabled_end();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        imgui_wrapper->tooltip(_L("Make the current rotation, scale or position the new baseline, without moving anything."),
+                               ImGui::GetFontSize() * 20.0f);
+    if (clicked && available) {
+        const bool position = type == GLGizmosManager::Move;
+        const bool rotation = type == GLGizmosManager::Rotate;
+        const bool scale    = type == GLGizmosManager::Scale;
+        // A modal dialog can not open in the middle of an ImGui frame.
+        wxGetApp().CallAfter([position, rotation, scale]() {
+            if (Plater *plater = wxGetApp().plater())
+                // For a whole object the Move tool has nothing to tick: offer rotation and scale instead.
+                plater->apply_transformation_dialog(position, rotation || (position && !plater->can_apply_transformation(true)),
+                                                    scale || (position && !plater->can_apply_transformation(true)));
+        });
+    }
+}
+
 void GizmoObjectManipulation::show_move_tooltip_information(ImGuiWrapper *imgui_wrapper, float caption_max, float x, float y)
 {
     ImTextureID normal_id = m_glcanvas.get_gizmos_manager().get_icon_texture_id(GLGizmosManager::MENU_ICON_NAME::IC_TOOLBAR_TOOLTIP);
@@ -1213,6 +1244,7 @@ void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper,
         total_text_max = std::max(total_text_max, imgui_wrapper->calc_text_size(m_desc_move[t]).x);
     }
     show_move_tooltip_information(imgui_wrapper, tip_caption_max, x, get_cur_y);
+    render_apply_transform_button(imgui_wrapper);
     m_last_active_item = current_active_id;
     last_move_input_window_width = ImGui::GetWindowWidth();
     imgui_wrapper->end();
@@ -1709,6 +1741,7 @@ void GizmoObjectManipulation::do_render_rotate_window(ImGuiWrapper *imgui_wrappe
         total_text_max  = std::max(total_text_max, imgui_wrapper->calc_text_size(m_desc_move[t]).x);
     }
     show_rotate_tooltip_information(imgui_wrapper, tip_caption_max, x, get_cur_y);
+    render_apply_transform_button(imgui_wrapper);
     m_last_active_item = current_active_id;
     last_rotate_input_window_width = ImGui::GetWindowWidth();
     imgui_wrapper->end();
@@ -1969,6 +2002,7 @@ void GizmoObjectManipulation::do_render_scale_input_window(ImGuiWrapper* imgui_w
         total_text_max  = std::max(total_text_max, imgui_wrapper->calc_text_size(m_desc_scale[t]).x);
     }
     show_scale_tooltip_information(imgui_wrapper, tip_caption_max, x, get_cur_y);
+    render_apply_transform_button(imgui_wrapper);
     m_last_active_item = current_active_id;
 
     last_scale_input_window_width = ImGui::GetWindowWidth();

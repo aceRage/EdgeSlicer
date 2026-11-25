@@ -25,6 +25,7 @@
 #include "TacJoint.hpp"
 #include "CutRecipe.hpp"
 #include "HeightColourPattern.hpp"
+#include "ImageObjectRecipe.hpp"
 #include "CostPricing.hpp"
 #include "Showcase/ShowcaseScene.hpp"
 #include "BRep/CadBody.hpp"
@@ -464,6 +465,9 @@ public:
     // Height colour patterns (HeightColourPattern.hpp): the authoring record of the ranges a
     // pattern generated. Normally empty; the slicer never reads it, only the ranges.
     std::vector<HeightColourPattern> height_colour_patterns;
+    // "Image to object" (ImageObjectRecipe.hpp): the settings and the image the object was made
+    // from, so it can be edited. Empty for every other object; the slicer never reads it.
+    ImageObjectRecipe       image_object_recipe;
     // Profile of increasing z to a layer height, to be linearly interpolated when calculating the layers.
     // The pairs of <z, layer_height> are packed into a 1D array.
     LayerHeightProfile      layer_height_profile;
@@ -657,6 +661,22 @@ public:
     // Rotation and mirroring is being baked in. In case the instance scaling was non-uniform, it is baked in as well.
     void bake_xy_rotation_into_meshes(size_t instance_idx);
 
+    // "Apply transform" (as in Blender): the chosen parts of a transformation become the new baseline. They are moved
+    // into the data below (the meshes), so they read as zero rotation / 100% scale / zero offset afterwards, while
+    // nothing moves or changes shape in the scene. A mirror is never applied: it stays a transformation, so that
+    // painting keeps its triangle order.
+    //
+    // The object as placed by the given instance. Its parts keep their own rotation, scale and offset inside the
+    // object; the other instances are compensated, so they stay as they are too. Texts, SVGs and parts with
+    // texture displacement keep their mesh and take the change into their own transformation instead.
+    // Returns false when there was nothing to apply or it cannot be done (cut connectors, a degenerate scale).
+    bool apply_instance_transformation(size_t instance_idx, bool rotation, bool scale);
+    // One part inside the object. `position` makes the part's offset zero: its origin moves to the object's origin.
+    // Returns false when there was nothing to apply or it cannot be done (see can_apply_volume_transformation()).
+    bool apply_volume_transformation(size_t volume_idx, bool position, bool rotation, bool scale);
+    // False for the parts whose mesh is generated or bound to data that a changed mesh would break.
+    static bool can_apply_volume_transformation(const ModelVolume &volume);
+
     double get_instance_min_z(size_t instance_idx) const;
     double get_instance_max_z(size_t instance_idx) const;
 
@@ -811,7 +831,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id, cut_recipe, height_colour_patterns);
+            cut_connectors, cut_id, cut_recipe, height_colour_patterns, image_object_recipe);
     }
     template<class Archive> void load(Archive& ar) {
         ar(cereal::base_class<ObjectBase>(this));
@@ -824,7 +844,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id, cut_recipe, height_colour_patterns);
+            cut_connectors, cut_id, cut_recipe, height_colour_patterns, image_object_recipe);
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
         if (volume_ids != volume_ids2)

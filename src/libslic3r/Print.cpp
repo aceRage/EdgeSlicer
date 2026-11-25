@@ -1591,8 +1591,11 @@ std::vector<size_t> Print::layers_sorted_for_object(float start, float end, std:
     return idx_of_object_sorted;
 };
 
-StringObjectException Print::sequential_print_clearance_valid(const Print &print, Polygons *polygons, std::vector<std::pair<Polygon, float>>* height_polygons)
+StringObjectException Print::sequential_print_clearance_valid(const Print &print, Polygons *polygons, std::vector<std::pair<Polygon, float>>* height_polygons,
+                                                              StringObjectException *rod_warning)
 {
+    if (rod_warning != nullptr)
+        *rod_warning = StringObjectException();
     StringObjectException single_object_exception;
     const auto& print_config = print.config();
     Polygons exclude_polys = get_bed_excluded_area(print_config);
@@ -1609,26 +1612,23 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
         // one PrintObject per distinct transformation, so print.objects() does not list them in order.
         std::pair<int, int>  model_position;
         double         arrange_score;
-        double               height; // top above the bed, raft included (object_top below)
+        double               height; // top above the bed, raft included (PrintObject::print_z_max)
         // Y extent (scaled) of the geometry that reaches above extruder_clearance_height_to_rod.
         // The X rod sits that far above the nozzle and spans the whole X axis, so this is the only
         // part of an already-printed instance it can collide with while a later instance prints.
         bool                 has_above_rod   = false;
         coord_t              above_rod_min_y = 0;
         coord_t              above_rod_max_y = 0;
+        // The instance's own footprint, not grown by the clearance (bounding_box above is).
+        BoundingBox          footprint;
     };
     // ORCA: Y extent of an instance's geometry above the rod height, in the same coordinates as the
     // bounding boxes below. Conservative: any triangle with a vertex above the rod contributes all
     // three of its vertices. Modifiers, blockers and negative volumes are not printed and are skipped.
     const double rod_height = print.config().extruder_clearance_height_to_rod.value;
-    // Top of an instance above the bed, scaled. object_print_z_max includes the raft and the Z shrinkage
-    // compensation, like the printable-height check in validate() (OrcaSlicer #17235).
-    auto object_top = [](const PrintInstance &instance) -> double {
-        return scale_(instance.print_object->slicing_parameters().object_print_z_max);
-    };
-    auto above_rod_y_range = [rod_height, &object_top](const PrintInstance &instance, coord_t &min_y, coord_t &max_y) -> bool {
+    auto above_rod_y_range = [rod_height](const PrintInstance &instance, coord_t &min_y, coord_t &max_y) -> bool {
         // Skip the mesh walk for the common case of an object whose top, raft included, doesn't reach the rod.
-        if (object_top(instance) <= scale_(rod_height))
+        if (instance.print_object->print_z_max() <= scale_(rod_height))
             return false;
         // Mesh Z this far below the rod prints above it once the raft lifts the object.
         const double rod_z = rod_height - instance.print_object->slicing_parameters().object_print_z_min;
@@ -1759,9 +1759,10 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                     }
                 }
                 struct print_instance_info print_info {&instance, convex_hull.bounding_box(), convex_hull};
-                print_info.height = object_top(instance);
+                print_info.height = instance.print_object->print_z_max();
                 print_info.model_position = model_position_of(print.model(), instance.model_instance);
                 print_info.has_above_rod = above_rod_y_range(instance, print_info.above_rod_min_y, print_info.above_rod_max_y);
+                print_info.footprint = convex_hull_no_offset.bounding_box();
                 print_instance_with_bounding_box.push_back(std::move(print_info));
                 convex_hulls_other.emplace_back(std::move(convex_hull));
             }
@@ -2000,6 +2001,41 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                     height_polygons->emplace_back(std::move(iter.second));
             }
         }
+
+        // EDGE: a warning, never a refusal, and it changes neither the order nor the G-code. Bambu Studio grows
+        // every footprint by half of extruder_clearance_dist_to_rod, so it refuses an instance that reaches above
+        // the rod when a later one is closer to it in Y than dist_to_rod (56.5 mm on the A1 / A2L). The test above
+        // reaches only half the clearance radius plus the skirt (36.4 mm there). Between the two, warn: the part
+        // above the rod (as above, shrunk by the same 0.1 mm) against the later instance's own footprint. Only on
+        // i3 printers, whose gantry spans the bed at the rod height.
+        if (rod_warning != nullptr && print.config().printer_structure.value == PrinterStructure::psI3) {
+            const coord_t rod_reach = scaled<coord_t>(print.config().extruder_clearance_dist_to_rod.value);
+            const coord_t tol       = scaled<coord_t>(0.1);
+            for (int k = 0; k + 1 < print_instance_count; k++) {
+                const auto &info_k = print_instance_with_bounding_box[k];
+                if (!info_k.has_above_rod || too_tall_instances.count(info_k.print_instance) > 0)
+                    continue;
+                const coord_t iy1   = info_k.above_rod_min_y + tol - rod_reach;
+                const coord_t iy2   = info_k.above_rod_max_y - tol + rod_reach;
+                bool          close = false;
+                for (int i = k + 1; i < print_instance_count && !close; i++) {
+                    const BoundingBox &later = print_instance_with_bounding_box[i].footprint;
+                    close = std::min(iy2, later.max.y()) - std::max(iy1, later.min.y()) > 0;
+                }
+                if (!close)
+                    continue;
+                const ModelObject *object = info_k.print_instance->model_instance->get_object();
+                const std::string  text   = (boost::format(L("%1% is tall and close to an object printed after it. The printer's gantry may hit it. "
+                                                               "Move them further apart, or print it last.")) % object->name).str();
+                if (rod_warning->string.empty()) {
+                    rod_warning->string = text;
+                    rod_warning->object = object;
+                } else {
+                    rod_warning->string += "\n" + text;
+                    rod_warning->object = nullptr;
+                }
+            }
+        }
     }
 
     return single_object_exception;
@@ -2188,7 +2224,8 @@ bool final_purge_drop_clearance_ok(const Print &print, double purge_z)
         return true;
 
     for (const PrintObject *object : print.objects()) {
-        const double object_top = unscaled<double>(object->max_z());
+        // Edge, with Orca #17445: the printed top, so a raft counts here as in the checks below.
+        const double object_top = unscaled<double>(object->print_z_max());
         // purge_z is machine-space (includes z_offset); object_top is object-space.
         const double rise       = object_top - (purge_z - print.config().z_offset.value);
         for (const PrintInstance &instance : object->instances()) {
@@ -2342,7 +2379,7 @@ StringObjectException Print::compacted_wipe_tower_clearance_valid(const Print &p
     Polygons              offenders;
     bool                  body_tier_used = false;
     for (const PrintObject *object : print.objects()) {
-        const double object_top = unscaled<double>(object->max_z());
+        const double object_top = unscaled<double>(object->print_z_max());
         for (const PrintInstance &instance : object->instances()) {
             const Polygon inst_hull = compacted_tower_print_instance_hull(*object, instance);
             if (inst_hull.points.empty())
@@ -2424,7 +2461,7 @@ void Print::validate_compacted_wipe_tower_clearance() const
         return;
 
     for (const PrintObject *object : m_objects) {
-        const double object_top = unscaled<double>(object->max_z());
+        const double object_top = unscaled<double>(object->print_z_max());
         for (const PrintInstance &instance : object->instances()) {
             const Polygon inst_hull = compacted_tower_print_instance_hull(*object, instance);
             if (inst_hull.points.empty())
@@ -3308,11 +3345,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             return {L("Smooth mode of timelapse is not supported when \"by object\" sequence is enabled.")};
 
         //BBS: refine seq-print validation logic
-        auto ret = sequential_print_clearance_valid(*this, collison_polygons, height_polygons);
+        StringObjectException rod_warning;
+        auto ret = sequential_print_clearance_valid(*this, collison_polygons, height_polygons, &rod_warning);
         if (!ret.string.empty()) {
             ret.type = STRING_EXCEPT_OBJECT_COLLISION_IN_SEQ_PRINT;
             return ret;
         }
+        if (!rod_warning.string.empty())
+            add_warning(rod_warning);
         // A single object printed by object can still build a tower: test it against the object (warning only).
         if (StringObjectException tower_warning = by_object_tower_clearance_warning(*this); !tower_warning.string.empty())
             add_warning(tower_warning);
@@ -7978,11 +8018,35 @@ void Print::_make_wipe_tower()
             MultiNozzleUtils::HotendFilamentTracker hotends(hotend_as_extruder(m_config), get_layered_nozzle_group_result());
             const auto nozzle_group = get_layered_nozzle_group_result();
             hotends.load(current_extruder_id, 0);
+            // Bambu printers with two extruders (H2D / X2D / H2C; Bambu Studio's NozzleStatusRecorder, as in
+            // LayeredNozzleGroupResult::estimate_seq_flush_weight): a nozzle keeps the last filament it held, so a
+            // change onto another nozzle - the other extruder, or another nozzle of the H2C's rack - flushes from
+            // THAT filament, and nothing when the nozzle is empty or already holds the next one. A change on one
+            // nozzle keeps the flush from the outgoing filament. The nozzle is the grouping's (filament_nozzle_map),
+            // or the extruder (filament_map) when the plate has no grouping. GCode's append_tcr writes this purge
+            // (M620.10 L / flush_length) as it is.
+            const bool                  flush_by_held_nozzle = !hotends.active() && is_BBL_printer() && m_config.nozzle_diameter.size() >= 2;
+            std::map<int, int>          filament_in_nozzle;
+            auto nozzle_of = [&](unsigned int filament_id, int layer_idx) -> int {
+                if (nozzle_group)
+                    return nozzle_group->get_nozzle_id(int(filament_id), layer_idx);
+                const std::vector<int> &fm = m_config.filament_map.values;
+                return filament_id < fm.size() && fm[filament_id] >= 1 ? fm[filament_id] - 1 : -1;
+            };
+            auto load_nozzle = [&](unsigned int filament_id, int layer_idx) {
+                if (!flush_by_held_nozzle)
+                    return;
+                if (const int nozzle = nozzle_of(filament_id, layer_idx); nozzle >= 0)
+                    filament_in_nozzle[nozzle] = int(filament_id);
+            };
+            load_nozzle(current_extruder_id, 0);
             for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) { // for all layers
                 const int layer_idx = int(&layer_tools - &m_wipe_tower_data.tool_ordering.front());
                 if (!layer_tools.has_wipe_tower) {
-                    for (const unsigned int filament_id : layer_tools.extruders)
+                    for (const unsigned int filament_id : layer_tools.extruders) {
                         hotends.load(filament_id, layer_idx);
+                        load_nozzle(filament_id, layer_idx);
+                    }
                     continue;
                 }
                 bool first_layer = &layer_tools == &m_wipe_tower_data.tool_ordering.front();
@@ -7996,8 +8060,10 @@ void Print::_make_wipe_tower()
                         const std::vector<LocalZWipeTowerToolchange> local_z_toolchanges =
                             collect_local_z_wipe_tower_toolchanges(*this, local_z_layers_to_print[local_z_layers_to_print_idx].second,
                                                                    int(current_extruder_id));
-                        for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges)
+                        for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges) {
                             hotends.load(toolchange.new_tool, layer_idx);
+                            load_nozzle(toolchange.new_tool, layer_idx);
+                        }
                         if (!local_z_toolchanges.empty())
                             current_extruder_id = local_z_toolchanges.back().new_tool;
                     }
@@ -8025,6 +8091,17 @@ void Print::_make_wipe_tower()
                                                   0.f :
                                                   wipe_volumes[size_t(held)][extruder_id];
                             hotends.load(extruder_id, layer_idx);
+                        } else if (flush_by_held_nozzle) {
+                            const int old_nozzle = nozzle_of(current_extruder_id, layer_idx);
+                            const int new_nozzle = nozzle_of(extruder_id, layer_idx);
+                            if (old_nozzle >= 0 && new_nozzle >= 0 && old_nozzle != new_nozzle) {
+                                const auto it   = filament_in_nozzle.find(new_nozzle);
+                                const int  held = it == filament_in_nozzle.end() ? -1 : it->second;
+                                volume_to_purge = held < 0 || held == int(extruder_id) || size_t(held) >= wipe_volumes.size() ?
+                                                      0.f :
+                                                      wipe_volumes[size_t(held)][extruder_id];
+                            }
+                            load_nozzle(extruder_id, layer_idx);
                         }
                         volume_to_purge *= m_config.flush_multiplier;
 

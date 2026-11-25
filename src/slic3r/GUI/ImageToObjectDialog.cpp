@@ -15,7 +15,9 @@
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Geometry.hpp"
 #include "libslic3r/LocalesUtils.hpp"
+#include "libslic3r/MeshPreview.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/NSVGUtils.hpp"
 #include "libslic3r/FilamentColorLibrary.hpp"
@@ -44,17 +46,14 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <functional>
+#include <limits>
+#include <map>
 #include <sstream>
 
 namespace Slic3r { namespace GUI {
 
-// Steps of the tool are written to the log at once: the log is buffered, so without the flush
-// the last lines before a crash are lost
-#define I2O_LOG(message)                                              \
-    do {                                                              \
-        BOOST_LOG_TRIVIAL(info) << "Image to object: " << message;    \
-        Slic3r::flush_logs();                                         \
-    } while (false)
+#define I2O_LOG(message) BOOST_LOG_TRIVIAL(debug) << "Image to object: " << message
 
 namespace {
 
@@ -166,12 +165,42 @@ wxString i2o_messages(const std::vector<std::string> &messages)
 
 wxString i2o_filament_label(int index) { return index == 0 ? _L("Default") : wxString::Format(_L("Filament %d"), index); }
 
-// Add the objects to the plate, side by side, as one undo step
-void i2o_add_objects(Plater *plater, const std::vector<OutlineObject> &objects, const ImageToObjectDialog &dialog)
+// Where an object which is replaced was, and what it was set to
+struct I2OPlacement
 {
-    I2O_LOG("taking the undo snapshot");
-    Plater::TakeSnapshot snapshot(plater, "Image to object");
-    I2O_LOG("snapshot taken");
+    std::vector<Geometry::Transformation> instances;
+    DynamicPrintConfig                    config;
+    bool                                  printable = true;
+};
+
+// "#RRGGBB" (or "#RRGGBBAA") -> colour, false for anything else
+bool i2o_parse_color(const std::string &hex, std::array<uint8_t, 3> &out)
+{
+    if ((hex.size() != 7 && hex.size() != 9) || hex[0] != '#')
+        return false;
+    auto digit = [](char c) -> int {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        if (c >= 'a' && c <= 'f')
+            return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F')
+            return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        int hi = digit(hex[1 + 2 * i]), lo = digit(hex[2 + 2 * i]);
+        if (hi < 0 || lo < 0)
+            return false;
+        out[i] = uint8_t(hi * 16 + lo);
+    }
+    return true;
+}
+
+// Add the objects to the plate, side by side. The caller takes the undo snapshot.
+// placements .. the n-th object takes the place, the copies and the settings of the n-th entry
+void i2o_add_objects(Plater *plater, const std::vector<OutlineObject> &objects, const ImageToObjectDialog &dialog,
+                     const std::vector<I2OPlacement> &placements = {})
+{
     Model               &model = plater->model();
     std::vector<size_t>  object_idxs;
 
@@ -182,23 +211,30 @@ void i2o_add_objects(Plater *plater, const std::vector<OutlineObject> &objects, 
     double y      = double(cell(1));
     bool   first  = true;
 
-    for (const OutlineObject &source : objects) {
+    // The objects made together are edited together
+    const std::string group    = new_image_object_group();
+    const std::string settings = image_object_settings_to_json(dialog.settings());
+
+    for (size_t n = 0; n < objects.size(); ++n) {
+        const OutlineObject &source = objects[n];
         if (source.parts.empty())
             continue;
+        const I2OPlacement *placement = n < placements.size() && !placements[n].instances.empty() ? &placements[n] : nullptr;
         I2O_LOG("adding \"" << source.name << "\", " << source.parts.size() << " parts");
         ModelObject *object = model.add_object();
         object->name        = source.name;
         object->add_instance(); // each object should have at least one instance
+        if (placement != nullptr) {
+            object->config.assign_config(placement->config);
+            object->printable = placement->printable;
+        }
         BoundingBoxf3 bb;
         for (const OutlinePart &part : source.parts) {
-            I2O_LOG("part \"" << part.name << "\": " << part.mesh.vertices.size() << " vertices, " << part.mesh.indices.size() << " triangles");
             TriangleMesh mesh{indexed_triangle_set(part.mesh)};
             bb.merge(mesh.bounding_box());
-            I2O_LOG("mesh ready");
             // the copying overload keeps the mesh where it is, so the parts stay aligned
             ModelVolume *volume = object->add_volume(mesh);
             volume->name        = part.name;
-            I2O_LOG("volume added");
             // the body follows the filament of the object
             if (int extruder = dialog.extruder(part); extruder > 0 && part.level >= 0)
                 volume->config.set_key_value("extruder", new ConfigOptionInt(extruder));
@@ -207,30 +243,59 @@ void i2o_add_objects(Plater *plater, const std::vector<OutlineObject> &objects, 
         for (const OutlinePart &part : source.parts)
             if (part.level < 0)
                 body = dialog.extruder(part);
-        object->config.set_key_value("extruder", new ConfigOptionInt(body));
+        // the dialog has no filament for a cutter: a replaced one keeps the filament it had
+        if (placement == nullptr || dialog.settings().type != ImageObjectType::CookieCutter)
+            object->config.set_key_value("extruder", new ConfigOptionInt(body));
+        if (!dialog.is_fit_test()) {
+            object->image_object_recipe.group      = group;
+            object->image_object_recipe.index      = int(n);
+            object->image_object_recipe.image_name = dialog.image_name();
+            object->image_object_recipe.settings   = settings;
+            object->image_object_recipe.source_png = dialog.source_png();
+        }
         object->invalidate_bounding_box();
         object->translate(-bb.center());
-        I2O_LOG("object centered");
 
         double half = bb.size().x() / 2.;
-        double x    = first ? next_x : next_x + half;
-        object->instances[0]->set_offset(Vec3d(x, y, -object->origin_translation.z()));
-        object->ensure_on_bed();
-        I2O_LOG("object placed at " << x << ", " << y);
-        next_x = x + half + I2O_OBJECT_GAP;
-        first  = false;
+        if (placement != nullptr) {
+            // the middle of the object stays where it was, with every copy of it
+            object->instances[0]->set_transformation(placement->instances.front());
+            for (size_t k = 1; k < placement->instances.size(); ++k)
+                object->add_instance()->set_transformation(placement->instances[k]);
+            object->ensure_on_bed();
+            const Vec3d offset = placement->instances.front().get_offset();
+            y      = offset.y();
+            next_x = offset.x() + half + I2O_OBJECT_GAP;
+        } else {
+            double x = first ? next_x : next_x + half;
+            object->instances[0]->set_offset(Vec3d(x, y, -object->origin_translation.z()));
+            object->ensure_on_bed();
+            next_x = x + half + I2O_OBJECT_GAP;
+        }
+        first = false;
+        I2O_LOG("object placed");
 
         model.InitializeAssemblyPositions({object});
-        I2O_LOG("assembly position set");
         Slic3r::save_object_mesh(*object);
-        I2O_LOG("backup saved");
         object_idxs.push_back(model.objects.size() - 1);
     }
     I2O_LOG(object_idxs.size() << " objects in the model, updating the object list");
     if (!object_idxs.empty())
         wxGetApp().obj_list()->paste_objects_into_list(object_idxs);
     wxGetApp().mainframe->update_title();
-    I2O_LOG("done");
+}
+
+// Index of the selected object when it was made by "Image to object", otherwise -1
+int i2o_selected_object()
+{
+    Plater *plater = wxGetApp().plater();
+    if (plater == nullptr || wxGetApp().obj_list() == nullptr)
+        return -1;
+    int          idx   = wxGetApp().obj_list()->get_selected_obj_idx();
+    const Model &model = plater->model();
+    if (idx < 0 || size_t(idx) >= model.objects.size() || model.objects[size_t(idx)]->image_object_recipe.empty())
+        return -1;
+    return idx;
 }
 
 } // namespace
@@ -327,17 +392,24 @@ void ImageToObjectDialog::save_to_config() const
     set_bool("keyring", s.clicker.keyring);
     set_double("keyring_angle", s.clicker.keyring_angle);
     set_int("picture_colors", s.picture_colors);
+    set_bool("view_3d", view_3d());
 }
 
-ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &image, const std::string &image_name,
-                                         const ImageToObjectSettings &settings)
+ImageToObjectDialog::ImageToObjectDialog(wxWindow                    *parent,
+                                         const TraceImage            &image,
+                                         const std::string           &source_png,
+                                         const std::string           &image_name,
+                                         const ImageToObjectSettings &settings,
+                                         bool                         is_edit)
     : DPIDialog(parent ? parent : static_cast<wxWindow *>(wxGetApp().mainframe),
                 wxID_ANY,
-                _L("Image to object"),
+                is_edit ? _L("Edit image object") : _L("Image to object"),
                 wxDefaultPosition,
                 wxDefaultSize,
                 wxDEFAULT_DIALOG_STYLE)
     , m_image(image)
+    , m_source_png(source_png)
+    , m_is_edit(is_edit)
     , m_preview_image(downscale_trace_image(image, I2O_PREVIEW_SIDE))
     , m_image_name(image_name)
     , m_settings(settings)
@@ -346,6 +418,9 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
     if (Plater *plater = wxGetApp().plater(); plater != nullptr)
         m_filament_colors = plater->get_extruder_colors_from_plater_config(nullptr, false);
     const int filaments = std::max<int>(1, int(m_filament_colors.size()));
+    // the filaments of an edited object are the ones it has, not the nearest ones
+    if (m_is_edit)
+        m_user_filament.fill(true);
 
     wxBoxSizer      *root = new wxBoxSizer(wxVERTICAL);
     wxBoxSizer      *cols = new wxBoxSizer(wxHORIZONTAL);
@@ -628,9 +703,26 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
     right->Add(label(_L("Image") + ":"), 0, wxBOTTOM, FromDIP(4));
     m_source_preview = new wxStaticBitmap(this, wxID_ANY, wxBitmap(i2o_blank(px)));
     right->Add(m_source_preview, 0, wxBOTTOM, FromDIP(8));
-    right->Add(label(_L("Object from above") + ":"), 0, wxBOTTOM, FromDIP(4));
+    wxArrayString views;
+    views.Add(_L("Object from above"));
+    views.Add(_L("Object in 3D"));
+    m_view = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, views);
+    {
+        AppConfig *cfg = wxGetApp().app_config;
+        m_view->SetSelection(cfg != nullptr && cfg->get(I2O_CFG_SECTION, "view_3d") == "1" ? 1 : 0);
+    }
+    m_view->SetToolTip(_L("From above shows the cross-sections and what is removed. 3D shows the objects as they are added to the plate; "
+                          "it follows the settings a little slower."));
+    right->Add(m_view, 0, wxBOTTOM, FromDIP(4));
     m_preview_bitmap = new wxStaticBitmap(this, wxID_ANY, wxBitmap(i2o_blank(px)));
     right->Add(m_preview_bitmap, 0);
+    wxBoxSizer *turn_row = new wxBoxSizer(wxHORIZONTAL);
+    m_turn_label         = new wxStaticText(this, wxID_ANY, _L("Turn") + ":");
+    m_turn               = new wxSlider(this, wxID_ANY, int(m_yaw), -180, 180, wxDefaultPosition, wxSize(FromDIP(160), -1));
+    m_turn->SetToolTip(_L("Turn the objects. The picture can also be dragged with the mouse."));
+    turn_row->Add(m_turn_label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+    turn_row->Add(m_turn, 1, wxALIGN_CENTER_VERTICAL);
+    right->Add(turn_row, 0, wxEXPAND | wxTOP, FromDIP(4));
     m_info = new wxStaticText(this, wxID_ANY, wxEmptyString);
     right->Add(m_info, 0, wxTOP, FromDIP(6));
     m_warning = new wxStaticText(this, wxID_ANY, wxEmptyString);
@@ -640,7 +732,7 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
     root->Add(cols, 1, wxEXPAND);
 
     wxStdDialogButtonSizer *buttons = new wxStdDialogButtonSizer();
-    m_ok = new wxButton(this, wxID_OK, _L("Add"));
+    m_ok = new wxButton(this, wxID_OK, m_is_edit ? _L("Apply") : _L("Add"));
     buttons->AddButton(m_ok);
     buttons->AddButton(new wxButton(this, wxID_CANCEL));
     buttons->Realize();
@@ -656,7 +748,7 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
         schedule_preview();
         evt.Skip();
     };
-    for (wxChoice *c : {m_type, m_shape_from, m_braces, m_picture, m_body_filament})
+    for (wxChoice *c : {m_type, m_shape_from, m_braces, m_picture, m_body_filament, m_view})
         c->Bind(wxEVT_CHOICE, changed);
     for (wxCheckBox *c : {m_auto_threshold, m_invert, m_fill_holes, m_largest_only, m_mirror, m_sharp_edge, m_keyring})
         c->Bind(wxEVT_CHECKBOX, changed);
@@ -688,6 +780,46 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
         }
     });
     Bind(wxEVT_TIMER, [this](wxTimerEvent &) { refresh_preview(); });
+    // turning draws the same objects again, they are not made again
+    m_turn->Bind(wxEVT_SLIDER, [this](wxCommandEvent &evt) {
+        m_yaw = double(m_turn->GetValue());
+        render_3d();
+        evt.Skip();
+    });
+    m_preview_bitmap->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent &evt) {
+        if (view_3d() && !m_preview_objects.empty()) {
+            m_dragging  = true;
+            m_drag_from = evt.GetPosition();
+            if (!m_preview_bitmap->HasCapture())
+                m_preview_bitmap->CaptureMouse();
+        }
+        evt.Skip();
+    });
+    m_preview_bitmap->Bind(wxEVT_MOTION, [this](wxMouseEvent &evt) {
+        if (m_dragging && evt.LeftIsDown()) {
+            const wxPoint delta = evt.GetPosition() - m_drag_from;
+            m_drag_from         = evt.GetPosition();
+            m_yaw              += 0.6 * double(delta.x);
+            while (m_yaw > 180.)
+                m_yaw -= 360.;
+            while (m_yaw < -180.)
+                m_yaw += 360.;
+            m_pitch = std::clamp(m_pitch + 0.4 * double(delta.y), 5., 90.);
+            m_turn->SetValue(int(m_yaw));
+            render_3d();
+        }
+        evt.Skip();
+    });
+    auto end_drag = [this]() {
+        m_dragging = false;
+        if (m_preview_bitmap->HasCapture())
+            m_preview_bitmap->ReleaseMouse();
+    };
+    m_preview_bitmap->Bind(wxEVT_LEFT_UP, [end_drag](wxMouseEvent &evt) {
+        end_drag();
+        evt.Skip();
+    });
+    m_preview_bitmap->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent &) { m_dragging = false; });
     m_ok->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
         I2O_LOG("Add pressed");
         if (finish()) {
@@ -707,7 +839,12 @@ ImageToObjectDialog::ImageToObjectDialog(wxWindow *parent, const TraceImage &ima
     wxGetApp().UpdateDlgDarkUI(this);
 }
 
-ImageToObjectDialog::~ImageToObjectDialog() { m_timer.Stop(); }
+ImageToObjectDialog::~ImageToObjectDialog()
+{
+    m_timer.Stop();
+    if (m_preview_bitmap != nullptr && m_preview_bitmap->HasCapture())
+        m_preview_bitmap->ReleaseMouse();
+}
 
 std::string ImageToObjectDialog::name_of(const std::string &what) const
 {
@@ -801,6 +938,10 @@ void ImageToObjectDialog::update_enabled()
     for (wxWindow *w : m_picture_controls)
         w->Show(!cutter);
     m_keyring_angle->Enable(m_keyring->GetValue());
+    // the fit test piece is a new object, not a change of this one
+    m_fit_test->Show(clicker && !m_is_edit);
+    m_turn->Show(view_3d());
+    m_turn_label->Show(view_3d());
     if (cutter || one)
         for (int i = 0; i < IMAGE_OBJECT_MAX_COLORS; ++i)
             for (wxWindow *w : {static_cast<wxWindow *>(m_level_swatch[size_t(i)]), static_cast<wxWindow *>(m_level_label[size_t(i)]),
@@ -891,11 +1032,14 @@ void ImageToObjectDialog::match_filaments(TraceFilamentMatch mode)
     TraceFilamentPlan plan = plan_trace_filaments(colors, m_filament_colors, mode);
 
     if (!plan.recolour.empty()) {
-        wxString text = GUI::format_wxstr(_L("Change the colour of filaments %1% to %2% to the colours of the picture?"),
-                                          plan.recolour.front().first, plan.recolour.back().first);
-        text += "\n" + _L("Other objects printed with these filaments change their colour too.");
+        // say all of it: with 4 filaments and 8 colours, "1 to 4" alone reads as if 4 colours were lost
+        wxString text = GUI::format_wxstr(_L("The picture has %1% colours, which go to filaments 1 to %1%."), int(colors.size()));
+        text += "\n" + GUI::format_wxstr(_L("%1% existing filaments (from %2% to %3%) get a new colour."), int(plan.recolour.size()),
+                                         plan.recolour.front().first, plan.recolour.back().first);
+        text += " " + _L("Other objects printed with these filaments change their colour too.");
         if (!plan.add.empty())
-            text += "\n" + GUI::format_wxstr(_L("%1% filaments are added."), int(plan.add.size()));
+            text += "\n" + GUI::format_wxstr(_L("%1% new filaments are added."), int(plan.add.size()));
+        text += "\n" + _L("Continue?");
         MessageDialog dialog(this, text, _L("Replace filament colours"), wxYES_NO | wxICON_QUESTION);
         if (dialog.ShowModal() != wxID_YES)
             return;
@@ -1092,7 +1236,39 @@ void ImageToObjectDialog::refresh_preview_unchecked()
             info += "\n" + _L("Two objects are added: base and lid. No supports.");
         }
         layers.push_back({sil.removed, "#E03030"});
-        m_preview_bitmap->SetBitmap(i2o_render(layers, px));
+
+        // The objects themselves, when they are wanted and can be made
+        bool drawn = false;
+        m_preview_objects.clear();
+        m_preview_colors.clear();
+        if (view_3d() && fits) {
+            try {
+                std::vector<std::string> ignored;
+                std::string              error;
+                if (generate(shape, s, m_preview_objects, ignored, error)) {
+                    for (const OutlineObject &object : m_preview_objects)
+                        for (const OutlinePart &part : object.parts) {
+                            std::array<uint8_t, 3> color{184, 196, 214};
+                            if (s.type == ImageObjectType::CookieCutter)
+                                color = {143, 179, 232};
+                            else if (part.level < 0)
+                                i2o_parse_color(filament_color(s.body_extruder), color);
+                            else if (!i2o_parse_color(filament_color(part.level < IMAGE_OBJECT_MAX_COLORS ? s.level_extruders[size_t(part.level)] : 0),
+                                                      color))
+                                color = size_t(part.level) < shape.colors.size() ? shape.colors[size_t(part.level)] :
+                                                                                    std::array<uint8_t, 3>{128, 128, 128};
+                            m_preview_colors.push_back(color);
+                        }
+                    drawn = render_3d();
+                }
+            } catch (const std::exception &e) {
+                // the picture from above is shown instead
+                BOOST_LOG_TRIVIAL(warning) << "Image to object: no 3D preview, " << e.what();
+                m_preview_objects.clear();
+            }
+        }
+        if (!drawn)
+            m_preview_bitmap->SetBitmap(i2o_render(layers, px));
         m_info->SetLabel(info);
         wxString warnings = i2o_messages(sil.warnings);
         if (!problem.empty())
@@ -1100,6 +1276,7 @@ void ImageToObjectDialog::refresh_preview_unchecked()
         m_warning->SetLabel(warnings);
         m_ok->Enable(fits);
     } else {
+        m_preview_objects.clear();
         m_preview_bitmap->SetBitmap(wxBitmap(i2o_blank(px)));
         m_info->SetLabel(wxEmptyString);
         m_warning->SetLabel(shape.error.empty() ? i2o_messages(sil.warnings) : _(from_u8(shape.error)));
@@ -1122,6 +1299,7 @@ void ImageToObjectDialog::change_image()
     if (!ImageTraceDialog::load_image_file(this, path, image, source_png, name))
         return;
     m_image         = std::move(image);
+    m_source_png    = std::move(source_png);
     m_preview_image = downscale_trace_image(m_image, I2O_PREVIEW_SIDE);
     m_image_name    = name;
     m_user_filament.fill(false);
@@ -1142,6 +1320,93 @@ bool ImageToObjectDialog::finish()
     }
 }
 
+bool ImageToObjectDialog::generate(const Shape &shape, const ImageToObjectSettings &settings, std::vector<OutlineObject> &objects,
+                                   std::vector<std::string> &warnings, std::string &error) const
+{
+    objects.clear();
+    warnings.clear();
+    if (shape.silhouette.empty())
+        return false;
+    if (settings.type == ImageObjectType::CookieCutter) {
+        OutlineObjectResult cutter = make_cookie_cutter(shape.silhouette.shape, settings.cutter);
+        error                      = cutter.error;
+        if (cutter.is_valid()) {
+            OutlineObject object;
+            object.name = name_of(_u8L("Cookie cutter"));
+            object.parts.push_back({object.name, std::move(cutter.mesh), -1});
+            objects.push_back(std::move(object));
+            warnings = cutter.warnings;
+        }
+    } else if (settings.type == ImageObjectType::Clicker) {
+        ClickerResult clicker = make_clicker(shape.silhouette.shape, shape.detail, settings.clicker);
+        error                 = clicker.error;
+        if (clicker.is_valid()) {
+            clicker.body.name = name_of(_u8L("Clicker body"));
+            clicker.cap.name  = name_of(_u8L("Clicker cap"));
+            for (OutlineObject *object : {&clicker.body, &clicker.cap})
+                for (OutlinePart &part : object->parts)
+                    part.name = part.level < 0 ? object->name : GUI::format(_u8L("Colour %1%"), part.level + 1);
+            objects.push_back(std::move(clicker.body));
+            objects.push_back(std::move(clicker.cap));
+            warnings = clicker.warnings;
+        }
+    } else {
+        OutlineBoxResult box = make_outline_box(shape.silhouette.shape, shape.detail, settings.box);
+        error                = box.error;
+        if (box.is_valid()) {
+            box.base.name = name_of(_u8L("Box"));
+            box.lid.name  = name_of(_u8L("Lid"));
+            for (OutlineObject *object : {&box.base, &box.lid})
+                for (OutlinePart &part : object->parts)
+                    part.name = part.level < 0 ? object->name : GUI::format(_u8L("Colour %1%"), part.level + 1);
+            objects.push_back(std::move(box.base));
+            objects.push_back(std::move(box.lid));
+            warnings = box.warnings;
+        }
+    }
+    return !objects.empty();
+}
+
+bool ImageToObjectDialog::view_3d() const { return m_view != nullptr && m_view->GetSelection() == 1; }
+
+bool ImageToObjectDialog::render_3d()
+{
+    if (m_preview_objects.empty())
+        return false;
+    // The objects stand side by side on the bed, as they are added
+    std::vector<MeshPreviewItem> items;
+    float                        next_x = 0.f;
+    size_t                       color  = 0;
+    for (const OutlineObject &object : m_preview_objects) {
+        Vec3f lo = Vec3f::Constant(std::numeric_limits<float>::max());
+        Vec3f hi = Vec3f::Constant(std::numeric_limits<float>::lowest());
+        for (const OutlinePart &part : object.parts)
+            for (const stl_vertex &v : part.mesh.vertices) {
+                lo = lo.cwiseMin(v);
+                hi = hi.cwiseMax(v);
+            }
+        if (lo.x() > hi.x())
+            continue;
+        const Vec3f offset(next_x - lo.x(), -0.5f * (lo.y() + hi.y()), -lo.z());
+        for (const OutlinePart &part : object.parts) {
+            MeshPreviewItem item;
+            item.mesh   = &part.mesh;
+            item.offset = offset;
+            if (color < m_preview_colors.size())
+                item.color = m_preview_colors[color];
+            ++color;
+            items.push_back(item);
+        }
+        next_x += hi.x() - lo.x() + float(I2O_OBJECT_GAP);
+    }
+    const int        px    = FromDIP(I2O_PREVIEW_PX);
+    MeshPreviewImage image = render_mesh_preview(items, px, px, m_yaw, m_pitch);
+    if (image.empty())
+        return false;
+    m_preview_bitmap->SetBitmap(i2o_bitmap(image.rgba.data(), image.width, image.height, px));
+    return true;
+}
+
 bool ImageToObjectDialog::finish_unchecked()
 {
     m_settings = collect();
@@ -1157,44 +1422,35 @@ bool ImageToObjectDialog::finish_unchecked()
         error              = shape.error;
         I2O_LOG("traced: " << shape.silhouette.shape.size() << " islands, " << shape.detail.size() << " colour levels, "
                            << shape.silhouette.width << " x " << shape.silhouette.height << " mm");
+        // The colours of this trace are put into the rows of the dialog by their value: the
+        // fine trace can leave out a colour of the rows (only specks of it), and by their order
+        // every colour after it would get the filament of another one.
+        const size_t            rows = m_level_colors.size();
+        std::vector<bool>       found(rows, false);
+        if (rows > 0 && !shape.detail.empty()) {
+            const std::vector<int>  row_of = match_image_object_colors(shape.colors, m_level_colors);
+            std::vector<ExPolygons> detail(rows);
+            for (size_t i = 0; i < shape.detail.size() && i < row_of.size(); ++i) {
+                const size_t row = size_t(std::clamp(row_of[i], 0, int(rows) - 1));
+                append(detail[row], std::move(shape.detail[i]));
+                found[row] = true;
+            }
+            shape.detail = std::move(detail);
+            shape.colors = m_level_colors;
+        }
         if (shape.silhouette.empty()) {
             if (error.empty() && !shape.silhouette.warnings.empty())
                 error = shape.silhouette.warnings.front();
-        } else if (m_settings.type == ImageObjectType::CookieCutter) {
-            OutlineObjectResult cutter = make_cookie_cutter(shape.silhouette.shape, m_settings.cutter);
-            error                      = cutter.error;
-            if (cutter.is_valid()) {
-                OutlineObject object;
-                object.name = name_of(_u8L("Cookie cutter"));
-                object.parts.push_back({object.name, std::move(cutter.mesh), -1});
-                m_objects.push_back(std::move(object));
-                m_warnings = cutter.warnings;
-            }
-        } else if (m_settings.type == ImageObjectType::Clicker) {
-            ClickerResult clicker = make_clicker(shape.silhouette.shape, shape.detail, m_settings.clicker);
-            error                 = clicker.error;
-            if (clicker.is_valid()) {
-                clicker.body.name = name_of(_u8L("Clicker body"));
-                clicker.cap.name  = name_of(_u8L("Clicker cap"));
-                for (OutlineObject *object : {&clicker.body, &clicker.cap})
-                    for (OutlinePart &part : object->parts)
-                        part.name = part.level < 0 ? object->name : GUI::format(_u8L("Colour %1%"), part.level + 1);
-                m_objects.push_back(std::move(clicker.body));
-                m_objects.push_back(std::move(clicker.cap));
-                m_warnings = clicker.warnings;
-            }
-        } else {
-            OutlineBoxResult box = make_outline_box(shape.silhouette.shape, shape.detail, m_settings.box);
-            error                = box.error;
-            if (box.is_valid()) {
-                box.base.name = name_of(_u8L("Box"));
-                box.lid.name  = name_of(_u8L("Lid"));
-                for (OutlineObject *object : {&box.base, &box.lid})
-                    for (OutlinePart &part : object->parts)
-                        part.name = part.level < 0 ? object->name : GUI::format(_u8L("Colour %1%"), part.level + 1);
-                m_objects.push_back(std::move(box.base));
-                m_objects.push_back(std::move(box.lid));
-                m_warnings = box.warnings;
+        } else if (generate(shape, m_settings, m_objects, m_warnings, error) && with_picture(m_settings)) {
+            // say which colours of the rows are not in the object
+            for (size_t row = 0; row < rows; ++row) {
+                bool made = false;
+                for (const OutlineObject &object : m_objects)
+                    for (const OutlinePart &part : object.parts)
+                        made = made || part.level == int(row);
+                if (!made)
+                    m_warnings.push_back(GUI::format(_u8L("Colour %1% of the picture is only in details too small to print and was left out."),
+                                                     row + 1));
             }
         }
     }
@@ -1265,14 +1521,122 @@ bool create_object_from_image(const wxString &image_path)
         return false;
 
     I2O_LOG("opening the dialog, image " << image.width << " x " << image.height << " px");
-    ImageToObjectDialog dialog(nullptr, image, name, ImageToObjectDialog::load_from_config());
+    ImageToObjectDialog dialog(nullptr, image, source_png, name, ImageToObjectDialog::load_from_config());
     int answer = dialog.ShowModal();
     I2O_LOG("dialog closed, answer " << answer << ", " << dialog.objects().size() << " objects");
     if (answer != wxID_OK || dialog.objects().empty())
         return false;
 
-    i2o_add_objects(plater, dialog.objects(), dialog);
+    {
+        Plater::TakeSnapshot snapshot(plater, "Image to object");
+        i2o_add_objects(plater, dialog.objects(), dialog);
+    }
     I2O_LOG("objects are on the plate");
+    if (!dialog.warnings().empty())
+        show_info(plater, i2o_messages(dialog.warnings()), _L("Image to object"));
+    return true;
+}
+
+bool can_edit_image_object() { return i2o_selected_object() >= 0; }
+
+bool edit_image_object()
+{
+    Plater *plater   = wxGetApp().plater();
+    int     selected = i2o_selected_object();
+    if (plater == nullptr || selected < 0)
+        return false;
+    Model                  &model  = plater->model();
+    const ImageObjectRecipe recipe = model.objects[size_t(selected)]->image_object_recipe;
+    ImageToObjectSettings   settings;
+    if (!image_object_settings_from_json(recipe.settings, settings)) {
+        show_error(plater, _L("The settings this object was made with could not be read."));
+        return false;
+    }
+
+    // The selected object and the other objects made with it (the lid of a box): one per place
+    // in the group. Copies of them keep what they are.
+    // A copy of an object has the group of the original. Copies are told apart by their order:
+    // the n-th base belongs to the n-th lid, which holds for a box copied as a whole. A copy of
+    // the lid alone has no base then, and gets a new one.
+    auto find_targets = [&model, &recipe, selected]() {
+        std::map<int, size_t> targets;
+        targets[recipe.index] = size_t(selected);
+        size_t rank = 0;
+        for (size_t i = 0; i < size_t(selected); ++i) {
+            const ImageObjectRecipe &other = model.objects[i]->image_object_recipe;
+            if (other.group == recipe.group && other.index == recipe.index)
+                ++rank;
+        }
+        std::map<int, size_t> seen;
+        for (size_t i = 0; i < model.objects.size(); ++i) {
+            const ImageObjectRecipe &other = model.objects[i]->image_object_recipe;
+            if (other.group != recipe.group || other.index == recipe.index)
+                continue;
+            if (seen[other.index]++ == rank)
+                targets[other.index] = i;
+        }
+        return targets;
+    };
+    std::map<int, size_t> targets = find_targets();
+
+    // Filaments as they are set now, they could be changed after the object was made
+    if (const ConfigOptionInt *body = model.objects[targets.begin()->second]->config.get().option<ConfigOptionInt>("extruder"); body != nullptr)
+        settings.body_extruder = std::max(0, body->value);
+    for (const auto &[index, object_idx] : targets)
+        for (const ModelVolume *volume : model.objects[object_idx]->volumes)
+            for (int level = 0; level < IMAGE_OBJECT_MAX_COLORS; ++level)
+                if (volume->name == GUI::format(_u8L("Colour %1%"), level + 1))
+                    if (const ConfigOptionInt *extruder = volume->config.get().option<ConfigOptionInt>("extruder"); extruder != nullptr)
+                        settings.level_extruders[size_t(level)] = std::max(0, extruder->value);
+
+    TraceImage  image;
+    std::string source_png = recipe.source_png;
+    if (source_png.empty() || !decode_trace_image(source_png, image) || image.empty()) {
+        image = TraceImage{};
+        MessageDialog question(nullptr,
+                               _L("The image of this object is not stored in the project.") + "\n" +
+                                   _L("Choose the image file again to change the object?"),
+                               _L("Edit image object"), wxYES_NO | wxICON_QUESTION);
+        if (question.ShowModal() != wxID_YES)
+            return false;
+        wxString path = ImageTraceDialog::choose_image_file(nullptr);
+        if (path.empty())
+            return false;
+        std::string name;
+        if (!ImageTraceDialog::load_image_file(nullptr, path, image, source_png, name))
+            return false;
+    }
+
+    ImageToObjectDialog dialog(nullptr, image, source_png, recipe.image_name, settings, true);
+    if (dialog.ShowModal() != wxID_OK || dialog.objects().empty())
+        return false;
+
+    // the dialog is modal, but be careful: the objects must still be there
+    if (i2o_selected_object() != selected || model.objects[size_t(selected)]->image_object_recipe.group != recipe.group)
+        return false;
+    targets = find_targets();
+
+    Plater::TakeSnapshot      snapshot(plater, "Edit image object");
+    // the n-th new object takes the place of the old object which was the n-th of its group;
+    // an entry without instances is an object which is not there any more and is added beside
+    std::vector<I2OPlacement> placements(size_t(std::max(0, targets.rbegin()->first)) + 1);
+    std::vector<size_t>       remove;
+    for (const auto &[index, object_idx] : targets) {
+        const ModelObject *object = model.objects[object_idx];
+        I2OPlacement       placement;
+        for (const ModelInstance *instance : object->instances)
+            placement.instances.push_back(instance->get_transformation());
+        placement.config    = object->config.get();
+        placement.printable = object->printable;
+        if (index >= 0 && size_t(index) < placements.size())
+            placements[size_t(index)] = std::move(placement);
+        remove.push_back(object_idx);
+    }
+    // from the end, so the indices of the other ones stay valid
+    std::sort(remove.begin(), remove.end(), std::greater<size_t>());
+    for (size_t object_idx : remove)
+        plater->remove(object_idx);
+    i2o_add_objects(plater, dialog.objects(), dialog, placements);
     if (!dialog.warnings().empty())
         show_info(plater, i2o_messages(dialog.warnings()), _L("Image to object"));
     return true;

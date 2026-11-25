@@ -163,7 +163,12 @@ public:
         SlicingCurvedTopsHeadCheck,
         // Thin features (ThinFeatures.hpp): features the wall generator skipped, or printed wider than the model.
         // Raised in the wall step, one notice per object; appended, own id.
-        SlicingThinFeatures
+        SlicingThinFeatures,
+        // Print by object on an i3 printer: an object above the rod height is within the gantry's reach
+        // (extruder_clearance_dist_to_rod) of an object printed after it. The same text as the validation warning,
+        // raised again during export_gcode so the preview (which hides validation notices) and the CLI's result.json
+        // show it. Appended, own id.
+        SlicingByObjectGantryReach
     };
 
     typedef size_t TimeStamp;

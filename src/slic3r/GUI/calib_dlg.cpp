@@ -23,6 +23,12 @@ std::vector<InputShaperType> input_shaper_types_for_flavor(GCodeFlavor flavor);
 
 namespace {
 
+// The project a calibration is made in: the one shown when Start is pressed. MainFrame creates some of these dialogs
+// once and shows them again later, and with the project strip the Plater that was shown then can be hidden or closed
+// by now. Building the test in a hidden Plater loaded its objects into that project's model while the object list of
+// the shown one indexed its own (crash in ObjectDataViewModel::AddObject); a closed one is freed memory.
+Plater *calib_plater() { return wxGetApp().plater(); }
+
 void ParseStringValues(std::string str, std::vector<double> &vec)
 {
     vec.clear();
@@ -105,7 +111,7 @@ std::vector<wxString> make_shaper_type_labels()
 }
 
 PA_Calibration_Dlg::PA_Calibration_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
-    : DPIDialog(parent, id, _L("PA Calibration"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+    : DPIDialog(parent, id, _L("PA Calibration"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE)
 {
     SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
     SetForegroundColour(wxColour("#363636"));
@@ -332,7 +338,8 @@ void PA_Calibration_Dlg::on_start(wxCommandEvent& event) {
         return;
     }
 
-    m_plater->calib_pa(m_params);
+    if (Plater *plater = calib_plater())
+        plater->calib_pa(m_params);
     EndModal(wxID_OK);
 
 }
@@ -369,7 +376,7 @@ enum FILAMENT_TYPE : int
 };
 
 Temp_Calibration_Dlg::Temp_Calibration_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
-    : DPIDialog(parent, id, _L("Temperature calibration"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+    : DPIDialog(parent, id, _L("Temperature calibration"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE)
 {
     SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
     SetForegroundColour(wxColour("#363636"));
@@ -500,7 +507,8 @@ void Temp_Calibration_Dlg::on_start(wxCommandEvent& event) {
     m_params.start = start;
     m_params.end = end;
     m_params.mode = CalibMode::Calib_Temp_Tower;
-    m_plater->calib_temp(m_params);
+    if (Plater *plater = calib_plater())
+        plater->calib_temp(m_params);
     EndModal(wxID_OK);
 
 }
@@ -557,7 +565,7 @@ void Temp_Calibration_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 //
 
 MaxVolumetricSpeed_Test_Dlg::MaxVolumetricSpeed_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
-    : DPIDialog(parent, id, _L("Max volumetric speed test"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+    : DPIDialog(parent, id, _L("Max volumetric speed test"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE)
 {
     SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
     SetForegroundColour(wxColour("#363636"));
@@ -644,7 +652,8 @@ void MaxVolumetricSpeed_Test_Dlg::on_start(wxCommandEvent& event) {
     }
 
     m_params.mode = CalibMode::Calib_Vol_speed_Tower;
-    m_plater->calib_max_vol_speed(m_params);
+    if (Plater *plater = calib_plater())
+        plater->calib_max_vol_speed(m_params);
     EndModal(wxID_OK);
 
 }
@@ -661,7 +670,6 @@ void MaxVolumetricSpeed_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 
 VFA_Test_Dlg::VFA_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
     : DPIDialog(parent, id, _L("VFA test"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE)
-    , m_plater(plater)
 {
     SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
     SetForegroundColour(wxColour("#363636"));
@@ -866,7 +874,8 @@ void VFA_Test_Dlg::on_start(wxCommandEvent& event)
     }
 
     m_params.mode = CalibMode::Calib_VFA_Tower;
-    m_plater->calib_VFA(m_params);
+    if (Plater *plater = calib_plater())
+        plater->calib_VFA(m_params);
     EndModal(wxID_OK);
 }
 
@@ -882,7 +891,7 @@ void VFA_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect)
 //
 
 Retraction_Test_Dlg::Retraction_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
-    : DPIDialog(parent, id, _L("Retraction test"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+    : DPIDialog(parent, id, _L("Retraction test"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE)
 {
     SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
     SetForegroundColour(wxColour("#363636"));
@@ -971,7 +980,8 @@ void Retraction_Test_Dlg::on_start(wxCommandEvent& event) {
     }
 
     m_params.mode = CalibMode::Calib_Retraction_tower;
-    m_plater->calib_retraction(m_params);
+    if (Plater *plater = calib_plater())
+        plater->calib_retraction(m_params);
     EndModal(wxID_OK);
 
 }
@@ -988,7 +998,6 @@ void Retraction_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 
 TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWindowID id, Plater *plater)
     : DPIDialog(parent, id, _L("Stringing (temp × retraction)"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE)
-    , m_plater(plater)
 {
     SetBackgroundColour(*wxWHITE);
     SetForegroundColour(wxColour("#363636"));
@@ -1266,7 +1275,8 @@ void TempRetract_Calibration_Dlg::on_start(wxCommandEvent &event)
         msg_dlg.ShowModal();
         return;
     }
-    m_plater->calib_temp_retraction(m_params);
+    if (Plater *plater = calib_plater())
+        plater->calib_temp_retraction(m_params);
     EndModal(wxID_OK);
 }
 
@@ -1280,7 +1290,7 @@ void TempRetract_Calibration_Dlg::on_dpi_changed(const wxRect &suggested_rect)
 //
 
 Input_Shaping_Freq_Test_Dlg::Input_Shaping_Freq_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
-    : DPIDialog(parent, id, _L("Input shaping Frequency test"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+    : DPIDialog(parent, id, _L("Input shaping Frequency test"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE)
 {
     SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
     SetForegroundColour(wxColour("#363636"));
@@ -1482,7 +1492,8 @@ void Input_Shaping_Freq_Test_Dlg::on_start(wxCommandEvent& event) {
     // Set model type based on selection
     m_params.test_model = m_rbModel->GetSelection() == 0 ? 0 : 1; // 0 = Ringing Tower, 1 = Fast Tower
     
-    m_plater->calib_input_shaping_freq(m_params);
+    if (Plater *plater = calib_plater())
+        plater->calib_input_shaping_freq(m_params);
     EndModal(wxID_OK);
 }
 
@@ -1495,7 +1506,7 @@ void Input_Shaping_Freq_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 //
 
 Input_Shaping_Damp_Test_Dlg::Input_Shaping_Damp_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
-    : DPIDialog(parent, id, _L("Input shaping Damp test"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+    : DPIDialog(parent, id, _L("Input shaping Damp test"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE)
 {
     SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
     SetForegroundColour(wxColour("#363636"));
@@ -1674,7 +1685,8 @@ void Input_Shaping_Damp_Test_Dlg::on_start(wxCommandEvent& event) {
     // Set model type based on selection
     m_params.test_model = m_rbModel->GetSelection() == 0 ? 0 : 1; // 0 = Ringing Tower, 1 = Fast Tower
     
-    m_plater->calib_input_shaping_damp(m_params);
+    if (Plater *plater = calib_plater())
+        plater->calib_input_shaping_damp(m_params);
     EndModal(wxID_OK);
 }
 
@@ -1687,7 +1699,7 @@ void Input_Shaping_Damp_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 //
 
 Cornering_Test_Dlg::Cornering_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
-    : DPIDialog(parent, id, _L("Cornering test"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+    : DPIDialog(parent, id, _L("Cornering test"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE)
 {
     SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
     SetForegroundColour(wxColour("#363636"));
@@ -1856,7 +1868,8 @@ void Cornering_Test_Dlg::on_start(wxCommandEvent& event) {
     // Set model type based on selection
     m_params.test_model = m_rbModel->GetSelection();
 
-    m_plater->Calib_Cornering(m_params);
+    if (Plater *plater = calib_plater())
+        plater->Calib_Cornering(m_params);
     EndModal(wxID_OK);
 }
 
@@ -1869,7 +1882,7 @@ void Cornering_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 //
 
 IroningFlow_Test_Dlg::IroningFlow_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
-    : DPIDialog(parent, id, _L("Ironing flow test"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+    : DPIDialog(parent, id, _L("Ironing flow test"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE)
 {
     SetBackgroundColour(*wxWHITE);
     SetForegroundColour(wxColour("#363636"));
@@ -1991,7 +2004,8 @@ void IroningFlow_Test_Dlg::on_start(wxCommandEvent& event) {
     }
 
     m_params.mode = CalibMode::Calib_Ironing_Flow;
-    m_plater->calib_ironing_flow(m_params);
+    if (Plater *plater = calib_plater())
+        plater->calib_ironing_flow(m_params);
     EndModal(wxID_OK);
 }
 
