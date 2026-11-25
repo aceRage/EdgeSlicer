@@ -5,12 +5,16 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/GCode/ToolOrdering.hpp"
+#include "libslic3r/GCode/ToolOrderUtils.hpp"
 
 #include "../fff_print/test_data.hpp"
 
 #include <boost/filesystem.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <memory>
 #include <regex>
@@ -215,15 +219,18 @@ std::string config_value(const std::string &gcode, const std::string &key)
     return value;
 }
 
+// 1-based filament_map "2,1,2" -> the nozzle (1 = left, 2 = right) each filament prints from.
+const int NOZZLE_OF[NUM_FILAMENTS] = { 2, 1, 2 };
+
+// The flush length of a change from -> to: the matrix's entry, from the block of the nozzle `to` prints from where the
+// project carries one matrix per nozzle (Bambu Studio's 2 x N x N).
 double flush_length(const DynamicPrintConfig &cfg, int from, int to)
 {
     const auto  *matrix = cfg.option<ConfigOptionFloats>("flush_volumes_matrix");
     const double d      = cfg.option<ConfigOptionFloats>("filament_diameter")->get_at(to);
-    return matrix->get_at(from * NUM_FILAMENTS + to) / (M_PI / 4. * d * d);
+    const size_t block  = matrix->size() == size_t(2 * NUM_FILAMENTS * NUM_FILAMENTS) ? size_t(NOZZLE_OF[to] - 1) : 0;
+    return matrix->get_at(block * NUM_FILAMENTS * NUM_FILAMENTS + from * NUM_FILAMENTS + to) / (M_PI / 4. * d * d);
 }
-
-// 1-based filament_map "2,1,2" -> the nozzle (1 = left, 2 = right) each filament prints from.
-const int NOZZLE_OF[NUM_FILAMENTS] = { 2, 1, 2 };
 
 void check_flushes_follow_the_nozzle_contents(const std::vector<Change> &changes, const DynamicPrintConfig &cfg, int start_filament)
 {
@@ -325,6 +332,44 @@ SCENARIO("H2D print by object: tool changes and temperatures name the real hoten
         REQUIRE(changes.size() >= 2);
         // The start G-code loads the first filament of the first layer; find it from the first change.
         check_flushes_follow_the_nozzle_contents(changes, cfg, changes.front().current_i);
+    }
+
+    GIVEN("the same plate by layer with one flush matrix per nozzle (Bambu Studio's 2 x N x N)")
+    {
+        // Every entry distinct, the right nozzle's (second block) 100 above the left one's: a change read from the
+        // wrong block, or from the floor(sqrt(18)) = 4 square the writer used to take, lands on another value.
+        DynamicPrintConfig cfg = h2d_config("by layer", false);
+        cfg.set_deserialize_strict({ { "flush_volumes_matrix", "0,101,102,110,0,112,120,121,0,0,201,202,210,0,212,220,221,0" } });
+        for (const bool tower : { false, true }) {
+            INFO("prime tower " << tower);
+            cfg.set_deserialize_strict({ { "enable_prime_tower", tower ? "1" : "0" } });
+            Print print;
+            Model model;
+            add_objects(model, { 1, 2, 3 });
+            const std::string         gcode   = slice(print, model, cfg);
+            const std::vector<Change> changes = collect_changes(body_lines(gcode));
+            REQUIRE(changes.size() >= 2);
+            CHECK(config_value(gcode, "filament_map") == "2,1,2");
+            if (!tower) {
+                check_flushes_follow_the_nozzle_contents(changes, cfg, changes.front().current_i);
+                continue;
+            }
+            // With the tower a change onto the other extruder flushes the tower's purge for what that nozzle held (PR
+            // 1160: the matrix volume less the filament change's grab, at least 100 mm3; test_flush_by_nozzle_held.cpp),
+            // not the matrix entry itself, so only the changes on the extruder printing are checked here: each flushes
+            // by that nozzle's own block.
+            int    active      = changes.front().current_i;
+            size_t same_nozzle = 0;
+            for (const Change &c : changes) {
+                CAPTURE(active, c.next, c.flush);
+                if (active >= 0 && NOZZLE_OF[c.next] == NOZZLE_OF[active]) {
+                    ++same_nozzle;
+                    CHECK(c.flush == Approx(flush_length(cfg, active, c.next)).epsilon(1e-3));
+                }
+                active = c.next;
+            }
+            CHECK(same_nozzle >= 1);
+        }
     }
 }
 
@@ -837,3 +882,132 @@ TEST_CASE("The flush keys are read from each filament's flow-variant column", "[
 }
 
 } // namespace bambu_flush_keys
+
+// Review of PR 1169: a plate printed object by object with ONE object of three filaments and the prime tower on was
+// refused ("Wipe tower generation failed: tool-change count mismatch"): the tower was planned with the per-nozzle
+// layer order while the export ordered the object with its own ToolOrdering (no Print, classic solver). By-object
+// plates keep the classic order on both, so they slice, tower on and off, and print what the tower planned.
+TEST_CASE("H2D by object, one object of three filaments: slices with and without the tower", "[H2DByObject]")
+{
+    const bool        tower    = GENERATE(true, false);
+    const std::string map      = GENERATE(as<std::string>{}, "1,2,2", "2,1,2");
+    const bool        manual   = GENERATE(true, false);
+    DYNAMIC_SECTION((tower ? "tower" : "no tower") << ", map " << map << (manual ? " manual" : " automatic"))
+    {
+        DynamicPrintConfig cfg = h2d_config("by object", tower);
+        cfg.set_deserialize_strict({ { "filament_map", map }, { "filament_map_mode", manual ? "Manual" : "Auto For Flush" } });
+        Print print;
+        Model model;
+        ModelObject *object = model.add_object();
+        object->name        = "three parts";
+        // Parts of 3, 1.8 and 0.9 mm: the upper layers print fewer filaments, so a layer's change count depends on
+        // which filament it starts with (as on a Benchy, where the order the tower planned and the order printed
+        // then disagree).
+        for (int i = 0; i < NUM_FILAMENTS; ++i) {
+            TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
+            cube.scale(Vec3f(0.5f, 0.5f, 0.15f - 0.06f * float(i) + (i == 2 ? 0.015f : 0.f)));
+            cube.translate(Vec3f(12.f * float(i), 0.f, 0.f));
+            ModelVolume *part = object->add_volume(cube);
+            part->name        = "part" + std::to_string(i);
+            part->config.set("extruder", i + 1);
+        }
+        object->add_instance();
+        object->center_around_origin();
+        object->instances.front()->set_offset(Vec3d(160., 160., 0.));
+        object->ensure_on_bed();
+        std::string gcode;
+        REQUIRE_NOTHROW(gcode = slice(print, model, cfg));
+        const std::vector<Change> changes = collect_changes(body_lines(gcode));
+        CHECK(changes.size() >= 2);
+    }
+}
+
+// Review of PR 1169: on a printer with one nozzle per extruder (H2D, X2D) the layers are ordered by Bambu Studio's
+// reorder_filaments_for_minimum_flush_volume (extruder by extruder, with the one-layer look-ahead), the routine Bambu
+// Studio's ToolOrdering calls there; reorder_filaments_for_multi_nozzle_extruder (no look-ahead) is for an extruder with
+// a rack (H2C). Three filaments on the left extruder, in cubes of 3, 2 and 1 mm (so the layers print 3, then 2, then 1
+// filaments and the look-ahead has a next layer to weigh): the printed order of every layer after the first is the
+// minimum-flush routine's answer, and for at least one of the matrices tried that answer differs from the multi-nozzle
+// routine's, so the test tells the two apart.
+TEST_CASE("H2D by layer: the layers print in the order of reorder_filaments_for_minimum_flush_volume", "[H2DByObject]")
+{
+    const std::vector<std::string> matrices = { "0,101,402,610,0,112,320,721,0", "0,700,100,100,0,700,700,100,0",
+                                                "0,150,600,500,0,150,150,650,0", "0,90,800,820,0,95,60,850,0" };
+    size_t routines_differ = 0;
+    for (const std::string &matrix : matrices) {
+        INFO("matrix " << matrix);
+        DynamicPrintConfig cfg = h2d_config("by layer", false);
+        cfg.set_deserialize_strict({ { "flush_volumes_matrix", matrix }, { "filament_map", "1,1,1" } });
+        Print print;
+        Model model;
+        for (int i = 0; i < NUM_FILAMENTS; ++i) {
+            TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
+            cube.scale(Vec3f(0.5f, 0.5f, 0.15f - 0.05f * float(i)));
+            ModelObject *object = model.add_object();
+            object->name        = "cube" + std::to_string(i);
+            object->add_volume(cube);
+            object->volumes.front()->name = object->name;
+            object->config.set("extruder", i + 1);
+            object->add_instance();
+            object->center_around_origin();
+            object->instances.front()->set_offset(Vec3d(60. + 115. * double(i), 160., 0.));
+            object->ensure_on_bed();
+        }
+        const std::string gcode = slice(print, model, cfg);
+        // A layer's order: the filament in hand where it prints on the layer, then each "T<n>" of the layer.
+        std::vector<std::vector<unsigned int>> printed;
+        int                                    active = -1;
+        std::istringstream                     ss(gcode);
+        static const std::regex                re_t(R"(^T(\d+)( |$))");
+        static const std::regex                re_extrude(R"(^G1 .*E[0-9.]+)");
+        bool                                   active_printed = false;
+        for (std::string line; std::getline(ss, line);) {
+            std::smatch m;
+            if (line.rfind("; CHANGE_LAYER", 0) == 0) {
+                printed.emplace_back();
+                active_printed = false;
+            } else if (std::regex_search(line, m, re_t) && std::stoi(m[1].str()) < 255) {
+                active         = std::stoi(m[1].str());
+                active_printed = false;
+            } else if (!printed.empty() && active >= 0 && !active_printed && std::regex_search(line, re_extrude) &&
+                       line.find("E-") == std::string::npos) {
+                active_printed = true;
+                if (printed.back().empty() || printed.back().back() != unsigned(active))
+                    printed.back().push_back(unsigned(active));
+            }
+        }
+        REQUIRE(printed.size() >= 3);
+        std::vector<std::vector<unsigned int>> layers;
+        for (const auto &layer : printed) {
+            std::vector<unsigned int> sorted = layer;
+            std::sort(sorted.begin(), sorted.end());
+            layers.push_back(sorted);
+        }
+        std::vector<int> extruder_of;
+        for (unsigned int f = 0; f < 3; ++f)
+            extruder_of.push_back(print.config().filament_map.get_at(f) - 1);
+        const std::vector<FlushMatrix> flush = GroupReorder::prepare_flush_matrices(print.config());
+        const std::vector<int>         first(printed.front().begin(), printed.front().end());
+        std::function<bool(int, std::vector<int> &)> first_fixed = [&](int layer, std::vector<int> &seq) {
+            if (layer != 0)
+                return false;
+            seq.clear();
+            for (int f : first)
+                seq.push_back(f + 1);
+            return true;
+        };
+        std::vector<std::vector<unsigned int>> expected, by_nozzle;
+        reorder_filaments_for_minimum_flush_volume({ 0, 1, 2 }, extruder_of, layers, flush, first_fixed, &expected);
+        auto grouping = print.get_layered_nozzle_group_result();
+        REQUIRE(grouping);
+        reorder_filaments_for_multi_nozzle_extruder({ 0, 1, 2 }, *grouping, layers, flush, first_fixed, &by_nozzle);
+        REQUIRE(expected.size() == printed.size());
+        for (size_t layer = 1; layer < printed.size(); ++layer) {
+            INFO("layer " << layer);
+            CHECK(printed[layer] == expected[layer]);
+        }
+        if (expected != by_nozzle)
+            ++routines_differ;
+    }
+    CHECK(routines_differ >= 1);
+}

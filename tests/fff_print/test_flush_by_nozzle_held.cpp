@@ -345,6 +345,11 @@ TEST_CASE("H2C: four filaments, one on the left nozzle and three in the rack", "
     {
         DynamicPrintConfig cfg = machine_config(H2C, 4, tower, "1,2,2,2");
         cfg.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values = layout.slots;
+        // Every layer from the second prints 2, 1, 3, 4: filament 3 goes into the rack nozzle filament 2 left a moment
+        // before, coming from filament 1 on the other extruder. The flush-minimising order would print each nozzle's
+        // filaments together and never re-enter a shared nozzle on another filament (PR 1169), so the plate fixes the
+        // order to make the re-entry happen.
+        cfg.set_deserialize_strict({ { "other_layers_print_sequence", "2,100,2,1,3,4" }, { "other_layers_print_sequence_nums", 1 } });
         Print             print;
         Model             model;
         const std::string gcode  = slice(print, model, cfg, 4);
