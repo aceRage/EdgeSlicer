@@ -1,6 +1,6 @@
 {
     "name": "Elegoo",
-    "version": "02.04.00.18",
+    "version": "02.04.00.19",
     "force_update": "0",
     "description": "Elegoo configurations",
     "machine_model_list": [
@@ -1595,6 +1595,10 @@
         {
             "name": "Elegoo PETG @ECC2",
             "sub_path": "filament/ECC2/Elegoo PETG @ECC2.json"
+        },
+        {
+            "name": "Polymaker G-Flex PETG @Elegoo CC2",
+            "sub_path": "filament/ECC2/Polymaker G-Flex PETG @Elegoo CC2.json"
         },
         {
             "name": "Elegoo PETG HF @base",

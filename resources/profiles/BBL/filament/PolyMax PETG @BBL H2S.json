@@ -10,7 +10,7 @@
         "0"
     ],
     "chamber_temperatures": [
-        "60"
+        "0"
     ],
     "circle_compensation_speed": [
         "200"
@@ -52,19 +52,19 @@
         "70"
     ],
     "eng_plate_temp": [
-        "110"
+        "70"
     ],
     "eng_plate_temp_initial_layer": [
-        "110"
+        "70"
     ],
     "fan_cooling_layer_time": [
         "30"
     ],
     "fan_max_speed": [
-        "60"
+        "40"
     ],
     "fan_min_speed": [
-        "50"
+        "20"
     ],
     "filament_adaptive_volumetric_speed": [
         "0"
@@ -95,40 +95,41 @@
         "-1"
     ],
     "filament_cost": [
-        "20"
+        "30"
     ],
     "filament_density": [
-        "1.19"
+        "1.24"
     ],
     "filament_dev_ams_drying_ams_limitations": [
-        "1"
+        "1",
+        "0"
     ],
     "filament_dev_ams_drying_heat_distortion_temperature": [
-        "105"
+        "75"
     ],
     "filament_dev_ams_drying_temperature": [
         "65",
-        "80",
         "65",
-        "80"
+        "55",
+        "55"
     ],
     "filament_dev_ams_drying_time": [
         "12",
-        "8.0",
         "12",
-        "8.0"
+        "12",
+        "12"
     ],
     "filament_dev_chamber_drying_bed_temperature": [
-        "90.0"
+        "80"
     ],
     "filament_dev_chamber_drying_time": [
         "12.0"
     ],
     "filament_dev_drying_cooling_temperature": [
-        "90"
+        "55"
     ],
     "filament_dev_drying_softening_temperature": [
-        "90"
+        "60"
     ],
     "filament_diameter": [
         "1.75"
@@ -138,7 +139,7 @@
         "Direct Drive High Flow"
     ],
     "filament_flow_ratio": [
-        "0.96"
+        "0.97"
     ],
     "filament_flush_temp": [
         "0"
@@ -150,10 +151,10 @@
         "0"
     ],
     "filament_max_volumetric_speed": [
-        "8"
+        "4"
     ],
     "filament_metal_stickiness": [
-        "None"
+        "High"
     ],
     "filament_minimal_purge_on_wipe_tower": [
         "15"
@@ -199,7 +200,7 @@
         "0"
     ],
     "filament_type": [
-        "PC"
+        "PETG"
     ],
     "filament_vendor": [
         "Polymaker"
@@ -266,10 +267,10 @@
         "1"
     ],
     "hot_plate_temp": [
-        "110"
+        "70"
     ],
     "hot_plate_temp_initial_layer": [
-        "110"
+        "70"
     ],
     "filament_ingredients_safe": "1",
     "filament_emission_safe": "1",
@@ -300,22 +301,22 @@
         "0"
     ],
     "nozzle_temperature": [
-        "260"
-    ],
-    "nozzle_temperature_initial_layer": [
-        "260"
-    ],
-    "nozzle_temperature_range_high": [
-        "270"
-    ],
-    "nozzle_temperature_range_low": [
         "250"
     ],
+    "nozzle_temperature_initial_layer": [
+        "250"
+    ],
+    "nozzle_temperature_range_high": [
+        "260"
+    ],
+    "nozzle_temperature_range_low": [
+        "230"
+    ],
     "overhang_fan_speed": [
-        "60"
+        "100"
     ],
     "overhang_fan_threshold": [
-        "25%"
+        "95%"
     ],
     "override_process_overhang_speed": [
         "0"
@@ -340,26 +341,26 @@
         "10"
     ],
     "slow_down_layer_time": [
-        "6"
+        "8"
     ],
     "slow_down_min_speed": [
         "20",
         "20"
     ],
     "supertack_plate_temp": [
-        "0"
+        "70"
     ],
     "supertack_plate_temp_initial_layer": [
-        "0"
+        "70"
     ],
     "temperature_vitrification": [
-        "117"
+        "79"
     ],
     "textured_plate_temp": [
-        "105"
+        "70"
     ],
     "textured_plate_temp_initial_layer": [
-        "105"
+        "70"
     ],
     "volumetric_speed_coefficients": [
         "0 0 0 0 0 0"
@@ -376,9 +377,9 @@
     "filament_end_gcode": [
         "; filament end gcode \n"
     ],
-    "inherits": "Generic PC @BBL H2S",
+    "inherits": "Generic PETG @BBL H2S",
     "filament_adhesiveness_category": [
-        "500"
+        "300"
     ],
     "filament_id": "PMPE09",
     "description": " ",

@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
     wizard_networking_tests.cpp
     print_host_sending_tests.cpp
     plugin_guard_tests.cpp
+    discord_presence_tests.cpp
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_lifecycle.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_install.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_config.cpp>

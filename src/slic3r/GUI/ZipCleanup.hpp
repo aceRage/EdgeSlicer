@@ -38,7 +38,10 @@ void start(Mode mode);
 using Listener = std::function<void(const ZipWorkCleaner::Usage& usage, const ZipWorkCleaner::Result* result)>;
 void set_listener(Listener listener);
 
-// Cancel and join the worker (MainFrame::shutdown). Later start() calls are ignored.
+// Cancel and join the worker. Later start() calls are ignored. Idempotent; called from
+// MainFrame::shutdown(), GUI_App::OnExit() (which also runs when an unhandled exception ends the
+// main loop, and on Windows at the end of the session) and the macOS end-of-session handler. Should
+// every one of those be skipped, the worker's own destructor still cancels and joins it at exit.
 void shutdown();
 
 } // namespace ZipCleanup
