@@ -101,6 +101,8 @@ bool parse_nozzle_change(std::string_view line, int &old_filament, int &new_fila
     return true;
 }
 
+} // namespace
+
 // A per-extruder-variant printer value (hotend_cooling_rate / hotend_heating_rate: one entry per
 // printer_extruder_variant) for logical extruder e. Bambu Studio resolves these to one value per
 // extruder when it loads the preset (update_values_to_printer_extruders); this tree keeps the
@@ -115,8 +117,6 @@ double extruder_variant_value(const PrintConfig &cfg, const std::vector<double> 
     }
     return values[std::min(e, values.size() - 1)];
 }
-
-} // namespace
 
 bool pre_cooling_active(const Print &print)
 {

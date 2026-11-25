@@ -1655,7 +1655,11 @@ public:
     }
 
     //BBS
-    static StringObjectException sequential_print_clearance_valid(const Print &print, Polygons *polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr);
+    // rod_warning, when given, receives the non-blocking "tall and close to a later object" warning: on an i3 printer an
+    // instance that reaches above extruder_clearance_height_to_rod, with a later instance closer to it in Y than
+    // extruder_clearance_dist_to_rod (Bambu Studio's reach) but outside the reach the error above uses.
+    static StringObjectException sequential_print_clearance_valid(const Print &print, Polygons *polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr,
+                                                                  StringObjectException *rod_warning = nullptr);
     // Orca: pre-slice clearance check for a prime tower compacted by "No sparse layers".
     static StringObjectException compacted_wipe_tower_clearance_valid(const Print &print, Polygons *polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr);
     ConflictResultOpt            get_conflict_result() const { return m_conflict_result; }

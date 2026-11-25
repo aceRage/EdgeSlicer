@@ -6889,7 +6889,8 @@ int CLI::run(int argc, char **argv)
                                             continue;
                                         }
                                         if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter || status.message_type == PrintStateBase::SlicingHeadCollision ||
-                                            status.message_type == PrintStateBase::SlicingCurvedTopsHeadCheck) {
+                                            status.message_type == PrintStateBase::SlicingCurvedTopsHeadCheck ||
+                                            status.message_type == PrintStateBase::SlicingByObjectGantryReach) {
                                             sliced_plate_info.warning_message = status.text;
                                             sliced_plate_info.warnings.push_back(status.text);
                                             cli_record_warning(sliced_info, "slicing_warning_non_critical",

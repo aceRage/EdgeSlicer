@@ -1094,6 +1094,7 @@ private:
     std::string        format_line_M104(int target_temp, size_t tool, const NozzleChangePlan &plan, bool is_heating, const std::string &comment) const;
 
     bool               m_handle_hotend_as_extruder = false;
+    // hotend_cooling_rate per logical extruder, its current variant's value (constructor).
     std::vector<float> m_hotend_cooling_rate;
 
     // Bambu Studio 2.9.1 (H3C): machine XY speed limit, mm/min (the H3C tower is capped by it, not by m_max_speed).

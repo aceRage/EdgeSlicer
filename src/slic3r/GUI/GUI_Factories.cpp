@@ -2167,6 +2167,21 @@ void MenuFactory::append_menu_item_edit_cut(wxMenu *menu)
             "", menu, []() { return true; }, m_parent);
 }
 
+// Dynamic, like "Edit cut..." above: only for an object made by "Image to object"
+void MenuFactory::append_menu_item_edit_image_object(wxMenu *menu)
+{
+    const wxString menu_name = _L("Edit image object") + dots;
+
+    auto menu_item_id = menu->FindItem(menu_name);
+    if (menu_item_id != wxNOT_FOUND)
+        menu->Destroy(menu_item_id);
+
+    if (can_edit_image_object())
+        append_menu_item(menu, wxID_ANY, menu_name, _L("Change the settings this object was made with from its image"),
+            [](wxCommandEvent &) { edit_image_object(); },
+            "", menu, []() { return true; }, m_parent);
+}
+
 // "COPY CUT TO...": take the selected object's cut and set it up on ANOTHER
 // object, so a cut authored on one half of a symmetric part lands exactly - not
 // hand-matched - on the other. Together with the cut panel's Mirror on X / Y / Z
@@ -3022,6 +3037,7 @@ wxMenu* MenuFactory::object_menu()
     append_menu_items_convert_unit(&m_object_menu);
     append_menu_items_flush_options(&m_object_menu);
     append_menu_item_edit_cut(&m_object_menu);
+    append_menu_item_edit_image_object(&m_object_menu);
     append_menu_item_copy_cut(&m_object_menu);
     append_menu_item_invalidate_cut_info(&m_object_menu);
     append_menu_item_edit_text(&m_object_menu);
