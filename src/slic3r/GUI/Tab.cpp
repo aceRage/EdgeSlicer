@@ -2298,7 +2298,7 @@ void Tab::on_roll_back_value(const bool to_sys /*= true*/)
     // When all values are rolled, then we have to update whole tab in respect to the reverted values
     update();
     if (m_active_page)
-        m_active_page->update_visibility(m_mode, true);
+        m_active_page->update_visibility(view_filter(), true);
 
     // BBS: restore all pages in preset, update_dirty also update combobox
     update_dirty();
@@ -2380,12 +2380,17 @@ void Tab::update_mode()
     update_changed_tree_ui();
 }
 
+ViewFilter Tab::view_filter() const
+{
+    return view_filter_for_level(m_mode);
+}
+
 void Tab::update_visibility()
 {
     Freeze(); // There is needed Freeze/Thaw to avoid a flashing after Show/Layout
 
     for (auto page : m_pages)
-        page->update_visibility(m_mode, page.get() == m_active_page);
+        page->update_visibility(view_filter(), page.get() == m_active_page);
     rebuild_page_tree();
 
     if (m_type == Preset::TYPE_SLA_PRINT)
@@ -3097,7 +3102,7 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 
     update();
     if(m_active_page)
-        m_active_page->update_visibility(m_mode, true);
+        m_active_page->update_visibility(view_filter(), true);
     m_page_view->GetParent()->Layout();
 
     if (refresh_mixed_filament_panel && wxGetApp().plater() != nullptr) {
@@ -5056,7 +5061,7 @@ void TabPrint::on_tower_defaults()
     this->load_config(PrimeTowerDefaults::changes_to_apply(*m_config, defaults));
     // Rows the new values show or hide (the rib rows after Wall type = Rib), as on_value_change() does.
     if (m_active_page)
-        m_active_page->update_visibility(m_mode, true);
+        m_active_page->update_visibility(view_filter(), true);
 }
 
 wxSizer* TabPrint::fine_detail_note_create_widget(wxWindow* parent)
@@ -5523,7 +5528,7 @@ void TabPrintModel::update_model_config()
     }
     toggle_options();
     if (m_active_page)
-        m_active_page->update_visibility(m_mode, true); // for taggle line
+        m_active_page->update_visibility(view_filter(), true); // for taggle line
     update_dirty();
     TabPrint::reload_config();
     //update();
@@ -10070,12 +10075,12 @@ void Tab::activate_selected_page(std::function<void()> throw_if_canceled)
     if (!m_active_page)
         return;
 
-    m_active_page->activate(m_mode, throw_if_canceled);
+    m_active_page->activate(view_filter(), throw_if_canceled);
     update_changed_ui();
     update_description_lines();
     if (m_active_page && !(m_active_page->title() == "Dependencies"))
         toggle_options();
-    m_active_page->update_visibility(m_mode, true); // for taggle line
+    m_active_page->update_visibility(view_filter(), true); // for taggle line
     update_flow_variant_view_visibility();
 }
 
@@ -11021,7 +11026,7 @@ void Page::reload_config()
         group->reload_config();
 }
 
-void Page::update_visibility(ConfigOptionMode mode, bool update_contolls_visibility)
+void Page::update_visibility(const ViewFilter& mode, bool update_contolls_visibility)
 {
     bool ret_val = false;
 #if HIDE_FIRST_SPLIT_LINE
@@ -11055,7 +11060,7 @@ void Page::update_visibility(ConfigOptionMode mode, bool update_contolls_visibil
 #endif
 }
 
-void Page::activate(ConfigOptionMode mode, std::function<void()> throw_if_canceled)
+void Page::activate(const ViewFilter& mode, std::function<void()> throw_if_canceled)
 {
 #if 0 // BBS: page title
     if (m_page_title == NULL) {

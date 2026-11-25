@@ -73,6 +73,12 @@ LineShow line_show(const ViewFilter &filter, const std::vector<std::string> &opt
 LineShow widget_line_show(const ViewFilter &filter, bool group_has_visible_option_line);
 inline bool shown(LineShow s) { return s != LineShow::Hidden; }
 
+// Whether an option group shows anything, for the pages that are not on screen (the page tree only asks
+// this; ConfigOptionsGroup::is_visible). One entry per option line: its mode and its option ids. As
+// today, an empty group is visible and the per-printer toggles are not consulted here.
+bool group_visible(const ViewFilter &filter, const std::vector<ConfigOptionMode> &line_modes,
+                   const std::vector<std::vector<std::string>> &line_ids);
+
 // ---------------------------------------------------------------------------------------------
 // "Changed" (design rule A, fallback B): the keys of the edited preset whose value differs from the
 // system preset it inherits from. A root user preset (no "inherits": its own base) and an external

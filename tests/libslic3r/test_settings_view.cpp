@@ -286,3 +286,79 @@ TEST_CASE("Object and part overrides are always shown on that object", "[Setting
     add_override_keys(part->config.get(), part_keys);
     CHECK(show(bambu(&part_keys), "seam_prefer_part_joints") == LineShow::ShownNotInBambu);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Wiring proof (view modes PR 3): with AppConfig "settings_view" unset, the GUI's visibility path
+// (OG_CustomCtrl lines, ConfigOptionsGroup::is_visible / update_visibility, Page, Tab) asks only
+// line_show / widget_line_show / group_visible; these reproduce main's decisions exactly.
+// ---------------------------------------------------------------------------------------------
+namespace {
+
+// main's ConfigOptionsGroup::is_visible(ConfigOptionMode), verbatim in logic.
+bool main_group_is_visible(const std::vector<ConfigOptionMode> &modes, ConfigOptionMode mode)
+{
+    if (modes.empty())
+        return true;
+    if (modes.size() == 1)
+        return modes[0] <= mode;
+    size_t hidden_row_cnt = 0;
+    for (auto opt_mode : modes)
+        if (opt_mode > mode)
+            hidden_row_cnt++;
+    return hidden_row_cnt != modes.size();
+}
+
+ViewFilter unset_view_filter(ConfigOptionMode level)
+{
+    ViewFilter f;
+    f.level = level;
+    f.view  = settings_view_from_string(""); // AppConfig without "settings_view"
+    return f;
+}
+
+} // namespace
+
+TEST_CASE("Unset settings_view: every option line shows as on main", "[SettingsView][Wiring]")
+{
+    REQUIRE(settings_view_from_string("") == SettingsView::Default);
+    for (ConfigOptionMode lvl : { comSimple, comAdvanced, comDevelop }) {
+        const ViewFilter f = unset_view_filter(lvl);
+        for (const auto &[key, def] : print_config_def.options) {
+            INFO(key << " at level " << int(lvl));
+            // main: OG_CustomCtrl::CtrlLine::update_visibility, `line_mode(og_line) <= mode`
+            CHECK(line_show(f, { key }, def.mode) == (def.mode <= lvl ? LineShow::Shown : LineShow::Hidden));
+            CHECK(line_show(f, { key + "#0", key + "#1" }, def.mode) == (def.mode <= lvl ? LineShow::Shown : LineShow::Hidden));
+        }
+        // main: a widget-only row counts as Simple, whatever the rest of its group does.
+        CHECK(widget_line_show(f, false) == LineShow::Shown);
+        CHECK(widget_line_show(f, true) == LineShow::Shown);
+    }
+}
+
+TEST_CASE("Unset settings_view: every group decision is main's is_visible", "[SettingsView][Wiring]")
+{
+    // Every sequence of up to four line modes, at every level.
+    const ConfigOptionMode all[] = { comSimple, comAdvanced, comDevelop };
+    std::vector<std::vector<ConfigOptionMode>> sequences = { {} };
+    for (size_t len = 1; len <= 4; ++len) {
+        std::vector<std::vector<ConfigOptionMode>> next;
+        for (const auto &s : sequences)
+            if (s.size() == len - 1)
+                for (ConfigOptionMode m : all) {
+                    auto t = s;
+                    t.push_back(m);
+                    next.push_back(t);
+                }
+        sequences.insert(sequences.end(), next.begin(), next.end());
+    }
+    REQUIRE(sequences.size() == 1 + 3 + 9 + 27 + 81);
+    for (ConfigOptionMode lvl : all)
+        for (const auto &modes : sequences) {
+            INFO("level " << int(lvl) << ", " << modes.size() << " lines");
+            // The GUI passes no ids outside the Bambu view (ConfigOptionsGroup::is_visible).
+            CHECK(group_visible(unset_view_filter(lvl), modes, {}) == main_group_is_visible(modes, lvl));
+            // With ids it decides the same: ids only matter in the Bambu view.
+            std::vector<std::vector<std::string>> ids(modes.size(), std::vector<std::string>{ off_list });
+            CHECK(group_visible(unset_view_filter(lvl), modes, ids) == main_group_is_visible(modes, lvl));
+        }
+}
