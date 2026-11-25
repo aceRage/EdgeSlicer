@@ -199,6 +199,17 @@ TEST_CASE("Print-action preference keys round-trip; unknown keys fall back to th
         CHECK(resolve_or_default("1", third_party, n, ePrintPlate) == ePrintPlate);
         CHECK(resolve_or_default("4", third_party, n, ePrintPlate) == ePrintPlate);
     }
+
+    SECTION("Bambu Send / Send all restore when offered and fall back when not")
+    {
+        const int bbl[]         = {ePrintPlate, eSendToPrinter, eSendToPrinterAll, eExportSlicedFile, eExportAllSlicedFile, eExportGcode};
+        const int bbl_no_send[] = {ePrintPlate, eExportSlicedFile, eExportAllSlicedFile, eExportGcode};
+        CHECK(resolve_or_default("send_to_printer", bbl, 6, -1) == eSendToPrinter);
+        CHECK(resolve_or_default("send_to_printer_all", bbl, 6, -1) == eSendToPrinterAll);
+        CHECK(resolve_or_default("send_to_printer", bbl_no_send, 4, -1) == -1);
+        CHECK_FALSE(requires_print_host(eSendToPrinter));
+        CHECK_FALSE(requires_print_host(eSendToPrinterAll));
+    }
 }
 
 TEST_CASE("Remembered checkbox settings retain both selections", "[AppConfig][Regression]")
