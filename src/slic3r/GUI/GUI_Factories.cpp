@@ -33,6 +33,7 @@
 #include "libslic3r/SupportSet.hpp"
 #include "SupportGroupsDialog.hpp"
 #include <algorithm>
+#include <set>
 #include <iterator>
 #include "slic3r/Utils/FixModelByWin10.hpp"
 #include "ParamsPanel.hpp"
@@ -486,9 +487,15 @@ static const Selection& get_selection()
 
 //				  category ->		vector 			 ( option	;  label )
 typedef std::map< std::string, std::vector< std::pair<std::string, std::string> > > FullSettingsHierarchy;
-static void get_full_settings_hierarchy(FullSettingsHierarchy& settings_menu, const bool is_part)
+// `item_overrides`: base keys the item already carries; they stay listed in every view.
+static void get_full_settings_hierarchy(FullSettingsHierarchy& settings_menu, const bool is_part,
+                                        const std::set<std::string>* item_overrides = nullptr)
 {
     auto options = SettingsFactory::get_options(is_part);
+    // Settings views: the Bambu view offers only Bambu Studio's keys (plus existing overrides);
+    // Basic / Advanced are unchanged (SettingsView.hpp, add_settings_key_offered).
+    options = filter_add_settings_keys(wxGetApp().get_settings_view(), wxGetApp().preset_bundle->is_bbl_vendor(),
+                                       options, item_overrides);
 
     const int filaments_cnt = filaments_count();
 
@@ -514,8 +521,12 @@ static wxMenu* create_settings_popupmenu(wxMenu* parent_menu, const bool is_obje
 {
     wxMenu* menu = new wxMenu;
 
+    // Rebuilt on every right-click, so a view change shows at once.
+    std::set<std::string> item_overrides;
+    add_override_keys(obj_list()->get_item_config(item).get(), item_overrides);
+
     FullSettingsHierarchy categories;
-    get_full_settings_hierarchy(categories, !is_object_settings);
+    get_full_settings_hierarchy(categories, !is_object_settings, &item_overrides);
 
     auto get_selected_options_for_category = [categories, item](const wxString& category_name) {
         wxArrayString names;
