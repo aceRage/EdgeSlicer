@@ -2335,8 +2335,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_prime_volume_nc))   // Orca #14800: the prime after a hotend change on one extruder
     // Orca #10780: the Type 1 tower purges each adhesiveness category into its own block.
     ((ConfigOptionInts,                filament_adhesiveness_category))
-    // Bambu Studio 02.09.01.70: read by reduce_infill_retraction_mode = Auto.
-    ((ConfigOptionEnumsGeneric,        filament_metal_stickiness))
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
     // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,
@@ -2592,7 +2590,8 @@ PRINT_CONFIG_CLASS_DEFINE(
 )
 
 // Bambu Studio 2.9.1 Type 1 tower options of the H3C, a class of their own: GCodeConfig and PrintConfig are at
-// MSVC's limit of macro nesting (fatal error C1009 with one option more).
+// MSVC's limit of macro nesting (fatal error C1009 with one option more). Also the overflow for later
+// GCodeConfig-style options (filament_metal_stickiness).
 PRINT_CONFIG_CLASS_DEFINE(
     PrintTowerConfig,
 
@@ -2618,6 +2617,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,             filament_tower_interface_purge_volume))
     // Orca #12266: set the print temperature back as an interface purge starts, so the nozzle cools during it.
     ((ConfigOptionBool,               enable_tower_interface_cooldown_during_tower))
+    // Not a tower option: Bambu Studio 02.09.01.70 filament_metal_stickiness, read by reduce_infill_retraction_mode
+    // = Auto (GCode.cpp). It lives here because GCodeConfig is at the macro nesting limit (C1009).
+    ((ConfigOptionEnumsGeneric,       filament_metal_stickiness))
 )
 
 // This object is mapped to Perl as Slic3r::Config::Print.
