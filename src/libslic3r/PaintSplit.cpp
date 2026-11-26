@@ -1511,27 +1511,40 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
             ColorSplitDetail::require_ok(C, "sheet");
             const Manifold cut = cand - C;
             ColorSplitDetail::require_ok(cut, "cut");
-            std::vector<Manifold> kept;
-            double                carried = 0., across_on = 0.;
+            // The parts of the cut: each one's share of the selection and of the skin just across this edge. The
+            // part holding most of that across skin is the other side, even with a little selected skin on it (the
+            // smoothed line runs a facet or two off the painted one); the parts carrying the selection are the piece.
+            struct CutPart { Manifold m; double carried{ 0. }; double across{ 0. }; };
+            std::vector<CutPart> cparts;
             for (Manifold& pc : cut.Decompose()) {
                 const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
                 const AABBMesh             aabb(its);
-                double                     a = 0.;
+                CutPart                    cp;
+                cp.m = pc;
                 for (const auto& [g, ga] : sel)
                     if (aabb.squared_distance(g) <= 1e-6)
-                        a += ga;
-                if (a < params.carry_frac * sel_area) {
+                        cp.carried += ga;
+                for (const Vec3d& q : loop.across)
+                    if (aabb.squared_distance(q) <= 1e-6)
+                        cp.across += 1.;
+                cparts.push_back(std::move(cp));
+            }
+            const double across_total = double(loop.across.size());
+            std::vector<Manifold> kept;
+            double                carried = 0., across_on = 0.;
+            int                   carrying = 0;
+            for (const CutPart& cp : cparts)
+                carrying += cp.carried >= params.carry_frac * sel_area;
+            for (const CutPart& cp : cparts) {
+                const bool other_side = across_total > 0. && cp.across > 0.5 * across_total;
+                if (cp.carried < params.carry_frac * sel_area || (other_side && carrying > 1)) {
                     ++out.returned_components;
                     continue;
                 }
-                kept.push_back(pc);
-                carried += a;
-                for (const Vec3d& q : loop.across)
-                    if (aabb.squared_distance(q) <= 1e-6)
-                        across_on += 1.;
+                kept.push_back(cp.m);
+                carried += cp.carried;
+                across_on += cp.across;
             }
-            BOOST_LOG_TRIVIAL(warning) << "PSDBG edge " << i << ": " << kept.size() << " part(s) kept, " << carried / sel_area
-                                     << " of the selection, " << across_on << " of " << loop.across.size() << " across facets on the piece";
             if (kept.empty()) {
                 out.error    = PaintSplitError::EmptyPiece;
                 out.bad_loop = int(i);
