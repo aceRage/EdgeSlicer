@@ -805,6 +805,9 @@ void GLGizmoPaintSplit::on_render_input_window(float x, float y, float bottom_li
                 ImGui::PopTextWrapPos();
             } else if (c < m_cuts.size()) {
                 can_apply = can_apply || cuts_ok(c);
+                const auto specks = std::count_if(m_cuts[c].begin(), m_cuts[c].end(), [](const PaintSplitFollowCut &k) { return k.ignored; });
+                if (specks > 0)
+                    note(format_wxstr(_L("%1% tiny edge(s) under 3 mm ignored."), int(specks)));
                 for (size_t l = 0; l < m_cuts[c].size(); ++l)
                     if (m_cuts[c][l].error != PaintSplitError::None) {
                         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_w);

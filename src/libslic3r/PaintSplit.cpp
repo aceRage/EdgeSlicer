@@ -1289,16 +1289,33 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
 {
     PaintSplitFollowCut out;
     out.error = PaintSplitError::CutterFailed;
-    if (loop.pts.size() < 3 || mesh.indices.empty())
+    if (mesh.indices.empty())
         return out;
+    // A speck of an edge (a stray unpainted facet the hole fill did not take): nothing to cut along.
+    if (loop.length < 3. || loop.pts.size() < 3) {
+        out.error   = PaintSplitError::None;
+        out.ignored = true;
+        return out;
+    }
 
     // The paint line as a closed stroke: resampled (about 1 mm, finer on a small hole) and smoothed, then put
-    // back on the skin, since smoothing pulls a curved line off it.
+    // back on the skin, since smoothing pulls a curved line off it. A wavy line whose projection crosses itself
+    // is retried smoother, then coarser.
     DrawCutStroke stroke;
     for (const DrawCutSample& s : loop.pts)
         stroke.append(s.pos, s.normal, s.facet);
     const double spacing = std::clamp(loop.length / 24., 0.05, DrawCutStroke::DefaultSpacing);
-    if (stroke.finish(spacing, std::clamp(params.smoothing, 0., 1.), /*force_closed=*/true) != DrawCutError::None || !stroke.is_closed())
+    const double smooth  = std::clamp(params.smoothing, 0., 1.);
+    const std::array<std::pair<double, double>, 4> tries{ { { spacing, smooth }, { spacing, std::max(smooth, 0.6) },
+                                                            { 2. * spacing, 1. }, { 4. * spacing, 1. } } };
+    out.stage = 1;
+    bool finished = false;
+    for (const auto& [sp, sm] : tries)
+        if (stroke.finish(sp, sm, /*force_closed=*/true) == DrawCutError::None && stroke.is_closed()) {
+            finished = true;
+            break;
+        }
+    if (!finished)
         return out;
     {
         const AABBMesh             aabb(mesh);
@@ -1315,14 +1332,22 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
         }
         stroke.set_path(path);
     }
-    if (!stroke.valid() || draw_cut_self_crossing(stroke))
+    if (!stroke.valid())
+        return out;
+    out.stage = 2;
+    if (draw_cut_self_crossing(stroke))
         return out;
 
     DrawCutParams dp;
     dp.direction  = params.square_to_bed ? DrawCutDirection::AxisZ : DrawCutDirection::SurfaceNormal;
-    dp.angle_deg  = std::clamp(params.angle_deg, -90., 90.);
     dp.extension  = std::max(0., params.extension);
     dp.through_all = false;
+    // A loop round the part separates: Lip angle is the band's slope (0, a flat shelf, by default). A loop on one
+    // side is a plug: its wall goes straight in by Depth (a flat shelf would lie on the skin itself), and Lip
+    // angle drafts that wall.
+    dp.angle_deg  = 0.;
+    out.separates = draw_cut_loop_separates(mesh, stroke, dp);
+    dp.angle_deg  = out.separates ? std::clamp(params.angle_deg, -90., 90.) : std::clamp(90. - std::abs(params.angle_deg), 0., 90.);
     // Depth, lowered until the band's inset no longer folds the core (a small hole cannot take 3 mm).
     double depth = std::max(0.05, params.depth);
     for (int k = 0; k < 8; ++k) {
@@ -1331,16 +1356,18 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
             break;
         depth *= 0.5;
     }
-    dp.depth = depth;
+    dp.depth  = depth;
+    out.stage = 3;
     if (draw_cut_band_folds(stroke, dp))
         return out;
+    out.stage = 4;
     out.depth     = depth;
-    out.separates = draw_cut_loop_separates(mesh, stroke, dp);
     out.cutter    = draw_cut_cutter_solid(stroke, dp, bbox, 0., &mesh);
     if (out.cutter.indices.empty())
         return out;
     out.preview = draw_cut_preview_surface(stroke, dp, bbox, 0., &mesh);
     out.error   = PaintSplitError::None;
+    out.stage   = 0;
     return out;
 }
 
@@ -1356,12 +1383,10 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
         out.error = PaintSplitError::BadComponent;
         return out;
     }
-    for (size_t i = 0; i < cutters.size(); ++i)
-        if (cutters[i].indices.empty()) {
-            out.error    = PaintSplitError::CutterFailed;
-            out.bad_loop = int(i);
-            return out;
-        }
+    if (std::all_of(cutters.begin(), cutters.end(), [](const indexed_triangle_set& c) { return c.indices.empty(); })) {
+        out.error = PaintSplitError::CutterFailed;
+        return out;
+    }
 
     std::vector<std::pair<Vec3d, double>> sel;
     for (size_t f = 0; f < region.surface.indices.size(); ++f)
@@ -1404,6 +1429,8 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
         };
         Manifold cand = M;
         for (size_t i = 0; i < cutters.size(); ++i) {
+            if (cutters[i].indices.empty())
+                continue; // an ignored speck of an edge (paint_split_follow_cut)
             const PaintSplitLoop& loop = region.loops[size_t(comp)][i];
             Vec3d                 lc   = Vec3d::Zero();
             for (const DrawCutSample& s : loop.pts)

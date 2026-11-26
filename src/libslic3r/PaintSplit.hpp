@@ -191,9 +191,13 @@ struct PaintSplitFollowCut
     indexed_triangle_set preview;  // band + skirt + core only: what the gizmo draws
     double               depth{ 0. };  // the depth actually used (lowered when the asked one folds)
     bool                 separates{ false }; // the loop goes round the part (a separation, not a plug)
+    bool                 ignored{ false };   // a speck of an edge (under 3 mm round): no cut, no error
+    int                  stage{ 0 };          // where a failure happened (0 ok, 1 stroke, 2 self-crossing, 3 folds, 4 cutter): diagnostics
 };
 
-// `mesh` is the part in the region's frame (closed); `bbox` its bounding box.
+// `mesh` is the part in the region's frame (closed); `bbox` its bounding box. A wavy edge whose stroke crosses
+// itself is retried smoother and coarser. Plugs (an edge on one side of the part) go straight in by Depth, with
+// Lip angle as their wall's draft; separations get Lip angle as the band's slope.
 PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, const PaintSplitLoop& loop,
                                            const PaintSplitFollowParams& params, const BoundingBoxf3& bbox);
 
