@@ -48,6 +48,7 @@
 #include "Showcase/ShowcaseRenderer.hpp"
 
 #include "slic3r/GUI/Gizmos/GLGizmoPainterBase.hpp"
+#include "slic3r/GUI/Gizmos/GizmoRectangleSelection.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "slic3r/Utils/MacDarkMode.hpp"
 
@@ -6510,12 +6511,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             const bool alt_shift_volume_click = evt.AltDown() && evt.ShiftDown() && !m_hover_volume_idxs.empty();
             if (evt.LeftDown() && evt.ShiftDown() && !alt_shift_volume_click && m_picking_enabled &&
                 m_layers_editing.state != LayersEditing::Editing) {
-                if (/*m_gizmos.get_current_type() != GLGizmosManager::SlaSupports
-                    &&*/ m_gizmos.get_current_type() != GLGizmosManager::FdmSupports
-                    && m_gizmos.get_current_type() != GLGizmosManager::Seam
-                    && m_gizmos.get_current_type() != GLGizmosManager::Cut
-                    && m_gizmos.get_current_type() != GLGizmosManager::MmSegmentation
-                    && m_gizmos.get_current_type() != GLGizmosManager::FuzzySkin) {
+                if (gizmo_allows_shift_rectangle_selection<GLGizmosManager>(m_gizmos.get_current_type())) {
                     m_rectangle_selection.start_dragging(m_mouse.position, evt.ShiftDown() ? GLSelectionRectangle::Select : GLSelectionRectangle::Deselect);
 
                     if (!has_mouse_capture())  // ORCA keep tracking mouse position while drag active and cursor not in window bounds
