@@ -6420,8 +6420,17 @@ void GCode::process_layers(const Print&              print,
                                                 check_placeholder_parser_failed();
                                                 print.throw_if_canceled();
                                                 m_extrusion_quality_estimator.set_precomputed_layers(std::move(precomputed.overhang_layers));
+                                                const LayerTools &layer_tools = tool_ordering.tools_for_layer(layer.print_z());
+                                                // Per-object prime towers: a copy's tower steps through its layers as the
+                                                // plate tower does by layer. No tower here otherwise.
+                                                if (m_wipe_tower && layer_tools.has_wipe_tower) {
+                                                    if (layer_tools.joins_wipe_tower_layer_below())
+                                                        m_wipe_tower->join_layer();
+                                                    else
+                                                        m_wipe_tower->next_layer();
+                                                }
                                                 return this->process_layer(print, {std::move(layer)},
-                                                                           tool_ordering.tools_for_layer(layer.print_z()),
+                                                                           layer_tools,
                                                                            &layer == &layers_to_print.back(), nullptr,
                                                                            single_object_idx, prime_extruder);
                                             });

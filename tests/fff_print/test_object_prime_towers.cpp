@@ -56,13 +56,15 @@ struct Machine
     const char *process;
     const char *filament;
     Vec2d       bed_center;
+    // The plate tower's position (the presets' own may not suit these plates); only a one-copy plate builds it.
+    Vec2d       tower;
     bool        bbl;
 };
 
-const Machine X1C{ "BBL", "Bambu Lab X1 Carbon 0.4 nozzle", "0.20mm Standard @BBL X1C", "Bambu PLA Basic @BBL X1C", { 128., 128. }, true };
-const Machine H2D{ "BBL", "Bambu Lab H2D 0.4 nozzle", "0.20mm Standard @BBL H2D", "Bambu PLA Basic @BBL H2D", { 165., 160. }, true };
-const Machine H2C{ "BBL", "Bambu Lab H2C 0.4 nozzle", "0.20mm Standard @BBL H2C", "Bambu PLA Basic @BBL H2C", { 165., 160. }, true };
-const Machine U1{ "Snapmaker", "Snapmaker U1 (0.4 nozzle)", "0.20mm Standard @Snapmaker U1 (0.4 nozzle)", "Generic PLA @U1 0.4 nozzle", { 135., 135. }, false };
+const Machine X1C{ "BBL", "Bambu Lab X1 Carbon 0.4 nozzle", "0.20mm Standard @BBL X1C", "Bambu PLA Basic @BBL X1C", { 128., 128. }, { 30., 200. }, true };
+const Machine H2D{ "BBL", "Bambu Lab H2D 0.4 nozzle", "0.20mm Standard @BBL H2D", "Bambu PLA Basic @BBL H2D", { 165., 160. }, { 40., 250. }, true };
+const Machine H2C{ "BBL", "Bambu Lab H2C 0.4 nozzle", "0.20mm Standard @BBL H2C", "Bambu PLA Basic @BBL H2C", { 165., 160. }, { 40., 250. }, true };
+const Machine U1{ "Snapmaker", "Snapmaker U1 (0.4 nozzle)", "0.20mm Standard @Snapmaker U1 (0.4 nozzle)", "Generic PLA @U1 0.4 nozzle", { 135., 135. }, { 30., 210. }, false };
 
 DynamicPrintConfig machine_config(const Machine &m, bool per_object, bool by_object = true, bool tower = true)
 {
@@ -77,6 +79,8 @@ DynamicPrintConfig machine_config(const Machine &m, bool per_object, bool by_obj
     cfg.set_deserialize_strict({
         { "enable_prime_tower", tower ? "1" : "0" },
         { "prime_tower_per_object", per_object ? "1" : "0" },
+        { "wipe_tower_x", m.tower.x() },
+        { "wipe_tower_y", m.tower.y() },
         { "wipe_tower_rotation_angle", 0 },
         { "gcode_comments", 1 },
         { "print_sequence", by_object ? "by object" : "by layer" },

@@ -7053,6 +7053,11 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     // grouped on every export: moving a copy changes the print order but leaves psWipeTower done.
     this->group_print_by_object();
     this->plan_print_by_object();
+    // Per-object prime towers are planned from that plan. A change of the clearance settings re-orders the blocks but
+    // only invalidates the G-code: make them again now, unless the skirt step below re-runs and does (with its notices).
+    if (this->object_tower_mode() && this->is_step_done(psWipeTower) && this->is_step_done(psSkirtBrim) &&
+        this->object_towers_signature() != m_object_towers_signature)
+        this->make_object_wipe_towers(false);
 
     if (this->set_started(psWipeTower)) {
         m_wipe_tower_data.clear();
@@ -7649,6 +7654,10 @@ void Print::_make_skirt()
         Points wipe_tower_points = this->first_layer_wipe_tower_corners();
         if (wipe_tower_points.size() >= 3)
             group_items.push_back({ std::move(wipe_tower_points), ObjectID(), size_t(-1), false });
+        // Per-object prime towers, likewise.
+        for (Points &tower_points : this->object_towers_first_layer_corners())
+            if (tower_points.size() >= 3)
+                group_items.push_back({ std::move(tower_points), ObjectID(), size_t(-1), false });
 
         std::vector<size_t> parent(group_items.size());
         std::iota(parent.begin(), parent.end(), 0);
@@ -8064,6 +8073,12 @@ std::string Print::object_towers_unsupported_reason() const
             return L("Prime tower per object does not work with mixed colour sublayers. The objects print without prime towers.");
     if (hotend_as_extruder(m_config) && this->uses_multiple_nozzle_diameters())
         return L("Prime tower per object does not work with mixed nozzle diameters on this printer. The objects print without prime towers.");
+    // What validate() requires of the plate tower (a printer whose wipe_tower_type is set to the Bambu-style tower).
+    if (!m_config.use_relative_e_distances)
+        return L("Prime tower per object needs relative extruder addressing. The objects print without prime towers.");
+    if (m_config.ooze_prevention && m_config.single_extruder_multi_material)
+        return L("Prime tower per object does not work with ooze prevention on a single-extruder multi-material printer. "
+                 "The objects print without prime towers.");
     return {};
 }
 
@@ -8279,7 +8294,7 @@ std::string Print::object_towers_signature() const
     return out.str();
 }
 
-void Print::make_object_wipe_towers()
+void Print::make_object_wipe_towers(bool raise_notices)
 {
     m_object_wipe_towers.clear();
     m_object_tower_statistics.clear();
@@ -8381,7 +8396,7 @@ void Print::make_object_wipe_towers()
             m_object_tower_statistics.number_of_toolchanges = changes;
         }
     }
-    if (!notices.empty()) {
+    if (raise_notices && !notices.empty()) {
         std::string text;
         for (const std::string &notice : notices)
             text += (text.empty() ? "" : "\n") + notice;
@@ -8849,7 +8864,10 @@ void Print::_make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, con
                         current_extruder_id = extruder_id;
                     }
                 }
-                layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
+                // A copy's tower marks no extrusions for flushing (above), so it has no order to fix: the pass walks
+                // every object of the plate.
+                if (plate_tower)
+                    layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
 
                 // if enable timelapse, slice all layer
                 if (enable_timelapse_print()) {

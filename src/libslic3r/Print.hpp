@@ -1880,7 +1880,8 @@ private:
     //   tower and final purge alone. Nothing calls it this way yet.
     void                _make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, const Vec2d &pos);
     // Per-object prime towers: generate one tower per towered copy of the plan into m_object_wipe_towers (psWipeTower).
-    void                make_object_wipe_towers();
+    // notices: raise the copies printed without a tower as a warning of the active step (none is active between steps).
+    void                make_object_wipe_towers(bool notices = true);
     // What the object towers were generated from (placements, print order, chained first filaments); a change re-runs
     // psWipeTower, which moving a copy alone does not invalidate.
     std::string         object_towers_signature() const;
