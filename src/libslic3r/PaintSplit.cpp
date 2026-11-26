@@ -1165,9 +1165,10 @@ PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, cons
                 }
                 return carried;
             };
-            // Up to four ways to cut this edge: its far side whole or only near the edge, with the plane facing the
-            // way the skin says; only when neither keeps half the selection, the same facing the other way. Of
-            // the two, the one that keeps the most of the selection wins, then the smaller piece.
+            // Up to four ways to cut this edge. First the plane facing the way the skin says, with its far side
+            // taken whole (the clean cut: nothing across the edge stays on the piece) or, when that takes away
+            // noticeably more of the selection (a plane through a small hole of a curved region), only near
+            // the edge. When neither keeps half the selection, the same with the plane facing the other way.
             PaintSplitPlane flipped = planes[i];
             // Offset is towards the piece, so it flips with the side: mirror the plane about the loop's centre.
             flipped.point  = flipped.point - 2. * flipped.normal * flipped.normal.dot(flipped.point - lc);
@@ -1175,26 +1176,21 @@ PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, cons
             std::swap(flipped.u, flipped.v);
             std::vector<Manifold> kept;
             int                   dropped = 0;
-            double                carried = -1., volume = 0.;
+            double                carried = -1.;
             bool                  was_flipped = false;
-            for (int k = 0; k < 4; ++k) {
-                if (k == 2 && carried >= 0.5 * sel_area)
-                    break;
-                std::vector<Manifold> k_kept;
-                int                   k_dropped = 0;
-                const double          k_carried = cut_once(k < 2 ? planes[i] : flipped, k % 2 == 1, k_kept, k_dropped);
-                if (k_kept.empty())
-                    continue;
-                double k_volume = 0.;
-                for (const Manifold& m : k_kept)
-                    k_volume += m.Volume();
-                const double tie = 0.02 * sel_area;
-                if (carried < 0. || k_carried > carried + tie || (k_carried >= carried - tie && k_volume < volume)) {
-                    kept        = std::move(k_kept);
-                    dropped     = k_dropped;
-                    carried     = k_carried;
-                    volume      = k_volume;
-                    was_flipped = k >= 2;
+            for (int side = 0; side < 2 && carried < 0.5 * sel_area; ++side) {
+                const PaintSplitPlane& pl = side == 0 ? planes[i] : flipped;
+                std::vector<Manifold>  whole_kept, near_kept;
+                int                    whole_dropped = 0, near_dropped = 0;
+                const double           whole = cut_once(pl, false, whole_kept, whole_dropped);
+                const double           near  = cut_once(pl, true, near_kept, near_dropped);
+                const bool use_whole = !whole_kept.empty() && (near_kept.empty() || whole >= near - 0.1 * sel_area);
+                const double best = use_whole ? whole : (near_kept.empty() ? -1. : near);
+                if (best > carried) {
+                    kept        = use_whole ? std::move(whole_kept) : std::move(near_kept);
+                    dropped     = use_whole ? whole_dropped : near_dropped;
+                    carried     = best;
+                    was_flipped = side == 1;
                 }
             }
             if (was_flipped)
