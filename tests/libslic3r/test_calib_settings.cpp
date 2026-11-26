@@ -103,6 +103,20 @@ TEST_CASE("The VFA dialog lowers the layer height, then the end speed, to stay u
 }
 
 
+TEST_CASE("Max volumetric speed calibration starts the spiral at full flow", "[Calib][MaxVolSpeed]")
+{
+    // Orca #17699. The option defaults to 0; the calibration helper sets it to 1 so the first spiral
+    // loop prints at the starting mm³/s instead of ramping from 0. Regular configs are left alone.
+    DynamicPrintConfig print = DynamicPrintConfig::full_print_config();
+    REQUIRE(print.option("spiral_starting_flow_ratio") != nullptr);
+    CHECK(print.opt_float("spiral_starting_flow_ratio") == 0.);
+    CHECK_FALSE(print.opt_bool("spiral_mode"));
+
+    apply_max_vol_speed_spiral_starting_flow(print);
+    CHECK(print.opt_float("spiral_starting_flow_ratio") == 1.);
+    CHECK_FALSE(print.opt_bool("spiral_mode"));
+}
+
 TEST_CASE("Adaptive pressure advance models are validated", "[Calib][AdaptivePA]")
 {
     // Orca #14198

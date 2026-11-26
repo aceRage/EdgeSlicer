@@ -23313,6 +23313,7 @@ void Plater::calib_max_vol_speed(const Calib_Params& params)
     obj_cfg.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
     print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
+    apply_max_vol_speed_spiral_starting_flow(*print_config);
     print_config->set_key_value("max_volumetric_extrusion_rate_slope", new ConfigOptionFloats { 0 });
 
     changed_objects({ 0 });

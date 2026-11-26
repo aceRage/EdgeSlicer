@@ -134,6 +134,42 @@ TEST_CASE("Spiral vase leaves the moves of custom G-code in relative positioning
     CHECK(heights.back() == Approx(0.22).margin(0.001));
 }
 
+// Orca #17699: the first spiral loop tapers extrusion from spiral_starting_flow_ratio up to 100%.
+// Max volumetric speed calibration sets that ratio to 1 so the loop prints at the starting flow.
+TEST_CASE("A spiral starting at full flow does not taper the first loop's extrusion", "[SpiralVase][Calib][MaxVolSpeed]")
+{
+    auto e_of_first_loop = [](double starting_flow) {
+        PrintConfig config;
+        config.use_relative_e_distances.value   = true;
+        config.spiral_mode_smooth.value         = false;
+        config.resolution.value                 = 0.001;
+        config.spiral_starting_flow_ratio.value = starting_flow;
+
+        SpiralVase vase(config);
+        vase.process_layer("G1 X0 Y0 Z0.2\n", false);
+        vase.enable(true);
+        const std::string gcode = vase.process_layer("G1 Z0.4\nG1 X10 Y0 E0.5 F3600\nG1 X10 Y10 E0.5\n", false);
+        std::vector<float> e;
+        GCodeReader reader;
+        reader.parse_buffer(gcode, [&e](GCodeReader &, const GCodeReader::GCodeLine &line) {
+            if (line.cmd_is("G1") && line.has_x() && line.has(E))
+                e.push_back(line.e());
+        });
+        return e;
+    };
+
+    const std::vector<float> ramped = e_of_first_loop(0.);
+    const std::vector<float> full   = e_of_first_loop(1.);
+    REQUIRE(ramped.size() == 2);
+    REQUIRE(full.size() == 2);
+    // Default 0: after the first of two equal segments the factor is 0.5, so E is halved.
+    CHECK_THAT(ramped.front(), WithinAbs(0.25f, 1e-4f));
+    CHECK_THAT(ramped.back(), WithinAbs(0.5f, 1e-4f));
+    // Ratio 1: both segments keep their extrusion.
+    CHECK_THAT(full.front(), WithinAbs(0.5f, 1e-4f));
+    CHECK_THAT(full.back(), WithinAbs(0.5f, 1e-4f));
+}
+
 TEST_CASE("A spiral vase's bottom is as thick as bottom_shell_thickness asks", "[SpiralVase]")
 {
     // The tops of the layers are at 0.25, 0.45, 0.65, 0.85 and 1.05 mm. Three layers are 0.65 mm; to be 0.9 mm

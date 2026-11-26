@@ -166,6 +166,12 @@ void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
                                         int                 filament_idx,
                                         bool                disable_z_hop = false);
 
+// Orca #17699: the max volumetric speed tower prints in spiral mode. Default spiral_starting_flow_ratio
+// is 0, so the first spiral loop ramps from 0 flow and the base of the test is not at the starting mm³/s.
+// Full flow (1) from the first loop keeps the test readable. Calibration projects only; regular prints
+// never call this.
+void apply_max_vol_speed_spiral_starting_flow(DynamicPrintConfig &print_config);
+
 // Orca #14759: number of printed layers per speed block in the VFA tower. The base model has 5 mm blocks designed
 // for a 0.2 mm layer height (0.4 mm nozzle), i.e. 25 layers per block.
 static constexpr int    vfa_layers_per_block     = 25;
