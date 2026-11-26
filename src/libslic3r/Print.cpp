@@ -6639,7 +6639,11 @@ void Print::plan_print_by_object()
         status.set_current_extruder_id(extruder);
     };
 
-    unsigned int       final_extruder = plan.orderings[size_t(current)].tool_ordering.last_extruder();
+    // As the export's loop: no filament asked for yet, so the first copy keeps ToolOrdering(object, -1) (the ordering the
+    // export prints it with). Starting from that ordering's own last filament rebuilt the first block as
+    // ToolOrdering(object, last) whenever the copy ends on another filament than it starts with, and a per-object prime
+    // tower planned from it disagreed with the export on the first layer ("append_tcr unexpected toolchange").
+    unsigned int       final_extruder = (unsigned int) -1;
     const PrintObject *prev_object    = instances[idx]->print_object;
     for (; idx < instances.size(); ++idx) {
         const PrintObject &object = *instances[idx]->print_object;

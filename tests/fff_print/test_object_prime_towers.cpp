@@ -468,3 +468,53 @@ TEST_CASE("Object towers: H2C blocks print M620.14 beside their own tower", "[Ob
         CHECK(count_of(block, "M620.14") > 0);
     }
 }
+
+// Owner hand test of #1207 (objtowers3_error.3mf): each object is two touching cubes, one part in filament 2 and one in
+// filament 1, so the copy's first layer starts on one filament and its last layer ends on the other. The by-object plan
+// rebuilt the first block as ToolOrdering(object, last filament) while the export prints it from ToolOrdering(object, -1),
+// so the first copy's tower was planned from another first-layer order: "append_tcr unexpected toolchange: layer_idx=0".
+TEST_CASE("Object towers: a copy that ends on another filament than it starts with (owner's two-part objects)", "[ObjectTowers]")
+{
+    Print print;
+    Model model;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "assembly" + std::to_string(i);
+        for (int part = 0; part < 2; ++part) {
+            TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
+            cube.scale(Vec3f(1.f, 1.f, 0.05f)); // 20 x 20 x 1 mm: 5 layers at 0.2 mm
+            cube.translate(part == 0 ? 0.5f : -20.5f, 0.f, 0.f); // 1 mm apart, as the owner's cubes
+            ModelVolume *volume = object->add_volume(cube);
+            volume->name        = "cube" + std::to_string(part);
+            volume->config.set("extruder", part == 0 ? 2 : 1);
+        }
+        object->config.set("extruder", 2);
+        place(object, Vec2d(X1C.bed_center.x() + (i == 0 ? -65. : 65.), X1C.bed_center.y()));
+    }
+    process(print, model, machine_config(X1C, true), X1C);
+
+    const ByObjectPlan &plan = print.by_object_plan();
+    REQUIRE(plan.blocks.size() == 2);
+    const ByObjectPlan::Ordering &first = plan.orderings[size_t(plan.blocks[0].ordering)];
+    // The case this covers: the first copy's ordering ends on another filament than it starts with.
+    REQUIRE(first.tool_ordering.first_extruder() != first.tool_ordering.last_extruder());
+    // The first block prints with the ordering the export uses for it.
+    CHECK(first.first_extruder == (unsigned int) -1);
+    REQUIRE(print.object_wipe_towers().size() == 2);
+    for (const std::unique_ptr<ObjectWipeTower> &tower : print.object_wipe_towers()) {
+        const ByObjectBlock *block = nullptr;
+        for (const ByObjectBlock &b : plan.blocks)
+            if (b.instance == tower->instance)
+                block = &b;
+        REQUIRE(block != nullptr);
+        CHECK(tower->tool_ordering->first_extruder() == block->first_extruder);
+    }
+
+    std::string gcode;
+    REQUIRE_NOTHROW(gcode = Test::gcode(print));
+    CHECK(print.by_object_plan_misses() == 0);
+    const std::vector<std::string> blocks = blocks_of(gcode);
+    REQUIRE(blocks.size() == 2);
+    for (const std::string &block : blocks)
+        CHECK(count_of(block, TOWER_START) > 0);
+}
