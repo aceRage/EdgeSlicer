@@ -965,8 +965,8 @@ TEST_CASE("Paint split loops: a band round a cylinder splits into three pieces w
         // A plane moved past the part's end has no cut face.
         PaintSplitPlaneParams pp;
         pp.offset = 30.;
-        const PaintSplitPlane far = paint_split_fit_loop_plane(r, 0, 0, pp);
-        CHECK(paint_split_cap(cyl, far, r.loops[0][0]).indices.empty());
+        const PaintSplitPlane far_plane = paint_split_fit_loop_plane(r, 0, 0, pp);
+        CHECK(paint_split_cap(cyl, far_plane, r.loops[0][0]).indices.empty());
     }
 
     SECTION("engine: piece, body and one loose piece; volumes add up") {
