@@ -8,6 +8,7 @@
 #include "DeviceModelCode.hpp"
 #include "ChamberLights.hpp"
 #include "BirdsEyeCamera.hpp"
+#include <ctime>
 #include "BambuSendDiagnosis.hpp"
 #include "BambuNetInfo.hpp"
 #include "AmsMatch.hpp"
@@ -2856,7 +2857,20 @@ void MachineObject::apply_ipcam_cameras(const GUI::BirdsEye::IpcamCameras& cams)
         support_liveview_cams = cams.liveview;
     }
     if (cams.has_record) support_record_cams = cams.record;
-    if (cams.has_enabled) enable_record_cams = cams.enabled;
+    if (cams.has_enabled && GUI::BirdsEye::take_pushed_record_list(camera_record_cam_ctl_start, (long long) time(nullptr)))
+        enable_record_cams = cams.enabled;
+}
+
+int MachineObject::command_ipcam_record_cam(int camera_id, bool on)
+{
+    BOOST_LOG_TRIVIAL(info) << "command_ipcam_record_cam camera_id=" << camera_id << " on=" << on;
+    const json j = GUI::BirdsEye::record_camera_command(camera_id, on, std::to_string(MachineObject::m_sequence_id++));
+    const int  rc = this->publish_json(j.dump());
+    if (rc == 0) {
+        camera_record_cam_ctl_start = (long long) time(nullptr);
+        enable_record_cams          = GUI::BirdsEye::with_recording(enable_record_cams, camera_id, on);
+    }
+    return rc;
 }
 
 int MachineObject::command_switch_camera(int camera_id)
@@ -5848,6 +5862,19 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                             if (j["camera"]["control"].get<std::string>() == "disable")
                                 this->camera_timelapse = false;
                             BOOST_LOG_TRIVIAL(info) << "ack of timelapse = " << camera_timelapse;
+                        } else if (j["camera"]["command"].get<std::string>() == "ipcam_record_set" && j["camera"].contains("camera_id")) {
+                            // A per-camera switch's reply: only that camera's entry, never the older
+                            // single switch below.
+                            const json& c = j["camera"];
+                            const bool refused = c.contains("result") && c["result"].is_string()
+                                                 && c["result"].get<std::string>() != "success";
+                            if (!refused && c["camera_id"].is_number_integer() && c.contains("control") && c["control"].is_string()
+                                && GUI::BirdsEye::take_pushed_record_list(camera_record_cam_ctl_start, (long long) time(nullptr))) {
+                                const int  cam_id = c["camera_id"].get<int>();
+                                const bool on     = c["control"].get<std::string>() == "enable";
+                                enable_record_cams = GUI::BirdsEye::with_recording(enable_record_cams, cam_id, on);
+                                BOOST_LOG_TRIVIAL(info) << "ack of ipcam_record_set camera_id=" << cam_id << " enabled=" << on;
+                            }
                         } else if (j["camera"]["command"].get<std::string>() == "ipcam_record_set") {
                             if (j["camera"]["control"].get<std::string>() == "enable")
                                 this->camera_recording_when_printing = true;

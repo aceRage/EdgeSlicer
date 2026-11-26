@@ -1,4 +1,5 @@
 #include "CameraPopup.hpp"
+#include "BirdsEyeCamera.hpp"
 
 #include "I18N.hpp"
 #include "Widgets/Label.hpp"
@@ -54,6 +55,31 @@ CameraPopup::CameraPopup(wxWindow *parent)
     m_text_recording->SetForegroundColour(TEXT_COL);
     m_switch_recording = new SwitchButton(m_panel);
 
+    // per-camera recording (BirdsEye printers), shown instead of the single switch above when the
+    // printer lists recordable cameras
+    auto make_row_text = [this](const wxString& text) {
+        wxStaticText* t = new wxStaticText(m_panel, wxID_ANY, text);
+        t->Wrap(-1);
+        t->SetFont(Label::Head_14);
+        t->SetForegroundColour(TEXT_COL);
+        t->Hide();
+        return t;
+    };
+    m_text_record_main       = make_row_text(_L("Live View camera recording"));
+    m_switch_record_main     = new SwitchButton(m_panel);
+    m_text_record_birdseye   = make_row_text(_L("BirdsEye camera recording"));
+    m_switch_record_birdseye = new SwitchButton(m_panel);
+    m_switch_record_main->Hide();
+    m_switch_record_birdseye->Hide();
+    m_text_storage = new wxStaticText(m_panel, wxID_ANY, "");
+    m_text_storage->SetFont(Label::Body_13);
+    m_text_storage->SetForegroundColour(wxColour(0x6B, 0x6B, 0x6B));
+    m_text_storage->Hide();
+    m_text_record_hint = new wxStaticText(m_panel, wxID_ANY, "");
+    m_text_record_hint->SetFont(Label::Body_13);
+    m_text_record_hint->SetForegroundColour(wxColour(0xFF, 0x6F, 0x00));
+    m_text_record_hint->Hide();
+
     //vcamera
     m_text_vcamera = new wxStaticText(m_panel, wxID_ANY, _L("Go Live"));
     m_text_vcamera->Wrap(-1);
@@ -63,6 +89,14 @@ CameraPopup::CameraPopup(wxWindow *parent)
 
     top_sizer->Add(m_text_recording, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_LEFT | wxALL, FromDIP(5));
     top_sizer->Add(m_switch_recording, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_RIGHT | wxALL, FromDIP(5));
+    top_sizer->Add(m_text_record_main, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_LEFT | wxALL, FromDIP(5));
+    top_sizer->Add(m_switch_record_main, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_RIGHT | wxALL, FromDIP(5));
+    top_sizer->Add(m_text_record_birdseye, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_LEFT | wxALL, FromDIP(5));
+    top_sizer->Add(m_switch_record_birdseye, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_RIGHT | wxALL, FromDIP(5));
+    top_sizer->Add(m_text_storage, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_LEFT | wxLEFT | wxRIGHT, FromDIP(5));
+    top_sizer->Add(0, 0, wxALL, 0);
+    top_sizer->Add(m_text_record_hint, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_LEFT | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
+    top_sizer->Add(0, 0, wxALL, 0);
     top_sizer->Add(m_text_vcamera, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_LEFT | wxALL, FromDIP(5));
     top_sizer->Add(m_switch_vcamera, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_RIGHT | wxALL, FromDIP(5));
 
@@ -157,6 +191,9 @@ CameraPopup::CameraPopup(wxWindow *parent)
 
     SetClientSize(m_panel->GetSize());
     m_switch_recording->Connect(wxEVT_LEFT_DOWN, wxCommandEventHandler(CameraPopup::on_switch_recording), NULL, this);
+    // LEFT_DOWN, not the toggle event, as for the single switch: the value flips only when the command goes out.
+    m_switch_record_main->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent&) { on_switch_record_cam(BirdsEye::CAMERA_MAIN, m_switch_record_main); });
+    m_switch_record_birdseye->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent&) { on_switch_record_cam(BirdsEye::CAMERA_DEPUTY, m_switch_record_birdseye); });
     m_switch_vcamera->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent &e) {
         wxMouseEvent evt(EVT_VCAMERA_SWITCH);
         evt.SetEventObject(this);
@@ -221,6 +258,79 @@ void CameraPopup::on_switch_recording(wxCommandEvent& event)
     bool value = m_switch_recording->GetValue();
     m_switch_recording->SetValue(!value);
     m_obj->command_ipcam_record(!value);
+}
+
+void CameraPopup::on_switch_record_cam(int camera_id, SwitchButton* sw)
+{
+    if (!m_obj || !sw->IsEnabled()) return;
+    if (m_obj->sdcard_state != MachineObject::SdcardState::HAS_SDCARD_NORMAL) {
+        update_record_cams();
+        return;
+    }
+    // Never handed to publish_json when it would refuse (it pops a message); the hint says why.
+    if (!m_obj->camera_command_blocker("ipcam_record_set").empty()) {
+        update_record_cams();
+        return;
+    }
+    const bool value = !sw->GetValue();
+    if (m_obj->command_ipcam_record_cam(camera_id, value) == 0)
+        sw->SetValue(value);
+}
+
+void CameraPopup::update_record_cams()
+{
+    if (!m_obj) return;
+    const BirdsEye::RecordSwitches shown = BirdsEye::record_switches(m_obj->support_record_cams);
+    const bool per_camera = m_obj->has_ipcam && !shown.legacy();
+    m_text_recording->Show(m_obj->has_ipcam && shown.legacy());
+    m_switch_recording->Show(m_obj->has_ipcam && shown.legacy());
+    m_text_record_main->Show(per_camera && shown.main);
+    m_switch_record_main->Show(per_camera && shown.main);
+    m_text_record_birdseye->Show(per_camera && shown.birdseye);
+    m_switch_record_birdseye->Show(per_camera && shown.birdseye);
+    if (!per_camera) {
+        m_text_storage->Hide();
+        m_text_record_hint->Hide();
+        return;
+    }
+
+    const auto sd = m_obj->sdcard_state;
+    wxString storage, hint;
+    switch (sd) {
+    case MachineObject::SdcardState::HAS_SDCARD_NORMAL: storage = _L("External storage: Installed"); break;
+    case MachineObject::SdcardState::NO_SDCARD:
+        storage = _L("External storage: Not installed");
+        hint    = _L("External storage is not installed. Recording is not supported.");
+        break;
+    case MachineObject::SdcardState::HAS_SDCARD_READONLY:
+        storage = _L("External storage: Read-only");
+        hint    = _L("External storage is read-only. Recording is not supported.");
+        break;
+    default:
+        storage = _L("External storage: Abnormal");
+        hint    = _L("External storage is abnormal. Recording is not supported.");
+        break;
+    }
+    const std::string blocker = m_obj->camera_command_blocker("ipcam_record_set");
+    if (hint.IsEmpty() && blocker == "secured")
+        hint = _L("Changing recording needs LAN Only + Developer Mode on the printer.");
+    else if (hint.IsEmpty() && blocker == "status_only")
+        hint = _L("This printer is connected through Bambu Connect in status-only mode, so EdgeSlicer cannot change its recording.");
+    else if (hint.IsEmpty() && !blocker.empty())
+        hint = _L("EdgeSlicer cannot send camera commands to this printer right now.");
+    const bool can_change = hint.IsEmpty();
+
+    m_switch_record_main->SetValue(BirdsEye::is_recording(m_obj->enable_record_cams, BirdsEye::CAMERA_MAIN));
+    m_switch_record_birdseye->SetValue(BirdsEye::is_recording(m_obj->enable_record_cams, BirdsEye::CAMERA_DEPUTY));
+    m_switch_record_main->Enable(can_change);
+    m_switch_record_birdseye->Enable(can_change);
+    m_text_record_main->SetForegroundColour(can_change ? TEXT_COL : wxColour(0xAC, 0xAC, 0xAC));
+    m_text_record_birdseye->SetForegroundColour(can_change ? TEXT_COL : wxColour(0xAC, 0xAC, 0xAC));
+    m_text_storage->SetLabel(storage);
+    m_text_storage->Show();
+    m_text_record_hint->SetLabel(hint);
+    m_text_record_hint->Wrap(FromDIP(260));
+    m_text_record_hint->Show(!hint.IsEmpty());
 }
 
 void CameraPopup::on_set_resolution()
@@ -338,14 +448,8 @@ void CameraPopup::check_func_supported(MachineObject *obj2)
     m_obj = obj2;
     if (m_obj == nullptr)
         return;
-    // function supported
-    if (m_obj->has_ipcam) {
-        m_text_recording->Show();
-        m_switch_recording->Show();
-    } else {
-        m_text_recording->Hide();
-        m_switch_recording->Hide();
-    }
+    // function supported: the single recording switch, or one per camera on a BirdsEye printer
+    update_record_cams();
 
     if (m_obj->virtual_camera && m_obj->has_ipcam) {
         m_text_vcamera->Show();
@@ -397,6 +501,7 @@ void CameraPopup::update(bool vcamera_streaming)
 {
     if (!m_obj) return;
     m_switch_recording->SetValue(m_obj->camera_recording_when_printing);
+    update_record_cams();
     sync_resolution_setting(m_obj->camera_resolution);
     sync_vcamera_state(vcamera_streaming);
 
@@ -447,6 +552,16 @@ void CameraPopup::OnLeftUp(wxMouseEvent &event)
             wxMouseEvent recording_evt(wxEVT_LEFT_DOWN);
             m_switch_recording->GetEventHandler()->ProcessEvent(recording_evt);
             return;
+        }
+        //per-camera recording (BirdsEye printers)
+        for (SwitchButton* sw : {m_switch_record_main, m_switch_record_birdseye}) {
+            if (!sw->IsShown()) continue;
+            auto rect = sw->ClientToScreen(wxPoint(0, 0));
+            if (mouse_pos.x > rect.x && mouse_pos.y > rect.y && mouse_pos.x < (rect.x + sw->GetSize().x) && mouse_pos.y < (rect.y + sw->GetSize().y)) {
+                wxMouseEvent record_evt(wxEVT_LEFT_DOWN);
+                sw->GetEventHandler()->ProcessEvent(record_evt);
+                return;
+            }
         }
         //vcamera
         auto vcamera_rect = m_switch_vcamera->ClientToScreen(wxPoint(0, 0));
