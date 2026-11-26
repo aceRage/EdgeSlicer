@@ -1,6 +1,6 @@
-add_executable(fuzz_gltf fuzz_gltf.cpp nanosvg_impl.cpp)
+add_executable(fuzz_gltf fuzz_gltf.cpp)
 # The same link set as tests/libslic3r: libslic3r pulls MD5 from OpenSSL and BCryptGenRandom
-# from bcrypt, and nanosvg is header-only so the executable defines the implementation itself.
+# from bcrypt. nanosvg's implementation lives in libslic3r (nanosvg_impl.cpp).
 target_link_libraries(fuzz_gltf libslic3r nanosvg OpenSSL::Crypto)
 if (WIN32)
     target_link_libraries(fuzz_gltf bcrypt.lib)
