@@ -28,6 +28,8 @@ struct PaintSplitApplyPiece
     int                          component{ 0 };
     std::vector<PaintSplitPlane> planes;   // one per loop of the component, in the cut frame (the instance without its offset)
     std::vector<indexed_triangle_set> cutters; // Follow paint: one closed cutter per loop, cut frame (wins over planes)
+    bool                         nearest_skin{ false }; // the nearest-skin split (wins over both)
+    PaintSplitSkinParams         skin;
     std::vector<Vec3d>           body_hints; // the later regions' selected skin: the rest piece holding it stays the body
     std::string          label;            // "Region 1", or the picked filament's name
     int                  filament{ 0 };    // 1-based extruder for the piece (D6), 0 = inherit

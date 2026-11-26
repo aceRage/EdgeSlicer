@@ -9,6 +9,10 @@
 #include "Tesselate.hpp"
 #include "TriangleMesh.hpp"
 #include "TriangleMeshSlicer.hpp"
+#include "MeshRepair.hpp"
+
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
 
 #include <Eigen/Eigenvalues>
 #include <boost/log/trivial.hpp>
@@ -47,6 +51,7 @@ const char* paint_split_error_message(PaintSplitError err)
     case PaintSplitError::EmptyBody: return L("The piece would take the whole part.");
     case PaintSplitError::CutCrossesRegion: return L("This edge's cut passes through the selected region. Fill the region's holes or select a simpler region.");
     case PaintSplitError::EdgeNotSeparated: return L("The cut along this edge does not go all the way round: the part stays joined past it. Raise Depth or Smoothing.");
+    case PaintSplitError::VoxelFailed: return L("The cut could not be computed (the region may be too large, or this build has no voxel support).");
     case PaintSplitError::CutterFailed: return L("This edge's cut surface could not be built (the edge folds or crosses itself). Raise Smoothing or lower Depth.");
     }
     return "";
@@ -1696,6 +1701,227 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
                     const AABBMesh             aabb(its);
                     for (const Vec3d& h : params.body_hints)
                         if (aabb.squared_distance(h) <= 1e-6)
+                            ++hits[j];
+                }
+            }
+            for (size_t j = 1; j < parts.size(); ++j)
+                if (hits[j] > hits[body_idx] || (hits[j] == hits[body_idx] && vol[j] > vol[body_idx]))
+                    body_idx = j;
+        }
+        out.piece_volume = cand.Volume();
+        out.piece        = ColorSplitDetail::from_manifold(cand);
+        for (size_t j = 0; j < parts.size(); ++j) {
+            if (j == body_idx) {
+                out.body_volume = parts[j].Volume();
+                out.body        = ColorSplitDetail::from_manifold(parts[j]);
+            } else {
+                out.loose_volume += parts[j].Volume();
+                out.loose.push_back(ColorSplitDetail::from_manifold(parts[j]));
+            }
+        }
+        if (!out.loose.empty())
+            out.warnings.push_back(PaintSplitWarning::LoosePieces);
+        const double total = out.piece_volume + out.body_volume + out.loose_volume;
+        if (std::abs(total - out.source_volume) > 1e-6 * std::abs(out.source_volume) + 1e-9)
+            out.warnings.push_back(PaintSplitWarning::VolumeMismatch);
+    } catch (const ColorSplitError& e) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: " << e.what();
+        out.error = PaintSplitError::BooleanFailed;
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: " << e.what();
+        out.error = PaintSplitError::BooleanFailed;
+    }
+    return out;
+}
+
+// -------------------------------------------------------------------------------------------- nearest skin
+
+indexed_triangle_set paint_split_nearest_claim(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                               const PaintSplitSkinParams& params, double* voxel_used)
+{
+    if (voxel_used != nullptr)
+        *voxel_used = 0.;
+    if (region.error != PaintSplitError::None || comp < 0 || size_t(comp) >= region.num_components() || mesh.indices.empty())
+        return {};
+    // The skin split in two: this component's selected facets, and every other facet of the part.
+    indexed_triangle_set S, U;
+    S.vertices = region.surface.vertices;
+    U.vertices = region.surface.vertices;
+    for (size_t f = 0; f < region.surface.indices.size(); ++f)
+        (region.facet_comp[f] == comp ? S : U).indices.push_back(region.surface.indices[f]);
+    if (S.indices.empty() || U.indices.empty())
+        return {};
+    BoundingBoxf3 sb, mb;
+    for (const Vec3i32& t : S.indices)
+        for (int k = 0; k < 3; ++k)
+            sb.merge(S.vertices[t[k]].cast<double>());
+    for (const Vec3f& v : mesh.vertices)
+        mb.merge(v.cast<double>());
+    const double depth = std::max(0., params.depth);
+    // How far the claim can reach from the selected skin: Depth, or (unlimited) about half the region's size,
+    // which is as deep as the nearest other skin can be for any sensible piece.
+    const double reach = depth > 0. ? depth : std::min(0.5 * sb.size().norm() + 5., 0.5 * mb.size().norm());
+    BoundingBoxf3 box(sb.min - Vec3d::Constant(reach + 1.), sb.max + Vec3d::Constant(reach + 1.));
+    box.min = box.min.cwiseMax(mb.min - Vec3d::Constant(1.));
+    box.max = box.max.cwiseMin(mb.max + Vec3d::Constant(1.));
+    const Vec3d  size = box.size();
+    double       h    = params.voxel;
+    if (h <= 0.)
+        h = std::max(0.15, std::cbrt(size.x() * size.y() * size.z() / double(std::max<size_t>(1000, params.max_samples))));
+    if (voxel_used != nullptr)
+        *voxel_used = h;
+    // One voxel of positive padding all round, so the surface closes inside the grid.
+    const int    nx = int(std::ceil(size.x() / h)) + 3, ny = int(std::ceil(size.y() / h)) + 3, nz = int(std::ceil(size.z() / h)) + 3;
+    const Vec3d  origin = box.min - Vec3d::Constant(h);
+    const AABBMesh tree_s(S), tree_u(U);
+    const float  out_v = float(2. * h);
+    std::vector<float> phi(size_t(nx) * size_t(ny) * size_t(nz), out_v);
+    tbb::parallel_for(tbb::blocked_range<int>(1, nz - 1), [&](const tbb::blocked_range<int>& range) {
+        for (int k = range.begin(); k < range.end(); ++k)
+            for (int j = 1; j < ny - 1; ++j)
+                for (int i = 1; i < nx - 1; ++i) {
+                    const Vec3d  p  = origin + h * Vec3d(i, j, k);
+                    const double ds = std::sqrt(tree_s.squared_distance(p));
+                    float        v;
+                    if (ds > reach + h)
+                        v = out_v;
+                    else if (depth > 0. && ds > depth)
+                        v = float(std::min(ds - depth, 2. * h));
+                    else {
+                        const double du = std::sqrt(tree_u.squared_distance(p));
+                        double       f  = ds - du;
+                        if (depth > 0.)
+                            f = std::max(f, ds - depth);
+                        v = float(std::clamp(f, -2. * h, 2. * h));
+                    }
+                    phi[(size_t(k) * size_t(ny) + size_t(j)) * size_t(nx) + size_t(i)] = v;
+                }
+    });
+    return mesh_dense_field(phi, nx, ny, nz, origin, h);
+}
+
+indexed_triangle_set paint_split_claim_cut_surface(const indexed_triangle_set& mesh, const indexed_triangle_set& claim)
+{
+    indexed_triangle_set out;
+    if (mesh.indices.empty() || claim.indices.empty())
+        return out;
+    const AABBMesh aabb(mesh);
+    out.vertices = claim.vertices;
+    for (const Vec3i32& t : claim.indices) {
+        const Vec3d g = (claim.vertices[t[0]] + claim.vertices[t[1]] + claim.vertices[t[2]]).cast<double>() / 3.;
+        int         f = -1;
+        Vec3d       c;
+        const double d2 = aabb.squared_distance(g, f, c);
+        // Inside, and not lying on the skin itself (where the claim follows the selected skin outside it).
+        if (f >= 0 && d2 > 1e-4 && (g - c).dot(its_face_normal(mesh, f).cast<double>()) < 0.)
+            out.indices.push_back(t);
+    }
+    its_compactify_vertices(out);
+    return out;
+}
+
+PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                            const PaintSplitSkinParams& skin, const PaintSplitAssignParams& params)
+{
+    PaintSplitPieces out;
+    if (region.error != PaintSplitError::None) {
+        out.error = region.error;
+        return out;
+    }
+    if (comp < 0 || size_t(comp) >= region.num_components()) {
+        out.error = PaintSplitError::BadComponent;
+        return out;
+    }
+    std::vector<std::pair<Vec3d, double>> sel;
+    for (size_t f = 0; f < region.surface.indices.size(); ++f)
+        if (region.facet_comp[f] == comp)
+            sel.emplace_back(ps_tri_centroid(region.surface, f), ps_tri_area(region.surface, f));
+    const double sel_area = region.area[size_t(comp)];
+
+    indexed_triangle_set  fixed;
+    PaintSplitRepairStats repair;
+    if (!paint_split_repair(mesh, fixed, nullptr, repair)) {
+        out.error = PaintSplitError::RepairFailed;
+        return out;
+    }
+    if (repair.needed)
+        out.warnings.push_back(PaintSplitWarning::Repaired);
+    const indexed_triangle_set& src = repair.needed ? fixed : mesh;
+
+    const indexed_triangle_set claim = paint_split_nearest_claim(src, region, comp, skin);
+    if (claim.indices.empty()) {
+        out.error = PaintSplitError::VoxelFailed;
+        return out;
+    }
+
+    manifold::ExecutionContext ctx;
+    Manifold                   M;
+    try {
+        M = ColorSplitDetail::to_manifold64(src, ctx);
+    } catch (...) {
+        out.error = PaintSplitError::NonManifold;
+        return out;
+    }
+    if (M.Status() != Manifold::Error::NoError || M.IsEmpty()) {
+        out.error = PaintSplitError::NonManifold;
+        return out;
+    }
+    try {
+        out.source_volume = M.Volume();
+        Manifold C;
+        try {
+            C = ColorSplitDetail::to_manifold64(claim, ctx);
+        } catch (...) {
+            out.error = PaintSplitError::VoxelFailed;
+            return out;
+        }
+        if (C.Status() != Manifold::Error::NoError || C.IsEmpty()) {
+            out.error = PaintSplitError::VoxelFailed;
+            return out;
+        }
+        // The claim's parts of the part that carry the selection are the piece (a stray voxel bubble is not).
+        std::vector<Manifold> kept;
+        for (Manifold& pc : (M ^ C).Decompose()) {
+            const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
+            const AABBMesh             aabb(its);
+            double                     a = 0.;
+            for (const auto& [g, ga] : sel)
+                if (aabb.squared_distance(g) <= 1e-6)
+                    a += ga;
+            if (a >= params.carry_frac * sel_area)
+                kept.push_back(pc);
+            else
+                ++out.returned_components;
+        }
+        if (kept.empty()) {
+            out.error = PaintSplitError::EmptyPiece;
+            return out;
+        }
+        const Manifold cand = ps_union(kept);
+        ColorSplitDetail::require_ok(cand, "piece");
+
+        // The rest: the part less the piece, seam-free, in connected pieces.
+        const Manifold rest = M - cand;
+        ColorSplitDetail::require_ok(rest, "rest");
+        std::vector<Manifold> parts;
+        for (Manifold& m : rest.Decompose())
+            if (m.Volume() > 1e-9 * std::max(1., out.source_volume))
+                parts.push_back(m);
+        if (parts.empty()) {
+            out.error = PaintSplitError::EmptyBody;
+            return out;
+        }
+        size_t body_idx = 0;
+        if (parts.size() > 1) {
+            std::vector<int>    hits(parts.size(), 0);
+            std::vector<double> vol(parts.size());
+            for (size_t j = 0; j < parts.size(); ++j) {
+                vol[j] = parts[j].Volume();
+                if (!params.body_hints.empty()) {
+                    const indexed_triangle_set its = ColorSplitDetail::from_manifold(parts[j]);
+                    const AABBMesh             aabb(its);
+                    for (const Vec3d& hnt : params.body_hints)
+                        if (aabb.squared_distance(hnt) <= 1e-6)
                             ++hits[j];
                 }
             }

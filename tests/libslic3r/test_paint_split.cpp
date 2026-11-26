@@ -1237,10 +1237,11 @@ TEST_CASE("Paint split loops: owner's painted figure", "[.][PaintSplitGrinch]")
             if (edges < 2 || r.area[0] < 100.)
                 continue;
             ++tried;
-            // What Apply does: Follow paint, one draw-cut cutter per edge.
+            // Follow paint (kept for comparison, PAINT_SPLIT_FOLLOW=1): one draw-cut cutter per edge.
+            const bool                        follow = std::getenv("PAINT_SPLIT_FOLLOW") != nullptr;
             std::vector<indexed_triangle_set> cutters;
             int                               bad_cut = -1;
-            for (size_t l = 0; l < r.loops[0].size(); ++l) {
+            for (size_t l = 0; follow && l < r.loops[0].size(); ++l) {
                 const PaintSplitFollowCut c = paint_split_follow_cut(tm.its, r.loops[0][l], PaintSplitFollowParams(), tm.bounding_box());
                 if (c.error != PaintSplitError::None) {
                     if (bad_cut < 0)
@@ -1324,7 +1325,7 @@ TEST_CASE("Paint split loops: owner's painted figure", "[.][PaintSplitGrinch]")
                     }
                 }
             }
-            const PaintSplitPieces p = paint_split_assign_cutters(tm.its, r, 0, cutters);
+            const PaintSplitPieces p = follow ? paint_split_assign_cutters(tm.its, r, 0, cutters) : PaintSplitPieces();
             if (std::getenv("PAINT_SPLIT_SKIN") != nullptr) {
                 // Option A (skin cut): the colour split's shells on the selection alone.
                 for (const bool unlimited : { false, true }) {
@@ -1359,7 +1360,25 @@ TEST_CASE("Paint split loops: owner's painted figure", "[.][PaintSplitGrinch]")
                           << (p.ok() ? "ok" : paint_split_error_message(p.error)) << " bad_loop " << p.bad_loop << ", pieces "
                           << (p.ok() ? 2 + p.loose.size() : 0) << ", piece vol " << p.piece_volume << ", body vol " << p.body_volume
                           << ", loose vol " << p.loose_volume << ", flipped " << p.flipped_loops);
-            CHECK(p.ok());
+            // What Apply does: the nearest-skin split.
+            {
+                const auto             t0 = std::chrono::steady_clock::now();
+                const PaintSplitPieces n  = paint_split_assign_nearest(tm.its, r, 0, PaintSplitSkinParams());
+                const double           secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                WARN("  NEAREST: " << (n.ok() ? "ok" : paint_split_error_message(n.error)) << ", piece " << n.piece_volume << " mm3, body "
+                                   << n.body_volume << " mm3, " << n.loose.size() << " loose (" << n.loose_volume << " mm3), " << secs << " s");
+                CHECK(n.ok());
+                if (const char* dump = std::getenv("PAINT_SPLIT_DUMP"); dump != nullptr && *dump != 0 && n.ok()) {
+                    static int near_no = 0;
+                    std::ofstream f(std::string(dump) + "/near" + std::to_string(++near_no) + ".txt");
+                    for (const Vec3i32& t : n.piece.indices) {
+                        f << "S";
+                        for (int k = 0; k < 3; ++k)
+                            f << " " << n.piece.vertices[t[k]].x() << " " << n.piece.vertices[t[k]].y() << " " << n.piece.vertices[t[k]].z();
+                        f << std::endl;
+                    }
+                }
+            }
         }
     }
     CHECK(tried > 0);
@@ -1505,4 +1524,114 @@ TEST_CASE("Paint split follow paint: a patch on one face is a plug, the rest of 
     CHECK(pb.size().z() < 16.);
     CHECK(p.loose.empty());
     CHECK_THAT(p.piece_volume + p.body_volume, WithinRel(p.source_volume, 1e-6));
+}
+
+// ------------------------------------------------------------------------------------------- nearest skin
+// Owner's choice 2026-11-26: the piece is the material nearer to the selected skin than to any other skin.
+
+TEST_CASE("Paint split nearest skin: a band round a cylinder comes off along its paint lines", "[PaintSplit]")
+{
+    const double               R   = 10.;
+    const indexed_triangle_set cyl = ps_ring_cylinder(R, 0., 40., 40, 48);
+    auto in_band = [](const Vec3d& g) {
+        const double th = std::atan2(g.y(), g.x());
+        return std::hypot(g.x(), g.y()) > 5. && g.z() > 16. + 2. * std::sin(3. * th) && g.z() < 24.;
+    };
+    const auto             mask = ps_mask_where(cyl, [&](int, const Vec3d& g) { return in_band(g); });
+    const PaintSplitRegion r    = paint_split_region(cyl, mask);
+    REQUIRE(r.error == PaintSplitError::None);
+    REQUIRE(r.loops[0].size() == 2);
+    PaintSplitSkinParams sp;
+    sp.voxel = 0.4;
+    const PaintSplitPieces p = paint_split_assign_nearest(cyl, r, 0, sp);
+    REQUIRE(p.ok());
+    CHECK(p.loose.size() == 1); // the band and the two ends
+    CHECK_THAT(p.piece_volume + p.body_volume + p.loose_volume, WithinRel(p.source_volume, 1e-6));
+    const AABBMesh piece(p.piece);
+    double sel_on = 0., sel_all = 0., unsel_on = 0.;
+    for (int i = 0; i < int(cyl.indices.size()); ++i) {
+        const Vec3i32& t = cyl.indices[i];
+        const Vec3d    g = (cyl.vertices[t[0]] + cyl.vertices[t[1]] + cyl.vertices[t[2]]).cast<double>() / 3.;
+        if (std::hypot(g.x(), g.y()) < 5.)
+            continue;
+        const bool on = piece.squared_distance(g) < 1e-4;
+        if (in_band(g)) {
+            sel_all += ps_facet_area(cyl, i);
+            sel_on += on ? ps_facet_area(cyl, i) : 0.;
+        } else if (on)
+            unsel_on += ps_facet_area(cyl, i);
+    }
+    CHECK(sel_on > 0.9 * sel_all);
+    CHECK(unsel_on < 0.1 * sel_all);
+    // It stays near the band: nothing below z = 10 or above z = 30.
+    const BoundingBoxf3 pb = ps_bbox(p.piece);
+    CHECK(pb.min.z() > 10.);
+    CHECK(pb.max.z() < 30.);
+}
+
+TEST_CASE("Paint split nearest skin: holes left in a region stay with the rest", "[PaintSplit]")
+{
+    const double               R  = 20.;
+    const indexed_triangle_set sp = its_make_sphere(R, 2. * PS_PI / 60.);
+    auto island = [&](const Vec3d& g) {
+        const Vec3d d = g.normalized();
+        return d.dot(Vec3d::UnitZ()) > std::cos(15. * PS_PI / 180.) || d.dot(Vec3d::UnitX()) > std::cos(15. * PS_PI / 180.);
+    };
+    const auto             mask = ps_mask_where(sp, [&](int, const Vec3d& g) { return g.z() > -10. && !island(g); });
+    PaintSplitRegionParams rp;
+    rp.fill_holes_pct = 0.;
+    const PaintSplitRegion r = paint_split_region(sp, mask, rp);
+    REQUIRE(r.error == PaintSplitError::None);
+    REQUIRE(r.loops[0].size() == 3);
+    PaintSplitSkinParams skin;
+    skin.depth = 4.;
+    skin.voxel = 0.4;
+    const PaintSplitPieces p = paint_split_assign_nearest(sp, r, 0, skin);
+    REQUIRE(p.ok());
+    CHECK_THAT(p.piece_volume + p.body_volume + p.loose_volume, WithinRel(p.source_volume, 1e-6));
+    // A shell about 4 mm deep under the painted skin, open at the two holes.
+    const AABBMesh piece(p.piece);
+    CHECK(piece.squared_distance(Vec3d(0., 0., R)) > 1.);
+    CHECK(piece.squared_distance(Vec3d(R, 0., 0.)) > 1.);
+    CHECK(piece.squared_distance(Vec3d(0., R, 0.)) < 0.01);
+    CHECK(piece.squared_distance(Vec3d(0., 0., 0.)) > 9.);
+    const double shell = 4. / 3. * PS_PI * (R * R * R - (R - 4.) * (R - 4.) * (R - 4.)) * 0.75; // roughly 3/4 of a 4 mm shell
+    CHECK(p.piece_volume > 0.5 * shell);
+    CHECK(p.piece_volume < 1.3 * shell);
+}
+
+TEST_CASE("Paint split nearest skin: a leg fused to a sack comes off without the sack", "[PaintSplit]")
+{
+    // A leg (cylinder r 5, z 0..40) fused into the side of a "sack" (box x 3..23, z 10..25). The leg's skin is
+    // painted; the sack and the leg's foot (bottom cap) are not.
+    std::vector<indexed_triangle_set> parts;
+    parts.push_back(ps_ring_cylinder(5., 0., 40., 40, 48));
+    parts.push_back(ps_moved(ps_grid_cube(20., 20), Vec3d(13., 0., 20.))); // x 3..23, y -10..10, z 10..30
+    const indexed_triangle_set mesh = ps_union(parts);
+    const auto mask = ps_mask_where(mesh, [&](int i, const Vec3d& g) {
+        const double r = std::hypot(g.x(), g.y());
+        return std::abs(r - 5.) < 0.3 && g.x() < 3.05 && g.z() > 0.5; // the leg's side, outside the sack
+    });
+    const PaintSplitRegion r = paint_split_region(mesh, mask);
+    REQUIRE(r.error == PaintSplitError::None);
+    REQUIRE(r.num_components() >= 1);
+    int comp = 0;
+    for (int c = 1; c < int(r.num_components()); ++c)
+        if (r.area[c] > r.area[comp])
+            comp = c;
+    PaintSplitSkinParams skin;
+    skin.voxel = 0.4;
+    const PaintSplitPieces p = paint_split_assign_nearest(mesh, r, comp, skin);
+    REQUIRE(p.ok());
+    CHECK_THAT(p.piece_volume + p.body_volume + p.loose_volume, WithinRel(p.source_volume, 1e-6));
+    // The piece is the leg, plus the bit of the sack's inside that is nearer to the leg's skin than to the sack's
+    // own (it ends about halfway): the sack keeps all of its skin and its far side.
+    const BoundingBoxf3 pb = ps_bbox(p.piece);
+    CHECK(pb.max.x() < 14.);
+    CHECK(pb.max.y() < 8.);
+    CHECK(pb.min.y() > -8.);
+    const AABBMesh piece(p.piece);
+    CHECK(piece.squared_distance(Vec3d(20., 0., 20.)) > 16.);
+    CHECK(p.body_volume > 0.6 * 20. * 20. * 20.);
+    CHECK(p.piece_volume > 0.5 * PS_PI * 25. * 40.);
 }

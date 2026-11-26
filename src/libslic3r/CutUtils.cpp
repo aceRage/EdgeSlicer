@@ -2297,25 +2297,27 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
 
     // A region with several loops (a band, a trim with holes) is cut once per loop (keep.planes); the
     // cutters below are then those planes' half-spaces, for placing the other parts (D19).
-    const bool                        follow = !keep.cutters.empty();
-    const bool                        multi  = follow || keep.planes.size() > 1;
+    const bool                        nearest = keep.nearest_skin;
+    const bool                        follow  = nearest || !keep.cutters.empty(); // the piece decides other parts
+    const bool                        multi   = follow || keep.planes.size() > 1;
     std::vector<indexed_triangle_set> cutters;
-    if (follow)
-        cutters = keep.cutters;
-    else if (multi) {
+    if (!keep.cutters.empty())
+        cutters = keep.cutters; // (unused by the nearest-skin split, which places other parts by its piece)
+    else if (multi && !nearest) {
         BoundingBoxf3 bbox;
         for (const ModelVolume* v : mo->volumes)
             if (v->is_model_part() && !v->mesh().empty())
                 bbox.merge(mesh_in_cut_frame(v).bounding_box());
         for (const PaintSplitPlane& pl : keep.planes)
             cutters.push_back(paint_split_half_space(pl, bbox));
-    } else
+    } else if (!nearest)
         cutters.push_back(cutter);
 
     // The masked part first: a refusal must leave nothing cloned.
     const ModelVolume* mask_volume = mo->volumes[size_t(keep.mask_volume_idx)];
     const TriangleMesh mask_mesh   = mesh_in_cut_frame(mask_volume);
-    PaintSplitPieces   pieces      = follow ? paint_split_assign_cutters(mask_mesh.its, *keep.region, keep.component, keep.cutters, keep.assign) :
+    PaintSplitPieces   pieces      = nearest ? paint_split_assign_nearest(mask_mesh.its, *keep.region, keep.component, keep.skin, keep.assign) :
+                                     follow ? paint_split_assign_cutters(mask_mesh.its, *keep.region, keep.component, keep.cutters, keep.assign) :
                                      multi  ? paint_split_assign_loops(mask_mesh.its, *keep.region, keep.component, keep.planes, keep.assign) :
                                               paint_split_assign(mask_mesh.its, *keep.region, keep.component, cutter, piece_inside, keep.assign);
     if (!pieces.ok()) {
@@ -2427,7 +2429,7 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
 
 const ModelObjectPtrs& Cut::perform_with_paint_split_planes(const PaintSplitKeep& keep, PaintSplitReport* report)
 {
-    if (!keep.cutters.empty() && !m_model.objects.empty())
+    if ((keep.nearest_skin || !keep.cutters.empty()) && !m_model.objects.empty())
         return perform_with_cutter_solid(indexed_triangle_set(), true, keep, report);
     if (keep.planes.empty() || m_model.objects.empty()) {
         if (report != nullptr) {

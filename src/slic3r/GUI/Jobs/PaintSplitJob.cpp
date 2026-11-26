@@ -73,6 +73,8 @@ void PaintSplitJob::process(Ctl &ctl)
         keep.component       = p.component;
         keep.planes          = p.planes;
         keep.cutters         = p.cutters;
+        keep.nearest_skin    = p.nearest_skin;
+        keep.skin            = p.skin;
         keep.assign.body_hints = p.body_hints;
         keep.cut_only_painted_part = m_plan.cut_only_painted_part;
 

@@ -79,8 +79,9 @@ private:
     void refresh_preview();
     void rebuild_preview();
     void render_preview();
-    PaintSplitFollowParams follow_params() const;
-    bool cuts_ok(size_t comp) const; // every edge of the component has its cut
+    PaintSplitSkinParams skin_params() const;
+    void compute_cut_preview(); // Show cut: the claims' cut surfaces, synchronously
+    bool cuts_ok(size_t comp) const; // the component can be split
     int  masked_part(int *count = nullptr) const;
     Transform3d part_to_cut_frame(int part) const;
 
@@ -101,9 +102,9 @@ private:
     Style m_style{ Style::Auto };
     float m_fill_holes_pct{ 10.f };
     // Follow paint (the cut style since the owner's hand test 2026-11-26).
-    float m_depth{ 3.f };      // mm
-    float m_lip_angle{ 0.f };  // degrees
-    float m_smoothing{ 0.3f }; // 0..1
+    float m_depth{ 0.f };      // mm under the selected skin; 0 = unlimited
+    float m_lip_angle{ 0.f };  // unused since the nearest-skin cut (kept in the undo archive's layout)
+    float m_smoothing{ 0.3f }; // likewise
     bool  m_snap_to_bed{ false }; // the flat core level
     bool  m_keep_as_parts{ false };
     bool  m_cut_only_painted_part{ false };
@@ -119,7 +120,7 @@ private:
     int                          m_preview_part{ -1 };
     int                          m_masked_parts{ 0 };
     PaintSplitRegion             m_region;     // of m_preview_part, in the cut frame
-    std::vector<std::vector<PaintSplitFollowCut>> m_cuts; // per component, per loop: the cut Apply makes
+    std::vector<indexed_triangle_set> m_claim_cut; // Show cut: per component, the cut surface inside the part
     TriangleMesh                 m_cut_mesh;            // m_preview_part's mesh in the cut frame
     GLModel                      m_plane_fill;          // the cut surfaces (band, skirt, core)
     GLModel                      m_plane_outline;       // the paint lines they follow

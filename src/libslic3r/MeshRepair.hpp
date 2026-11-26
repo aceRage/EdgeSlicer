@@ -62,6 +62,12 @@ indexed_triangle_set round_band_by_voxels(const indexed_triangle_set &mesh,
 // entry when it is false rather than offering something that can only ever fail.
 bool voxel_ops_available();
 
+// Paint Split's nearest-skin claim: the zero level set of a dense scalar field, as a closed mesh whose outside is
+// where the field is positive. `values` holds nx * ny * nz samples, x fastest, sample (i, j, k) at
+// origin + voxel * (i, j, k). Samples on the outermost layer should be positive, so the surface closes inside the
+// box. Empty on failure and on a build without OpenVDB.
+indexed_triangle_set mesh_dense_field(const std::vector<float> &values, int nx, int ny, int nz, const Vec3d &origin, double voxel);
+
 } // namespace Slic3r
 
 #endif // slic3r_MeshRepair_hpp_

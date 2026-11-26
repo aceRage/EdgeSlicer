@@ -33,6 +33,7 @@ enum class PaintSplitError {
     CutCrossesRegion, // one edge's cut would take most of the selected region away (PaintSplitPieces::bad_loop)
     CutterFailed,     // one edge's follow-paint cut surface could not be built (folds, crosses itself, too short)
     EdgeNotSeparated, // one edge's cut sheet does not part the region from what lies across that edge
+    VoxelFailed,      // the nearest-skin field could not be meshed (no OpenVDB in this build, or a broken claim)
 };
 const char* paint_split_error_message(PaintSplitError err);
 
@@ -210,6 +211,32 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
                                            const PaintSplitFollowParams& params, const BoundingBoxf3& bbox);
 
 // ---------------------------------------------------------------------------------------------------------
+// Nearest skin (the owner's choice, 2026-11-26): the piece is the material nearer to the region's selected skin
+// than to any other skin of the part, optionally no deeper than Depth. On the skin the cut meets the paint line
+// itself (to about a voxel); inside it runs where the two skins are equally near, so it stays local, and bands,
+// holes and fused contacts (legs against a sack) need nothing special. The field is sampled on a voxel grid over
+// the region's neighbourhood and its zero level set (the "claim") is cut out of the exact mesh.
+// ---------------------------------------------------------------------------------------------------------
+
+struct PaintSplitSkinParams
+{
+    double depth{ 0. };               // mm under the selected skin; 0 = unlimited (to where another skin is nearer)
+    double voxel{ 0. };               // mm; 0 = automatic, from max_samples over the claim's box
+    size_t max_samples{ 6000000 };    // the voxel budget of the automatic size
+};
+
+// The claim of component `comp` as a closed mesh (same frame as the region), empty on failure. `voxel_used`
+// receives the voxel size.
+indexed_triangle_set paint_split_nearest_claim(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                               const PaintSplitSkinParams& params, double* voxel_used = nullptr);
+// The part of the claim's surface that lies inside the part: the cut surface, for the preview.
+indexed_triangle_set paint_split_claim_cut_surface(const indexed_triangle_set& mesh, const indexed_triangle_set& claim);
+// The split: piece = the part AND the claim, reduced to the components that carry the selection; the rest of the
+// part falls into connected pieces as in paint_split_assign_loops (body by body_hints, then volume; others loose).
+PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                            const PaintSplitSkinParams& skin, const PaintSplitAssignParams& params = {});
+
+// ---------------------------------------------------------------------------------------------------------
 // The keep-connected rule (design 4.2)
 // ---------------------------------------------------------------------------------------------------------
 
@@ -299,6 +326,8 @@ struct PaintSplitKeep
     int                     component{ 0 };           // which region component becomes the piece
     std::vector<PaintSplitPlane> planes;              // per loop of `component`, cut frame (Cut::perform_with_paint_split_planes)
     std::vector<indexed_triangle_set> cutters;        // or Follow paint's closed cutters per loop (these win when set)
+    bool                    nearest_skin{ false };    // the nearest-skin split (wins over both)
+    PaintSplitSkinParams    skin;
     PaintSplitAssignParams  assign;                   // kerf_solid, if any, also in the cut frame
     bool                    cut_only_painted_part{ false }; // D19 (c): other parts stay whole on the body
 };
