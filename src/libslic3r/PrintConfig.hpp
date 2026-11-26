@@ -2130,6 +2130,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats, top_surface_speed))
     //BBS
     ((ConfigOptionBools,                 enable_overhang_speed))
+    // Bambu Studio 02.09.01.70 height slowdown (PrintConfig.hpp:1261-1267, PrintRegionConfig there too).
+    ((ConfigOptionBools, enable_height_slowdown))
+    ((ConfigOptionFloats, slowdown_start_height))
+    ((ConfigOptionFloats, slowdown_start_speed))
+    ((ConfigOptionFloats, slowdown_start_acc))
+    ((ConfigOptionFloats, slowdown_end_height))
+    ((ConfigOptionFloats, slowdown_end_speed))
+    ((ConfigOptionFloats, slowdown_end_acc))
     ((ConfigOptionBool,                  overhang_shadow_inner_wall))
     ((ConfigOptionPercent,               overhang_shadow_speed_ratio))
     ((ConfigOptionPercent,               overhang_shadow_distance))
@@ -2649,6 +2657,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               during_print_exhaust_fan_speed))
     ((ConfigOptionInts,               complete_print_exhaust_fan_speed))
     ((ConfigOptionFloatOrPercent,     initial_layer_line_width))
+    ((ConfigOptionFloat,              initial_layer_infill_line_width)) // Bambu Studio 02.09.01.70
     // Per-nozzle process P5: per FILAMENT (index filament - 1), the first-layer width of the per-nozzle process of
     // the filament's nozzle (0 = that process uses the role widths); empty without per-nozzle processes.
     ((ConfigOptionFloatsOrPercents,   nozzle_initial_layer_line_width))
