@@ -31,6 +31,7 @@ enum class PaintSplitError {
     EmptyBody,     // the piece would take the whole part
     RepairFailed,  // the part has holes or slivers that the automatic repair could not close
     CutCrossesRegion, // one edge's cut would take most of the selected region away (PaintSplitPieces::bad_loop)
+    CutterFailed,     // one edge's follow-paint cut surface could not be built (folds, crosses itself, too short)
 };
 const char* paint_split_error_message(PaintSplitError err);
 
@@ -168,6 +169,35 @@ indexed_triangle_set paint_split_half_space(const PaintSplitPlane& plane, const 
 indexed_triangle_set paint_split_slab(const PaintSplitPlane& plane, const BoundingBoxf3& bbox, double kerf);
 
 // ---------------------------------------------------------------------------------------------------------
+// Follow paint (design 3.3a / 4.3a; the default since the owner's hand test 2026-11-26): each boundary loop
+// becomes a closed draw-cut stroke, and the draw cut's band + flat core is the cut surface. The skin line is the
+// paint line; inside, the band runs Depth mm at Lip angle onto a flat core inside the loop's own footprint. A
+// loop round the part is a separation, a loop on one side a plug (draw_cut_loop_separates).
+// ---------------------------------------------------------------------------------------------------------
+
+struct PaintSplitFollowParams
+{
+    double depth{ 3. };        // mm the band travels in before the flat core (capped so it cannot fold)
+    double angle_deg{ 0. };    // the lip angle, -90..90 (0 = a flat shelf; see DrawCutParams::angle_deg)
+    double extension{ 2. };    // mm the skirt reaches out past the skin line
+    double smoothing{ 0.3 };   // 0..1 of the paint line before it becomes the stroke
+    bool   square_to_bed{ false }; // the core forced level (DrawCutDirection::AxisZ)
+};
+
+struct PaintSplitFollowCut
+{
+    PaintSplitError      error{ PaintSplitError::None };
+    indexed_triangle_set cutter;   // the closed solid for the boolean
+    indexed_triangle_set preview;  // band + skirt + core only: what the gizmo draws
+    double               depth{ 0. };  // the depth actually used (lowered when the asked one folds)
+    bool                 separates{ false }; // the loop goes round the part (a separation, not a plug)
+};
+
+// `mesh` is the part in the region's frame (closed); `bbox` its bounding box.
+PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, const PaintSplitLoop& loop,
+                                           const PaintSplitFollowParams& params, const BoundingBoxf3& bbox);
+
+// ---------------------------------------------------------------------------------------------------------
 // The keep-connected rule (design 4.2)
 // ---------------------------------------------------------------------------------------------------------
 
@@ -242,6 +272,13 @@ PaintSplitPieces paint_split_assign(const indexed_triangle_set& mesh, const Pain
 PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
                                           const std::vector<PaintSplitPlane>& planes, const PaintSplitAssignParams& params = {});
 
+// The same with any closed cutters, one per loop (Follow paint: paint_split_follow_cut). For each cutter the
+// side carrying more of the selection is the region's; there the parts that carry the selection stay, and on
+// the other side what lies across this loop's edge goes to the rest. Works for one loop too. The rest of the
+// part (mesh less the piece) falls into connected pieces as above.
+PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                            const std::vector<indexed_triangle_set>& cutters, const PaintSplitAssignParams& params = {});
+
 // What Cut::perform_with_cutter_solid() needs besides the cutter (design 4.4).
 struct PaintSplitKeep
 {
@@ -249,6 +286,7 @@ struct PaintSplitKeep
     const PaintSplitRegion* region{ nullptr };        // the mask's region, ALREADY in the cut frame
     int                     component{ 0 };           // which region component becomes the piece
     std::vector<PaintSplitPlane> planes;              // per loop of `component`, cut frame (Cut::perform_with_paint_split_planes)
+    std::vector<indexed_triangle_set> cutters;        // or Follow paint's closed cutters per loop (these win when set)
     PaintSplitAssignParams  assign;                   // kerf_solid, if any, also in the cut frame
     bool                    cut_only_painted_part{ false }; // D19 (c): other parts stay whole on the body
 };

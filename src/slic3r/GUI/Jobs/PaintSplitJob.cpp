@@ -72,6 +72,7 @@ void PaintSplitJob::process(Ctl &ctl)
         keep.region          = &m_plan.region;
         keep.component       = p.component;
         keep.planes          = p.planes;
+        keep.cutters         = p.cutters;
         keep.assign.body_hints = p.body_hints;
         keep.cut_only_painted_part = m_plan.cut_only_painted_part;
 

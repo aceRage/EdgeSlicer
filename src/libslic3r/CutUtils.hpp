@@ -371,6 +371,7 @@ public:
     // (paint_split_assign_loops), and the rest of the part comes back as the body plus `_looseN` parts
     // (in the lower object too, by that suffix, so the caller can make them objects of their own).
     // With keep.planes.size() > 1, perform_with_cutter_solid() ignores its `cutter` and does the same.
+    // keep.cutters (Follow paint, one closed cutter per loop) win over keep.planes: paint_split_assign_cutters().
     const ModelObjectPtrs& perform_with_paint_split_planes(const PaintSplitKeep& keep, PaintSplitReport* report = nullptr);
     // Flexi joint cut: one object, two watertight model parts, a real Manifold boolean.
     // perform_with_plane() dispatches here automatically when a flexi connector is present.

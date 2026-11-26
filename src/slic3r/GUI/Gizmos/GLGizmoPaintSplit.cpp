@@ -39,7 +39,6 @@ namespace Slic3r::GUI {
 namespace {
 // The mask over the part's own colours: a warm orange, see-through so the paint under it shows.
 const ColorRGBA PS_MASK_COLOR(1.f, 0.54f, 0.24f, 0.70f);
-const ColorRGBA PS_TINT_COLOR(0.f, 0.59f, 0.53f, 0.35f);
 const ColorRGBA PS_PLANE_COLOR(0.f, 0.59f, 0.53f, 0.22f);
 const char     *PS_KEEP_AS_PARTS_KEY = "paint_split_keep_as_parts";
 } // namespace
@@ -62,12 +61,10 @@ bool GLGizmoPaintSplit::on_init()
     m_desc["fill_angle"]    = _L("Angle");
     m_desc["fill_holes"]    = _L("Fill holes up to");
     m_desc["clear"]         = _L("Clear selection");
-    m_desc["style"]         = _L("Cut style");
-    m_desc["auto"]          = _L("Auto");
-    m_desc["plane"]         = _L("Plane");
-    m_desc["offset"]        = _L("Offset");
-    m_desc["tilt_u"]        = _L("Tilt 1");
-    m_desc["tilt_v"]        = _L("Tilt 2");
+    m_desc["style"]         = _L("Cut along the paint");
+    m_desc["depth"]         = _L("Depth");
+    m_desc["lip_angle"]     = _L("Lip angle");
+    m_desc["smoothing"]     = _L("Smoothing");
     m_desc["snap"]          = _L("Square to bed");
     m_desc["result"]        = _L("Result");
     m_desc["keep_as_parts"] = _L("Keep as parts");
@@ -99,11 +96,8 @@ void GLGizmoPaintSplit::on_shutdown()
     m_paint_views.clear();
     m_plane_fill.reset();
     m_plane_outline.reset();
-    m_tint.reset();
-    m_planes.clear();
-    m_caps_missing.clear();
+    m_cuts.clear();
     m_cut_mesh = TriangleMesh();
-    m_cut_neighbors.clear();
     m_region   = PaintSplitRegion();
     m_region_dirty = true;
     m_parent.toggle_model_objects_visibility(true);
@@ -154,9 +148,10 @@ bool GLGizmoPaintSplit::defer_close(std::function<void()> close)
 
 void GLGizmoPaintSplit::on_save(cereal::BinaryOutputArchive &ar) const
 {
-    const int      version = 1;
+    // Version 2 (Follow paint): the three floats after the hole fill are Depth, Lip angle and Smoothing.
+    const int      version = 2;
     const uint64_t object  = uint64_t(m_committed_object);
-    ar(version, object, m_committed, m_picked_filament, int(m_mode), int(m_style), m_fill_holes_pct, m_offset, m_tilt_u, m_tilt_v,
+    ar(version, object, m_committed, m_picked_filament, int(m_mode), int(m_style), m_fill_holes_pct, m_depth, m_lip_angle, m_smoothing,
        m_snap_to_bed, m_keep_as_parts);
 }
 
@@ -164,8 +159,13 @@ void GLGizmoPaintSplit::on_load(cereal::BinaryInputArchive &ar)
 {
     int      version = 0, mode = 0, style = 0;
     uint64_t object  = 0;
-    ar(version, object, m_loaded, m_picked_filament, mode, style, m_fill_holes_pct, m_offset, m_tilt_u, m_tilt_v, m_snap_to_bed,
-       m_keep_as_parts);
+    float a = 0.f, b = 0.f, c = 0.f;
+    ar(version, object, m_loaded, m_picked_filament, mode, style, m_fill_holes_pct, a, b, c, m_snap_to_bed, m_keep_as_parts);
+    if (version >= 2) {
+        m_depth     = a;
+        m_lip_angle = b;
+        m_smoothing = c;
+    } // version 1 held the plane's Offset / Tilts: the Follow paint controls keep their values
     m_loaded_object = size_t(object);
     m_loaded_valid  = true;
     m_mode          = Mode(std::clamp(mode, 0, int(Mode::PickSegment)));
@@ -418,6 +418,12 @@ int GLGizmoPaintSplit::masked_part(int *count) const
     return first;
 }
 
+bool GLGizmoPaintSplit::cuts_ok(size_t comp) const
+{
+    return comp < m_cuts.size() && !m_cuts[comp].empty() &&
+           std::all_of(m_cuts[comp].begin(), m_cuts[comp].end(), [](const PaintSplitFollowCut &c) { return c.error == PaintSplitError::None; });
+}
+
 Transform3d GLGizmoPaintSplit::part_to_cut_frame(int part) const
 {
     const ModelObject *mo = m_c->selection_info()->model_object();
@@ -444,15 +450,14 @@ void GLGizmoPaintSplit::refresh_preview()
         rebuild_preview();
 }
 
-PaintSplitPlaneParams GLGizmoPaintSplit::plane_params() const
+PaintSplitFollowParams GLGizmoPaintSplit::follow_params() const
 {
-    // Auto is the Plane until Follow paint arrives (design P3): one fitted plane per edge.
-    PaintSplitPlaneParams pp;
-    pp.offset      = m_offset;
-    pp.tilt_u_deg  = m_tilt_u;
-    pp.tilt_v_deg  = m_tilt_v;
-    pp.snap_to_bed = m_snap_to_bed;
-    return pp;
+    PaintSplitFollowParams fp;
+    fp.depth         = m_depth;
+    fp.angle_deg     = m_lip_angle;
+    fp.smoothing     = m_smoothing;
+    fp.square_to_bed = m_snap_to_bed;
+    return fp;
 }
 
 void GLGizmoPaintSplit::rebuild_preview()
@@ -460,9 +465,7 @@ void GLGizmoPaintSplit::rebuild_preview()
     m_preview_dirty = false;
     m_plane_fill.reset();
     m_plane_outline.reset();
-    m_tint.reset();
-    m_planes.clear();
-    m_caps_missing.clear();
+    m_cuts.clear();
 
     const ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
     if (mo == nullptr)
@@ -480,100 +483,58 @@ void GLGizmoPaintSplit::rebuild_preview()
         m_region       = PaintSplitRegion();
         m_preview_part = -1;
         m_cut_mesh     = TriangleMesh();
-        m_cut_neighbors.clear();
         m_region_dirty = false;
         return;
     }
 
-    const Transform3d                             to_cut = part_to_cut_frame(part);
-    const TriangleSelector::TriangleSplittingData mask   = m_triangle_selectors[size_t(part)]->serialize();
+    const Transform3d to_cut = part_to_cut_frame(part);
     // The region (the heavy part) only when the mask, the hole fill or the part's frame changed: the cut style
-    // sliders move the planes and their cut faces alone, live.
+    // sliders rebuild the cut surfaces alone.
     if (m_region_dirty || part != m_preview_part) {
         m_region_dirty = false;
         m_preview_part = part;
         PaintSplitRegionParams rp;
         rp.fill_holes_pct = m_fill_holes_pct;
-        m_region          = paint_split_region(mv->mesh().its, mask, rp);
+        m_region          = paint_split_region(mv->mesh().its, m_triangle_selectors[size_t(part)]->serialize(), rp);
         if (m_region.error == PaintSplitError::None)
             paint_split_transform(m_region, to_cut);
         m_cut_mesh = TriangleMesh(mv->mesh());
         m_cut_mesh.transform(to_cut, true);
-        m_cut_neighbors = its_face_neighbors(m_cut_mesh.its);
     }
     if (m_region.error != PaintSplitError::None)
         return;
     m_world_offset = mo->instances[m_parent.get_selection().get_instance_idx()]->get_offset();
 
-    const PaintSplitPlaneParams pp = plane_params();
-    for (size_t c = 0; c < m_region.num_components(); ++c)
-        m_planes.push_back(m_region.component_ok(int(c)) ? paint_split_fit_planes(m_region, int(c), pp) : std::vector<PaintSplitPlane>());
-    m_caps_missing.assign(m_planes.size(), 0);
-
-    // The cut faces Apply makes: each plane's cross-section of the part round its edge. A plane that misses
-    // the part shows as a disc a little larger than the edge, so it can still be seen and moved back.
+    // Follow paint: one draw-cut band + core per edge, along the paint line (owner 2026-11-26). The preview is
+    // that surface itself (band, skirt, core), never the closure the boolean needs.
+    const PaintSplitFollowParams fp   = follow_params();
+    const BoundingBoxf3          bbox = m_cut_mesh.bounding_box();
+    m_cuts.resize(m_region.num_components());
     using Geo = GLModel::Geometry;
     Geo fill, outline;
     fill.format    = { Geo::EPrimitiveType::Triangles, Geo::EVertexLayout::P3 };
     outline.format = { Geo::EPrimitiveType::Lines, Geo::EVertexLayout::P3 };
-    const int SEG  = 64;
-    for (size_t c = 0; c < m_planes.size(); ++c)
-        for (size_t l = 0; l < m_planes[c].size(); ++l) {
-            const PaintSplitPlane &pl   = m_planes[c][l];
-            const PaintSplitLoop  &loop = m_region.loops[c][l];
-            if (!pl.valid)
-                continue;
-            const indexed_triangle_set cap = paint_split_cap(m_cut_mesh.its, pl, loop);
-            if (!cap.indices.empty()) {
-                // Lift the face a hair along its normal so it is not hidden in the part's skin.
-                const Vec3f lift = (0.02 * pl.normal).cast<float>();
-                for (const Vec3i32 &t : cap.indices) {
-                    const unsigned b = unsigned(fill.vertices_count());
-                    for (int k = 0; k < 3; ++k)
-                        fill.add_vertex(Vec3f(cap.vertices[t[k]] + lift));
-                    fill.add_triangle(b, b + 1, b + 2);
-                }
-                // Its outline: the cap's boundary edges.
-                std::map<std::pair<int, int>, int> use;
-                for (const Vec3i32 &t : cap.indices)
-                    for (int k = 0; k < 3; ++k) {
-                        int a = t[k], b = t[(k + 1) % 3];
-                        if (a > b)
-                            std::swap(a, b);
-                        ++use[{ a, b }];
-                    }
-                for (const auto &[e, n] : use)
-                    if (n == 1) {
-                        const unsigned b = unsigned(outline.vertices_count());
-                        outline.add_vertex(Vec3f(cap.vertices[e.first] + lift));
-                        outline.add_vertex(Vec3f(cap.vertices[e.second] + lift));
-                        outline.add_line(b, b + 1);
-                    }
-                continue;
+    for (size_t c = 0; c < m_region.num_components(); ++c) {
+        if (!m_region.component_ok(int(c)))
+            continue;
+        for (const PaintSplitLoop &loop : m_region.loops[c]) {
+            m_cuts[c].push_back(paint_split_follow_cut(m_cut_mesh.its, loop, fp, bbox));
+            const indexed_triangle_set &surf = m_cuts[c].back().preview;
+            for (const Vec3i32 &t : surf.indices) {
+                const unsigned b = unsigned(fill.vertices_count());
+                for (int k = 0; k < 3; ++k)
+                    fill.add_vertex(surf.vertices[t[k]]);
+                fill.add_triangle(b, b + 1, b + 2);
             }
-            ++m_caps_missing[c];
-            double r = 0.;
-            for (const DrawCutSample &s : loop.pts) {
-                const Vec3d d = s.pos - pl.point;
-                r             = std::max(r, (d - pl.normal * pl.normal.dot(d)).norm());
+            // The paint line the cut follows, on the skin.
+            for (size_t i = 0; i < loop.pts.size(); ++i) {
+                const unsigned b = unsigned(outline.vertices_count());
+                outline.add_vertex(Vec3f(loop.pts[i].pos.cast<float>()));
+                outline.add_vertex(Vec3f(loop.pts[(i + 1) % loop.pts.size()].pos.cast<float>()));
+                outline.add_line(b, b + 1);
             }
-            r                 = 1.25 * r + 2.;
-            const unsigned c0 = unsigned(fill.vertices_count());
-            fill.add_vertex(Vec3f(pl.point.cast<float>()));
-            for (int k = 0; k < SEG; ++k) {
-                const double t = 2. * PI * double(k) / double(SEG);
-                fill.add_vertex(Vec3f((pl.point + r * (std::cos(t) * pl.u + std::sin(t) * pl.v)).cast<float>()));
-            }
-            for (int k = 0; k < SEG; ++k)
-                fill.add_triangle(c0, c0 + 1 + unsigned(k), c0 + 1 + unsigned((k + 1) % SEG));
-            const unsigned o0 = unsigned(outline.vertices_count());
-            for (int k = 0; k < SEG; ++k) {
-                const double t = 2. * PI * double(k) / double(SEG);
-                outline.add_vertex(Vec3f((pl.point + r * (std::cos(t) * pl.u + std::sin(t) * pl.v)).cast<float>()));
-            }
-            for (int k = 0; k < SEG; ++k)
-                outline.add_line(o0 + unsigned(k), o0 + unsigned((k + 1) % SEG));
         }
+    }
     if (fill.vertices_count() > 0) {
         m_plane_fill.init_from(std::move(fill));
         m_plane_fill.set_color(PS_PLANE_COLOR);
@@ -582,71 +543,11 @@ void GLGizmoPaintSplit::rebuild_preview()
         m_plane_outline.init_from(std::move(outline));
         m_plane_outline.set_color(ColorRGBA::ORCA());
     }
-
-    // The tint: the skin that leaves with the piece. A flood over the surface from the selected facets that
-    // never crosses a plane of its region - the keep-connected rule as the surface sees it (material joined
-    // only through the inside, like a ponytail below the neck line, is not tinted). A band's piece is the
-    // skin on the inner side of all of its edges' planes.
-    const indexed_triangle_set &its = m_cut_mesh.its;
-    TriangleSelector            scratch(mv->mesh());
-    scratch.deserialize(mask, true);
-    std::vector<int> src;
-    scratch.get_facets_strict(EnforcerBlockerType::ENFORCER, &src);
-    std::vector<char> seed(its.indices.size(), 0);
-    for (int f : src)
-        if (f >= 0 && size_t(f) < seed.size())
-            seed[size_t(f)] = 1;
-    const std::vector<Vec3i32> &neighbors = m_cut_neighbors;
-    std::vector<char>          tinted(its.indices.size(), 0);
-    for (const std::vector<PaintSplitPlane> &planes : m_planes) {
-        if (planes.empty() || std::any_of(planes.begin(), planes.end(), [](const PaintSplitPlane &p) { return !p.valid; }))
-            continue;
-        auto on_piece = [&](size_t f) {
-            const Vec3i32 &t = its.indices[f];
-            const Vec3d    g = (its.vertices[t[0]] + its.vertices[t[1]] + its.vertices[t[2]]).cast<double>() / 3.;
-            for (const PaintSplitPlane &pl : planes)
-                if (pl.normal.dot(g - pl.point) <= 0.)
-                    return false;
-            return true;
-        };
-        std::vector<char>   seen(its.indices.size(), 0);
-        std::vector<size_t> queue;
-        for (size_t f = 0; f < its.indices.size(); ++f)
-            if (seed[f] && on_piece(f)) {
-                seen[f] = 1;
-                queue.push_back(f);
-            }
-        while (!queue.empty()) {
-            const size_t f = queue.back();
-            queue.pop_back();
-            tinted[f] = 1;
-            for (int k = 0; k < 3; ++k) {
-                const int g = neighbors[f][k];
-                if (g >= 0 && !seen[size_t(g)] && on_piece(size_t(g))) {
-                    seen[size_t(g)] = 1;
-                    queue.push_back(size_t(g));
-                }
-            }
-        }
-    }
-    Geo tint;
-    tint.format = { Geo::EPrimitiveType::Triangles, Geo::EVertexLayout::P3 };
-    for (size_t f = 0; f < its.indices.size(); ++f)
-        if (tinted[f]) {
-            const unsigned b = unsigned(tint.vertices_count());
-            for (int k = 0; k < 3; ++k)
-                tint.add_vertex(its.vertices[its.indices[f][k]]);
-            tint.add_triangle(b, b + 1, b + 2);
-        }
-    if (tint.vertices_count() > 0) {
-        m_tint.init_from(std::move(tint));
-        m_tint.set_color(PS_TINT_COLOR);
-    }
 }
 
 void GLGizmoPaintSplit::render_preview()
 {
-    if (!m_plane_fill.is_initialized() && !m_tint.is_initialized())
+    if (!m_plane_fill.is_initialized() && !m_plane_outline.is_initialized())
         return;
     GLShaderProgram *shader = wxGetApp().get_shader("flat");
     if (shader == nullptr)
@@ -658,12 +559,6 @@ void GLGizmoPaintSplit::render_preview()
     glsafe(::glEnable(GL_BLEND));
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
     glsafe(::glDisable(GL_CULL_FACE));
-    if (m_tint.is_initialized()) {
-        glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
-        glsafe(::glPolygonOffset(-1.f, -1.f));
-        m_tint.render();
-        glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
-    }
     // The cut faces lie inside the part: drawn through its skin, see-through, so they can be seen while the
     // style sliders move them.
     glsafe(::glDepthMask(GL_FALSE));
@@ -743,7 +638,7 @@ void GLGizmoPaintSplit::apply()
     const int filament = size_t(m_preview_part) < m_picked_filament.size() ? m_picked_filament[size_t(m_preview_part)] : 0;
     int       n        = 0;
     // Each region's selected skin, sampled: a later region's rest piece must stay the body it is cut from.
-    std::vector<std::vector<Vec3d>> skin(m_planes.size());
+    std::vector<std::vector<Vec3d>> skin(m_cuts.size());
     for (size_t f = 0; f < m_region.surface.indices.size(); ++f) {
         const int c = m_region.facet_comp[f];
         if (c >= 0 && size_t(c) < skin.size() && skin[size_t(c)].size() < 256) {
@@ -752,18 +647,18 @@ void GLGizmoPaintSplit::apply()
                 (m_region.surface.vertices[t[0]] + m_region.surface.vertices[t[1]] + m_region.surface.vertices[t[2]]).cast<double>() / 3.);
         }
     }
-    for (size_t c = 0; c < m_planes.size(); ++c) {
-        if (m_planes[c].empty() ||
-            std::any_of(m_planes[c].begin(), m_planes[c].end(), [](const PaintSplitPlane &p) { return !p.valid; }))
+    for (size_t c = 0; c < m_cuts.size(); ++c) {
+        if (!cuts_ok(c))
             continue;
         PaintSplitApplyPiece piece;
         piece.component = int(c);
-        piece.planes    = m_planes[c];
+        for (const PaintSplitFollowCut &cut : m_cuts[c])
+            piece.cutters.push_back(cut.cutter);
         for (size_t d = c + 1; d < skin.size(); ++d)
             piece.body_hints.insert(piece.body_hints.end(), skin[d].begin(), skin[d].end());
         piece.filament = filament;
         piece.label    = filament > 0 ? GUI::format(_u8L("Filament %1%"), filament) : GUI::format(_u8L("Region %1%"), ++n);
-        if (filament > 0 && m_planes.size() > 1)
+        if (filament > 0 && m_cuts.size() > 1)
             piece.label += " " + std::to_string(++n);
         plan.pieces.push_back(std::move(piece));
     }
@@ -902,25 +797,20 @@ void GLGizmoPaintSplit::on_render_input_window(float x, float y, float bottom_li
             note(_L("Holes will be repaired while splitting. The painting is kept."));
         for (size_t c = 0; c < m_region.num_components(); ++c) {
             const size_t edges = m_region.loops[c].size();
-            const wxString cut = edges == 1 ? _L("1 edge - one cut") : format_wxstr(_L("%1% edges - cut as %1% cuts"), edges);
+            const wxString cut = edges == 1 ? _L("1 edge - cut along the paint") : format_wxstr(_L("%1% edges - %1% cuts along the paint"), edges);
             m_imgui->text(format_wxstr(_L("Region %1%: %2%, %3% cm²"), c + 1, cut, wxString::Format("%.1f", m_region.area[c] / 100.)));
             if (m_region.comp_error[c] != PaintSplitError::None) {
                 ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_w);
                 m_imgui->warning_text(_L(paint_split_error_message(m_region.comp_error[c])));
                 ImGui::PopTextWrapPos();
-            } else if (c < m_planes.size() && !m_planes[c].empty() &&
-                       std::all_of(m_planes[c].begin(), m_planes[c].end(), [](const PaintSplitPlane &p) { return p.valid; })) {
-                can_apply = true;
-                for (size_t l = 0; l < m_planes[c].size(); ++l)
-                    if (m_planes[c][l].far_from_boundary) {
+            } else if (c < m_cuts.size()) {
+                can_apply = can_apply || cuts_ok(c);
+                for (size_t l = 0; l < m_cuts[c].size(); ++l)
+                    if (m_cuts[c][l].error != PaintSplitError::None) {
                         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_w);
-                        m_imgui->warning_text(edges == 1 ? _L(paint_split_warning_message(PaintSplitWarning::PlaneFarFromBoundary)) :
-                                                           format_wxstr(_L("Edge %1%: %2%"), l + 1,
-                                                                        _L(paint_split_warning_message(PaintSplitWarning::PlaneFarFromBoundary))));
+                        m_imgui->warning_text(format_wxstr(_L("Edge %1%: %2%"), l + 1, _L(paint_split_error_message(m_cuts[c][l].error))));
                         ImGui::PopTextWrapPos();
                     }
-                if (c < m_caps_missing.size() && m_caps_missing[c] > 0)
-                    note(_L("A cut plane misses the part (shown as a disc). Move it back with Offset."));
             }
             if (m_region.holes_filled[c] > 0)
                 m_imgui->text(format_wxstr(_L("%1% small hole(s) filled"), m_region.holes_filled[c]));
@@ -929,35 +819,22 @@ void GLGizmoPaintSplit::on_render_input_window(float x, float y, float bottom_li
             note(_L("The region is split off as its own piece; the rest of the part becomes one piece per connected remainder."));
     }
 
-    // Cut style (Auto resolves to Plane until Follow paint arrives). The cut faces are drawn in the 3D view and
-    // follow these controls live.
+    // Cut style: Follow paint (owner 2026-11-26; the flat plane per edge reached far into unpainted areas). The cut
+    // surfaces are drawn in the 3D view and follow these controls live.
     ImGui::Separator();
     m_imgui->text(m_desc.at("style"));
     if (ImGui::IsItemHovered())
-        m_imgui->tooltip(_L("How each edge of the region is cut. The teal faces in the 3D view are the cut faces Apply will make, one per edge."), tip_w);
-    if (ImGui::RadioButton(into_u8(m_desc.at("auto")).c_str(), m_style == Style::Auto) && m_style != Style::Auto) {
-        m_style = Style::Auto;
-        dirty   = true;
-    }
-    if (ImGui::IsItemHovered())
-        m_imgui->tooltip(_L("Picks the cut for each edge. Today that is a flat plane fitted to the edge; a cut that follows the paint line comes later."), tip_w);
-    ImGui::SameLine();
-    if (ImGui::RadioButton(into_u8(m_desc.at("plane")).c_str(), m_style == Style::Plane) && m_style != Style::Plane) {
-        m_style = Style::Plane;
-        dirty   = true;
-    }
-    if (ImGui::IsItemHovered())
-        m_imgui->tooltip(_L("A flat cut through each edge: the plane that fits that edge best."), tip_w);
-    note(_L("Each edge gets a flat cut fitted to it, drawn in the 3D view. Offset moves the cuts along their normals; Tilt turns them."));
-    dirty |= slider("##ps_offset", m_desc.at("offset"), &m_offset, -50.f, 50.f, "%.1f mm", 0.1f,
-                    _L("Moves every cut along its normal, in mm. Positive goes into the piece (a smaller piece), negative into the rest of the part."));
-    dirty |= slider("##ps_tilt_u", m_desc.at("tilt_u"), &m_tilt_u, -45.f, 45.f, "%.0f°", 1.f,
-                    _L("Turns every cut about its first in-plane axis, in degrees."));
-    dirty |= slider("##ps_tilt_v", m_desc.at("tilt_v"), &m_tilt_v, -45.f, 45.f, "%.0f°", 1.f,
-                    _L("Turns every cut about its second in-plane axis, in degrees."));
+        m_imgui->tooltip(_L("Each edge of the region is cut along its paint line: on the skin the cut is the paint line itself, inside the part it turns onto a flat face. The teal surfaces in the 3D view are those cuts."), tip_w);
+    note(_L("The cut follows the paint line on the skin, runs in by Depth at Lip angle, then turns onto a flat face inside the part."));
+    dirty |= slider("##ps_depth", m_desc.at("depth"), &m_depth, 0.5f, 10.f, "%.1f mm", 0.1f,
+                    _L("How far the cut runs in from the paint line before it turns onto the flat inner face, in mm. Lowered automatically on small edges."));
+    dirty |= slider("##ps_lip", m_desc.at("lip_angle"), &m_lip_angle, -60.f, 60.f, "%.0f°", 1.f,
+                    _L("The slope of that first part of the cut, in degrees: 0 is a flat shelf, positive slopes away from the edge's outer side, negative towards it. Sloped lips key the pieces together."));
+    dirty |= slider("##ps_smooth", m_desc.at("smoothing"), &m_smoothing, 0.f, 1.f, "%.2f", 0.01f,
+                    _L("How much the paint line is smoothed before it is cut along: 0 follows every facet step of the paint, 1 is smoothest."));
     dirty |= m_imgui->bbl_checkbox(m_desc.at("snap"), m_snap_to_bed);
     if (ImGui::IsItemHovered())
-        m_imgui->tooltip(_L("Makes every cut level (parallel to the bed), so the cut faces print flat."), tip_w);
+        m_imgui->tooltip(_L("Makes the flat inner faces level (parallel to the bed), so they print flat."), tip_w);
 
     // Result
     ImGui::Separator();

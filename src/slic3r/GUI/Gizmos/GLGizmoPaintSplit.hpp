@@ -79,7 +79,8 @@ private:
     void refresh_preview();
     void rebuild_preview();
     void render_preview();
-    PaintSplitPlaneParams plane_params() const;
+    PaintSplitFollowParams follow_params() const;
+    bool cuts_ok(size_t comp) const; // every edge of the component has its cut
     int  masked_part(int *count = nullptr) const;
     Transform3d part_to_cut_frame(int part) const;
 
@@ -99,10 +100,11 @@ private:
     Mode  m_mode{ Mode::Brush };
     Style m_style{ Style::Auto };
     float m_fill_holes_pct{ 10.f };
-    float m_offset{ 0.f };
-    float m_tilt_u{ 0.f };
-    float m_tilt_v{ 0.f };
-    bool  m_snap_to_bed{ false };
+    // Follow paint (the cut style since the owner's hand test 2026-11-26).
+    float m_depth{ 3.f };      // mm
+    float m_lip_angle{ 0.f };  // degrees
+    float m_smoothing{ 0.3f }; // 0..1
+    bool  m_snap_to_bed{ false }; // the flat core level
     bool  m_keep_as_parts{ false };
     bool  m_cut_only_painted_part{ false };
 
@@ -117,13 +119,10 @@ private:
     int                          m_preview_part{ -1 };
     int                          m_masked_parts{ 0 };
     PaintSplitRegion             m_region;     // of m_preview_part, in the cut frame
-    std::vector<std::vector<PaintSplitPlane>> m_planes; // per component, per loop
-    std::vector<int>             m_caps_missing;        // per component: loops whose plane misses the part
+    std::vector<std::vector<PaintSplitFollowCut>> m_cuts; // per component, per loop: the cut Apply makes
     TriangleMesh                 m_cut_mesh;            // m_preview_part's mesh in the cut frame
-    std::vector<Vec3i32>         m_cut_neighbors;       // its facet neighbours (the tint's flood)
-    GLModel                      m_plane_fill;          // the cut faces Apply makes (or discs where none)
-    GLModel                      m_plane_outline;
-    GLModel                      m_tint;
+    GLModel                      m_plane_fill;          // the cut surfaces (band, skirt, core)
+    GLModel                      m_plane_outline;       // the paint lines they follow
     Vec3d                        m_world_offset{ Vec3d::Zero() };
 
     std::map<std::string, wxString> m_desc;

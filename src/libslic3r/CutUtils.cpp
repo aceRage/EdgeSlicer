@@ -2297,9 +2297,12 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
 
     // A region with several loops (a band, a trim with holes) is cut once per loop (keep.planes); the
     // cutters below are then those planes' half-spaces, for placing the other parts (D19).
-    const bool                        multi = keep.planes.size() > 1;
+    const bool                        follow = !keep.cutters.empty();
+    const bool                        multi  = follow || keep.planes.size() > 1;
     std::vector<indexed_triangle_set> cutters;
-    if (multi) {
+    if (follow)
+        cutters = keep.cutters;
+    else if (multi) {
         BoundingBoxf3 bbox;
         for (const ModelVolume* v : mo->volumes)
             if (v->is_model_part() && !v->mesh().empty())
@@ -2312,8 +2315,9 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
     // The masked part first: a refusal must leave nothing cloned.
     const ModelVolume* mask_volume = mo->volumes[size_t(keep.mask_volume_idx)];
     const TriangleMesh mask_mesh   = mesh_in_cut_frame(mask_volume);
-    PaintSplitPieces   pieces      = multi ? paint_split_assign_loops(mask_mesh.its, *keep.region, keep.component, keep.planes, keep.assign) :
-                                             paint_split_assign(mask_mesh.its, *keep.region, keep.component, cutter, piece_inside, keep.assign);
+    PaintSplitPieces   pieces      = follow ? paint_split_assign_cutters(mask_mesh.its, *keep.region, keep.component, keep.cutters, keep.assign) :
+                                     multi  ? paint_split_assign_loops(mask_mesh.its, *keep.region, keep.component, keep.planes, keep.assign) :
+                                              paint_split_assign(mask_mesh.its, *keep.region, keep.component, cutter, piece_inside, keep.assign);
     if (!pieces.ok()) {
         rep.bad_loop = pieces.bad_loop;
         return refuse(pieces.error);
@@ -2380,8 +2384,9 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
         TriangleMesh whole = mesh_in_cut_frame(volume);
         bool         to_piece = false;
         if (!keep.cut_only_painted_part) {
-            const double inside = paint_split_inside_fraction(whole.its, cutters);
-            to_piece            = inside >= 0. && (piece_inside ? inside : 1. - inside) > 0.5;
+            // Follow paint's cutters may hold either side; the piece itself says where the part belongs.
+            const double inside = follow ? paint_split_inside_fraction(whole.its, pieces.piece) : paint_split_inside_fraction(whole.its, cutters);
+            to_piece            = inside >= 0. && (follow || piece_inside ? inside : 1. - inside) > 0.5;
         }
         (to_piece ? rep.other_parts_to_piece : rep.other_parts_to_body)++;
         // Not cut, so not renamed: a part keeps its name through any number of paint splits.
@@ -2422,6 +2427,8 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
 
 const ModelObjectPtrs& Cut::perform_with_paint_split_planes(const PaintSplitKeep& keep, PaintSplitReport* report)
 {
+    if (!keep.cutters.empty() && !m_model.objects.empty())
+        return perform_with_cutter_solid(indexed_triangle_set(), true, keep, report);
     if (keep.planes.empty() || m_model.objects.empty()) {
         if (report != nullptr) {
             *report       = PaintSplitReport();

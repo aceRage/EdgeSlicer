@@ -1233,7 +1233,17 @@ TEST_CASE("Paint split loops: owner's painted figure", "[.][PaintSplitGrinch]")
             if (edges < 2 || r.area[0] < 100.)
                 continue;
             ++tried;
-            const PaintSplitPieces p = paint_split_assign_loops(tm.its, r, 0, paint_split_fit_planes(r, 0));
+            // What Apply does: Follow paint, one draw-cut cutter per edge.
+            std::vector<indexed_triangle_set> cutters;
+            int                               bad_cut = -1;
+            for (size_t l = 0; l < r.loops[0].size(); ++l) {
+                const PaintSplitFollowCut c = paint_split_follow_cut(tm.its, r.loops[0][l], PaintSplitFollowParams(), tm.bounding_box());
+                if (c.error != PaintSplitError::None && bad_cut < 0)
+                    bad_cut = int(l);
+                cutters.push_back(c.cutter);
+            }
+            WARN("  cutters built, first failed edge " << bad_cut);
+            const PaintSplitPieces p = paint_split_assign_cutters(tm.its, r, 0, cutters);
             WARN("state " << s << ": " << edges << " edges, " << r.holes_filled[0] << " holes filled, area " << r.area[0] << " mm2 -> "
                           << (p.ok() ? "ok" : paint_split_error_message(p.error)) << " bad_loop " << p.bad_loop << ", pieces "
                           << (p.ok() ? 2 + p.loose.size() : 0) << ", piece vol " << p.piece_volume << ", body vol " << p.body_volume
@@ -1242,4 +1252,145 @@ TEST_CASE("Paint split loops: owner's painted figure", "[.][PaintSplitGrinch]")
         }
     }
     CHECK(tried > 0);
+}
+
+// ------------------------------------------------------------------------------------------- follow paint
+// Owner hand test 2026-11-26: a flat plane per edge sliced far into unpainted areas (the sack under the
+// trousers, the whole head under the hat). The cut now follows the paint line: a draw-cut band + flat core.
+
+namespace {
+
+std::vector<indexed_triangle_set> ps_follow_cutters(const indexed_triangle_set& mesh, const PaintSplitRegion& r, int comp,
+                                                    const PaintSplitFollowParams& fp = {})
+{
+    std::vector<indexed_triangle_set> out;
+    const BoundingBoxf3               bbox = ps_bbox(mesh);
+    for (const PaintSplitLoop& loop : r.loops[size_t(comp)]) {
+        const PaintSplitFollowCut cut = paint_split_follow_cut(mesh, loop, fp, bbox);
+        REQUIRE(cut.error == PaintSplitError::None);
+        REQUIRE(!cut.preview.indices.empty());
+        out.push_back(cut.cutter);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Paint split follow paint: a band round a cylinder is cut along its two paint lines", "[PaintSplit]")
+{
+    const double               R   = 10.;
+    const int                  SEG = 48;
+    const indexed_triangle_set cyl = ps_ring_cylinder(R, 0., 40., 40, SEG);
+    // A wavy lower edge (the trouser waist under a belt): z = 16 + 2 sin(3 theta); a straight upper one at 24.
+    auto in_band = [](const Vec3d& g) {
+        const double th = std::atan2(g.y(), g.x());
+        return std::hypot(g.x(), g.y()) > 5. && g.z() > 16. + 2. * std::sin(3. * th) && g.z() < 24.;
+    };
+    const auto             mask = ps_mask_where(cyl, [&](int, const Vec3d& g) { return in_band(g); });
+    const PaintSplitRegion r    = paint_split_region(cyl, mask);
+    REQUIRE(r.error == PaintSplitError::None);
+    REQUIRE(r.num_components() == 1);
+    REQUIRE(r.loops[0].size() == 2);
+
+    SECTION("each cut surface stays near its own edge") {
+        const BoundingBoxf3 bbox = ps_bbox(cyl);
+        for (const PaintSplitLoop& loop : r.loops[0]) {
+            PaintSplitFollowParams fp;
+            const PaintSplitFollowCut cut = paint_split_follow_cut(cyl, loop, fp, bbox);
+            REQUIRE(cut.error == PaintSplitError::None);
+            CHECK(cut.separates); // the loop goes round the part
+            Vec3d lc = Vec3d::Zero();
+            for (const DrawCutSample& s : loop.pts)
+                lc += s.pos;
+            lc /= double(loop.pts.size());
+            // Band, skirt and core: within the edge's own radius plus the skirt, nothing model-wide.
+            double far_v = 0.;
+            for (const Vec3f& v : cut.preview.vertices)
+                far_v = std::max(far_v, (v.cast<double>() - lc).norm());
+            CHECK(far_v < R + fp.extension + 4.);
+        }
+    }
+
+    SECTION("the piece is the band: its skin and none of the rest's") {
+        const PaintSplitPieces p = paint_split_assign_cutters(cyl, r, 0, ps_follow_cutters(cyl, r, 0));
+        REQUIRE(p.ok());
+        CHECK(p.loose.size() == 1);
+        CHECK_THAT(p.piece_volume + p.body_volume + p.loose_volume, WithinRel(p.source_volume, 1e-6));
+        // Side facets on the piece's surface: the selected ones are there, the unselected ones are not.
+        const AABBMesh piece(p.piece);
+        double sel_on = 0., sel_all = 0., unsel_on = 0.;
+        for (int i = 0; i < int(cyl.indices.size()); ++i) {
+            const Vec3i32& t = cyl.indices[i];
+            const Vec3d    g = (cyl.vertices[t[0]] + cyl.vertices[t[1]] + cyl.vertices[t[2]]).cast<double>() / 3.;
+            if (std::hypot(g.x(), g.y()) < 5.)
+                continue;
+            const bool on = piece.squared_distance(g) < 1e-4;
+            if (in_band(g)) {
+                sel_all += ps_facet_area(cyl, i);
+                sel_on += on ? ps_facet_area(cyl, i) : 0.;
+            } else if (on)
+                unsel_on += ps_facet_area(cyl, i);
+        }
+        CHECK(sel_on > 0.95 * sel_all);
+        CHECK(unsel_on < 0.05 * sel_all);
+    }
+
+    SECTION("through Cut: new objects, the band's colour on the piece") {
+        Model        model;
+        ModelObject* mo  = model.add_object();
+        mo->name         = "figure";
+        ModelVolume* vol = mo->add_volume(TriangleMesh(cyl));
+        vol->name        = "figure";
+        mo->add_instance();
+        {
+            TriangleSelector sel(vol->mesh());
+            for (int i = 0; i < int(cyl.indices.size()); ++i) {
+                const Vec3i32& t = cyl.indices[i];
+                const Vec3d    g = (cyl.vertices[t[0]] + cyl.vertices[t[1]] + cyl.vertices[t[2]]).cast<double>() / 3.;
+                sel.set_facet(i, in_band(g) ? EnforcerBlockerType::Extruder2 : EnforcerBlockerType::Extruder3);
+            }
+            vol->mmu_segmentation_facets.set_data(sel.serialize());
+        }
+        PaintSplitKeep keep;
+        keep.mask_volume_idx = 0;
+        keep.region          = &r;
+        keep.component       = 0;
+        keep.cutters         = ps_follow_cutters(cyl, r, 0);
+        Cut              cut(mo, 0, Transform3d::Identity(), ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                                                            ModelObjectCutAttribute::KeepPaint);
+        PaintSplitReport rep;
+        const ModelObjectPtrs& res = cut.perform_with_paint_split_planes(keep, &rep);
+        REQUIRE(rep.error == PaintSplitError::None);
+        REQUIRE(res.size() == 2);
+        const double a2_piece = ps_painted_area(res[0], EnforcerBlockerType::Extruder2);
+        const double a2_rest  = ps_painted_area(res[1], EnforcerBlockerType::Extruder2);
+        CHECK(a2_piece > 0.95 * (a2_piece + a2_rest));
+        CHECK(ps_painted_area(res[0], EnforcerBlockerType::Extruder3) < 0.05 * a2_piece);
+    }
+}
+
+TEST_CASE("Paint split follow paint: a patch on one face is a plug, the rest of the part is untouched", "[PaintSplit]")
+{
+    const indexed_triangle_set grid = ps_grid_cube(30., 30); // -15..15, 1 mm facets
+    const auto mask = ps_mask_where(grid, [&](int i, const Vec3d& g) {
+        return its_face_normal(grid, i).x() > 0.9f && std::abs(g.y()) < 6. && std::abs(g.z()) < 6.;
+    });
+    const PaintSplitRegion r = paint_split_region(grid, mask);
+    REQUIRE(r.error == PaintSplitError::None);
+    REQUIRE(r.num_components() == 1);
+    REQUIRE(r.loops[0].size() == 1);
+    PaintSplitFollowParams    fp;
+    const PaintSplitFollowCut cut = paint_split_follow_cut(grid, r.loops[0][0], fp, ps_bbox(grid));
+    REQUIRE(cut.error == PaintSplitError::None);
+    CHECK_FALSE(cut.separates);
+    const PaintSplitPieces p = paint_split_assign_cutters(grid, r, 0, { cut.cutter });
+    REQUIRE(p.ok());
+    // A plug a few mm deep under the patch, nowhere near the rest of the cube.
+    const BoundingBoxf3 pb = ps_bbox(p.piece);
+    CHECK(pb.min.x() > 15. - 3. * fp.depth);
+    CHECK(pb.max.x() < 15. + 1e-3);
+    CHECK(pb.size().y() < 16.);
+    CHECK(pb.size().z() < 16.);
+    CHECK(p.loose.empty());
+    CHECK_THAT(p.piece_volume + p.body_volume, WithinRel(p.source_volume, 1e-6));
 }
