@@ -88,6 +88,7 @@ add_executable(${_TEST_NAME}_tests
 	test_extra_perimeters.cpp
 	test_seam_position.cpp
 	test_seam_overhang_outer.cpp
+	test_seam_placer.cpp
 	test_seam_part_joints.cpp
 	test_seam_autopaint.cpp
 	test_scarf_seam.cpp
