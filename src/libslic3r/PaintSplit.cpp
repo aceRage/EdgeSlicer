@@ -171,12 +171,7 @@ std::vector<PaintSplitLoop> ps_loops(const indexed_triangle_set& its, const std:
             smp.facet  = size_t(he.face);
             loop.pts.push_back(smp);
             loop.length += (its.vertices[he.b] - its.vertices[he.a]).cast<double>().norm();
-            if (const auto it = edges.find(ps_edge_key(he.a, he.b)); it != edges.end())
-                for (int g : it->second)
-                    if (facet_comp[g] != comp) {
-                        loop.across.push_back(ps_tri_centroid(its, size_t(g)));
-                        break;
-                    }
+
             if (he.b == start)
                 break;
             size_t next = size_t(-1);
@@ -187,6 +182,44 @@ std::vector<PaintSplitLoop> ps_loops(const indexed_triangle_set& its, const std:
             cur = next;
         }
         loops.push_back(std::move(loop));
+    }
+    // Each loop's skin across its edge, 1.5 to 4 mm away from it: a cut along the (smoothed) paint line must part
+    // these from the piece. Flooded over the unselected facets from the ones on the edge, each carrying the edge
+    // point it started from.
+    for (PaintSplitLoop& loop : loops) {
+        std::unordered_map<int, Vec3d> origin;
+        std::vector<int>               front;
+        for (const DrawCutSample& smp : loop.pts) {
+            const int f = int(smp.facet);
+            for (int i = 0; i < 3; ++i) {
+                const auto it = edges.find(ps_edge_key(its.indices[f][i], its.indices[f][(i + 1) % 3]));
+                if (it == edges.end())
+                    continue;
+                for (int g : it->second)
+                    if (facet_comp[g] != comp && origin.emplace(g, smp.pos).second)
+                        front.push_back(g);
+            }
+        }
+        for (int ring = 0; ring < 200 && !front.empty() && loop.across.size() < 400; ++ring) {
+            std::vector<int> next;
+            for (int f : front) {
+                const Vec3d  o = origin[f];
+                const double d = (ps_tri_centroid(its, size_t(f)) - o).norm();
+                if (d >= 1.5 && d <= 4.)
+                    loop.across.push_back(ps_tri_centroid(its, size_t(f)));
+                if (d > 4.)
+                    continue;
+                for (int i = 0; i < 3; ++i) {
+                    const auto it = edges.find(ps_edge_key(its.indices[f][i], its.indices[f][(i + 1) % 3]));
+                    if (it == edges.end())
+                        continue;
+                    for (int g : it->second)
+                        if (facet_comp[g] != comp && origin.emplace(g, o).second)
+                            next.push_back(g);
+                }
+            }
+            front = std::move(next);
+        }
     }
     // Each loop's local inward direction: a few facet rings on each side of its edges, the selected side
     // flooded within the component, the other side outside it.
@@ -1340,6 +1373,13 @@ static indexed_triangle_set ps_thicken(indexed_triangle_set surf, double t)
             out.indices.emplace_back(b, a, a + off);
             out.indices.emplace_back(b, a + off, b + off);
         }
+    // Outward whichever way the surface was wound.
+    double vol = 0.;
+    for (const Vec3i32& f : out.indices)
+        vol += out.vertices[f[0]].cast<double>().dot(out.vertices[f[1]].cast<double>().cross(out.vertices[f[2]].cast<double>()));
+    if (vol < 0.)
+        for (Vec3i32& f : out.indices)
+            std::swap(f[1], f[2]);
     return out;
 }
 
@@ -1592,6 +1632,7 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
                 cparts.push_back(std::move(cp));
             }
             const double across_total = double(loop.across.size());
+            BOOST_LOG_TRIVIAL(warning) << "PSDBG edge " << i << ": the sheet (" << C.Volume() << " mm3) leaves " << cparts.size() << " part(s)";
             std::vector<Manifold> kept;
             double                carried = 0., across_on = 0.;
             int                   carrying = 0;
