@@ -826,6 +826,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/Search.hpp
     GUI/Selection.cpp
     GUI/Selection.hpp
+    GUI/SelectedSingleInstance.hpp
     GUI/SelectMachine.cpp
     GUI/SelectMachine.hpp
     GUI/SelectMachinePop.cpp

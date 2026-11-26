@@ -1,5 +1,6 @@
 #include "libslic3r/libslic3r.h"
 #include "Selection.hpp"
+#include "SelectedSingleInstance.hpp"
 #include <cfloat>
 
 #include "3DScene.hpp"
@@ -428,10 +429,14 @@ ModelObject *Selection::get_selected_single_object(int &out_object_idx) const
 
 const ModelInstance *Selection::get_selected_single_intance() const
 {
+    const int instance_idx = get_instance_idx();
+    if (instance_idx < 0)
+        return nullptr;
+
     int  object_idx;
     auto mo = get_selected_single_object(object_idx);
     if (mo) {
-        return mo->instances[get_instance_idx()];
+        return selected_single_instance(mo->instances, instance_idx);
     }
     return nullptr;
 }

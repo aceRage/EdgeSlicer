@@ -159,6 +159,7 @@ add_executable(${_TEST_NAME}_tests
     filament_commands_tests.cpp
     ams_dual_layout_tests.cpp
     gizmo_selection_object_tests.cpp
+    selected_single_instance_tests.cpp
     emboss_picking_tests.cpp
     svg_import_routing_tests.cpp
     emboss_free_transform_tests.cpp
