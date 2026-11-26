@@ -3856,6 +3856,7 @@ void PrintConfigDef::init_fff_params()
                         "to shorten the effective vertical column length and improve Z-axis compression "
                         "buckling resistance. Filament use is preserved. No effect at ~30% sparse infill "
                         "density and above. Only applies when Sparse infill pattern is set to Gyroid.");
+    def->mode       = comAdvanced; // owner 2026-11-25: not in Basic
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("sparse_infill_pattern", coEnum);
@@ -9663,7 +9664,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Balanced"));
     def->enum_labels.push_back(L("Fine text"));
     def->enum_labels.push_back(L("Custom"));
-    def->mode = comSimple;
+    def->mode = comAdvanced; // owner 2026-11-25: the Thin features group is not in Basic
     def->set_default_value(new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
 
     def = this->add("thin_feature_line_width", coPercent);

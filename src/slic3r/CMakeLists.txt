@@ -532,6 +532,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ParamsDialog.cpp
     GUI/ParamsDialog.hpp
     GUI/ParamsPanel.cpp
+    GUI/SettingsViewSelector.cpp
+    GUI/SettingsViewSelector.hpp
     GUI/ParamsPanel.hpp
     GUI/PartPlate.cpp
     GUI/PartPlate.hpp

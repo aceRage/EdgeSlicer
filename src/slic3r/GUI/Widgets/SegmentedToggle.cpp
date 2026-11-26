@@ -71,7 +71,7 @@ SegmentedToggle::SegmentedToggle(wxWindow* parent,
           : StateColor(std::pair(wxColour(g_selectedBg), (int)StateColor::Normal)))
     , m_selectedFg(StateColor(std::pair(wxColour(style == Style::Plain ? g_plainSelectedFg : g_selectedFg), (int)StateColor::Normal)))
 {
-    SetBackgroundColour(style == Style::Plain
+    SetBackgroundColour(style != Style::Boxed
         ? parent->GetBackgroundColour()
         : StateColor::darkModeColorFor(wxColour("#FFFFFF")));
 
@@ -146,7 +146,9 @@ SegmentedToggle::SegmentedToggle(wxWindow* parent,
         outerSizer->Add(btnSizer, 0, wxALL, FromDIP(g_buttonPaddingH));
     } else {
         m_pContainer->SetSizer(btnSizer);
-        outerSizer->Add(m_pContainer, 1, wxEXPAND | wxALL, FromDIP(g_outerMargin));
+        // Pill: no outer margin, so the control is only as tall as its container (28 DIP) and
+        // swapping it with the dropdown never changes the height of the header row it sits in.
+        outerSizer->Add(m_pContainer, 1, wxEXPAND | wxALL, FromDIP(pill ? 0 : g_outerMargin));
     }
     SetSizer(outerSizer);
     Layout();
@@ -181,6 +183,20 @@ void SegmentedToggle::setSegmentToolTip(int index, const wxString& tip)
 {
     if (index >= 0 && index < (int)m_buttons.size() && m_buttons[index] != nullptr)
         m_buttons[index]->SetToolTip(tip);
+}
+
+void SegmentedToggle::setButtonMinWidth(int width_dip)
+{
+    if (m_style == Style::Plain)
+        return;
+    for (Button* btn : m_buttons)
+        if (btn != nullptr)
+            btn->SetMinSize(wxSize(FromDIP(width_dip), btn->GetMinSize().y));
+    if (m_pContainer != nullptr)
+        m_pContainer->InvalidateBestSize();
+    InvalidateBestSize();
+    Layout();
+    Fit();
 }
 
 void SegmentedToggle::bindSelectionCallback(SelectionCallback cb)

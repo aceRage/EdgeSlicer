@@ -282,6 +282,16 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         wxGetApp().app_config->set("user_mode", "simple");
         wxGetApp().app_config->set_bool("developer_mode", false);
         wxGetApp().app_config->save();
+    } else {
+        // Settings views: builds before 2026-11-25 stored Developer mode as user_mode "develop". It loads as
+        // Advanced with Developer mode on (the same lines show), and Developer mode is a flag from now on.
+        std::string user_mode = wxGetApp().app_config->get("user_mode");
+        bool        developer = wxGetApp().app_config->get_bool("developer_mode");
+        if (migrate_legacy_developer_user_mode(user_mode, developer)) {
+            wxGetApp().app_config->set("user_mode", user_mode);
+            wxGetApp().app_config->set_bool("developer_mode", developer);
+            wxGetApp().app_config->save();
+        }
     }
 
     wxGetApp().app_config->set_bool("internal_developer_mode", false);

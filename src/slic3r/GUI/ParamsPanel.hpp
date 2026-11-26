@@ -38,6 +38,7 @@ class StaticBox;
 
 namespace Slic3r {
 namespace GUI {
+class SettingsViewSelector;
 
 ///////////////////////////////////////////////////////////////////////////
 
@@ -87,7 +88,8 @@ class ParamsPanel : public wxPanel
         ScalableButton *m_tips_arrow{nullptr};
         bool m_tips_arror_blink{false};
         wxStaticText* m_title_view { nullptr };
-        SwitchButton* m_mode_view { nullptr };
+        // Basic | Advanced | Bambu (replaced the "Advance" SwitchButton; m_title_view is no longer created).
+        SettingsViewSelector* m_mode_view { nullptr };
         //wxBitmapButton* m_search_button { nullptr };
         wxStaticLine* m_staticline_print { nullptr };
         //wxBoxSizer* m_print_sizer { nullptr };

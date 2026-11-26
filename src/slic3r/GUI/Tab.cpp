@@ -1,6 +1,7 @@
 // #include "libslic3r/GCodeSender.hpp"
 //#include "slic3r/Utils/Serial.hpp"
 #include "Tab.hpp"
+#include "SettingsViewSelector.hpp"
 #include "BambuSetupNoticeDialog.hpp"
 #include "MixedSublayerUi.hpp"
 #include "PresetHints.hpp"
@@ -509,14 +510,9 @@ void Tab::create_preset_tab()
     m_top_sizer->Add(m_search_item, 1, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::ContentMargin()));
 
     if (dynamic_cast<TabPrint*>(this) == nullptr) {
-        m_static_title = new Label(m_top_panel, Label::Body_12, _L("Advance"));
-        m_static_title->Wrap( -1 );
-        // BBS: open this tab by select first
-        m_static_title->Bind(wxEVT_LEFT_UP, [this](auto& e) {
-            restore_last_select_item();
-        });
-        m_top_sizer->Add(m_static_title, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
-        m_mode_view = new SwitchButton(m_top_panel, wxID_ABOUT);
+        // Settings views: Basic | Advanced | Bambu (dropdown when the row is narrow) replaced the "Advance" switch.
+        m_static_title = nullptr;
+        m_mode_view = new SettingsViewSelector(m_top_panel);
         m_top_sizer->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
         m_top_sizer->Add( m_mode_view, 0, wxALIGN_CENTER_VERTICAL);
     }
@@ -2032,6 +2028,9 @@ void Tab::update_changed_ui()
 
     update_custom_dirty();
 
+    // Bambu settings view: lines outside Bambu Studio's list that now differ from the system preset.
+    update_view_exceptions();
+
     decorate();
 
     wxTheApp->CallAfter([this]() {
@@ -2298,7 +2297,7 @@ void Tab::on_roll_back_value(const bool to_sys /*= true*/)
     // When all values are rolled, then we have to update whole tab in respect to the reverted values
     update();
     if (m_active_page)
-        m_active_page->update_visibility(m_mode, true);
+        m_active_page->update_visibility(view_filter(), true);
 
     // BBS: restore all pages in preset, update_dirty also update combobox
     update_dirty();
@@ -2375,9 +2374,72 @@ void Tab::update_mode()
     //if (m_mode_sizer)
     //    m_mode_sizer->SetMode(m_mode);
 
+    if (m_mode_view)
+        m_mode_view->update_from_app();
+    // A view change starts the "shown anyway" set afresh.
+    refresh_view_printer_flag();
+    m_view_exceptions = compute_view_exceptions();
+
     update_visibility();
 
     update_changed_tree_ui();
+}
+
+ViewFilter Tab::view_filter() const
+{
+    ViewFilter filter = view_filter_for_level(m_mode);
+    filter.view       = wxGetApp().get_settings_view();
+    if (filter.bambu()) {
+        filter.bbl_printer = m_view_bbl_printer;
+        filter.changed     = &m_view_exceptions;
+        filter.revealed    = &wxGetApp().settings_view_revealed();
+    }
+    return filter;
+}
+
+void Tab::refresh_view_printer_flag()
+{
+    m_view_bbl_printer = wxGetApp().get_settings_view() == SettingsView::Bambu && m_preset_bundle != nullptr &&
+                         m_preset_bundle->is_bbl_vendor();
+}
+
+std::set<std::string> Tab::compute_view_exceptions()
+{
+    std::set<std::string> keys;
+    if (wxGetApp().get_settings_view() != SettingsView::Bambu || m_presets == nullptr || m_config == nullptr)
+        return keys;
+    if (dynamic_cast<TabPrintModel*>(this) == nullptr && settings_view_reference(*m_presets) == nullptr) {
+        // No system preset to compare with (a root user preset, or an imported preset without "inherits"):
+        // the option defaults (design rule B).
+        keys = options_differing_from_defaults(*m_config);
+    } else {
+        // Rule A: exactly the options whose undo-to-system arrow is active (update_changed_ui: flow-variant
+        // and per-nozzle slots, the extruder count, a model tab's object overrides).
+        for (const auto& [key, status] : m_options_list)
+            if ((status & osSystemValue) == 0)
+                keys.insert(SettingsViewKeys::base_key(key));
+    }
+    add_view_exceptions(keys);
+    return keys;
+}
+
+void Tab::update_view_exceptions()
+{
+    if (wxGetApp().get_settings_view() != SettingsView::Bambu)
+        return;
+    const size_t before = m_view_exceptions.size();
+    for (const std::string& key : compute_view_exceptions())
+        m_view_exceptions.insert(key);
+    // A key newly outside the system preset appears at once; a key reset to the system value stays (sticky)
+    // until the page is rebuilt.
+    if (m_view_exceptions.size() != before && !m_view_refresh_pending) {
+        m_view_refresh_pending = true;
+        wxTheApp->CallAfter([this]() {
+            m_view_refresh_pending = false;
+            if (parent() != nullptr && m_completed)
+                update_visibility();
+        });
+    }
 }
 
 void Tab::update_visibility()
@@ -2385,7 +2447,7 @@ void Tab::update_visibility()
     Freeze(); // There is needed Freeze/Thaw to avoid a flashing after Show/Layout
 
     for (auto page : m_pages)
-        page->update_visibility(m_mode, page.get() == m_active_page);
+        page->update_visibility(view_filter(), page.get() == m_active_page);
     rebuild_page_tree();
 
     if (m_type == Preset::TYPE_SLA_PRINT)
@@ -2418,7 +2480,7 @@ void Tab::msw_rescale()
         bmp->msw_rescale();
 
     if (m_mode_view)
-        m_mode_view->Rescale();
+        m_mode_view->msw_rescale();
 
     if (m_detach_preset_btn)
         m_detach_preset_btn->msw_rescale();
@@ -3097,7 +3159,7 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 
     update();
     if(m_active_page)
-        m_active_page->update_visibility(m_mode, true);
+        m_active_page->update_visibility(view_filter(), true);
     m_page_view->GetParent()->Layout();
 
     if (refresh_mixed_filament_panel && wxGetApp().plater() != nullptr) {
@@ -3136,6 +3198,11 @@ void Tab::update_wiping_button_visibility() {
 void Tab::activate_option(const std::string& opt_key, const wxString& category)
 {
     wxString page_title = translate_category(category, m_type);
+
+    // Bambu settings view: search (and hints) find every Advanced option; jumping to one the view hides
+    // reveals that line in place, with the "Not in Bambu Studio" chip, instead of switching the view.
+    if (view_filter().bambu() && wxGetApp().settings_view_revealed().insert(SettingsViewKeys::base_key(opt_key)).second)
+        update_visibility();
 
     auto cur_item = m_tabctrl->GetFirstVisibleItem();
     if (cur_item < 0)
@@ -3979,6 +4046,8 @@ void TabPrint::build()
                                              L("Sets the prime tower settings of this process to Bambu Studio's defaults for the "
                                                "selected printer. Lists every change before applying it. Filament settings are not changed.") };
             tower_defaults_line.widget = [this](wxWindow* parent) { return tower_defaults_create_widget(parent); };
+            // Owner 2026-11-25: not in Basic (widget-only rows otherwise show at every level).
+            tower_defaults_line.widget_mode = comAdvanced;
             optgroup->append_line(tower_defaults_line);
         }
         optgroup->append_single_option_line("prime_tower_width", "multimaterial_settings_prime_tower#width");
@@ -5056,7 +5125,7 @@ void TabPrint::on_tower_defaults()
     this->load_config(PrimeTowerDefaults::changes_to_apply(*m_config, defaults));
     // Rows the new values show or hide (the rib rows after Wall type = Rib), as on_value_change() does.
     if (m_active_page)
-        m_active_page->update_visibility(m_mode, true);
+        m_active_page->update_visibility(view_filter(), true);
 }
 
 wxSizer* TabPrint::fine_detail_note_create_widget(wxWindow* parent)
@@ -5446,6 +5515,8 @@ void TabPrintModel::build()
 void TabPrintModel::set_model_config(std::map<ObjectBase *, ModelConfig *> const & object_configs)
 {
     m_object_configs = object_configs;
+    // Another selection: its own overrides (update_changed_ui adds them back).
+    m_view_exceptions.clear();
     m_prints.get_selected_preset().config.apply(*m_parent_tab->m_config);
     update_model_config();
 }
@@ -5523,7 +5594,7 @@ void TabPrintModel::update_model_config()
     }
     toggle_options();
     if (m_active_page)
-        m_active_page->update_visibility(m_mode, true); // for taggle line
+        m_active_page->update_visibility(view_filter(), true); // for taggle line
     update_dirty();
     TabPrint::reload_config();
     //update();
@@ -5650,6 +5721,18 @@ void TabPrintModel::update_custom_dirty()
 {
     for (auto k : m_null_keys) m_options_list[k] = 0;
     for (auto k : m_all_keys) m_options_list[k] &= ~osSystemValue;
+}
+
+void TabPrintModel::add_view_exceptions(std::set<std::string>& keys)
+{
+    // What the object / part / layer range overrides is always shown on it (design 3.5), and so is what
+    // the process preset changed (the object shows those values too).
+    for (const std::string& k : m_all_keys)
+        keys.insert(SettingsViewKeys::base_key(k));
+    for (const std::string& k : m_null_keys)
+        keys.insert(SettingsViewKeys::base_key(k));
+    if (m_parent_tab != nullptr)
+        keys.insert(m_parent_tab->view_exceptions().begin(), m_parent_tab->view_exceptions().end());
 }
 
 //BBS: GUI refactor
@@ -9153,6 +9236,9 @@ void Tab::reactive_preset_combo_box()
 void Tab::load_current_preset()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<<boost::format(": enter");
+    // Another preset: its own "shown anyway" lines (update_changed_ui adds them back); maybe another printer.
+    m_view_exceptions.clear();
+    refresh_view_printer_flag();
     // Per-nozzle process P8: a tool's profile shown after another preset was selected for it: the tool uses that one now,
     // and the plate-wide settings show the Plate's values again.
     if (m_type == Preset::TYPE_PRINT && m_preset_bundle != nullptr && m_preset_bundle->nozzle_tool_view() >= 0)
@@ -10081,12 +10167,15 @@ void Tab::activate_selected_page(std::function<void()> throw_if_canceled)
     if (!m_active_page)
         return;
 
-    m_active_page->activate(m_mode, throw_if_canceled);
+    // The page is rebuilt: lines reset to the system value since the last build may go now.
+    refresh_view_printer_flag();
+    m_view_exceptions = compute_view_exceptions();
+    m_active_page->activate(view_filter(), throw_if_canceled);
     update_changed_ui();
     update_description_lines();
     if (m_active_page && !(m_active_page->title() == "Dependencies"))
         toggle_options();
-    m_active_page->update_visibility(m_mode, true); // for taggle line
+    m_active_page->update_visibility(view_filter(), true); // for taggle line
     update_flow_variant_view_visibility();
 }
 
@@ -11032,7 +11121,7 @@ void Page::reload_config()
         group->reload_config();
 }
 
-void Page::update_visibility(ConfigOptionMode mode, bool update_contolls_visibility)
+void Page::update_visibility(const ViewFilter& mode, bool update_contolls_visibility)
 {
     bool ret_val = false;
 #if HIDE_FIRST_SPLIT_LINE
@@ -11053,6 +11142,9 @@ void Page::update_visibility(ConfigOptionMode mode, bool update_contolls_visibil
 #endif
     }
 
+    if (update_contolls_visibility)
+        update_view_footer(mode);
+
     m_show = ret_val;
 #ifdef __WXMSW__
     if (!m_show) return;
@@ -11066,7 +11158,7 @@ void Page::update_visibility(ConfigOptionMode mode, bool update_contolls_visibil
 #endif
 }
 
-void Page::activate(ConfigOptionMode mode, std::function<void()> throw_if_canceled)
+void Page::activate(const ViewFilter& mode, std::function<void()> throw_if_canceled)
 {
 #if 0 // BBS: page title
     if (m_page_title == NULL) {
@@ -11095,6 +11187,7 @@ void Page::activate(ConfigOptionMode mode, std::function<void()> throw_if_cancel
         throw_if_canceled();
     }
 
+
 #ifdef __WXMSW__
     // BBS: fix field control position
     wxTheApp->CallAfter([this]() {
@@ -11104,6 +11197,82 @@ void Page::activate(ConfigOptionMode mode, std::function<void()> throw_if_cancel
         }
     });
 #endif
+}
+
+void Page::ensure_view_footer()
+{
+    // Bambu settings view footer: "N more EdgeSlicer settings on this page - Show all" (mockup
+    // tests/mockups/view_modes.html). Created the first time the active page is shown in the Bambu view,
+    // at the end of the page; nothing is created in Basic / Advanced.
+    if (m_view_footer || m_vsizer == nullptr)
+        return;
+    // Only while this page's groups are the ones in the (shared) page view: an inactive tab keeps its
+    // m_active_page pointer after its controls were cleared for another tab.
+    bool on_screen = false;
+    for (const auto& group : m_optgroups)
+        if (group->sizer != nullptr && m_vsizer->GetItem(group->sizer) != nullptr) {
+            on_screen = true;
+            break;
+        }
+    if (!on_screen)
+        return;
+    auto* footer = new wxPanel(m_parent, wxID_ANY);
+    footer->SetBackgroundColour(m_parent->GetBackgroundColour());
+    footer->SetName(_L("Settings hidden by the Bambu view"));
+    auto* sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto* text  = new Label(footer, Label::Body_12, wxEmptyString);
+    text->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#6B6B6B")));
+    auto* show_all = new Button(footer, _L("Show all"));
+    show_all->SetBorderWidth(0);
+    show_all->SetFont(Label::Body_12);
+    show_all->SetPaddingSize(wxSize(footer->FromDIP(4), 0));
+    show_all->SetBackgroundColor(StateColor(std::pair(m_parent->GetBackgroundColour(), (int) StateColor::Normal)));
+    show_all->SetTextColor(StateColor(std::pair(StateColor::darkModeColorFor(wxColour("#009688")), (int) StateColor::Normal)));
+    show_all->SetCursor(wxCursor(wxCURSOR_HAND));
+    show_all->SetToolTip(_L("Switch the settings view to Advanced: every setting."));
+    show_all->Bind(wxEVT_BUTTON, [](wxCommandEvent&) {
+        wxGetApp().CallAfter([]() { wxGetApp().save_view_choice(ViewChoice::Advanced); });
+    });
+    sizer->Add(text, 0, wxALIGN_CENTER_VERTICAL);
+    sizer->AddSpacer(footer->FromDIP(6));
+    sizer->Add(show_all, 0, wxALIGN_CENTER_VERTICAL);
+    footer->SetSizer(sizer);
+    m_vsizer->Add(footer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, footer->FromDIP(10));
+    m_view_footer      = footer;
+    m_view_footer_text = text;
+}
+
+void Page::update_view_footer(const ViewFilter& filter)
+{
+    if (filter.bambu())
+        ensure_view_footer();
+    if (!m_view_footer)
+        return;
+    // Lines this page shows in Advanced but the Bambu view hides (the per-printer toggles still apply).
+    int hidden = 0;
+    if (filter.bambu()) {
+        const ViewFilter advanced = view_filter_for_level(comAdvanced);
+        for (const auto& group : m_optgroups)
+            for (const Line& line : group->get_lines()) {
+                if (line.is_separator() || line.get_options().empty() || !line.toggle_visible)
+                    continue;
+                const std::vector<std::string> ids  = line_option_ids(line);
+                const ConfigOptionMode         mode = line_mode(line);
+                if (Slic3r::shown(line_show(advanced, ids, mode)) && !Slic3r::shown(line_show(filter, ids, mode)))
+                    ++hidden;
+            }
+    }
+    if (m_view_footer_text)
+        static_cast<wxStaticText*>(m_view_footer_text.get())
+            ->SetLabel(wxString::Format(_L_PLURAL("%d more EdgeSlicer setting on this page", "%d more EdgeSlicer settings on this page", hidden),
+                                        hidden));
+    const bool show = hidden > 0;
+    if (m_view_footer->IsShown() != show || show) {
+        m_view_footer->Show(show);
+        m_view_footer->Layout();
+        if (wxWindow* parent = m_view_footer->GetParent())
+            parent->Layout();
+    }
 }
 
 void Page::clear()

@@ -2798,10 +2798,22 @@ void GCode::PlaceholderParserIntegration::validate_output_vector_variables()
 
 // Collect pairs of object_layer + support_layer sorted by print_z.
 // object_layer & support_layer are considered to be on the same print_z, if they are not further than EPSILON.
-std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObject& object)
+std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObject& object, bool warn, const WipeTowerData *tower)
 {
+    // The support layers: the object's own, plus the tower-only layers of this copy's prime tower, by print_z. On a tie
+    // the object's own layer comes first. Without a tower (every caller so far) these are exactly the object's.
+    std::vector<const SupportLayer*> support_layers = object.support_layers().vector();
+    if (tower != nullptr && !tower->virtual_support_layers.empty()) {
+        std::vector<const SupportLayer*> merged;
+        merged.reserve(support_layers.size() + tower->virtual_support_layers.size());
+        std::merge(support_layers.begin(), support_layers.end(), tower->virtual_support_layers.begin(), tower->virtual_support_layers.end(),
+                   std::back_inserter(merged),
+                   [](const SupportLayer *l1, const SupportLayer *l2) { return l1->print_z < l2->print_z; });
+        support_layers = std::move(merged);
+    }
+
     std::vector<GCode::LayerToPrint> layers_to_print;
-    layers_to_print.reserve(object.layers().size() + object.support_layers().size());
+    layers_to_print.reserve(object.layers().size() + support_layers.size());
 
     /*
     // Calculate a minimum support layer height as a minimum over all extruders, but not smaller than 10um.
@@ -2826,7 +2838,7 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
     size_t              idx_support_layer    = 0;
     const LayerToPrint* last_extrusion_layer = nullptr;
     size_t              last_extrusion_layer_idx = 0;
-    while (idx_object_layer < object.layers().size() || idx_support_layer < object.support_layers().size()) {
+    while (idx_object_layer < object.layers().size() || idx_support_layer < support_layers.size()) {
         LayerToPrint layer_to_print;
         double       print_z_min = std::numeric_limits<double>::max();
         if (idx_object_layer < object.layers().size()) {
@@ -2834,8 +2846,8 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
             print_z_min                 = std::min(print_z_min, layer_to_print.object_layer->print_z);
         }
 
-        if (idx_support_layer < object.support_layers().size()) {
-            layer_to_print.support_layer = object.support_layers()[idx_support_layer++];
+        if (idx_support_layer < support_layers.size()) {
+            layer_to_print.support_layer = support_layers[idx_support_layer++];
             print_z_min                  = std::min(print_z_min, layer_to_print.support_layer->print_z);
         }
 
@@ -2928,7 +2940,7 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
         }
     }
 
-    if (!warning_ranges.empty()) {
+    if (warn && !warning_ranges.empty()) {
         std::string warning;
         size_t      i = 0;
         for (i = 0; i < std::min(warning_ranges.size(), size_t(5)); ++i)

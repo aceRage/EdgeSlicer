@@ -1576,11 +1576,10 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
 
         if (param == "developer_mode") {
             m_developer_mode_def = app_config->get("developer_mode");
-            if (m_developer_mode_def == "true") {
-                Slic3r::GUI::wxGetApp().save_mode(comDevelop);
-            } else {
-                Slic3r::GUI::wxGetApp().save_mode(comAdvanced);
-            }
+            // Settings views (owner, 2026-11-25): Developer mode is a flag on top of the chosen view
+            // (Basic / Advanced / Bambu); toggling it no longer writes user_mode. update_mode() re-reads
+            // the level (Advanced and Bambu reach comDevelop) and the curved tops developer gate.
+            Slic3r::GUI::wxGetApp().update_mode();
         }
 
         // webview  dump_vedio
