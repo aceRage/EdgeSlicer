@@ -1401,12 +1401,30 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
     dp.direction  = params.square_to_bed ? DrawCutDirection::AxisZ : DrawCutDirection::SurfaceNormal;
     dp.extension  = std::max(0., params.extension);
     dp.through_all = false;
-    // A loop round the part separates: Lip angle is the band's slope (0, a flat shelf, by default). A loop on one
-    // side is a plug: its wall goes straight in by Depth (a flat shelf would lie on the skin itself), and Lip
-    // angle drafts that wall.
-    dp.angle_deg  = 0.;
-    out.separates = draw_cut_loop_separates(mesh, stroke, dp);
-    dp.angle_deg  = out.separates ? std::clamp(params.angle_deg, -90., 90.) : std::clamp(90. - std::abs(params.angle_deg), 0., 90.);
+    // The cut spans the loop: the band from the paint line onto a flat core in the loop's own plane, inside the
+    // loop's footprint, and nothing else (not the draw cut's closure). That parts a loop round the part (a waist,
+    // a hat's rim) across its section, and takes a cap under a curved patch (an eye on a head). When the skin
+    // inside the loop lies within Depth of that plane (a patch on a flat face) the cap would be a sliver: the cut
+    // is a plug instead, its wall straight in by Depth (Lip angle drafts it).
+    Vec3d n = Vec3d::UnitZ(), c = Vec3d::Zero();
+    if (!draw_cut_core_plane(stroke, dp, n, c))
+        return out;
+    double r = 0.;
+    for (const DrawCutSample& smp : stroke.path())
+        r = std::max(r, (smp.pos - c).norm());
+    const double centre_depth = std::sqrt(AABBMesh(mesh).squared_distance(c));
+    const bool   plug         = centre_depth < std::max(1., params.depth);
+    out.separates             = !plug;
+    // The skirt must leave the skin even where the paint line sits in a crease (fur trim over a face).
+    dp.extension = std::max(dp.extension, plug ? 2. : 0.3 * r + 1.);
+    if (!plug)
+        dp.angle_deg = std::clamp(params.angle_deg, -90., 90.);
+    else {
+        // + leans along -n (the core normal, whose sign follows the winding): into the part only when the skin's
+        // outward side is +n.
+        const double sign = draw_cut_outward_side(stroke, n, &mesh).dot(n) >= 0. ? 1. : -1.;
+        dp.angle_deg      = sign * std::clamp(90. - std::abs(params.angle_deg), 0., 90.);
+    }
     // Depth, lowered until the band's inset no longer folds the core (a small hole cannot take 3 mm).
     double depth = std::max(0.05, params.depth);
     for (int k = 0; k < 8; ++k) {
@@ -1421,10 +1439,7 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
         return out;
     out.stage = 4;
     out.depth     = depth;
-    out.cutter    = draw_cut_cutter_solid(stroke, dp, bbox, 0., &mesh);
-    if (out.cutter.indices.empty())
-        return out;
-    out.preview = draw_cut_preview_surface(stroke, dp, bbox, 0., &mesh);
+    out.preview = draw_cut_preview_surface(stroke, dp, bbox, 0., nullptr);
     // The cut itself is the band + core sheet only (not the closure the draw cut adds to make a solid, which
     // reaches far past the edge): a thin sheet the region is separated along.
     out.stage = 5;
@@ -1515,6 +1530,8 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
                     if (aabb.squared_distance(q) <= 1e-6)
                         across_on += 1.;
             }
+            BOOST_LOG_TRIVIAL(warning) << "PSDBG edge " << i << ": " << kept.size() << " part(s) kept, " << carried / sel_area
+                                     << " of the selection, " << across_on << " of " << loop.across.size() << " across facets on the piece";
             if (kept.empty()) {
                 out.error    = PaintSplitError::EmptyPiece;
                 out.bad_loop = int(i);
@@ -1533,8 +1550,6 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
             }
             cand = ps_union(kept);
             ColorSplitDetail::require_ok(cand, "piece");
-            BOOST_LOG_TRIVIAL(debug) << "Paint split edge " << i << ": " << kept.size() << " part(s) kept, " << carried / sel_area
-                                     << " of the selection, " << across_on << " of " << loop.across.size() << " across facets on the piece";
         }
 
         // The rest: the part less the piece, seam-free, in connected pieces.

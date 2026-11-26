@@ -174,8 +174,9 @@ indexed_triangle_set paint_split_slab(const PaintSplitPlane& plane, const Boundi
 // ---------------------------------------------------------------------------------------------------------
 // Follow paint (design 3.3a / 4.3a; the default since the owner's hand test 2026-11-26): each boundary loop
 // becomes a closed draw-cut stroke, and the draw cut's band + flat core is the cut surface. The skin line is the
-// paint line; inside, the band runs Depth mm at Lip angle onto a flat core inside the loop's own footprint. A
-// loop round the part is a separation, a loop on one side a plug (draw_cut_loop_separates).
+// paint line; inside, the band runs Depth mm at Lip angle onto a flat core inside the loop's own footprint, and
+// only that surface is cut with (as a thin sheet), so the cut never reaches past the loop. Under a flat patch the
+// cut is a plug Depth deep instead.
 // ---------------------------------------------------------------------------------------------------------
 
 // The thickness of a follow-paint cut sheet, mm. The sheet's material goes to the rest of the part (the rest is
@@ -194,18 +195,17 @@ struct PaintSplitFollowParams
 struct PaintSplitFollowCut
 {
     PaintSplitError      error{ PaintSplitError::None };
-    indexed_triangle_set cutter;   // the closed solid for the boolean
     indexed_triangle_set preview;  // band + skirt + core only: what the gizmo draws
     indexed_triangle_set sheet;    // that surface as a closed sheet PaintSplitSheetThickness thick: what Apply cuts with
     double               depth{ 0. };  // the depth actually used (lowered when the asked one folds)
-    bool                 separates{ false }; // the loop goes round the part (a separation, not a plug)
+    bool                 separates{ false }; // the cut parts the part across the loop (false: a plug under a flat patch)
     bool                 ignored{ false };   // a speck of an edge (under 3 mm round): no cut, no error
     int                  stage{ 0 };          // where a failure happened (0 ok, 1 stroke, 2 self-crossing, 3 folds, 4 cutter): diagnostics
 };
 
 // `mesh` is the part in the region's frame (closed); `bbox` its bounding box. A wavy edge whose stroke crosses
-// itself is retried smoother and coarser. Plugs (an edge on one side of the part) go straight in by Depth, with
-// Lip angle as their wall's draft; separations get Lip angle as the band's slope.
+// itself is retried smoother and coarser. Plugs (a flat patch) go straight in by Depth, with Lip angle as their
+// wall's draft; elsewhere Lip angle is the band's slope.
 PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, const PaintSplitLoop& loop,
                                            const PaintSplitFollowParams& params, const BoundingBoxf3& bbox);
 

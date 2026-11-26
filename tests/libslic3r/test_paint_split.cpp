@@ -1244,6 +1244,11 @@ TEST_CASE("Paint split loops: owner's painted figure", "[.][PaintSplitGrinch]")
                     WARN("  edge " << l << " (" << r.loops[0][l].pts.size() << " samples, " << r.loops[0][l].length << " mm) failed at stage " << c.stage);
                 }
                 cutters.push_back(c.sheet);
+                BoundingBoxf3 sb;
+                for (const Vec3f& v : c.sheet.vertices)
+                    sb.merge(v.cast<double>());
+                WARN("  edge " << l << ": " << r.loops[0][l].length << " mm, separates " << c.separates << ", ignored " << c.ignored << ", depth "
+                               << c.depth << ", sheet " << c.sheet.indices.size() << " faces, size " << (sb.defined ? sb.size().norm() : 0.));
             }
             WARN("  cutters built, first failed edge " << bad_cut);
             const PaintSplitPieces p = paint_split_assign_cutters(tm.its, r, 0, cutters);
