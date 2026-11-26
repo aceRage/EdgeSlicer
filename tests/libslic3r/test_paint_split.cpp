@@ -1085,12 +1085,17 @@ TEST_CASE("Paint split loops: a cap with two holes left open is cut along its th
 
     const std::vector<PaintSplitPlane> planes = paint_split_fit_planes(r, 0);
     REQUIRE(planes.size() == 3);
-    // The outer edge (z = -10) faces up into the region; each hole's cut faces away from its island.
-    CHECK(planes[0].normal.z() > 0.99);
-    for (size_t l = 1; l < 3; ++l) {
-        const Vec3d c = planes[l].point.normalized();
-        CHECK(planes[l].normal.dot(c) < -0.95);
+    // The edge at z = -10 faces up into the region; each hole's cut faces away from its island, towards the
+    // sphere's centre. (Which loop comes first is not part of the contract.)
+    int rims = 0;
+    for (size_t l = 0; l < 3; ++l) {
+        if (planes[l].point.z() < 0.) {
+            ++rims;
+            CHECK(planes[l].normal.z() > 0.99);
+        } else
+            CHECK(planes[l].normal.dot(planes[l].point.normalized()) < -0.95);
     }
+    CHECK(rims == 1);
 
     const PaintSplitPieces p = paint_split_assign_loops(sp, r, 0, planes);
     REQUIRE(p.ok());
