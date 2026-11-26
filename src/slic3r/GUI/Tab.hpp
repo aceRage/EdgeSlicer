@@ -101,8 +101,8 @@ public:
 	size_t		iconID() const { return m_iconID; }
 	void		set_config(DynamicPrintConfig* config_in) { m_config = config_in; }
 	void		reload_config();
-    void        update_visibility(ConfigOptionMode mode, bool update_contolls_visibility);
-    void        activate(ConfigOptionMode mode, std::function<void()> throw_if_canceled);
+    void        update_visibility(const ViewFilter& filter, bool update_contolls_visibility);
+    void        activate(const ViewFilter& filter, std::function<void()> throw_if_canceled);
     void        clear();
     void        msw_rescale();
     void        sys_color_changed();
@@ -440,6 +440,9 @@ public:
 	virtual void	reload_config();
     void            update_mode();
     void            update_visibility();
+    // The settings view this tab shows (level + optional Bambu filter, SettingsView.hpp). The one place the
+    // filter is built: every page / group / line visibility update goes through it.
+    ViewFilter      view_filter() const;
     virtual void    msw_rescale();
     virtual void	sys_color_changed();
 	Field*			get_field(const t_config_option_key& opt_key, int opt_index = -1) const;

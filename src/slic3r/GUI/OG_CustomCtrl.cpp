@@ -493,16 +493,28 @@ void OG_CustomCtrl::OnLeaveWin(wxMouseEvent& event)
     event.Skip();
 }
 
-bool OG_CustomCtrl::update_visibility(ConfigOptionMode mode)
+bool OG_CustomCtrl::update_visibility(const ViewFilter& filter)
 {
     // BBS: new layout
     wxCoord    h_pos = (ctrlWidth + get_title_width() - titleWidth) * m_em_unit;
     wxCoord    h_pos2 = get_title_width() * m_em_unit;
     wxCoord    v_pos = 0;
 
+    // Settings views (SettingsView line_show): in Basic / Advanced / Developer every line is today's
+    // `line_mode <= level`, a widget-only row (no option) counting as Simple. In the Bambu view a
+    // widget-only row follows its group: shown while the group shows at least one option line.
+    bool has_visible_option_line = false;
+    if (filter.bambu())
+        for (const CtrlLine& line : ctrl_lines)
+            if (!line.is_separator() && !line.og_line.get_options().empty() && line.og_line.toggle_visible &&
+                Slic3r::shown(line_show(filter, line_option_ids(line.og_line), line_mode(line.og_line))))
+                has_visible_option_line = true;
+
     bool has_visible_lines = false;
     for (CtrlLine& line : ctrl_lines) {
-        line.update_visibility(mode);
+        line.update_visibility(line.og_line.get_options().empty() ?
+                                   widget_line_show(filter, has_visible_option_line) :
+                                   line_show(filter, line_option_ids(line.og_line), line_mode(line.og_line)));
         if (line.is_visible) {
             v_pos += (wxCoord)line.height;
 
@@ -720,16 +732,18 @@ void OG_CustomCtrl::CtrlLine::msw_rescale()
     correct_items_positions();
 }
 
-void OG_CustomCtrl::CtrlLine::update_visibility(ConfigOptionMode mode)
+void OG_CustomCtrl::CtrlLine::update_visibility(LineShow show)
 {
     if (og_line.is_separator())
         return;
     const std::vector<Option>& option_set = og_line.get_options();
 
     // A widget-only row (no option, e.g. the Printer settings Extruder page's "Nozzles in this project" button and the rack
-    // box) is shown in every mode. front() of its empty option list read null + 0x180 here (owner crash 2026-11-10, clicking
-    // Printer settings > Extruder 1 on any printer).
-    is_visible = og_line.toggle_visible && line_mode(og_line) <= mode;
+    // box) is shown in every mode (Bambu view: while its group shows an option line). front() of its empty option list read
+    // null + 0x180 here (owner crash 2026-11-10, clicking Printer settings > Extruder 1 on any printer): line_mode() and
+    // line_option_ids() handle the empty list.
+    is_visible   = og_line.toggle_visible && Slic3r::shown(show);
+    not_in_bambu = show == LineShow::ShownNotInBambu;
 
     if (draw_just_act_buttons)
         return;

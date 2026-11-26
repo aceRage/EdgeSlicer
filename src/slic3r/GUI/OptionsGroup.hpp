@@ -9,6 +9,7 @@
 
 #include "libslic3r/Config.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/SettingsView.hpp"
 
 #include "Field.hpp"
 #include "I18N.hpp"
@@ -111,6 +112,10 @@ bool line_is_legend(const Line& line);
 ConfigOptionMode line_mode(const Line& line);
 // The first option's key, or nullptr for a line with no option (a widget-only row or a separator).
 const t_config_option_key* line_first_option_id(const Line& line);
+// The ids of a line's options ("key" or "key#index"); empty for a widget-only row or a separator.
+std::vector<std::string> line_option_ids(const Line& line);
+// The filter of a plain level (Basic / Advanced / Developer, no settings view): today's `mode <= level`.
+inline ViewFilter view_filter_for_level(ConfigOptionMode mode) { ViewFilter f; f.level = mode; return f; }
 
 using column_t = std::function<wxWindow*(wxWindow* parent, const Line&)>;
 
@@ -312,8 +317,11 @@ public:
     // return value shows visibility : false => all options are hidden
     void        Hide();
     void        Show(const bool show);
-    bool        is_visible(ConfigOptionMode mode);
-    bool        update_visibility(ConfigOptionMode mode);
+    bool        is_visible(ConfigOptionMode mode) { return is_visible(view_filter_for_level(mode)); }
+    bool        update_visibility(ConfigOptionMode mode) { return update_visibility(view_filter_for_level(mode)); }
+    // Settings views (SettingsView.hpp): the level plus the optional Bambu key filter.
+    bool        is_visible(const ViewFilter& filter);
+    bool        update_visibility(const ViewFilter& filter);
     void        msw_rescale();
     void        sys_color_changed();
     void        refresh();

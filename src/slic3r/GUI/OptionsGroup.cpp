@@ -261,6 +261,14 @@ ConfigOptionMode line_mode(const Line& line)
     return options.empty() ? comSimple : options.front().opt.mode;
 }
 
+std::vector<std::string> line_option_ids(const Line& line)
+{
+    std::vector<std::string> ids;
+    for (const Option& opt : line.get_options())
+        ids.push_back(opt.opt_id);
+    return ids;
+}
+
 const t_config_option_key* line_first_option_id(const Line& line)
 {
     const std::vector<Option>& options = line.get_options();
@@ -796,36 +804,46 @@ void ConfigOptionsGroup::Show(const bool show)
 #endif /* __WXGTK__ */
 }
 
-bool ConfigOptionsGroup::is_visible(ConfigOptionMode mode)
+bool ConfigOptionsGroup::is_visible(const ViewFilter& filter)
 {
+    if (!filter.bambu())
+        // Basic / Advanced / Developer: today's rule over the modes stored when the lines were added
+        // (empty group visible, otherwise visible when any line's mode <= level).
+        return group_visible(filter, m_options_mode, {});
     if (m_options_mode.empty())
         return true;
-    if (m_options_mode.size() == 1)
-        return m_options_mode[0] <= mode;
-
-    size_t hidden_row_cnt = 0;
-    for (auto opt_mode : m_options_mode)
-        if (opt_mode > mode)
-            hidden_row_cnt++;
-
-    return hidden_row_cnt != m_options_mode.size();
+    // Bambu view: needs each line's keys, so it reads the group's current lines (TabPrintModel::build
+    // drops lines after they were added; m_options_mode keeps their modes).
+    std::vector<ConfigOptionMode>         modes;
+    std::vector<std::vector<std::string>> ids;
+    for (const Line& line : m_lines)
+        if (!line.is_separator() && !line.get_options().empty()) {
+            modes.push_back(line_mode(line));
+            ids.push_back(line_option_ids(line));
+        }
+    return group_visible(filter, modes, ids);
 }
 
-bool ConfigOptionsGroup::update_visibility(ConfigOptionMode mode)
+bool ConfigOptionsGroup::update_visibility(const ViewFilter& filter)
 {
 	if (m_options_mode.empty() || !m_grid_sizer)
 		return true;
 
     if (custom_ctrl) {
-        bool show = custom_ctrl->update_visibility(mode);
+        bool show = custom_ctrl->update_visibility(filter);
         this->Show(show);
         return show;
     }
 
+    // Basic / Advanced / Developer: `opt_mode <= level`, exactly as before (SettingsView line_show).
+    auto line_shown = [&filter](const Line& line, ConfigOptionMode opt_mode) {
+        return Slic3r::shown(line_show(filter, line_option_ids(line), opt_mode));
+    };
+
 	int opt_mode_size = m_options_mode.size();
 	if (m_grid_sizer->GetEffectiveRowsCount() != opt_mode_size &&
 		opt_mode_size == 1)
-		return m_options_mode[0] <= mode;
+		return line_shown(m_lines.front(), m_options_mode[0]);
 
 	Show(true);
 
@@ -835,7 +853,7 @@ bool ConfigOptionsGroup::update_visibility(ConfigOptionMode mode)
     Line * line = &m_lines.front();
     size_t line_opt_end = line->get_options().size();
     for (auto opt_mode : m_options_mode) {
-        const bool show = opt_mode <= mode && line->toggle_visible;
+        const bool show = line_shown(*line, opt_mode) && line->toggle_visible;
         if (--line_opt_end == 0) {
             ++line;
             line_opt_end = line->get_options().size();

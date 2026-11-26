@@ -108,6 +108,18 @@ LineShow widget_line_show(const ViewFilter &filter, bool group_has_visible_optio
     return group_has_visible_option_line ? LineShow::Shown : LineShow::Hidden;
 }
 
+bool group_visible(const ViewFilter &filter, const std::vector<ConfigOptionMode> &line_modes,
+                   const std::vector<std::vector<std::string>> &line_ids)
+{
+    if (line_modes.empty())
+        return true;
+    static const std::vector<std::string> no_ids;
+    for (size_t i = 0; i < line_modes.size(); ++i)
+        if (shown(line_show(filter, i < line_ids.size() ? line_ids[i] : no_ids, line_modes[i])))
+            return true;
+    return false;
+}
+
 const Preset *settings_view_reference(const PresetCollection &presets)
 {
     const Preset *parent = presets.get_selected_preset_parent();

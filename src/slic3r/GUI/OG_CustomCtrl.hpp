@@ -46,6 +46,8 @@ class OG_CustomCtrl :public wxPanel
         bool draw_mode_bitmap       { true };
         bool is_visible             { true };
         bool is_focused             { false };
+        // Shown in the Bambu settings view although Bambu Studio does not show it (the "Not in Bambu Studio" chip).
+        bool not_in_bambu           { false };
 
         CtrlLine(   wxCoord         height,
                     OG_CustomCtrl*  ctrl,
@@ -57,7 +59,7 @@ class OG_CustomCtrl :public wxPanel
         int     get_max_win_width();
         void    correct_items_positions();
         void    msw_rescale();
-        void    update_visibility(ConfigOptionMode mode);
+        void    update_visibility(LineShow show);
 
         void render_separator(wxDC& dc, wxCoord v_pos);
 
@@ -92,7 +94,8 @@ public:
     void    OnLeaveWin(wxMouseEvent& event);
 
     void    init_ctrl_lines();
-    bool    update_visibility(ConfigOptionMode mode);
+    bool    update_visibility(ConfigOptionMode mode) { return update_visibility(view_filter_for_level(mode)); }
+    bool    update_visibility(const ViewFilter& filter);
     void    correct_window_position(wxWindow* win, const Line& line, Field* field = nullptr);
     void    correct_widgets_position(wxSizer* widget, const Line& line, Field* field = nullptr);
     void    init_max_win_width();
