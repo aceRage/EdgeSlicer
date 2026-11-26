@@ -89,10 +89,10 @@ DynamicPrintConfig machine_config(const Machine &m, bool per_object, bool by_obj
 }
 
 // A 20 x 20 x 1 mm cube: walls in filament 1 and infill in filament `infill` (2: every layer changes filament).
-ModelObject *add_cube(Model &model, const std::string &name, int infill)
+ModelObject *add_cube(Model &model, const std::string &name, int infill, const Vec3f &scale = Vec3f(1.f, 1.f, 0.05f))
 {
     TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
-    cube.scale(Vec3f(1.f, 1.f, 0.05f));
+    cube.scale(scale);
     ModelObject *object = model.add_object();
     object->name        = name;
     object->add_volume(cube);
@@ -291,12 +291,14 @@ TEST_CASE("Object towers: each tower stands beside its copy, on the bed, clear o
 
 TEST_CASE("Object towers: a copy that has no room keeps printing, without a tower and with a notice", "[ObjectTowers]")
 {
-    // A tower far wider than the bed fits beside no copy.
+    // Two 110 x 230 mm slabs side by side fill the X1C's bed: no side of either has room for a tower.
     Print print;
     Model model;
-    add_row(model, X1C, { 2, 2 }, 110.);
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = add_cube(model, "slab" + std::to_string(i), 2, Vec3f(5.5f, 11.5f, 0.05f));
+        place(object, Vec2d(64. + 128. * i, 128.));
+    }
     DynamicPrintConfig cfg = machine_config(X1C, true);
-    cfg.set_deserialize_strict({ { "prime_tower_width", 300 } });
     std::vector<StringObjectException> warnings;
     REQUIRE(apply_validate(print, model, cfg, X1C, &warnings).string.empty());
     const ObjectTowerPlan plan = print.plan_object_towers();
@@ -366,8 +368,10 @@ TEST_CASE("Object towers: G-code per block (X1C, two 2-colour cubes)", "[ObjectT
         size_t                 planned = 0;
         for (const std::vector<WipeTower::ToolChangeResult> &layer : tower->data->tool_changes)
             planned += layer.size();
+        CHECK(planned > 0);
         CHECK(count_of(blocks[i], TOWER_START) > 0);
-        CHECK(count_of(blocks[i], TOWER_START) <= planned);
+        // Every tower section that starts in the block ends in it.
+        CHECK(count_of(blocks[i], TOWER_START) == count_of(blocks[i], "WIPE_TOWER_END"));
     }
     // The summed statistics are the towers' own.
     std::vector<float> sum(print.config().filament_diameter.size(), 0.f);
