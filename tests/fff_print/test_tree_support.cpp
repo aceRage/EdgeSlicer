@@ -451,3 +451,58 @@ TEST_CASE("Tree support resting on the model gets every bottom interface layer a
     CHECK(above_plate == interface_layers);
     CHECK(between_plates == 0);
 }
+
+// Ported from OrcaSlicer #17700. Hybrid tree support grows its first layer by
+// raft_first_layer_expansion after the support was clipped to the bed, so the grown
+// footprint must be clipped again.
+TEST_CASE("Hybrid tree support first layer expansion stays on the bed", "[TreeSupport][Regression]")
+{
+    const double bed_max_x = 56.;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "printable_area",             "0x0,56x0,56x100,0x100" },
+        { "enable_support",             1 },
+        { "support_type",               "tree(auto)" },
+        { "support_style",              "tree_hybrid" },
+        { "raft_layers",                0 },
+        { "raft_first_layer_expansion", 5 },
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+    });
+    // A block with a ledge that overhangs to 2 mm from the bed's right edge, closer than the expansion.
+    TriangleMesh block = make_cube(20, 40, 8);
+    TriangleMesh ledge = make_cube(9.1, 40, 1.9);
+    block.translate(25.f, 30.f, 0.f);
+    // The ledge overlaps the block rather than touching it; a coplanar join slices ambiguously.
+    ledge.translate(44.9f, 30.f, 6.f);
+    block.merge(ledge);
+
+    // Edge's init_print() always runs arrange_objects(), which would move the ledge off the bed
+    // edge this case is built around. Place the instance ourselves, as in the Snap995 case above.
+    Slic3r::Model model;
+    ModelObject *model_object = model.add_object();
+    model_object->name = "ledge.stl";
+    model_object->add_volume(std::move(block));
+    model_object->add_instance();
+    model_object->ensure_on_bed();
+
+    Slic3r::Print print;
+    print.auto_assign_extruders(model_object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    print.process();
+
+    const PrintObject *object = print.objects().front();
+    REQUIRE(!object->support_layers().empty());
+    Points first_layer;
+    object->support_layers().front()->support_fills.collect_points(first_layer);
+    REQUIRE(!first_layer.empty());
+    const Point shift = object->instances().front().shift;
+    double max_x = 0.;
+    for (const Point &pt : first_layer)
+        max_x = std::max(max_x, unscaled<double>(pt.x() + shift.x()));
+    // Without the expansion the support stops near the ledge's edge at 54 mm, so this shows the expansion ran.
+    REQUIRE(max_x > 55.);
+    CHECK(max_x <= bed_max_x);
+}
