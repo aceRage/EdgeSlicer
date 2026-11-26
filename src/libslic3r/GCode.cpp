@@ -12025,6 +12025,62 @@ static bool overhang_fan_on_for_role(int overhang_fan_threshold, ExtrusionRole r
            role == erBridgeInfill || role == erOverhangPerimeter;
 }
 
+// Bambu Studio 02.09.01.70 GCode.cpp:7519-7520: "path.role() > erNone && path.role() <= erGapFill". Our enum has
+// roles of its own in that range (over-support walls and surfaces, internal bridges), which are object extrusions
+// like their neighbours, so they are slowed down too.
+bool height_slowdown_role(ExtrusionRole role)
+{
+    switch (role) {
+    case erPerimeter:
+    case erExternalPerimeter:
+    case erOverhangPerimeter:
+    case erOverSupportPerimeter:
+    case erInternalInfill:
+    case erSolidInfill:
+    case erTopSolidInfill:
+    case erBottomSurface:
+    case erBottomSurfaceOverSupport:
+    case erIroning:
+    case erBridgeInfill:
+    case erInternalBridgeInfill:
+    case erGapFill: return true;
+    default: return false;
+    }
+}
+
+// Bambu Studio 02.09.01.70 GCode.cpp:7522-7540.
+HeightSlowdown height_slowdown_limits(bool enabled, double start_height, double end_height, double start_speed, double end_speed,
+                                      double start_acc, double end_acc, double print_z)
+{
+    HeightSlowdown out;
+    if (!enabled || start_height >= end_height || print_z < start_height)
+        return out;
+    out.active = true;
+    if (print_z > end_height) { // above the ending height: the ending values
+        out.max_speed = end_speed;
+        out.max_acc   = end_acc;
+    } else { // linear between the two heights
+        const double t = (print_z - start_height) / (end_height - start_height);
+        out.max_speed  = t * (end_speed - start_speed) + start_speed;
+        out.max_acc    = start_acc - (start_acc - end_acc) * t;
+    }
+    return out;
+}
+
+// Bambu Studio 02.09.01.70 GCode::slowDownByHeight (GCode.cpp:7513-7563): the values read with NOZZLE_CONFIG,
+// here with process_flow_value (the process variant of the current filament).
+HeightSlowdown GCode::height_slowdown_for(const ExtrusionPath &path)
+{
+    if (m_layer == nullptr || !height_slowdown_role(path.role()) || !this->process_flow_value(m_config.enable_height_slowdown))
+        return {};
+    return height_slowdown_limits(true, this->process_flow_value(m_config.slowdown_start_height),
+                                  this->process_flow_value(m_config.slowdown_end_height),
+                                  this->process_flow_value(m_config.slowdown_start_speed),
+                                  this->process_flow_value(m_config.slowdown_end_speed),
+                                  this->process_flow_value(m_config.slowdown_start_acc),
+                                  this->process_flow_value(m_config.slowdown_end_acc), m_layer->print_z);
+}
+
 std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_description, double speed)
 {
     std::string gcode;
@@ -12053,6 +12109,23 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     const bool   curved_top    = zaa_contoured && path.z_contour->curved_top;
     const double curved_safe_z = curved_top ? zaa_base_z + double(path.z_contour->safe_z_delta) : zaa_base_z;
     // Curved tops P3: the developer overrides in force, listed before the block's first path.
+    // Bambu Studio 02.09.01.70 GCode.cpp:7599-7606: the height slowdown of this path. While the nozzle travels to the
+    // path's first point, the travel speeds are capped too (and travel_to() caps the travel acceleration and jerk
+    // through m_height_slowdown_travel); GCode.cpp:7620-7627 restores them right after that travel.
+    const HeightSlowdown height_slowdown = this->height_slowdown_for(path);
+    std::vector<double>  saved_travel_speed;
+    double               saved_travel_speed_z = 0.;
+    if (height_slowdown.active) {
+        saved_travel_speed   = m_writer.config.travel_speed.values;
+        saved_travel_speed_z = m_writer.config.travel_speed_z.value;
+        for (double &v : m_writer.config.travel_speed.values)
+            if (!std::isnan(v))
+                v = std::min(v, height_slowdown.max_speed);
+        if (!std::isnan(m_writer.config.travel_speed_z.value))
+            m_writer.config.travel_speed_z.value = std::min(m_writer.config.travel_speed_z.value, height_slowdown.max_speed);
+        m_height_slowdown_travel = height_slowdown;
+    }
+
     if (curved_top && !path.z_contour->block_comment.empty())
         gcode += path.z_contour->block_comment;
     if (curved_top)
@@ -12092,6 +12165,13 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             gcode += this->writer().travel_to_z(sloped == nullptr ? zaa_first_z : m_nominal_z, z_sync_comment, true);
         }
         m_need_change_layer_lift_z = false;
+    }
+
+    // Bambu Studio 02.09.01.70 GCode.cpp:7620-7627: restore the travel speed and acceleration.
+    if (height_slowdown.active) {
+        m_writer.config.travel_speed.values  = saved_travel_speed;
+        m_writer.config.travel_speed_z.value = saved_travel_speed_z;
+        m_height_slowdown_travel             = HeightSlowdown();
     }
 
     // ZAA: land on this path's own starting Z whatever the previous path left behind - a contoured
@@ -12158,6 +12238,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         } else {
             acceleration = this->process_flow_value(m_config.default_acceleration);
         }
+        // Bambu Studio 02.09.01.70 GCode.cpp:7663-7664.
+        if (height_slowdown.active)
+            acceleration = std::min(acceleration, height_slowdown.max_acc);
         acceleration_i = (unsigned int) floor(acceleration + 0.5);
     }
 
@@ -12176,6 +12259,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         } else {
             jerk = this->process_flow_value(m_config.default_jerk);
         }
+        // Bambu Studio 02.09.01.70 GCode.cpp:7681-7682 (its jerk block runs only off Bambu Lab printers).
+        if (height_slowdown.active && !this->is_BBL_Printer())
+            jerk = std::min(jerk, height_slowdown.max_speed);
     }
 
     if (!skip_accel_jerk_switch_for_short_pointillism) {
@@ -12492,6 +12578,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         }
     }
 
+    // Bambu Studio 02.09.01.70 GCode.cpp:7847-7848: the height slowdown caps the speed last, after the first layer
+    // speeds and the volumetric cap (and here after resonance avoidance, which can raise a speed).
+    if (height_slowdown.active)
+        speed = std::min(speed, height_slowdown.max_speed);
+
     bool                        variable_speed = false;
     // Orca #16297: the overhang fan is on along the whole path (a uniform fan state the constant-speed branch's
     // path-wide marker can carry).
@@ -12598,6 +12689,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         if (!overhang_speed_on)
             for (ProcessedPoint &point : new_points)
                 point.speed = speed;
+        // Bambu caps the overhang speeds as well (they are path speeds there, set before GCode.cpp:7847).
+        if (height_slowdown.active)
+            for (ProcessedPoint &point : new_points)
+                point.speed = std::min(point.speed, float(height_slowdown.max_speed));
         variable_speed = std::any_of(new_points.begin(), new_points.end(), [speed](const ProcessedPoint& p) {
             return fabs(double(p.speed) - speed) > 1;
         }); // Ignore small speed variations (under 1mm/sec)
@@ -13408,6 +13503,10 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
             } else {
                 if (this->process_flow_value(m_config.travel_acceleration) > 0)
                     acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5);
+                // Bambu Studio 02.09.01.70 GCode.cpp:7553-7555: the height slowdown caps the travel acceleration
+                // (m_travel_accelerations only: not the first layer's nor the short-travel one).
+                if (m_height_slowdown_travel.active)
+                    acceleration_to_set = std::min(acceleration_to_set, (unsigned int) m_height_slowdown_travel.max_acc);
             }
         }
         if (this->process_flow_value(m_config.default_jerk) > 0) {
@@ -13417,6 +13516,9 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
             } else {
                 if (this->process_flow_value(m_config.travel_jerk) > 0)
                     jerk_to_set = this->process_flow_value(m_config.travel_jerk);
+                // Bambu Studio 02.09.01.70 GCode.cpp:7556-7557 (off Bambu Lab printers).
+                if (m_height_slowdown_travel.active && !this->is_BBL_Printer())
+                    jerk_to_set = std::min(jerk_to_set, m_height_slowdown_travel.max_speed);
             }
         }
     }
@@ -13539,6 +13641,12 @@ std::string GCode::curved_tops_travel_to(const Point& point, ExtrusionRole role,
         acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5);
     if (this->process_flow_value(m_config.default_jerk) > 0 && this->process_flow_value(m_config.travel_jerk) > 0)
         jerk_to_set = this->process_flow_value(m_config.travel_jerk);
+    // Height slowdown (Bambu Studio 02.09.01.70 GCode.cpp:7553-7557), as travel_to() applies it.
+    if (m_height_slowdown_travel.active) {
+        acceleration_to_set = std::min(acceleration_to_set, (unsigned int) m_height_slowdown_travel.max_acc);
+        if (!this->is_BBL_Printer())
+            jerk_to_set = std::min(jerk_to_set, m_height_slowdown_travel.max_speed);
+    }
     if (m_writer.get_gcode_flavor() == gcfKlipper) {
         gcode += m_writer.set_accel_and_jerk(acceleration_to_set, jerk_to_set);
     } else {

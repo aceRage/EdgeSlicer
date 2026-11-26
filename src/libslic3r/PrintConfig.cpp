@@ -1873,6 +1873,75 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBools { true });
 
+    // Bambu Studio 02.09.01.70 height slowdown (PrintConfig.cpp:2169-2232, used by GCode::slowDownByHeight,
+    // GCode.cpp:7513-7563). Same keys, labels and defaults; per process variant like Bambu's NOZZLE_CONFIG
+    // (process_flow_variant_options).
+    def = this->add("enable_height_slowdown", coBools);
+    def->label = L("Slow down by height");
+    def->category = L("Speed");
+    def->tooltip = L("Enable this option to slow printing down by height.\n\n"
+                     "From Starting height to Ending height, the print speed, the travel speed and the "
+                     "accelerations of walls, infill and gap fill are capped by a limit that goes linearly "
+                     "from the starting to the ending values. Above Ending height the ending values apply. "
+                     "Below Starting height nothing is capped. Tall, narrow prints wobble less this way.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBools { false });
+
+    def = this->add("slowdown_start_height", coFloats);
+    def->label = L("Starting height");
+    def->category = L("Speed");
+    def->tooltip = L("The height starts to slow down");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0. });
+
+    def = this->add("slowdown_start_speed", coFloats);
+    def->label = L("Speed at starting height");
+    def->category = L("Speed");
+    def->tooltip = L("The speed limit at Starting height. Print and travel speeds above it are lowered to it.");
+    def->sidetext = L("mm/s");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 1000. });
+
+    def = this->add("slowdown_start_acc", coFloats);
+    def->label = L("Acceleration at starting height");
+    def->category = L("Speed");
+    def->tooltip = L("The acceleration limit at Starting height. Print and travel accelerations above it are lowered to it.");
+    def->sidetext = u8"mm/s²";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 100000. });
+
+    def = this->add("slowdown_end_height", coFloats);
+    def->label = L("Ending height");
+    def->category = L("Speed");
+    def->tooltip = L("The height finishes slowing down, "
+                     "Ending height should be larger than Starting height, or the slowing down will not work!");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 400. });
+
+    def = this->add("slowdown_end_speed", coFloats);
+    def->label = L("Speed at ending height");
+    def->category = L("Speed");
+    def->tooltip = L("The speed limit at Ending height and above.");
+    def->sidetext = L("mm/s");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 1000. });
+
+    def = this->add("slowdown_end_acc", coFloats);
+    def->label = L("Acceleration at ending height");
+    def->category = L("Speed");
+    def->tooltip = L("The acceleration limit at Ending height and above.");
+    def->sidetext = u8"mm/s²";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 100000. });
+
     // Port of Neotko Overhang Shadow (cf1255c). Off by default; no Libre Mode lock; not enabled in any profile.
     def = this->add("overhang_shadow_inner_wall", coBool);
     def->label = L("Slow down inner walls next to overhangs");
@@ -4238,6 +4307,19 @@ void PrintConfigDef::init_fff_params()
     def->max_literal = 10;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
+
+    // Bambu Studio 02.09.01.70 (PrintConfig.cpp:3994-4005, used by PrintRegion::flow, PrintRegion.cpp:30-31).
+    def = this->add("initial_layer_infill_line_width", coFloat);
+    def->label = L("Initial layer infill");
+    def->category = L("Quality");
+    def->tooltip = L("Line width of the infill of initial layer, including sparse infill, solid infill and top surface. "
+                     "Walls, support and everything else of the initial layer are not affected and keep using the line width "
+                     "of initial layer. Zero means to use the line width of initial layer.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max_literal = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
 
     def = this->add("initial_layer_print_height", coFloat);
@@ -11828,6 +11910,14 @@ const std::vector<std::string>& process_flow_variant_options()
         "overhang_3_4_speed",
         "overhang_4_4_speed",
         "enable_overhang_speed",
+        // Bambu Studio 02.09.01.70 height slowdown: NOZZLE_CONFIG (per variant) in GCode::slowDownByHeight.
+        "enable_height_slowdown",
+        "slowdown_start_height",
+        "slowdown_start_speed",
+        "slowdown_start_acc",
+        "slowdown_end_height",
+        "slowdown_end_speed",
+        "slowdown_end_acc",
         "slowdown_for_curled_perimeters",
         "default_acceleration",
         "outer_wall_acceleration",
