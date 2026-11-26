@@ -114,6 +114,7 @@ add_executable(${_TEST_NAME}_tests
     hms_actions_tests.cpp
     remote_error_actions_tests.cpp
     plate_focus_hide_tests.cpp
+    dialog_work_area_tests.cpp
     gizmo_volume_refs_tests.cpp
     camera_projection_type_tests.cpp
     plate_print_slots_tests.cpp
