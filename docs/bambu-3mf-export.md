@@ -78,7 +78,6 @@ per-object, per-part and per-height-range settings):
    `support_ironing` -> `enable_support_ironing`, `extruder_clearance_radius` ->
    `extruder_clearance_max_radius`, `dont_slow_down_outer_wall` ->
    `no_slow_down_for_cooling_on_outwalls`, `role_based_wipe_speed` -> `role_base_wipe_speed`,
-   `reduce_infill_retraction` -> `reduce_infill_retraction_mode` (`Enabled` / `Disabled`),
    `wipe_tower_rib_width` / `_extra_rib_length` / `_fillet_wall` / `_max_purge_speed` ->
    `prime_tower_*`, `wipe_tower_wall_type` -> `prime_tower_rib_wall` (`rib` = on; Bambu has no
    cone tower, a cone goes out as off), and since 2026-09-22 `lateral_lattice_angle_1/2` ->

@@ -4238,7 +4238,7 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
         optgroup->append_single_option_line("fuzzy_skin_skip_overhangs", "others_settings_fuzzy_skin#skip-fuzzy-skin-on-overhangs");
 
         optgroup = page->new_optgroup(L("G-code output"), L"param_gcode");
-        optgroup->append_single_option_line("reduce_infill_retraction", "others_settings_g_code_output#reduce-infill-retraction");
+        optgroup->append_single_option_line("reduce_infill_retraction_mode", "others_settings_g_code_output#reduce-infill-retraction");
         optgroup->append_single_option_line("gcode_add_line_number", "others_settings_g_code_output#add-line-number");
         optgroup->append_single_option_line("gcode_comments", "others_settings_g_code_output#verbose-g-code");
         optgroup->append_single_option_line("gcode_label_objects", "others_settings_g_code_output#label-objects");
@@ -6433,6 +6433,8 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_is_support");
         // Orca #10780 (Bambu Studio Tab.cpp): developer mode only.
         optgroup->append_single_option_line("filament_adhesiveness_category");
+        // Bambu Studio 02.09.01.70 Tab.cpp:4804: read by Process > Others > Reduce infill retraction = Auto.
+        optgroup->append_single_option_line("filament_metal_stickiness");
         //optgroup->append_single_option_line("filament_colour");
         optgroup->append_single_option_line("required_nozzle_HRC");
         optgroup->append_single_option_line("default_filament_colour");

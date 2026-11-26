@@ -480,6 +480,22 @@ static const t_config_enum_values s_keys_map_StabilizerMode = {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(StabilizerMode)
 
+// Bambu Studio 02.09.01.70 PrintConfig.cpp:929-942.
+static const t_config_enum_values s_keys_map_ReduceInfillRetractionMode = {
+    { "Disabled", rirDisabled },
+    { "Auto",     rirAuto },
+    { "Enabled",  rirEnabled }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(ReduceInfillRetractionMode)
+
+static const t_config_enum_values s_keys_map_FilamentMetalStickiness = {
+    { "None",   fmsNone },
+    { "Low",    fmsLow },
+    { "Medium", fmsMedium },
+    { "High",   fmsHigh }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FilamentMetalStickiness)
+
 static const t_config_enum_values s_keys_map_StabilizerColumnShape = {
     { "round",        scsRound       },
     { "rounded_rect", scsRoundedRect },
@@ -3737,6 +3753,26 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionInts{ 0 });
+
+    // Bambu Studio 02.09.01.70 PrintConfig.cpp:3310-3327 (Filament > Basic information).
+    def = this->add("filament_metal_stickiness", coEnums);
+    def->label = L("Metal stickiness");
+    def->tooltip = L("Indicates how strongly the filament tends to stick to the metal nozzle and leave residue. "
+                     "\"None\" means untested or custom filament, behaves the same as Low. "
+                     "Low: e.g. PLA - retraction can be safely skipped in infill areas. "
+                     "Medium: moderate stickiness - use with caution. "
+                     "High: e.g. PETG - retraction should not be skipped to avoid oozing artifacts on outer walls.");
+    def->enum_keys_map = &ConfigOptionEnum<FilamentMetalStickiness>::get_enum_values();
+    def->enum_values.push_back("None");
+    def->enum_values.push_back("Low");
+    def->enum_values.push_back("Medium");
+    def->enum_values.push_back("High");
+    def->enum_labels.push_back(L("None"));
+    def->enum_labels.push_back(L("Low"));
+    def->enum_labels.push_back(L("Medium"));
+    def->enum_labels.push_back(L("High"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnumsGeneric{ fmsNone });
 
     // Ultra: per-filament additive Z offset (OrcaSlicer #4660)
     def = this->add("filament_z_offset", coFloats);
@@ -7198,13 +7234,25 @@ void PrintConfigDef::init_fff_params()
     // start and end point is from the change_filament_gcode
     def->set_default_value(new ConfigOptionPoints{Vec2d(30, -3), Vec2d(54, 245)});
 
-    def = this->add("reduce_infill_retraction", coBool);
+    // Bambu Studio 02.09.01.70 PrintConfig.cpp:5272-5289. Replaced our reduce_infill_retraction bool
+    // (handle_legacy maps it: 1 -> Enabled, 0 -> Disabled). Our default stays Disabled, the old bool's
+    // false (Bambu's is Auto), so profiles that never set it slice as before.
+    def = this->add("reduce_infill_retraction_mode", coEnum);
     def->label = L("Reduce infill retraction");
-    def->tooltip = L("Don't retract when the travel is in infill area absolutely. That means the oozing can't been seen. "
-                     "This can reduce times of retraction for complex model and save printing time, but make slicing and "
-                     "G-code generating slower.");
+    def->tooltip = L("Controls whether retraction is skipped when traveling within the infill area. "
+                     "\"Auto\" enables this optimization for filaments with low metal stickiness (e.g. PLA) "
+                     "and disables it for medium/high metal stickiness filaments (e.g. PETG) to avoid oozing artifacts. "
+                     "\"Enabled\" always skips retraction in infill areas regardless of filament type. "
+                     "\"Disabled\" always retracts normally.");
+    def->enum_keys_map = &ConfigOptionEnum<ReduceInfillRetractionMode>::get_enum_values();
+    def->enum_values.push_back("Disabled");
+    def->enum_values.push_back("Auto");
+    def->enum_values.push_back("Enabled");
+    def->enum_labels.push_back(L("Disabled"));
+    def->enum_labels.push_back(L("Auto"));
+    def->enum_labels.push_back(L("Enabled"));
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
+    def->set_default_value(new ConfigOptionEnum<ReduceInfillRetractionMode>(rirDisabled));
 
     def = this->add("ooze_prevention", coBool);
     def->label = L("Enable");
@@ -12629,6 +12677,16 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
             value = "auto";
         else if (value == "0" || value == "false")
             value = "off";
+    } else if (opt_key == "reduce_infill_retraction") {
+        // Bambu parity PR 2 (owner D3, 2026-11-25): the bool became Bambu Studio's three-way
+        // reduce_infill_retraction_mode (02.09.01.70 PrintConfig.cpp:5272-5289). On stays "always skip"
+        // (Enabled), so old projects, presets and other vendors' profiles slice as before; Bambu itself
+        // reads an old 1 as Auto (Config.cpp:999-1005). An empty value (key-only pass) only renames.
+        opt_key = "reduce_infill_retraction_mode";
+        if (value == "1" || boost::iequals(value, "true"))
+            value = "Enabled";
+        else if (value == "0" || boost::iequals(value, "false"))
+            value = "Disabled";
     } else if (opt_key == "draft_shield" && value == "limited") {
         value = "disabled";
     } else if (opt_key == "support_interface_filament_source") {
