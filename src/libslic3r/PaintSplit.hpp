@@ -221,6 +221,7 @@ struct PaintSplitPieces
     PaintSplitRejoin                  rejoin;
     std::vector<PaintSplitWarning>    warnings;
     int                               bad_loop{ -1 }; // CutCrossesRegion / EmptyPiece: the loop (0-based) whose cut failed
+    int                               flipped_loops{ 0 }; // paint_split_assign_loops: cuts taken the other way round (the skin was unclear)
 
     bool ok() const { return error == PaintSplitError::None; }
 };

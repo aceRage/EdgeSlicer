@@ -1135,37 +1135,57 @@ PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, cons
             // What this loop's cut takes away: the far side of its plane, but only within a box round the loop
             // (1.5 times its radius, plus 2 mm). An unbounded half-space through a small hole of a curved
             // region would slice the region itself far from the hole (owner's figure, 2026-11-25).
-            const Manifold C = ColorSplitDetail::to_manifold64(ps_loop_far_box(planes[i], lc, 1.5 * rin + 2., bbox), ctx);
-            ColorSplitDetail::require_ok(C, "cutter");
-            auto [outside, inside] = cand.Split(C);
-            ColorSplitDetail::require_ok(inside, "split inside");
-            ColorSplitDetail::require_ok(outside, "split outside");
-
-            std::vector<Manifold> kept;
-            double                carried = 0.;
-            int                   dropped = 0;
-            for (Manifold& pc : inside.Decompose()) {
-                const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
-                const AABBMesh             aabb(its);
-                const double               a = carried_by(aabb);
-                if (a >= params.carry_frac * sel_area) {
+            auto cut_once = [&](const PaintSplitPlane& plane, std::vector<Manifold>& kept, int& dropped) {
+                kept.clear();
+                dropped        = 0;
+                double carried = 0.;
+                const Manifold C = ColorSplitDetail::to_manifold64(ps_loop_far_box(plane, lc, 1.5 * rin + 2., bbox), ctx);
+                ColorSplitDetail::require_ok(C, "cutter");
+                auto [outside, inside] = cand.Split(C);
+                ColorSplitDetail::require_ok(inside, "split inside");
+                ColorSplitDetail::require_ok(outside, "split outside");
+                for (Manifold& pc : inside.Decompose()) {
+                    const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
+                    const AABBMesh             aabb(its);
+                    const double               a = carried_by(aabb);
+                    if (a >= params.carry_frac * sel_area) {
+                        kept.push_back(pc);
+                        carried += a;
+                    } else
+                        ++dropped; // material on the region's side without selection (an arm crossing the cut)
+                }
+                for (Manifold& pc : outside.Decompose()) {
+                    const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
+                    const AABBMesh             aabb(its);
+                    std::vector<double>        d;
+                    d.reserve(loop.pts.size());
+                    for (const DrawCutSample& s : loop.pts)
+                        d.push_back(std::sqrt(aabb.squared_distance(s.pos)));
+                    if (ps_median(std::move(d)) <= tol)
+                        continue; // across this loop's own edge: the rest
+                    // Cut off by this plane, but far from this edge (beyond another loop's cut): still the piece's.
+                    carried += carried_by(aabb);
                     kept.push_back(pc);
-                    carried += a;
-                } else
-                    ++dropped; // material on the region's side without selection (an arm crossing the cut)
-            }
-            for (Manifold& pc : outside.Decompose()) {
-                const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
-                const AABBMesh             aabb(its);
-                std::vector<double>        d;
-                d.reserve(loop.pts.size());
-                for (const DrawCutSample& s : loop.pts)
-                    d.push_back(std::sqrt(aabb.squared_distance(s.pos)));
-                if (ps_median(std::move(d)) <= tol)
-                    continue; // across this loop's own edge: the rest
-                // Cut off by this plane, but far from this edge (beyond another loop's cut): still the piece's.
-                carried += carried_by(aabb);
-                kept.push_back(pc);
+                }
+                return carried;
+            };
+            std::vector<Manifold> kept;
+            int                   dropped = 0;
+            double                carried = cut_once(planes[i], kept, dropped);
+            if (kept.empty() || carried < 0.5 * sel_area) {
+                // The skin round this edge did not say clearly which side the region is on: try the other side.
+                PaintSplitPlane flipped = planes[i];
+                flipped.normal          = -flipped.normal;
+                std::swap(flipped.u, flipped.v);
+                std::vector<Manifold> kept2;
+                int                   dropped2 = 0;
+                const double          carried2 = cut_once(flipped, kept2, dropped2);
+                if (!kept2.empty() && carried2 > carried) {
+                    kept    = std::move(kept2);
+                    dropped = dropped2;
+                    carried = carried2;
+                    ++out.flipped_loops;
+                }
             }
             out.returned_components += dropped;
             if (kept.empty()) {

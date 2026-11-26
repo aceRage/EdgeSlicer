@@ -1237,7 +1237,7 @@ TEST_CASE("Paint split loops: owner's painted figure", "[.][PaintSplitGrinch]")
             WARN("state " << s << ": " << edges << " edges, " << r.holes_filled[0] << " holes filled, area " << r.area[0] << " mm2 -> "
                           << (p.ok() ? "ok" : paint_split_error_message(p.error)) << " bad_loop " << p.bad_loop << ", pieces "
                           << (p.ok() ? 2 + p.loose.size() : 0) << ", piece vol " << p.piece_volume << ", body vol " << p.body_volume
-                          << ", loose vol " << p.loose_volume);
+                          << ", loose vol " << p.loose_volume << ", flipped " << p.flipped_loops);
             CHECK(p.ok());
         }
     }
