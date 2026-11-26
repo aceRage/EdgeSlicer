@@ -46,6 +46,7 @@ const char* paint_split_error_message(PaintSplitError err)
     case PaintSplitError::EmptyPiece: return L("The cut does not reach the selected region.");
     case PaintSplitError::EmptyBody: return L("The piece would take the whole part.");
     case PaintSplitError::CutCrossesRegion: return L("This edge's cut passes through the selected region. Fill the region's holes or select a simpler region.");
+    case PaintSplitError::EdgeNotSeparated: return L("The cut along this edge does not go all the way round: the part stays joined past it. Raise Depth or Smoothing.");
     case PaintSplitError::CutterFailed: return L("This edge's cut surface could not be built (the edge folds or crosses itself). Raise Smoothing or lower Depth.");
     }
     return "";
@@ -170,6 +171,12 @@ std::vector<PaintSplitLoop> ps_loops(const indexed_triangle_set& its, const std:
             smp.facet  = size_t(he.face);
             loop.pts.push_back(smp);
             loop.length += (its.vertices[he.b] - its.vertices[he.a]).cast<double>().norm();
+            if (const auto it = edges.find(ps_edge_key(he.a, he.b)); it != edges.end())
+                for (int g : it->second)
+                    if (facet_comp[g] != comp) {
+                        loop.across.push_back(ps_tri_centroid(its, size_t(g)));
+                        break;
+                    }
             if (he.b == start)
                 break;
             size_t next = size_t(-1);
@@ -549,6 +556,8 @@ void paint_split_transform(PaintSplitRegion& region, const Transform3d& trafo)
                 loop.pts[i].normal = (nm * loop.pts[i].normal).normalized();
             }
             loop.inward = trafo.matrix().block<3, 3>(0, 0) * loop.inward;
+            for (Vec3d& q : loop.across)
+                q = trafo * q;
             for (size_t i = 0; i < loop.pts.size(); ++i)
                 loop.length += (loop.pts[(i + 1) % loop.pts.size()].pos - loop.pts[i].pos).norm();
         }
@@ -1284,6 +1293,56 @@ PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, cons
 
 // -------------------------------------------------------------------------------------------- follow paint
 
+// A closed sheet of thickness `t` round an open surface: the surface offset by +-t/2 along its vertex normals,
+// the two copies joined along the boundary. Empty when the surface is not a clean manifold patch.
+static indexed_triangle_set ps_thicken(indexed_triangle_set surf, double t)
+{
+    indexed_triangle_set out;
+    its_merge_vertices(surf);
+    its_remove_degenerate_faces(surf);
+    its_compactify_vertices(surf);
+    const size_t nv = surf.vertices.size();
+    if (nv == 0 || surf.indices.empty())
+        return out;
+    std::vector<Vec3d> vn(nv, Vec3d::Zero());
+    for (const Vec3i32& f : surf.indices) {
+        const Vec3d a = surf.vertices[f[0]].cast<double>(), b = surf.vertices[f[1]].cast<double>(), c = surf.vertices[f[2]].cast<double>();
+        const Vec3d n = (b - a).cross(c - a); // area weighted
+        for (int k = 0; k < 3; ++k)
+            vn[f[k]] += n;
+    }
+    for (Vec3d& n : vn) {
+        if (n.norm() < 1e-12)
+            return out;
+        n.normalize();
+    }
+    std::map<std::pair<int, int>, int> directed;
+    for (const Vec3i32& f : surf.indices)
+        for (int k = 0; k < 3; ++k) {
+            const std::pair<int, int> e{ f[k], f[(k + 1) % 3] };
+            if (++directed[e] > 1)
+                return out; // inconsistent orientation or a non-manifold edge
+        }
+    out.vertices.reserve(2 * nv);
+    for (size_t v = 0; v < nv; ++v)
+        out.vertices.emplace_back((surf.vertices[v].cast<double>() + 0.5 * t * vn[v]).cast<float>());
+    for (size_t v = 0; v < nv; ++v)
+        out.vertices.emplace_back((surf.vertices[v].cast<double>() - 0.5 * t * vn[v]).cast<float>());
+    const int off = int(nv);
+    for (const Vec3i32& f : surf.indices) {
+        out.indices.emplace_back(f[0], f[1], f[2]);
+        out.indices.emplace_back(f[0] + off, f[2] + off, f[1] + off);
+    }
+    // Boundary: directed edges whose reverse is not there; the wall faces outward.
+    for (const auto& [e, n] : directed)
+        if (directed.find({ e.second, e.first }) == directed.end()) {
+            const int a = e.first, b = e.second;
+            out.indices.emplace_back(b, a, a + off);
+            out.indices.emplace_back(b, a + off, b + off);
+        }
+    return out;
+}
+
 PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, const PaintSplitLoop& loop,
                                            const PaintSplitFollowParams& params, const BoundingBoxf3& bbox)
 {
@@ -1366,6 +1425,12 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
     if (out.cutter.indices.empty())
         return out;
     out.preview = draw_cut_preview_surface(stroke, dp, bbox, 0., &mesh);
+    // The cut itself is the band + core sheet only (not the closure the draw cut adds to make a solid, which
+    // reaches far past the edge): a thin sheet the region is separated along.
+    out.stage = 5;
+    out.sheet = ps_thicken(out.preview, PaintSplitSheetThickness);
+    if (out.sheet.indices.empty())
+        return out;
     out.error   = PaintSplitError::None;
     out.stage   = 0;
     return out;
@@ -1421,76 +1486,43 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
         out.source_volume = M.Volume();
         // A cut keeping less than a third of the selection goes through the region.
         const double keep_min = 1. / 3.;
-        struct Part
-        {
-            Manifold m;
-            double   carried{ 0. };
-            bool     adjacent{ false };
-        };
         Manifold cand = M;
         for (size_t i = 0; i < cutters.size(); ++i) {
             if (cutters[i].indices.empty())
                 continue; // an ignored speck of an edge (paint_split_follow_cut)
             const PaintSplitLoop& loop = region.loops[size_t(comp)][i];
-            Vec3d                 lc   = Vec3d::Zero();
-            for (const DrawCutSample& s : loop.pts)
-                lc += s.pos;
-            lc /= double(std::max<size_t>(1, loop.pts.size()));
-            double r = 0.;
-            for (const DrawCutSample& s : loop.pts)
-                r = std::max(r, (s.pos - lc).norm());
-            // The cut runs along the paint line, so what lies across this edge touches it.
-            const double tol = std::max(1., 0.1 * r);
-
+            // The sheet along this edge cuts the region free there; what still carries the selection stays.
             const Manifold C = ColorSplitDetail::to_manifold64(cutters[i], ctx);
-            ColorSplitDetail::require_ok(C, "cutter");
-            auto [inside, outside] = cand.Split(C);
-            ColorSplitDetail::require_ok(inside, "split inside");
-            ColorSplitDetail::require_ok(outside, "split outside");
-            auto parts_of = [&](const Manifold& side, double& total) {
-                std::vector<Part> parts;
-                total = 0.;
-                for (Manifold& pc : side.Decompose()) {
-                    const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
-                    const AABBMesh             aabb(its);
-                    Part                       p;
-                    p.m = pc;
-                    for (const auto& [g, a] : sel)
-                        if (aabb.squared_distance(g) <= 1e-6)
-                            p.carried += a;
-                    std::vector<double> d;
-                    d.reserve(loop.pts.size());
-                    for (const DrawCutSample& s : loop.pts)
-                        d.push_back(std::sqrt(aabb.squared_distance(s.pos)));
-                    p.adjacent = ps_median(std::move(d)) <= tol;
-                    total += p.carried;
-                    parts.push_back(std::move(p));
+            ColorSplitDetail::require_ok(C, "sheet");
+            const Manifold cut = cand - C;
+            ColorSplitDetail::require_ok(cut, "cut");
+            std::vector<Manifold> kept;
+            double                carried = 0., across_on = 0.;
+            for (Manifold& pc : cut.Decompose()) {
+                const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
+                const AABBMesh             aabb(its);
+                double                     a = 0.;
+                for (const auto& [g, ga] : sel)
+                    if (aabb.squared_distance(g) <= 1e-6)
+                        a += ga;
+                if (a < params.carry_frac * sel_area) {
+                    ++out.returned_components;
+                    continue;
                 }
-                return parts;
-            };
-            double                  in_total = 0., out_total = 0.;
-            const std::vector<Part> in_parts  = parts_of(inside, in_total);
-            const std::vector<Part> out_parts = parts_of(outside, out_total);
-            // The region's side of this edge is the one holding more of the selection.
-            const bool               region_inside = in_total >= out_total;
-            const std::vector<Part>& near_side     = region_inside ? in_parts : out_parts;
-            const std::vector<Part>& across_side   = region_inside ? out_parts : in_parts;
-            std::vector<Manifold>    kept;
-            double                   carried = 0.;
-            for (const Part& p : near_side)
-                if (p.carried >= params.carry_frac * sel_area) {
-                    kept.push_back(p.m);
-                    carried += p.carried;
-                } else
-                    ++out.returned_components; // no selection on it (an arm the cutter reached): the rest
-            for (const Part& p : across_side)
-                if (!p.adjacent && p.carried >= params.carry_frac * sel_area) {
-                    // Across this cutter but not this edge (beyond another edge of the region): still the piece's.
-                    kept.push_back(p.m);
-                    carried += p.carried;
-                }
+                kept.push_back(pc);
+                carried += a;
+                for (const Vec3d& q : loop.across)
+                    if (aabb.squared_distance(q) <= 1e-6)
+                        across_on += 1.;
+            }
             if (kept.empty()) {
                 out.error    = PaintSplitError::EmptyPiece;
+                out.bad_loop = int(i);
+                return out;
+            }
+            // The skin across this edge still on the piece: the sheet did not go all the way round.
+            if (!loop.across.empty() && across_on > 0.5 * double(loop.across.size())) {
+                out.error    = PaintSplitError::EdgeNotSeparated;
                 out.bad_loop = int(i);
                 return out;
             }
@@ -1501,6 +1533,8 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
             }
             cand = ps_union(kept);
             ColorSplitDetail::require_ok(cand, "piece");
+            BOOST_LOG_TRIVIAL(debug) << "Paint split edge " << i << ": " << kept.size() << " part(s) kept, " << carried / sel_area
+                                     << " of the selection, " << across_on << " of " << loop.across.size() << " across facets on the piece";
         }
 
         // The rest: the part less the piece, seam-free, in connected pieces.

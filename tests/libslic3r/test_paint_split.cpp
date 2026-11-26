@@ -1243,7 +1243,7 @@ TEST_CASE("Paint split loops: owner's painted figure", "[.][PaintSplitGrinch]")
                         bad_cut = int(l);
                     WARN("  edge " << l << " (" << r.loops[0][l].pts.size() << " samples, " << r.loops[0][l].length << " mm) failed at stage " << c.stage);
                 }
-                cutters.push_back(c.cutter);
+                cutters.push_back(c.sheet);
             }
             WARN("  cutters built, first failed edge " << bad_cut);
             const PaintSplitPieces p = paint_split_assign_cutters(tm.its, r, 0, cutters);
@@ -1272,7 +1272,7 @@ std::vector<indexed_triangle_set> ps_follow_cutters(const indexed_triangle_set& 
         const PaintSplitFollowCut cut = paint_split_follow_cut(mesh, loop, fp, bbox);
         REQUIRE(cut.error == PaintSplitError::None);
         REQUIRE(!cut.preview.indices.empty());
-        out.push_back(cut.cutter);
+        out.push_back(cut.sheet);
     }
     return out;
 }
@@ -1386,8 +1386,8 @@ TEST_CASE("Paint split follow paint: a patch on one face is a plug, the rest of 
     const PaintSplitFollowCut cut = paint_split_follow_cut(grid, r.loops[0][0], fp, ps_bbox(grid));
     REQUIRE(cut.error == PaintSplitError::None);
     CHECK_FALSE(cut.separates);
-    const PaintSplitPieces p = paint_split_assign_cutters(grid, r, 0, { cut.cutter });
-    INFO("error " << int(p.error) << " bad_loop " << p.bad_loop << " cutter faces " << cut.cutter.indices.size());
+    const PaintSplitPieces p = paint_split_assign_cutters(grid, r, 0, { cut.sheet });
+    INFO("error " << int(p.error) << " bad_loop " << p.bad_loop << " sheet faces " << cut.sheet.indices.size());
     REQUIRE(p.ok());
     // A plug a few mm deep under the patch, nowhere near the rest of the cube.
     const BoundingBoxf3 pb = ps_bbox(p.piece);

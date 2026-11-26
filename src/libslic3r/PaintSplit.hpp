@@ -32,6 +32,7 @@ enum class PaintSplitError {
     RepairFailed,  // the part has holes or slivers that the automatic repair could not close
     CutCrossesRegion, // one edge's cut would take most of the selected region away (PaintSplitPieces::bad_loop)
     CutterFailed,     // one edge's follow-paint cut surface could not be built (folds, crosses itself, too short)
+    EdgeNotSeparated, // one edge's cut sheet does not part the region from what lies across that edge
 };
 const char* paint_split_error_message(PaintSplitError err);
 
@@ -88,6 +89,8 @@ struct PaintSplitLoop
     // on each side). It says which side of this edge's cut the piece is on, locally, which the whole region
     // cannot say for a band or a hole.
     Vec3d                      inward{ Vec3d::Zero() };
+    // Centroids of the unselected facets just across the edge: the cut must part them from the piece.
+    std::vector<Vec3d>         across;
 };
 
 struct PaintSplitRegionParams
@@ -175,6 +178,10 @@ indexed_triangle_set paint_split_slab(const PaintSplitPlane& plane, const Boundi
 // loop round the part is a separation, a loop on one side a plug (draw_cut_loop_separates).
 // ---------------------------------------------------------------------------------------------------------
 
+// The thickness of a follow-paint cut sheet, mm. The sheet's material goes to the rest of the part (the rest is
+// the part less the piece), so the piece's cut face sits this much short of the rest's: invisible in print.
+constexpr double PaintSplitSheetThickness = 0.02;
+
 struct PaintSplitFollowParams
 {
     double depth{ 3. };        // mm the band travels in before the flat core (capped so it cannot fold)
@@ -189,6 +196,7 @@ struct PaintSplitFollowCut
     PaintSplitError      error{ PaintSplitError::None };
     indexed_triangle_set cutter;   // the closed solid for the boolean
     indexed_triangle_set preview;  // band + skirt + core only: what the gizmo draws
+    indexed_triangle_set sheet;    // that surface as a closed sheet PaintSplitSheetThickness thick: what Apply cuts with
     double               depth{ 0. };  // the depth actually used (lowered when the asked one folds)
     bool                 separates{ false }; // the loop goes round the part (a separation, not a plug)
     bool                 ignored{ false };   // a speck of an edge (under 3 mm round): no cut, no error
@@ -276,10 +284,10 @@ PaintSplitPieces paint_split_assign(const indexed_triangle_set& mesh, const Pain
 PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
                                           const std::vector<PaintSplitPlane>& planes, const PaintSplitAssignParams& params = {});
 
-// The same with any closed cutters, one per loop (Follow paint: paint_split_follow_cut). For each cutter the
-// side carrying more of the selection is the region's; there the parts that carry the selection stay, and on
-// the other side what lies across this loop's edge goes to the rest. Works for one loop too. The rest of the
-// part (mesh less the piece) falls into connected pieces as above.
+// Follow paint: one closed thin sheet per loop (PaintSplitFollowCut::sheet; an empty one is skipped). Each sheet
+// is cut out of the piece; the parts that still carry the selection stay. A sheet that leaves the skin across its
+// edge on the piece is refused (EdgeNotSeparated). Works for one loop too. The rest of the part (mesh less the
+// piece, sheets included) falls into connected pieces as above.
 PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
                                             const std::vector<indexed_triangle_set>& cutters, const PaintSplitAssignParams& params = {});
 

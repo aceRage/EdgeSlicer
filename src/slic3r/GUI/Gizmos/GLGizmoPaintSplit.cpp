@@ -653,7 +653,7 @@ void GLGizmoPaintSplit::apply()
         PaintSplitApplyPiece piece;
         piece.component = int(c);
         for (const PaintSplitFollowCut &cut : m_cuts[c])
-            piece.cutters.push_back(cut.cutter);
+            piece.cutters.push_back(cut.sheet);
         for (size_t d = c + 1; d < skin.size(); ++d)
             piece.body_hints.insert(piece.body_hints.end(), skin[d].begin(), skin[d].end());
         piece.filament = filament;
