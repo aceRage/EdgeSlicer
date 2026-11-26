@@ -1186,21 +1186,21 @@ PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, cons
                 std::vector<Manifold>  whole_kept, near_kept;
                 int                    whole_dropped = 0, near_dropped = 0;
                 const double           whole = cut_once(pl, false, whole_kept, whole_dropped);
-                const double           near  = cut_once(pl, true, near_kept, near_dropped);
+                const double           local  = cut_once(pl, true, near_kept, near_dropped);
                 double vw = 0., vn = 0.;
                 for (const Manifold& m : whole_kept)
                     vw += m.Volume();
                 for (const Manifold& m : near_kept)
                     vn += m.Volume();
                 BOOST_LOG_TRIVIAL(debug) << "Paint split loop " << i << " side " << side << ": whole keeps " << whole / sel_area
-                                         << " of the selection (" << vw << " mm3), near " << near / sel_area << " (" << vn << " mm3)";
+                                         << " of the selection (" << vw << " mm3), local " << local / sel_area << " (" << vn << " mm3)";
                 // The near-only cut leaves whatever lies across the edge beyond its box on the piece: on a figure that
                 // can be half the body (owner's figure: 74 cm3 instead of 6). It is taken only when the whole cut
                 // fails, or keeps clearly less of the selection for about the same piece.
                 const bool whole_ok  = !whole_kept.empty() && whole >= keep_min * sel_area;
-                const bool use_whole = whole_ok ? (near_kept.empty() || whole >= near - 0.1 * sel_area || vn > 1.5 * vw) :
-                                                  (near_kept.empty() || whole >= near);
-                const double best = use_whole ? whole : (near_kept.empty() ? -1. : near);
+                const bool use_whole = whole_ok ? (near_kept.empty() || whole >= local - 0.1 * sel_area || vn > 1.5 * vw) :
+                                                  (near_kept.empty() || whole >= local);
+                const double best = use_whole ? whole : (near_kept.empty() ? -1. : local);
                 if (best > carried) {
                     kept        = use_whole ? std::move(whole_kept) : std::move(near_kept);
                     dropped     = use_whole ? whole_dropped : near_dropped;
