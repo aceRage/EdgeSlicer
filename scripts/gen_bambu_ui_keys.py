@@ -62,8 +62,6 @@ INFERRED_EQUIVALENTS = (
     # (Bambu key, our key, why)
     ('sub_top_surface_pattern', 'undertop_surface_pattern',
      'pattern of the solid layer under a top surface'),
-    ('machine_hotend_change_time', 'machine_tool_change_time',
-     'statistics-only change time (Bambu: hotend rack swap, ours: tool change)'),
 )
 
 # Bambu tab keys (Simple or Advanced) that EdgeSlicer does not have, reviewed 2026-11-24 against
@@ -80,11 +78,12 @@ REVIEWED_MISSING = (
     'filament_overhang_3_4_speed', 'filament_overhang_4_4_speed', 'filament_overhang_totally_speed',
     'filament_scarf_gap', 'filament_scarf_height', 'filament_scarf_length', 'filament_scarf_seam_type',
     'filament_velocity_adaptation_factor', 'first_x_layer_fan_speed', 'first_x_layer_optional_fan_speed',
-    'first_x_layer_part_fan_speed', 'infill_rotate_step', 'modifier_ignore_infill',
-    'optional_cooling_fan_speed', 'optional_fan_full_speed_layer', 'overhang_threshold_participating_cooling',
-    'overhang_totally_speed', 'override_filament_scarf_seam_setting', 'override_process_overhang_speed',
-    'periodic_modifier', 'periodic_modifier_apply_layers', 'periodic_modifier_skip_layers',
-    'pre_start_fan_time', 'seam_placement_away_from_overhangs', 'seam_slope_gap', 'smooth_coefficient',
+    'first_x_layer_part_fan_speed', 'infill_rotate_step', 'machine_hotend_change_time',
+    'modifier_ignore_infill', 'optional_cooling_fan_speed', 'optional_fan_full_speed_layer',
+    'overhang_threshold_participating_cooling', 'overhang_totally_speed',
+    'override_filament_scarf_seam_setting', 'override_process_overhang_speed', 'periodic_modifier',
+    'periodic_modifier_apply_layers', 'periodic_modifier_skip_layers', 'pre_start_fan_time',
+    'seam_placement_away_from_overhangs', 'seam_slope_gap', 'smooth_coefficient',
     'smooth_speed_discontinuity_area', 'vertical_shell_speed', 'wrapping_detection_gcode',
     'z_direction_outwall_speed_continuous',
 )

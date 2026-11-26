@@ -521,7 +521,6 @@ const std::vector<InferredEquivalent> &inferred_equivalents()
 {
     static const std::vector<InferredEquivalent> list = {
         { "sub_top_surface_pattern", "undertop_surface_pattern" }, // pattern of the solid layer under a top surface
-        { "machine_hotend_change_time", "machine_tool_change_time" }, // statistics-only change time (Bambu: hotend rack swap, ours: tool change)
     };
     return list;
 }
@@ -564,6 +563,7 @@ const std::vector<const char *> &reviewed_missing()
         "first_x_layer_optional_fan_speed",
         "first_x_layer_part_fan_speed",
         "infill_rotate_step",
+        "machine_hotend_change_time",
         "modifier_ignore_infill",
         "optional_cooling_fan_speed",
         "optional_fan_full_speed_layer",
