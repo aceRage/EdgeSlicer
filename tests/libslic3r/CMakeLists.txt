@@ -223,6 +223,7 @@ add_executable(${_TEST_NAME}_tests
 	test_scale_to_volume.cpp
 	test_slice_compare.cpp
 	test_stl.cpp
+	test_support_activity.cpp
 	test_support_set.cpp
 	test_support_interlock.cpp
 	test_startup_sound.cpp
