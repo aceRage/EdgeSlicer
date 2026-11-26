@@ -50,6 +50,7 @@ add_executable(${_TEST_NAME}_tests
     web_load_retry_tests.cpp
     webview2_args_tests.cpp
     webview2_userdata_tests.cpp
+    webview_pending_load_tests.cpp
     device_page_load_tests.cpp
     flutter_web_bundle_tests.cpp
     home_tab_tests.cpp
