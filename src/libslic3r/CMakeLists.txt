@@ -623,6 +623,8 @@ set(lisbslic3r_sources
     StartupProfile.hpp
     Preset.cpp
     Preset.hpp
+    SettingsView.cpp
+    SettingsView.hpp
     PresetFlowVariant.cpp
     PresetFlowVariant.hpp
     PrincipalComponents2D.cpp
