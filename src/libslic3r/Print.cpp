@@ -8212,7 +8212,9 @@ ObjectTowerPlan Print::plan_object_towers() const
         const BoundingBox tb     = get_extents(local);
         const BoundingBox cb     = get_extents(copy.hull);
         // Candidate anchors (bed coordinates, scaled): right, left, behind, in front of the copy, each slid along that
-        // side in 5 mm steps from its middle outwards.
+        // side in 5 mm steps from its middle outwards, as far as the tower still runs at least 5 mm alongside the copy
+        // (a tower wider than a small copy, or a copy at the bed's edge, needs to overhang its side).
+        const coord_t      along = scale_(5.);
         std::vector<Point> anchors;
         auto slide = [&](coord_t lo, coord_t hi) {
             std::vector<coord_t> out;
@@ -8228,13 +8230,15 @@ ObjectTowerPlan Print::plan_object_towers() const
             }
             return out;
         };
-        for (coord_t y : slide(cb.min.y() - tb.min.y(), cb.max.y() - tb.max.y()))
+        const coord_t y_lo = cb.min.y() - tb.max.y() + along, y_hi = cb.max.y() - tb.min.y() - along;
+        const coord_t x_lo = cb.min.x() - tb.max.x() + along, x_hi = cb.max.x() - tb.min.x() - along;
+        for (coord_t y : slide(y_lo, y_hi))
             anchors.emplace_back(cb.max.x() + own_gap - tb.min.x(), y);
-        for (coord_t y : slide(cb.min.y() - tb.min.y(), cb.max.y() - tb.max.y()))
+        for (coord_t y : slide(y_lo, y_hi))
             anchors.emplace_back(cb.min.x() - own_gap - tb.max.x(), y);
-        for (coord_t x : slide(cb.min.x() - tb.min.x(), cb.max.x() - tb.max.x()))
+        for (coord_t x : slide(x_lo, x_hi))
             anchors.emplace_back(x, cb.max.y() + own_gap - tb.min.y());
-        for (coord_t x : slide(cb.min.x() - tb.min.x(), cb.max.x() - tb.max.x()))
+        for (coord_t x : slide(x_lo, x_hi))
             anchors.emplace_back(x, cb.min.y() - own_gap - tb.max.y());
 
         double best_score = -1.;
