@@ -404,3 +404,106 @@ TEST_CASE("Unset settings_view: every group decision is main's is_visible", "[Se
             CHECK(group_visible(unset_view_filter(lvl), modes, ids) == main_group_is_visible(modes, lvl));
         }
 }
+
+TEST_CASE("Selector choice <-> AppConfig user_mode + settings_view", "[SettingsView][AppConfig]")
+{
+    // Reading: what the selector shows.
+    CHECK(view_choice("", "") == ViewChoice::Basic); // new install before MainFrame writes "simple"
+    CHECK(view_choice("simple", "") == ViewChoice::Basic);
+    CHECK(view_choice("advanced", "") == ViewChoice::Advanced);
+    CHECK(view_choice("advanced", "bambu") == ViewChoice::Bambu);
+    CHECK(view_choice("simple", "bambu") == ViewChoice::Bambu);
+    CHECK(view_choice("develop", "") == ViewChoice::Advanced);    // legacy Developer mode: Advanced
+    CHECK(view_choice("develop", "bambu") == ViewChoice::Bambu);  // the view is kept
+    CHECK(view_choice("something", "") == ViewChoice::Basic);
+    CHECK(view_choice("advanced", "newer-view") == ViewChoice::Advanced); // unknown view from a newer build
+
+    // Writing: what each segment stores.
+    const ViewChoiceConfig basic = view_choice_config(ViewChoice::Basic);
+    CHECK(basic.user_mode == "simple");
+    CHECK(basic.settings_view.empty());
+    const ViewChoiceConfig advanced = view_choice_config(ViewChoice::Advanced);
+    CHECK(advanced.user_mode == "advanced");
+    CHECK(advanced.settings_view.empty());
+    const ViewChoiceConfig bambu_cfg = view_choice_config(ViewChoice::Bambu);
+    CHECK(bambu_cfg.user_mode == "advanced");
+    CHECK(bambu_cfg.settings_view == "bambu");
+
+    // Round trip: every selectable choice reads back as itself (restart keeps the choice).
+    for (ViewChoice c : { ViewChoice::Basic, ViewChoice::Advanced, ViewChoice::Bambu }) {
+        const ViewChoiceConfig cfg = view_choice_config(c);
+        CHECK(view_choice(cfg.user_mode, cfg.settings_view) == c);
+    }
+}
+
+TEST_CASE("Developer mode is a flag on top of the view", "[SettingsView][AppConfig][Developer]")
+{
+    // Developer mode off: today's levels.
+    CHECK(effective_level(ViewChoice::Basic, false) == comSimple);
+    CHECK(effective_level(ViewChoice::Advanced, false) == comAdvanced);
+    CHECK(effective_level(ViewChoice::Bambu, false) == comAdvanced);
+    // Developer mode on: Basic stays Simple; Advanced and Bambu reach comDevelop (Bambu still filtered).
+    CHECK(effective_level(ViewChoice::Basic, true) == comSimple);
+    CHECK(effective_level(ViewChoice::Advanced, true) == comDevelop);
+    CHECK(effective_level(ViewChoice::Bambu, true) == comDevelop);
+    // Toggling Developer mode writes only developer_mode: the chosen view reads back unchanged.
+    for (ViewChoice c : { ViewChoice::Basic, ViewChoice::Advanced, ViewChoice::Bambu }) {
+        const ViewChoiceConfig cfg = view_choice_config(c);
+        CHECK(view_choice(cfg.user_mode, cfg.settings_view) == c);
+        CHECK(effective_level(view_choice(cfg.user_mode, cfg.settings_view), true) == (c == ViewChoice::Basic ? comSimple : comDevelop));
+    }
+}
+
+TEST_CASE("Migration: user_mode develop loads as Advanced with Developer mode on", "[SettingsView][AppConfig][Developer]")
+{
+    std::string user_mode = "develop";
+    bool        developer = false;
+    CHECK(migrate_legacy_developer_user_mode(user_mode, developer));
+    CHECK(user_mode == "advanced");
+    CHECK(developer);
+    CHECK(view_choice(user_mode, "") == ViewChoice::Advanced);
+    CHECK(effective_level(view_choice(user_mode, ""), developer) == comDevelop); // same lines as before
+    // A Bambu view written next to it survives.
+    std::string um2 = "develop";
+    bool        dev2 = true;
+    CHECK(migrate_legacy_developer_user_mode(um2, dev2));
+    CHECK(view_choice(um2, "bambu") == ViewChoice::Bambu);
+    // Nothing else is touched.
+    for (const char *m : { "simple", "advanced", "", "something" }) {
+        std::string u = m;
+        bool        d = false;
+        CHECK_FALSE(migrate_legacy_developer_user_mode(u, d));
+        CHECK(u == m);
+        CHECK_FALSE(d);
+    }
+}
+
+TEST_CASE("Basic hides Z-buckling bias, the Thin features group and the Bambu defaults row", "[SettingsView][Basic]")
+{
+    // Owner 2026-11-25. The Thin features group's lines (Tab.cpp TabPrint::build, Quality page): all
+    // Advanced, so the group (and its full-width Fine detail note) is hidden in Basic.
+    const char *thin_features[] = { "fine_detail", "thin_feature_line_width", "thin_feature_min_size", "fine_detail_speed",
+                                    "min_feature_size", "min_bead_width", "initial_layer_min_bead_width", "min_length_factor" };
+    std::vector<ConfigOptionMode> thin_modes;
+    for (const char *k : thin_features) {
+        INFO(k);
+        CHECK(mode_of(k) >= comAdvanced);
+        thin_modes.push_back(mode_of(k));
+    }
+    CHECK_FALSE(group_visible(level(comSimple), thin_modes, {}));
+    CHECK(group_visible(level(comAdvanced), thin_modes, {}));
+
+    CHECK(mode_of("gyroid_optimized") == comAdvanced);
+    CHECK(show(level(comSimple), "gyroid_optimized") == LineShow::Hidden);
+    CHECK(show(level(comAdvanced), "gyroid_optimized") == LineShow::Shown);
+
+    // "Use Bambu defaults" is a widget-only row with widget_mode comAdvanced: hidden in Basic, shown in
+    // Advanced; in the Bambu view it still follows its group, as before.
+    CHECK(widget_line_show(level(comSimple), true, comAdvanced) == LineShow::Hidden);
+    CHECK(widget_line_show(level(comAdvanced), true, comAdvanced) == LineShow::Shown);
+    CHECK(widget_line_show(level(comDevelop), true, comAdvanced) == LineShow::Shown);
+    CHECK(widget_line_show(bambu(), true, comAdvanced) == LineShow::Shown);
+    CHECK(widget_line_show(bambu(), false, comAdvanced) == LineShow::Hidden);
+    // Other widget-only rows keep showing at every level.
+    CHECK(widget_line_show(level(comSimple), false) == LineShow::Shown);
+}

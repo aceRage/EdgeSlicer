@@ -37,6 +37,9 @@ public:
     int  getSelected() const;
     // The tooltip of one segment's button.
     void setSegmentToolTip(int index, const wxString& tip);
+    // Narrower segments than the default 80 DIP (Boxed / Pill), e.g. for a crowded header row.
+    void setButtonMinWidth(int width_dip);
+    int  segmentCount() const { return int(m_buttons.size()); }
 
     void bindSelectionCallback(SelectionCallback cb);
 

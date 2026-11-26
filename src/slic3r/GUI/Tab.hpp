@@ -30,6 +30,7 @@
 #include <wx/imaglist.h>
 
 #include <map>
+#include <set>
 #include <vector>
 #include <memory>
 
@@ -65,6 +66,7 @@ class OG_CustomCtrl;
 std::vector<InputShaperType> input_shaper_types_for_flavor(GCodeFlavor flavor);
 class SegmentedToggle;
 class NozzleChipRow;
+class SettingsViewSelector;
 
 // Single Tab page containing a{ vsizer } of{ optgroups }
 // package Slic3r::GUI::Tab::Page;
@@ -80,6 +82,11 @@ class Page: public std::enable_shared_from_this<Page>// : public wxScrolledWindo
 	// BBS: new layout
 	wxStaticText*	m_page_title;
     bool            m_show = true;
+    // Bambu settings view: "N more EdgeSlicer settings on this page - Show all" (destroyed with the page view).
+    wxWeakRef<wxWindow> m_view_footer;
+    wxWeakRef<wxWindow> m_view_footer_text;
+    void            update_view_footer(const ViewFilter& filter);
+    void            ensure_view_footer();
 public:
 	//BBS: GUI refactor
     Page(wxWindow* parent, const wxString& title, int iconID, wxPanel* tab_owner);
@@ -359,7 +366,21 @@ public:
     // 3. propagate changed configuration to the Plater when (m_update_cnt == 0) only
     int                 m_update_cnt = 0;
 
-	SwitchButton *		m_mode_view = nullptr;
+	// Basic | Advanced | Bambu (filament / printer tab header; replaced the "Advance" switch).
+	SettingsViewSelector* m_mode_view = nullptr;
+	// Bambu settings view: base keys outside Bambu Studio's list that this tab shows anyway (differ from the
+	// system preset, or overridden by the selected object). Sticky: a key stays until the page is rebuilt,
+	// the preset or selection changes, or the view changes, so a reset line does not vanish under the cursor.
+	std::set<std::string> m_view_exceptions;
+	bool                  m_view_refresh_pending = false;
+	// The printer is a Bambu Lab printer (Bambu view: Bambu's BBL-only hides, design D15). Cached:
+	// PresetBundle::is_bbl_vendor() scans every vendor's models.
+	bool                  m_view_bbl_printer = false;
+	void                  refresh_view_printer_flag();
+	std::set<std::string> compute_view_exceptions();
+	void                  update_view_exceptions();
+	// Model tabs add the process tab's exceptions and the object's own overrides.
+	virtual void          add_view_exceptions(std::set<std::string>& /*keys*/) {}
 
 public:
 	// BBS
@@ -443,6 +464,7 @@ public:
     // The settings view this tab shows (level + optional Bambu filter, SettingsView.hpp). The one place the
     // filter is built: every page / group / line visibility update goes through it.
     ViewFilter      view_filter() const;
+    const std::set<std::string>& view_exceptions() const { return m_view_exceptions; }
     virtual void    msw_rescale();
     virtual void	sys_color_changed();
 	Field*			get_field(const t_config_option_key& opt_key, int opt_index = -1) const;
@@ -730,6 +752,7 @@ protected:
 	virtual void	reload_config();
 
 	virtual void	update_custom_dirty() override;
+	virtual void	add_view_exceptions(std::set<std::string>& keys) override;
 
 protected:
 	std::vector<std::string> m_keys;

@@ -68,6 +68,8 @@ class OG_CustomCtrl :public wxPanel
         wxPoint draw_blinking_bmp(wxDC& dc, wxPoint pos, bool is_blinking);
         wxPoint draw_act_bmps(wxDC& dc, wxPoint pos, const wxBitmap& bmp_undo_to_sys, const wxBitmap& bmp_undo, bool is_blinking, size_t rect_id = 0);
         wxCoord draw_edit_bmp(wxDC& dc, wxPoint pos, const wxBitmap& bmp_edit);
+        // Bambu settings view: the "Not in Bambu Studio" chip after the label (a short "E" when the label column is full).
+        void    draw_not_in_bambu_chip(wxDC& dc, wxCoord v_pos, wxCoord column_end);
         bool    launch_browser() const;
         bool    is_separator() const { return og_line.is_separator(); }
 
@@ -75,6 +77,7 @@ class OG_CustomCtrl :public wxPanel
         std::vector<wxRect> rects_undo_to_sys_icon;
         std::vector<wxRect> rects_edit_icon;
         wxRect              rect_label;
+        wxRect              rect_chip;
     };
 
     std::vector<CtrlLine> ctrl_lines;

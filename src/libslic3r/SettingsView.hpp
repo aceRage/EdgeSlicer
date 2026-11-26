@@ -32,6 +32,29 @@ SettingsView settings_view_from_string(const std::string &value);
 // Default -> "" (the key is removed / left absent), Bambu -> "bambu".
 std::string  settings_view_to_string(SettingsView view);
 
+// The selector in the sidebar and tab headers (Basic | Advanced | Bambu). Preferences > Developer mode
+// (AppConfig "developer_mode") is a separate flag on top of the chosen view (owner, 2026-11-25): it
+// never changes the view and never disables the selector.
+enum class ViewChoice { Basic, Advanced, Bambu };
+// What the selector shows for AppConfig "user_mode" / "settings_view" (either may be absent: "").
+// settings_view bambu -> Bambu; user_mode advanced -> Advanced; the legacy user_mode "develop" (written
+// by builds before this change) -> Advanced; else Basic (absent or unknown reads as simple).
+ViewChoice   view_choice(const std::string &user_mode, const std::string &settings_view);
+// What choosing a segment writes. settings_view empty = remove the key. Bambu is Bambu Studio's Advanced
+// list, so it writes user_mode "advanced" (design D2): an older build without views shows Advanced.
+struct ViewChoiceConfig
+{
+    std::string user_mode;
+    std::string settings_view;
+};
+ViewChoiceConfig view_choice_config(ViewChoice choice);
+// The level the settings show (GUI_App::get_mode()): Basic -> Simple; Advanced and Bambu -> Advanced,
+// or Develop with Developer mode on (the Bambu filter then still applies, see line_show()).
+ConfigOptionMode effective_level(ViewChoice choice, bool developer_mode);
+// Migration of builds where Developer mode wrote user_mode "develop": becomes user_mode "advanced"
+// with developer_mode on. Returns true when it changed something.
+bool         migrate_legacy_developer_user_mode(std::string &user_mode, bool &developer_mode);
+
 struct ViewFilter
 {
     ConfigOptionMode level       = comSimple;             // effective level (user_mode + Developer mode)
@@ -70,9 +93,10 @@ size_t bambu_list_size();
 // (the mode of its first option, as today). A line with no option (a widget-only row) is decided by the
 // group: see widget_line_show().
 LineShow line_show(const ViewFilter &filter, const std::vector<std::string> &option_ids, ConfigOptionMode line_mode);
-// A widget-only line: shown in every level as today; in the Bambu view only while its group shows at
-// least one option line, so a widget does not survive alone in an emptied group.
-LineShow widget_line_show(const ViewFilter &filter, bool group_has_visible_option_line);
+// A widget-only line: shown from its own level (widget_mode, comSimple unless the row sets one, as
+// today); in the Bambu view only while its group shows at least one option line, so a widget does not
+// survive alone in an emptied group.
+LineShow widget_line_show(const ViewFilter &filter, bool group_has_visible_option_line, ConfigOptionMode widget_mode = comSimple);
 inline bool shown(LineShow s) { return s != LineShow::Hidden; }
 
 // Whether an option group shows anything, for the pages that are not on screen (the page tree only asks

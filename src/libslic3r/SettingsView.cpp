@@ -20,6 +20,39 @@ std::string settings_view_to_string(SettingsView view)
     return view == SettingsView::Bambu ? "bambu" : "";
 }
 
+ViewChoice view_choice(const std::string &user_mode, const std::string &settings_view)
+{
+    if (settings_view_from_string(settings_view) == SettingsView::Bambu)
+        return ViewChoice::Bambu;
+    return user_mode == "advanced" || user_mode == "develop" ? ViewChoice::Advanced : ViewChoice::Basic;
+}
+
+ViewChoiceConfig view_choice_config(ViewChoice choice)
+{
+    switch (choice) {
+    case ViewChoice::Basic: return { "simple", "" };
+    case ViewChoice::Advanced: return { "advanced", "" };
+    case ViewChoice::Bambu: break;
+    }
+    return { "advanced", settings_view_to_string(SettingsView::Bambu) };
+}
+
+ConfigOptionMode effective_level(ViewChoice choice, bool developer_mode)
+{
+    if (choice == ViewChoice::Basic)
+        return comSimple;
+    return developer_mode ? comDevelop : comAdvanced;
+}
+
+bool migrate_legacy_developer_user_mode(std::string &user_mode, bool &developer_mode)
+{
+    if (user_mode != "develop")
+        return false;
+    user_mode      = "advanced";
+    developer_mode = true;
+    return true;
+}
+
 namespace SettingsViewKeys {
 
 std::string base_key(const std::string &opt_id)
@@ -101,10 +134,10 @@ LineShow line_show(const ViewFilter &filter, const std::vector<std::string> &opt
     return exception ? LineShow::ShownNotInBambu : LineShow::Hidden;
 }
 
-LineShow widget_line_show(const ViewFilter &filter, bool group_has_visible_option_line)
+LineShow widget_line_show(const ViewFilter &filter, bool group_has_visible_option_line, ConfigOptionMode widget_mode)
 {
     if (!filter.bambu())
-        return comSimple <= filter.level ? LineShow::Shown : LineShow::Hidden;
+        return widget_mode <= filter.level ? LineShow::Shown : LineShow::Hidden;
     return group_has_visible_option_line ? LineShow::Shown : LineShow::Hidden;
 }
 
