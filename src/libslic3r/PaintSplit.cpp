@@ -1603,70 +1603,76 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
         out.source_volume = M.Volume();
         // A cut keeping less than a third of the selection goes through the region.
         const double keep_min = 1. / 3.;
-        Manifold cand = M;
-        for (size_t i = 0; i < cutters.size(); ++i) {
-            if (cutters[i].indices.empty())
-                continue; // an ignored speck of an edge (paint_split_follow_cut)
-            const PaintSplitLoop& loop = region.loops[size_t(comp)][i];
-            // The sheet along this edge cuts the region free there; what still carries the selection stays.
-            const Manifold C = ColorSplitDetail::to_manifold64(cutters[i], ctx);
-            ColorSplitDetail::require_ok(C, "sheet");
-            const Manifold cut = cand - C;
-            ColorSplitDetail::require_ok(cut, "cut");
-            // The parts of the cut: each one's share of the selection and of the skin just across this edge. The
-            // part holding most of that across skin is the other side, even with a little selected skin on it (the
-            // smoothed line runs a facet or two off the painted one); the parts carrying the selection are the piece.
-            struct CutPart { Manifold m; double carried{ 0. }; double across{ 0. }; };
-            std::vector<CutPart> cparts;
-            for (Manifold& pc : cut.Decompose()) {
-                const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
-                const AABBMesh             aabb(its);
-                CutPart                    cp;
-                cp.m = pc;
-                for (const auto& [g, ga] : sel)
-                    if (aabb.squared_distance(g) <= 1e-6)
-                        cp.carried += ga;
-                for (const Vec3d& q : loop.across)
+        // All the sheets at once: the region may hang on through another edge until that one is cut too (a leg,
+        // a foot in the sack, an arm back to the torso).
+        std::vector<Manifold> sheets;
+        std::vector<size_t>   sheet_loop;
+        for (size_t i = 0; i < cutters.size(); ++i)
+            if (!cutters[i].indices.empty()) { // an empty one is an ignored speck of an edge
+                sheets.push_back(ColorSplitDetail::to_manifold64(cutters[i], ctx));
+                ColorSplitDetail::require_ok(sheets.back(), "sheet");
+                sheet_loop.push_back(i);
+            }
+        const Manifold cut = M - ps_union(sheets);
+        ColorSplitDetail::require_ok(cut, "cut");
+        // The parts of the cut: each one's share of the selection and of each edge's skin across it. A part holding
+        // most of one edge's across skin is that edge's other side, even with a little selected skin on it (the
+        // smoothed line runs a facet or two off the painted one); the parts carrying the selection are the piece.
+        const std::vector<PaintSplitLoop>& loops = region.loops[size_t(comp)];
+        struct CutPart { Manifold m; double carried{ 0. }; std::vector<double> across; };
+        std::vector<CutPart> cparts;
+        for (Manifold& pc : cut.Decompose()) {
+            const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
+            const AABBMesh             aabb(its);
+            CutPart                    cp;
+            cp.m = pc;
+            cp.across.assign(loops.size(), 0.);
+            for (const auto& [g, ga] : sel)
+                if (aabb.squared_distance(g) <= 1e-6)
+                    cp.carried += ga;
+            for (size_t i : sheet_loop)
+                for (const Vec3d& q : loops[i].across)
                     if (aabb.squared_distance(q) <= 1e-6)
-                        cp.across += 1.;
-                cparts.push_back(std::move(cp));
+                        cp.across[i] += 1.;
+            cparts.push_back(std::move(cp));
+        }
+        int carrying = 0;
+        for (const CutPart& cp : cparts)
+            carrying += cp.carried >= params.carry_frac * sel_area;
+        std::vector<Manifold> kept;
+        std::vector<double>   across_on(loops.size(), 0.);
+        double                carried = 0.;
+        for (const CutPart& cp : cparts) {
+            bool other_side = false;
+            for (size_t i : sheet_loop)
+                other_side = other_side || (!loops[i].across.empty() && cp.across[i] > 0.5 * double(loops[i].across.size()));
+            if (cp.carried < params.carry_frac * sel_area || (other_side && carrying > 1)) {
+                ++out.returned_components;
+                continue;
             }
-            const double across_total = double(loop.across.size());
-            BOOST_LOG_TRIVIAL(warning) << "PSDBG edge " << i << ": the sheet (" << C.Volume() << " mm3) leaves " << cparts.size() << " part(s)";
-            std::vector<Manifold> kept;
-            double                carried = 0., across_on = 0.;
-            int                   carrying = 0;
-            for (const CutPart& cp : cparts)
-                carrying += cp.carried >= params.carry_frac * sel_area;
-            for (const CutPart& cp : cparts) {
-                const bool other_side = across_total > 0. && cp.across > 0.5 * across_total;
-                if (cp.carried < params.carry_frac * sel_area || (other_side && carrying > 1)) {
-                    ++out.returned_components;
-                    continue;
-                }
-                kept.push_back(cp.m);
-                carried += cp.carried;
-                across_on += cp.across;
-            }
-            if (kept.empty()) {
-                out.error    = PaintSplitError::EmptyPiece;
-                out.bad_loop = int(i);
-                return out;
-            }
-            // The skin across this edge still on the piece: the sheet did not go all the way round.
-            if (!loop.across.empty() && across_on > 0.5 * double(loop.across.size())) {
+            kept.push_back(cp.m);
+            carried += cp.carried;
+            for (size_t i : sheet_loop)
+                across_on[i] += cp.across[i];
+        }
+        BOOST_LOG_TRIVIAL(debug) << "Paint split: the sheets leave " << cparts.size() << " part(s), " << kept.size() << " kept";
+        if (kept.empty()) {
+            out.error = PaintSplitError::EmptyPiece;
+            return out;
+        }
+        // An edge whose across skin is still on the piece: its sheet did not go all the way round.
+        for (size_t i : sheet_loop)
+            if (!loops[i].across.empty() && across_on[i] > 0.5 * double(loops[i].across.size())) {
                 out.error    = PaintSplitError::EdgeNotSeparated;
                 out.bad_loop = int(i);
                 return out;
             }
-            if (carried < keep_min * sel_area) {
-                out.error    = PaintSplitError::CutCrossesRegion;
-                out.bad_loop = int(i);
-                return out;
-            }
-            cand = ps_union(kept);
-            ColorSplitDetail::require_ok(cand, "piece");
+        if (carried < keep_min * sel_area) {
+            out.error = PaintSplitError::CutCrossesRegion;
+            return out;
         }
+        const Manifold cand = ps_union(kept);
+        ColorSplitDetail::require_ok(cand, "piece");
 
         // The rest: the part less the piece, seam-free, in connected pieces.
         const Manifold rest = M - cand;
