@@ -7,6 +7,7 @@
 #include "AmsDualLayout.hpp"
 #include "DeviceModelCode.hpp"
 #include "ChamberLights.hpp"
+#include "BirdsEyeCamera.hpp"
 #include "BambuSendDiagnosis.hpp"
 #include "BambuNetInfo.hpp"
 #include "AmsMatch.hpp"
@@ -134,6 +135,10 @@ wxString get_stage_string(int stage)
         return _L("First layer error pause");
     case 35:
         return _L("Nozzle clog pause");
+    case 45:
+        return _L("Confirming BirdsEye camera location");
+    case 46:
+        return _L("Calibrating BirdsEye camera");
     default:
         ;
     }
@@ -2837,6 +2842,35 @@ int MachineObject::command_ipcam_record(bool on_off)
     return this->publish_json(j.dump());
 }
 
+void MachineObject::apply_ipcam_cameras(const GUI::BirdsEye::IpcamCameras& cams)
+{
+    if (cams.current != liveview_current_camera) {
+        // Warning level for hand test H1: did the push follow a swap? No serial, no address.
+        BOOST_LOG_TRIVIAL(warning) << "BirdsEye: current_liveview " << liveview_current_camera << " -> " << cams.current;
+        liveview_current_camera = cams.current;
+    }
+    if (cams.has_liveview && cams.liveview != support_liveview_cams) {
+        std::string ids;
+        for (int id : cams.liveview) ids += (ids.empty() ? "" : ",") + std::to_string(id);
+        BOOST_LOG_TRIVIAL(info) << "BirdsEye: support_liveview_cams [" << ids << "]";
+        support_liveview_cams = cams.liveview;
+    }
+    if (cams.has_record) support_record_cams = cams.record;
+    if (cams.has_enabled) enable_record_cams = cams.enabled;
+}
+
+int MachineObject::command_switch_camera(int camera_id)
+{
+    const json j = GUI::BirdsEye::switch_camera_command(camera_id, std::to_string(MachineObject::m_sequence_id++));
+    const int  rc = this->publish_json(j.dump());
+    // Warning level so the owner's default-level log shows it (hand test H1). No serial, no address.
+    BOOST_LOG_TRIVIAL(warning) << "BirdsEye: change_liveview_cam_idx camera_id=" << camera_id << " ("
+                               << GUI::BirdsEye::camera_label(camera_id) << "), from current_liveview="
+                               << liveview_current_camera << ", peer_name=" << GUI::BirdsEye::PEER_NAME
+                               << ", publish_json=" << rc;
+    return rc;
+}
+
 int MachineObject::command_ipcam_timelapse(bool on_off)
 {
     BOOST_LOG_TRIVIAL(info) << "command_ipcam_timelapse " << on_off;
@@ -3032,6 +3066,8 @@ void MachineObject::reset()
     camera_recording = false;
     camera_recording_when_printing = false;
     camera_timelapse = false;
+    support_liveview_cams.clear();
+    liveview_current_camera = GUI::BirdsEye::CAMERA_UNKNOWN;
     //camera_resolution = "";
     printing_speed_mag = 100;
     gcode_file_prepare_percent = 0;
@@ -3285,11 +3321,21 @@ static bool payload_needs_signature(const std::string& json_str)
 
 std::string MachineObject::print_command_blocker(const std::string& command) const
 {
+    return command_blocker("print", command);
+}
+
+std::string MachineObject::camera_command_blocker(const std::string& command) const
+{
+    return command_blocker("camera", command);
+}
+
+std::string MachineObject::command_blocker(const std::string& ns, const std::string& command) const
+{
     // The same two refusals publish_json applies, asked before a button is drawn rather than
     // after it is pressed. A status-only printer is sent nothing but status requests; a secured
     // one drops every unsigned control command. Neither depends on LAN versus cloud.
     json probe;
-    probe["print"]["command"] = command;
+    probe[ns]["command"] = command;
     const std::string payload = probe.dump();
     if (const AppConfig* cfg = Slic3r::GUI::wxGetApp().app_config;
         cfg != nullptr && BambuConnectStatus::is_status_only(*cfg, dev_id) && !BambuConnectStatus::status_only_allows(payload))
@@ -5067,6 +5113,9 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         try {
                             if (jj.contains("ipcam")) {
                                 json const & ipcam = jj["ipcam"];
+                                // BirdsEye camera fields first: the parser never throws, so a field
+                                // below in an unexpected shape cannot skip them.
+                                apply_ipcam_cameras(GUI::BirdsEye::parse_ipcam_cameras(ipcam));
                                 if (ipcam.contains("ipcam_record")) {
                                     if (camera_recording_hold_count > 0)
                                         camera_recording_hold_count--;
@@ -5805,6 +5854,16 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                             if (j["camera"]["control"].get<std::string>() == "disable")
                                 this->camera_recording_when_printing = false;
                             BOOST_LOG_TRIVIAL(info) << "ack of ipcam_record_set " << camera_recording_when_printing;
+                        } else if (j["camera"]["command"].get<std::string>() == "change_liveview_cam_idx") {
+                            // Bambu Studio ignores this reply and waits for the push's current_liveview;
+                            // so does EdgeSlicer. It is logged for hand test H1 (no serial, no address).
+                            const json& c = j["camera"];
+                            BOOST_LOG_TRIVIAL(warning) << "BirdsEye: reply to change_liveview_cam_idx: result="
+                                << (c.contains("result") && c["result"].is_string() ? c["result"].get<std::string>() : std::string("-"))
+                                << " reason="
+                                << (c.contains("reason") && c["reason"].is_string() ? c["reason"].get<std::string>() : std::string("-"))
+                                << " camera_id="
+                                << (c.contains("camera_id") ? c["camera_id"].dump() : std::string("-"));
                         } else if (j["camera"]["command"].get<std::string>() == "ipcam_resolution_set") {
                             this->camera_resolution = j["camera"]["resolution"].get<std::string>();
                             BOOST_LOG_TRIVIAL(info) << "ack of resolution = " << camera_resolution;
