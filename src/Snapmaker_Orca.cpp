@@ -62,6 +62,7 @@ using namespace nlohmann;
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/GCode/PostProcessor.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Print.hpp"
@@ -5459,6 +5460,8 @@ int CLI::run(int argc, char **argv)
     else if (need_arrange)
     {
         ArrangePolygons selected, unselected, unprintable, locked_aps;
+        // Per-object prime towers: the object each selected item (by its itemid) belongs to.
+        std::vector<const ModelObject *> selected_objects;
 
         //for (Model &model : m_models)
         if (m_models.size() > 0)
@@ -5668,6 +5671,8 @@ int CLI::run(int argc, char **argv)
                             if (!locked)
                             {
                                 ap.itemid = cont.size();
+                                if (&cont == &selected)
+                                    selected_objects.push_back(mo);
                                 cont.emplace_back(std::move(ap));
                             }
                             else
@@ -5820,6 +5825,41 @@ int CLI::run(int argc, char **argv)
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
                 arrangement::update_unselected_items_inflation(unselected, &m_print_config, arrange_cfg);
                 arrangement::update_selected_items_axis_align(selected, &m_print_config, arrange_cfg);
+                // Per-object prime towers (design 2.5): printing by object with prime_tower_per_object, a multi-colour
+                // copy needs room beside it for its own tower. Grow such an item by its estimated tower, so the arrange
+                // leaves that room (the slicer places the tower beside the copy afterwards).
+                if (arrange_cfg.is_seq_print && selected.size() > 1 && m_print_config.has("prime_tower_per_object") &&
+                    m_print_config.opt_bool("prime_tower_per_object") && m_print_config.has("enable_prime_tower") &&
+                    m_print_config.opt_bool("enable_prime_tower") && resolve_wipe_tower_type(m_print_config) == WipeTowerType::Type1) {
+                    auto filament_key = [this](const ModelObject &object, const char *key) -> int {
+                        if (const ConfigOption *opt = object.config.option(key); opt != nullptr && opt->getInt() > 0)
+                            return opt->getInt();
+                        return m_print_config.has(key) ? m_print_config.option(key)->getInt() : 0;
+                    };
+                    const double layer_height = m_print_config.has("layer_height") ? m_print_config.opt_float("layer_height") : 0.2;
+                    for (ArrangePolygon &ap : selected) {
+                        if (ap.itemid < 0 || size_t(ap.itemid) >= selected_objects.size())
+                            continue;
+                        const ModelObject &object = *selected_objects[size_t(ap.itemid)];
+                        std::vector<unsigned int> filaments;
+                        for (const ModelVolume *volume : object.volumes)
+                            if (volume->is_model_part())
+                                for (int extruder : volume->get_extruders())
+                                    if (extruder > 0)
+                                        filaments.push_back(unsigned(extruder - 1));
+                        for (const char *key : { "wall_filament", "sparse_infill_filament", "solid_infill_filament" })
+                            if (const int f = filament_key(object, key); f > 0)
+                                filaments.push_back(unsigned(f - 1));
+                        sort_remove_duplicates(filaments);
+                        if (filaments.size() < 2)
+                            continue;
+                        const WipeTowerFootprint tower = estimate_wipe_tower_footprint(m_print_config, WipeTowerType::Type1, filaments, layer_height,
+                                                                                       object.instance_bounding_box(0).size().z());
+                        if (tower.depth <= EPSILON)
+                            continue;
+                        ap.inflation += scaled<coord_t>(std::max(tower.width, tower.depth) + 2. * tower.brim_width + 5.);
+                    }
+                }
 
                 beds=get_shrink_bedpts(&m_print_config, arrange_cfg);
 
