@@ -1284,7 +1284,7 @@ static std::vector<std::string> s_Preset_print_options {
     "filename_format", "wall_filament", "outer_wall_filament", "support_bottom_z_distance",
     "sparse_infill_filament", "solid_infill_filament", "top_surface_filament", "bottom_surface_filament", "ironing_filament", "support_filament", "support_interface_filament", "support_filament_matching","support_interface_not_for_body",
     "support_interface_interlock", "support_interface_interlock_layers", "support_interface_interlock_beam_lines", "support_interface_nozzle_temperature",
-    "ooze_prevention", "standby_temperature_delta", "preheat_time","delta_temperature","preheat_steps", "interface_shells", "line_width", "initial_layer_line_width", "inner_wall_line_width",
+    "ooze_prevention", "standby_temperature_delta", "preheat_time","delta_temperature","preheat_steps", "interface_shells", "line_width", "initial_layer_line_width", "initial_layer_infill_line_width", "inner_wall_line_width",
     "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
     "skin_infill_line_width","skeleton_infill_line_width", "locked_skin_infill_pattern", "locked_skeleton_infill_pattern", "infill_instead_top_bottom_surfaces",
     "top_surface_line_width", "support_line_width", "infill_wall_overlap","top_bottom_infill_wall_overlap", "bridge_flow", "bridge_line_width", "bridge_expansion_extra", "internal_bridge_flow",
@@ -1298,7 +1298,7 @@ static std::vector<std::string> s_Preset_print_options {
      "tree_support_branch_diameter", "tree_support_branch_diameter_angle",
      "detect_narrow_internal_solid_infill",
      "gcode_add_line_number", "enable_arc_fitting", "precise_z_height", "infill_combination","infill_combination_max_layer_height", /*"adaptive_layer_height",*/
-     "support_bottom_interface_spacing", "enable_overhang_speed", "overhang_shadow_inner_wall", "overhang_shadow_speed_ratio", "overhang_shadow_distance", "slowdown_for_curled_perimeters", "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed",
+     "support_bottom_interface_spacing", "enable_overhang_speed", "enable_height_slowdown", "slowdown_start_height", "slowdown_start_speed", "slowdown_start_acc", "slowdown_end_height", "slowdown_end_speed", "slowdown_end_acc", "overhang_shadow_inner_wall", "overhang_shadow_speed_ratio", "overhang_shadow_distance", "slowdown_for_curled_perimeters", "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed",
      "layer_time_speed_smoothing", "layer_time_speed_max_variation", "layer_time_speed_max_speedup",
      "layer_time_speed_max_slowdown", "layer_time_speed_max_time_increase", "layer_time_speed_slowdown_scope",
      "min_layer_time_pause", "min_layer_time_pause_park", "min_layer_time_pause_park_x", "min_layer_time_pause_park_y",

@@ -3546,6 +3546,8 @@ void TabPrint::build()
         optgroup = page->new_optgroup(L("Line width"), L"param_line_width");
         optgroup->append_single_option_line("line_width","quality_settings_line_width");
         optgroup->append_single_option_line("initial_layer_line_width","quality_settings_line_width");
+        // Bambu Studio 02.09.01.70 Tab.cpp:3118, right under the initial layer line width.
+        optgroup->append_single_option_line("initial_layer_infill_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("outer_wall_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("inner_wall_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("top_surface_line_width","quality_settings_line_width");
@@ -3828,6 +3830,15 @@ void TabPrint::build()
         optgroup->append_single_option_line("support_interface_speed", "speed_settings_other_layers_speed#support-interface");
         optgroup->append_single_option_line("small_support_perimeter_speed", "speed_settings_other_layers_speed#small-tree-support-perimeters");
         optgroup->append_single_option_line("small_support_perimeter_threshold", "speed_settings_other_layers_speed#small-tree-support-perimeters-threshold");
+        // Bambu Studio 02.09.01.70 Tab.cpp:3285-3291: Speed > Other layers speed (Bambu puts them after its
+        // overhang speed line, which has a group of its own here).
+        optgroup->append_single_option_line("enable_height_slowdown");
+        optgroup->append_single_option_line("slowdown_start_height");
+        optgroup->append_single_option_line("slowdown_start_speed");
+        optgroup->append_single_option_line("slowdown_start_acc");
+        optgroup->append_single_option_line("slowdown_end_height");
+        optgroup->append_single_option_line("slowdown_end_speed");
+        optgroup->append_single_option_line("slowdown_end_acc");
         optgroup = page->new_optgroup(L("Overhang speed"), L"param_overhang_speed", 15);
         optgroup->append_single_option_line("enable_overhang_speed", "speed_settings_overhang_speed#slow-down-for-overhang");
         optgroup->append_single_option_line("slowdown_for_curled_perimeters", "speed_settings_overhang_speed#slow-down-for-curled-perimeters");

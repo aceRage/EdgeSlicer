@@ -978,7 +978,7 @@ void StatusBasePanel::init_bitmaps()
     m_bitmap_timelapse_off = ScalableBitmap(this, wxGetApp().dark_mode() ? "monitor_timelapse_off_dark" : "monitor_timelapse_off", 20);
     m_bitmap_vcamera_on = ScalableBitmap(this, wxGetApp().dark_mode() ? "monitor_vcamera_on_dark" : "monitor_vcamera_on", 20);
     m_bitmap_vcamera_off = ScalableBitmap(this, wxGetApp().dark_mode() ? "monitor_vcamera_off_dark" : "monitor_vcamera_off", 20);
-    m_bitmap_switch_camera = ScalableBitmap(this, wxGetApp().dark_mode() ? "camera_switch_dark" : "camera_switch", 20);
+    m_bitmap_switch_camera = ScalableBitmap(this, wxGetApp().dark_mode() ? "camera_custom_source_dark" : "camera_custom_source", 20);
 
 }
 
@@ -1064,7 +1064,9 @@ wxBoxSizer *StatusBasePanel::create_monitoring_page()
     m_bitmap_recording_img->SetToolTip(_L("Video"));
     m_bitmap_vcamera_img->SetToolTip(_L("Go Live"));
     m_setting_button->SetToolTip(_L("Camera Setting"));
-    m_camera_switch_button->SetToolTip(_L("Switch Camera View"));
+    // "Show custom camera", not "Switch Camera View": the BirdsEye swap in the video bar switches
+    // the printer's own cameras, and two look-alike "switch camera" buttons would be confusing.
+    m_camera_switch_button->SetToolTip(_L("Show custom camera"));
 
     bSizer_monitoring_title->Add(m_camera_switch_button, 0, wxALIGN_CENTER_VERTICAL | wxALL, FromDIP(5));
     bSizer_monitoring_title->Add(m_bitmap_sdcard_img, 0, wxALIGN_CENTER_VERTICAL | wxALL, FromDIP(5));

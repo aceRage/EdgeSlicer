@@ -154,6 +154,16 @@ extern Flow support_material_1st_layer_flow(const PrintObject *object, float lay
 extern Flow support_material_interface_flow(const PrintObject *object, const PrintObjectConfig &object_config, float layer_height = 0.f);
 extern Flow support_material_interface_flow(const PrintObject *object, float layer_height = 0.f);
 
+// Bambu Studio 02.09.01.70 (PrintRegion.cpp:24-31): on the first layer, sparse infill, solid infill and top surface
+// take initial_layer_infill_line_width when it is set (> 0); everything else keeps the initial layer line width.
+// EdgeSlicer: not while a per-nozzle process gives this role's filament a first-layer width of its own
+// (nozzle_initial_layer_line_width), so one plate-wide infill width never reaches a nozzle of another size.
+inline bool use_initial_layer_infill_width(FlowRole role, double initial_layer_infill_line_width, bool per_nozzle_initial_width)
+{
+    const bool infill_role = role == frInfill || role == frSolidInfill || role == frTopSolidInfill;
+    return infill_role && initial_layer_infill_line_width > 0. && !per_nozzle_initial_width;
+}
+
 }
 
 #endif

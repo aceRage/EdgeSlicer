@@ -1744,7 +1744,8 @@ int CLI::run(int argc, char **argv)
     int current_printable_width, current_printable_depth, current_printable_height, shrink_to_new_bed = 0;
     int old_printable_height = 0, old_printable_width = 0, old_printable_depth = 0;
     Pointfs old_printable_area, old_exclude_area;
-    float old_max_radius = 0.f, old_height_to_rod = 0.f, old_height_to_lid = 0.f;
+    // double, like the current values they are compared with: a float copy of 47.4 never equals the double 47.4.
+    double old_max_radius = 0., old_height_to_rod = 0., old_height_to_lid = 0.;
     std::vector<double> old_max_layer_height, old_min_layer_height;
     std::string outfile_dir              =  m_config.opt_string("outputdir", true);
     const std::vector<std::string>              &load_configs               = m_config.option<ConfigOptionStrings>("load_settings", true)->values;
@@ -2529,7 +2530,7 @@ int CLI::run(int argc, char **argv)
                     if (config.option<ConfigOptionFloat>("extruder_clearance_height_to_lid"))
                         old_height_to_lid = config.opt_float("extruder_clearance_height_to_lid");
                     if (config.option<ConfigOptionFloat>("extruder_clearance_radius"))
-                        old_max_radius = float(sequential_clearance_radius(config));
+                        old_max_radius = sequential_clearance_radius(config);
                     if (config.option<ConfigOptionFloats>("max_layer_height"))
                         old_max_layer_height = config.option<ConfigOptionFloats>("max_layer_height")->values;
                     if (config.option<ConfigOptionFloats>("min_layer_height"))
@@ -5204,9 +5205,13 @@ int CLI::run(int argc, char **argv)
 
     if ((!need_arrange) && is_bbl_3mf && !shrink_to_new_bed && (plate_to_slice > 0))
     {
-        if (((old_height_to_rod != 0.f) && (old_height_to_rod != height_to_rod))
-            || ((old_height_to_lid != 0.f) && (old_height_to_lid != height_to_lid))
-            || ((old_max_radius != 0.f) && (old_max_radius != clearance_radius)))
+        // Compare with a tolerance so a project whose clearances equal the current ones keeps its saved positions.
+        auto clearance_changed = [](double old_value, double new_value) {
+            return (old_value != 0.) && (std::abs(old_value - new_value) > 1e-3);
+        };
+        if (clearance_changed(old_height_to_rod, height_to_rod)
+            || clearance_changed(old_height_to_lid, height_to_lid)
+            || clearance_changed(old_max_radius, clearance_radius))
         {
             if (is_seq_print_for_curr_plate) {
                 need_arrange = true;

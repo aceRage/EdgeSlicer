@@ -346,6 +346,9 @@ TEST_CASE("Every Bambu enum value of a shared key loads", "[BambuAliases][Config
     const std::set<std::pair<std::string, std::string>> no_equivalent = {
         { "nozzle_type", "tungsten_carbide" }, // no such nozzle type here
     };
+    // Bambu Studio 02.09 pattern values we have no pattern for (Bambu-only ironing spiral and a global
+    // monotonic line); on any pattern key they fall back through the normal substitution.
+    const std::set<std::string> no_equivalent_values = { "ironingarchimedeanspiral", "globalmonotonicline" };
     // Keys handle_legacy's ignore set retires whatever their value (see hubtest notes on extruder_type).
     const std::set<std::string> retired = { "extruder_type" };
     for (const BambuExport::BambuKeyDef &bdef : BambuExport::bambu_key_defs()) {
@@ -358,7 +361,7 @@ TEST_CASE("Every Bambu enum value of a shared key loads", "[BambuAliases][Config
         const std::string        joined(bdef.enum_values);
         boost::algorithm::split(values, joined, boost::is_any_of("|"));
         for (const std::string &v : values) {
-            if (no_equivalent.count({ bdef.key, v }))
+            if (no_equivalent.count({ bdef.key, v }) || no_equivalent_values.count(v))
                 continue;
             std::string key = bdef.key, value = v;
             PrintConfigDef::handle_legacy(key, value);

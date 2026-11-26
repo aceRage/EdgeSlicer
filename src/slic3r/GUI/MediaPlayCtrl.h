@@ -71,6 +71,12 @@ protected:
 
     void SetStatus(wxString const &msg, bool hyperlink = true);
 
+    // BirdsEye camera swap (design tests/design_birds_eye_camera.md, D1-D3, D6): a button in this
+    // bar, shown only when the printer lists two or more live-view cameras, and a badge naming the
+    // camera the printer streams now. Refreshed from SetMachineObject on every Device page tick.
+    void update_camera_swap();
+    void on_camera_swap();
+
 private:
     void load();
 
@@ -136,6 +142,21 @@ private:
     ::Button *m_button_play;
     ::Label * m_label_stat;
     ::Label * m_label_status;
+
+    // BirdsEye swap. The printer's camera list and current camera are copied in SetMachineObject;
+    // the MachineObject itself is looked up again by m_machine when the button is pressed.
+    ::Button *       m_button_camera_swap = nullptr;
+    ::Label *        m_label_camera       = nullptr;
+    std::vector<int> m_cams;                  // support_liveview_cams
+    int              m_cam_current = -1;      // current_liveview, -1 unknown
+    std::string      m_cam_blocker;           // camera_command_blocker: "", "secured", "status_only"
+    bool             m_cam_connected = false;
+    bool             m_cam_clickable = false; // drawn active; otherwise grey with the reason as tooltip
+    int              m_switch_target = -1;    // camera asked for, -1 when no switch is pending
+    wxDateTime       m_switch_deadline;
+    bool             m_switch_failed     = false; // the printer did not follow the last press within 10 s
+    int              m_switch_failed_cam = -1;    // current_liveview when that was noticed
+    wxString         m_swap_shown_state;      // last button/badge state applied, to skip no-op redraws
 };
 
 }}
