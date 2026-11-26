@@ -529,8 +529,9 @@ TEST_CASE("Object towers: a copy that ends on another filament than it starts wi
     std::string gcode;
     REQUIRE_NOTHROW(gcode = Test::gcode(print));
     CHECK(print.by_object_plan_misses() == 0);
+    // The travel to the second copy may be split into several moves (each carries the comment blocks_of() splits on).
     const std::vector<std::string> blocks = blocks_of(gcode);
-    REQUIRE(blocks.size() == 2);
-    for (const std::string &block : blocks)
-        CHECK(count_of(block, TOWER_START) > 0);
+    REQUIRE(blocks.size() >= 2);
+    CHECK(count_of(blocks.front(), TOWER_START) > 0);
+    CHECK(count_of(blocks.back(), TOWER_START) > 0);
 }
