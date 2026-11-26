@@ -1797,7 +1797,11 @@ indexed_triangle_set paint_split_nearest_claim(const indexed_triangle_set& mesh,
                     phi[(size_t(k) * size_t(ny) + size_t(j)) * size_t(nx) + size_t(i)] = v;
                 }
     });
-    return mesh_dense_field(phi, nx, ny, nz, origin, h);
+    indexed_triangle_set claim = mesh_dense_field(phi, nx, ny, nz, origin, h);
+    // Outward, whichever way the mesher winds.
+    if (its_volume(claim) < 0.)
+        its_flip_triangles(claim);
+    return claim;
 }
 
 indexed_triangle_set paint_split_claim_cut_surface(const indexed_triangle_set& mesh, const indexed_triangle_set& claim)
