@@ -15,6 +15,7 @@
 
 #include "Widgets/Label.hpp"
 #include "Widgets/SwitchButton.hpp"
+#include "SettingsViewSelector.hpp"
 #include "Widgets/Button.hpp"
 #include "GUI_Factories.hpp"
 #include "libslic3r/PresetManagerModel.hpp"
@@ -226,8 +227,8 @@ ParamsPanel::ParamsPanel( wxWindow* parent, wxWindowID id, const wxPoint& pos, c
         m_tips_arrow = new ScalableButton(m_top_panel, wxID_ANY, "tips_arrow");
         m_tips_arrow->Hide();
 
-        m_title_view = new Label(m_top_panel, Label::Body_12, _L("Advance")); // ORCA match size with advanced toggle on tab.cpp m_static_title
-        m_mode_view = new SwitchButton(m_top_panel, wxID_ABOUT);
+        // Settings views: Basic | Advanced | Bambu (dropdown when the row is narrow) replaced the "Advance" switch.
+        m_mode_view = new SettingsViewSelector(m_top_panel);
 
         // BBS: new layout
         //m_search_btn = new ScalableButton(m_top_panel, wxID_ANY, "search", wxEmptyString, wxDefaultSize, wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, true);
@@ -353,8 +354,6 @@ ParamsPanel::ParamsPanel( wxWindow* parent, wxWindowID id, const wxPoint& pos, c
 
     if (m_mode_region)
         m_mode_region->Bind(wxEVT_TOGGLEBUTTON, &ParamsPanel::OnToggled, this);
-    if (m_mode_view)
-        m_mode_view->Bind(wxEVT_TOGGLEBUTTON, &ParamsPanel::OnToggled, this);
     Bind(wxEVT_TOGGLEBUTTON, &ParamsPanel::OnToggled, this); // For Tab's mode switch
     //Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { wxGetApp().plater()->search(false); }, wxID_FIND);
     //m_export_to_file->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { wxGetApp().mainframe->export_config(); });
@@ -383,8 +382,6 @@ void ParamsPanel::create_layout()
         m_mode_sizer->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
         m_mode_sizer->Add(m_tips_arrow, 0, wxALIGN_CENTER);
         m_mode_sizer->AddStretchSpacer(8);
-        m_mode_sizer->Add( m_title_view, 0, wxALIGN_CENTER );
-        m_mode_sizer->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
         m_mode_sizer->Add(m_mode_view, 0, wxALIGN_CENTER);
         m_mode_sizer->AddSpacer(FromDIP(SidebarProps::ElementSpacing() * 6)); // ORCA using spacer prevents shaky mode_view when tips_arrow highlighting mode_region instead using AddStretchSpacer
         m_mode_sizer->Add(m_manage_btn, 0, wxALIGN_CENTER);
@@ -553,28 +550,8 @@ void ParamsPanel::OnToggled(wxCommandEvent& event)
         return;
     }
 
-    if (wxID_ABOUT != event.GetId()) {
-        return;
-    }
-
-    // this is from tab's mode switch
-    bool value = dynamic_cast<SwitchButton*>(event.GetEventObject())->GetValue();
-    int mode_id;
-
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": Advanced mode toogle to %1%") % value;
-
-    if (value)
-    {
-        //m_mode_region->SetBitmap(m_toggle_on_icon);
-        mode_id = comAdvanced;
-    }
-    else
-    {
-        //m_mode_region->SetBitmap(m_toggle_off_icon);
-        mode_id = comSimple;
-    }
-
-    Slic3r::GUI::wxGetApp().save_mode(mode_id);
+    // The tabs' "Advance" switches (wxID_ABOUT) are gone: the settings view selectors
+    // (SettingsViewSelector) write GUI_App::save_view_choice() themselves.
 }
 
 // This is special, DO NOT call it from outer except from Tab
@@ -648,28 +625,10 @@ bool ParamsPanel::is_active_and_shown_tab(wxPanel* tab)
 
 void ParamsPanel::update_mode()
 {
-    int app_mode = Slic3r::GUI::wxGetApp().get_mode();
-    SwitchButton * mode_view = m_current_tab ? dynamic_cast<Tab*>(m_current_tab)->m_mode_view : nullptr;
-    if (mode_view == nullptr) mode_view = m_mode_view;
-    if (mode_view == nullptr) return;
-
-    //BBS: disable the mode tab and return directly when enable develop mode
-    if (app_mode == comDevelop)
-    {
-        mode_view->Disable();
-        return;
-    }
-    if (!mode_view->IsEnabled())
-        mode_view->Enable();
-
-    if (app_mode == comAdvanced)
-    {
-        mode_view->SetValue(true);
-    }
-    else
-    {
-        mode_view->SetValue(false);
-    }
+    // Settings views: the selectors read GUI_App::get_view_choice() (Developer mode shows "Developer").
+    // Each Tab refreshes its own selector in Tab::update_mode().
+    if (m_mode_view)
+        m_mode_view->update_from_app();
 }
 
 void ParamsPanel::msw_rescale()
@@ -686,7 +645,7 @@ void ParamsPanel::msw_rescale()
     if (m_mode_region)
         ((SwitchButton* )m_mode_region)->Rescale();
     if (m_mode_view)
-        ((SwitchButton* )m_mode_view)->Rescale();
+        m_mode_view->msw_rescale();
     for (auto tab : {m_tab_print, m_tab_print_plate, m_tab_print_object, m_tab_print_part, m_tab_print_layer, m_tab_filament, m_tab_printer}) {
         if (tab) dynamic_cast<Tab*>(tab)->msw_rescale();
     }

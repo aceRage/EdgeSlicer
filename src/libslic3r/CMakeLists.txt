@@ -354,6 +354,8 @@ set(lisbslic3r_sources
     Format/BambuMultiDiameter.cpp
     Format/BambuMultiDiameter.hpp
     Format/BambuKnownKeys.cpp
+    Format/BambuUiKeys.cpp
+    Format/BambuUiKeys.hpp
     Format/GLTF.cpp
     Format/GLTF.hpp
     format.hpp
@@ -621,6 +623,8 @@ set(lisbslic3r_sources
     StartupProfile.hpp
     Preset.cpp
     Preset.hpp
+    SettingsView.cpp
+    SettingsView.hpp
     PresetFlowVariant.cpp
     PresetFlowVariant.hpp
     PrincipalComponents2D.cpp

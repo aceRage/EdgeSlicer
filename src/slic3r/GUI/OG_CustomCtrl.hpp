@@ -46,6 +46,8 @@ class OG_CustomCtrl :public wxPanel
         bool draw_mode_bitmap       { true };
         bool is_visible             { true };
         bool is_focused             { false };
+        // Shown in the Bambu settings view although Bambu Studio does not show it (the "Not in Bambu Studio" chip).
+        bool not_in_bambu           { false };
 
         CtrlLine(   wxCoord         height,
                     OG_CustomCtrl*  ctrl,
@@ -57,7 +59,7 @@ class OG_CustomCtrl :public wxPanel
         int     get_max_win_width();
         void    correct_items_positions();
         void    msw_rescale();
-        void    update_visibility(ConfigOptionMode mode);
+        void    update_visibility(LineShow show);
 
         void render_separator(wxDC& dc, wxCoord v_pos);
 
@@ -66,6 +68,8 @@ class OG_CustomCtrl :public wxPanel
         wxPoint draw_blinking_bmp(wxDC& dc, wxPoint pos, bool is_blinking);
         wxPoint draw_act_bmps(wxDC& dc, wxPoint pos, const wxBitmap& bmp_undo_to_sys, const wxBitmap& bmp_undo, bool is_blinking, size_t rect_id = 0);
         wxCoord draw_edit_bmp(wxDC& dc, wxPoint pos, const wxBitmap& bmp_edit);
+        // Bambu settings view: the "Not in Bambu Studio" chip after the label (a short "E" when the label column is full).
+        void    draw_not_in_bambu_chip(wxDC& dc, wxCoord v_pos, wxCoord column_end);
         bool    launch_browser() const;
         bool    is_separator() const { return og_line.is_separator(); }
 
@@ -73,6 +77,7 @@ class OG_CustomCtrl :public wxPanel
         std::vector<wxRect> rects_undo_to_sys_icon;
         std::vector<wxRect> rects_edit_icon;
         wxRect              rect_label;
+        wxRect              rect_chip;
     };
 
     std::vector<CtrlLine> ctrl_lines;
@@ -92,7 +97,8 @@ public:
     void    OnLeaveWin(wxMouseEvent& event);
 
     void    init_ctrl_lines();
-    bool    update_visibility(ConfigOptionMode mode);
+    bool    update_visibility(ConfigOptionMode mode) { return update_visibility(view_filter_for_level(mode)); }
+    bool    update_visibility(const ViewFilter& filter);
     void    correct_window_position(wxWindow* win, const Line& line, Field* field = nullptr);
     void    correct_widgets_position(wxSizer* widget, const Line& line, Field* field = nullptr);
     void    init_max_win_width();
