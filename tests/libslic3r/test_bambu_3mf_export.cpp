@@ -477,7 +477,7 @@ SCENARIO("Export Bambu 3MF writes a project Bambu Studio loads with its settings
         REQUIRE(back.ok);
         CHECK(back.is_bbl_3mf);
         CHECK(back.version.maj() == 2);
-        CHECK(back.version.min() == 8);
+        CHECK(back.version.min() == 9);
         CHECK(back.plates.size() == 2);
         REQUIRE(back.model.objects.size() == 1);
         const ModelObject *obj = back.model.objects[0];
