@@ -1,6 +1,7 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Airbrush/AirbrushBake.hpp"
 #include "GLCanvas3D.hpp"
+#include "RightUpSelect.hpp"
 #include "SequentialPrintClearance.hpp"
 #include "slic3r/Utils/ToolbarScaleLogic.hpp"
 
@@ -6860,7 +6861,8 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             // forces a frame render to ensure that m_hover_volume_idxs is updated even when the user right clicks while
             // the context menu is already shown
             render();
-            if (!m_hover_volume_idxs.empty()) {
+            // Orca: do not select the hovered volume when ending a camera pan/rotation
+            if (should_select_hovered_volume_on_right_up(m_mouse.ignore_right_up, m_hover_volume_idxs.empty())) {
                 // if right clicking on volume, propagate event through callback (shows context menu)
                 int volume_idx = get_first_hover_volume_idx();
                 if (!m_volumes.volumes[volume_idx]->is_wipe_tower // no context menu for the wipe tower
