@@ -195,17 +195,9 @@ std::vector<PaintSplitLoop> ps_loops(const indexed_triangle_set& its, const std:
         };
         std::vector<int> nb;
         for (PaintSplitLoop& loop : loops) {
-            // About a quarter of the loop's radius deep on each side (at least 3 rings): on a fine mesh a few
-            // rings are a fraction of a millimetre, too little to see which way the skin goes.
-            Vec3d lc = Vec3d::Zero();
-            for (const DrawCutSample& s : loop.pts)
-                lc += s.pos;
-            lc /= double(std::max<size_t>(1, loop.pts.size()));
-            double lr = 0.;
-            for (const DrawCutSample& s : loop.pts)
-                lr = std::max(lr, (s.pos - lc).norm());
-            const double edge  = loop.length / double(std::max<size_t>(1, loop.pts.size()));
-            const int    RINGS = edge > 0. ? std::clamp(int(0.25 * lr / edge), 3, 40) : 3;
+            // Three rings each side: deeper floods reach round the next bend of a figure and can point the wrong
+            // way (owner's figure, 2026-11-25); paint_split_assign_loops tries the other side when this one fails.
+            const int RINGS = 3;
             std::unordered_map<int, int> seen_in, seen_out; // face -> ring
             std::vector<int>             front_in, front_out;
             for (const DrawCutSample& s : loop.pts) {
@@ -1173,9 +1165,9 @@ PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, cons
                 }
                 return carried;
             };
-            // Four ways to cut this edge: the plane facing the way the skin says or the other way (the skin can be
-            // unclear on a fine, wavy edge), its far side whole or only near the edge. The one that keeps the most
-            // of the selection wins; among those that keep about as much, the smallest piece.
+            // Up to four ways to cut this edge: its far side whole or only near the edge, with the plane facing the
+            // way the skin says; only when neither keeps half the selection, the same facing the other way. Of
+            // the two, the one that keeps the most of the selection wins, then the smaller piece.
             PaintSplitPlane flipped = planes[i];
             // Offset is towards the piece, so it flips with the side: mirror the plane about the loop's centre.
             flipped.point  = flipped.point - 2. * flipped.normal * flipped.normal.dot(flipped.point - lc);
@@ -1186,6 +1178,8 @@ PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, cons
             double                carried = -1., volume = 0.;
             bool                  was_flipped = false;
             for (int k = 0; k < 4; ++k) {
+                if (k == 2 && carried >= 0.5 * sel_area)
+                    break;
                 std::vector<Manifold> k_kept;
                 int                   k_dropped = 0;
                 const double          k_carried = cut_once(k < 2 ? planes[i] : flipped, k % 2 == 1, k_kept, k_dropped);
