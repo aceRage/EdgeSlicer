@@ -231,10 +231,6 @@ indexed_triangle_set paint_split_nearest_claim(const indexed_triangle_set& mesh,
                                                const PaintSplitSkinParams& params, double* voxel_used = nullptr);
 // The part of the claim's surface that lies inside the part: the cut surface, for the preview.
 indexed_triangle_set paint_split_claim_cut_surface(const indexed_triangle_set& mesh, const indexed_triangle_set& claim);
-// The split: piece = the part AND the claim, reduced to the components that carry the selection; the rest of the
-// part falls into connected pieces as in paint_split_assign_loops (body by body_hints, then volume; others loose).
-PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
-                                            const PaintSplitSkinParams& skin, const PaintSplitAssignParams& params = {});
 
 // ---------------------------------------------------------------------------------------------------------
 // The keep-connected rule (design 4.2)
@@ -317,6 +313,11 @@ PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, cons
 // piece, sheets included) falls into connected pieces as above.
 PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
                                             const std::vector<indexed_triangle_set>& cutters, const PaintSplitAssignParams& params = {});
+
+// The nearest-skin split: piece = the part AND the claim (paint_split_nearest_claim), reduced to the components that
+// carry the selection; the rest of the part falls into connected pieces as above.
+PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                            const PaintSplitSkinParams& skin, const PaintSplitAssignParams& params = {});
 
 // What Cut::perform_with_cutter_solid() needs besides the cutter (design 4.4).
 struct PaintSplitKeep
