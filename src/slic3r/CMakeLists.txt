@@ -648,6 +648,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/DeviceControls.hpp
     GUI/BambuFans.hpp
     GUI/ChamberLights.hpp
+    GUI/BirdsEyeCamera.hpp
     GUI/FilamentCommands.hpp
     GUI/SnapmakerLan.hpp
     GUI/RemoteHub.cpp
