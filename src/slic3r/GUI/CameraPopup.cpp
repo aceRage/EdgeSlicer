@@ -324,8 +324,6 @@ void CameraPopup::update_record_cams()
     m_switch_record_birdseye->SetValue(BirdsEye::is_recording(m_obj->enable_record_cams, BirdsEye::CAMERA_DEPUTY));
     m_switch_record_main->Enable(can_change);
     m_switch_record_birdseye->Enable(can_change);
-    m_text_record_main->SetForegroundColour(can_change ? TEXT_COL : wxColour(0xAC, 0xAC, 0xAC));
-    m_text_record_birdseye->SetForegroundColour(can_change ? TEXT_COL : wxColour(0xAC, 0xAC, 0xAC));
     m_text_storage->SetLabel(storage);
     m_text_storage->Show();
     m_text_record_hint->SetLabel(hint);
@@ -548,7 +546,7 @@ void CameraPopup::OnLeftUp(wxMouseEvent &event)
     if (mouse_pos.x > wxscroll_win_pos.x && mouse_pos.y > wxscroll_win_pos.y && mouse_pos.x < (wxscroll_win_pos.x + m_panel->GetSize().x) && mouse_pos.y < (wxscroll_win_pos.y + m_panel->GetSize().y)) {
         //recording
         auto recording_rect = m_switch_recording->ClientToScreen(wxPoint(0, 0));
-        if (mouse_pos.x > recording_rect.x && mouse_pos.y > recording_rect.y && mouse_pos.x < (recording_rect.x + m_switch_recording->GetSize().x) && mouse_pos.y < (recording_rect.y + m_switch_recording->GetSize().y)) {
+        if (m_switch_recording->IsShown() && mouse_pos.x > recording_rect.x && mouse_pos.y > recording_rect.y && mouse_pos.x < (recording_rect.x + m_switch_recording->GetSize().x) && mouse_pos.y < (recording_rect.y + m_switch_recording->GetSize().y)) {
             wxMouseEvent recording_evt(wxEVT_LEFT_DOWN);
             m_switch_recording->GetEventHandler()->ProcessEvent(recording_evt);
             return;
