@@ -193,9 +193,19 @@ std::vector<PaintSplitLoop> ps_loops(const indexed_triangle_set& its, const std:
                             out.push_back(g);
             }
         };
-        const int RINGS = 3;
         std::vector<int> nb;
         for (PaintSplitLoop& loop : loops) {
+            // About a quarter of the loop's radius deep on each side (at least 3 rings): on a fine mesh a few
+            // rings are a fraction of a millimetre, too little to see which way the skin goes.
+            Vec3d lc = Vec3d::Zero();
+            for (const DrawCutSample& s : loop.pts)
+                lc += s.pos;
+            lc /= double(std::max<size_t>(1, loop.pts.size()));
+            double lr = 0.;
+            for (const DrawCutSample& s : loop.pts)
+                lr = std::max(lr, (s.pos - lc).norm());
+            const double edge  = loop.length / double(std::max<size_t>(1, loop.pts.size()));
+            const int    RINGS = edge > 0. ? std::clamp(int(0.25 * lr / edge), 3, 40) : 3;
             std::unordered_map<int, int> seen_in, seen_out; // face -> ring
             std::vector<int>             front_in, front_out;
             for (const DrawCutSample& s : loop.pts) {
@@ -675,6 +685,20 @@ static indexed_triangle_set ps_plane_box(const PaintSplitPlane& plane, const Bou
     return box;
 }
 
+// The box on the far side of `plane` (against its normal) round `centre`'s foot on the plane: half-width `half` in
+// the plane, reaching past `bbox`.
+static indexed_triangle_set ps_loop_far_box(const PaintSplitPlane& plane, const Vec3d& centre, double half, const BoundingBoxf3& bbox)
+{
+    const double reach = bbox.size().norm() + 2. + std::abs(plane.normal.dot(bbox.center() - plane.point));
+    const Vec3d  o     = centre - plane.normal * plane.normal.dot(centre - plane.point);
+    indexed_triangle_set box = its_make_cube(2. * half, 2. * half, reach);
+    for (Vec3f& p : box.vertices) {
+        const Vec3d q = o + plane.u * (double(p.x()) - half) + plane.v * (double(p.y()) - half) + plane.normal * (double(p.z()) - reach);
+        p             = q.cast<float>();
+    }
+    return box;
+}
+
 indexed_triangle_set paint_split_half_space(const PaintSplitPlane& plane, const BoundingBoxf3& bbox)
 {
     const Vec3d  centre = bbox.center();
@@ -1094,23 +1118,28 @@ PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, cons
         Manifold cand = M;
         for (size_t i = 0; i < planes.size(); ++i) {
             const PaintSplitLoop& loop = region.loops[size_t(comp)][i];
-            const Manifold        C    = ColorSplitDetail::to_manifold64(paint_split_half_space(planes[i], bbox), ctx);
-            ColorSplitDetail::require_ok(C, "cutter");
-            auto [inside, outside] = cand.Split(C);
-            ColorSplitDetail::require_ok(inside, "split inside");
-            ColorSplitDetail::require_ok(outside, "split outside");
-
             // How far a piece across the cut may lie from this loop and still be "across this edge".
             Vec3d lc = Vec3d::Zero();
             for (const DrawCutSample& s : loop.pts)
                 lc += s.pos;
             lc /= double(std::max<size_t>(1, loop.pts.size()));
-            double r = 0., maxd = 0.;
+            double r = 0., maxd = 0., rin = 0.;
             for (const DrawCutSample& s : loop.pts) {
-                r    = std::max(r, (s.pos - lc).norm());
+                const Vec3d d = s.pos - lc;
+                r    = std::max(r, d.norm());
+                rin  = std::max(rin, (d - planes[i].normal * planes[i].normal.dot(d)).norm());
                 maxd = std::max(maxd, std::abs(planes[i].normal.dot(s.pos - planes[i].point)));
             }
             const double tol = std::max(1., 0.1 * 2. * r) + maxd;
+
+            // What this loop's cut takes away: the far side of its plane, but only within a box round the loop
+            // (1.5 times its radius, plus 2 mm). An unbounded half-space through a small hole of a curved
+            // region would slice the region itself far from the hole (owner's figure, 2026-11-25).
+            const Manifold C = ColorSplitDetail::to_manifold64(ps_loop_far_box(planes[i], lc, 1.5 * rin + 2., bbox), ctx);
+            ColorSplitDetail::require_ok(C, "cutter");
+            auto [outside, inside] = cand.Split(C);
+            ColorSplitDetail::require_ok(inside, "split inside");
+            ColorSplitDetail::require_ok(outside, "split outside");
 
             std::vector<Manifold> kept;
             double                carried = 0.;

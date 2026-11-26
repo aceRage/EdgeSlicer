@@ -1089,7 +1089,7 @@ TEST_CASE("Paint split loops: a cap with two holes left open is cut along its th
     // sphere's centre. (Which loop comes first is not part of the contract.)
     int rims = 0;
     for (size_t l = 0; l < 3; ++l) {
-        if (planes[l].point.z() < 0.) {
+        if (planes[l].point.z() < -5.) {
             ++rims;
             CHECK(planes[l].normal.z() > 0.99);
         } else
