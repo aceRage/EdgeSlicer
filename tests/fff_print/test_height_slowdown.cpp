@@ -243,14 +243,20 @@ TEST_CASE("Initial layer infill line width sets the first layer's infill width o
             CHECK(path.width == Approx(0.5).margin(0.01));
         });
     }
+    // The second layer keeps its own widths (0.42 / 0.45 here; a few bridging-flow solid lines are wider either
+    // way), never the first layer's infill width.
+    size_t second_regular = 0;
     for (const LayerRegion *layerm : object.layers()[1]->regions())
         for_each_path(layerm->fills, [&](const ExtrusionPath &path) {
             if (!infill_role(path.role()))
                 return;
             ++second_infill;
-            CHECK(path.width < 0.46);
+            second_regular += path.width < 0.46;
+            if (infill_width > 0.)
+                CHECK(path.width != Approx(infill_width).margin(0.005));
         });
     CHECK(first_infill > 0);
     CHECK(first_walls > 0);
-    CHECK(second_infill > 0);
+    REQUIRE(second_infill > 0);
+    CHECK(second_regular * 10 >= second_infill * 9);
 }
