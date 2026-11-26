@@ -470,9 +470,11 @@ TEST_CASE("Object towers: H2C blocks print M620.14 beside their own tower", "[Ob
 }
 
 // Owner hand test of #1207 (objtowers3_error.3mf): each object is two touching cubes, one part in filament 2 and one in
-// filament 1, so the copy's first layer starts on one filament and its last layer ends on the other. The by-object plan
-// rebuilt the first block as ToolOrdering(object, last filament) while the export prints it from ToolOrdering(object, -1),
-// so the first copy's tower was planned from another first-layer order: "append_tcr unexpected toolchange: layer_idx=0".
+// filament 1, so the copy's first layer starts on one filament and its last layer ends on the other. The export chains even
+// the first block from ToolOrdering(object, -1)'s last filament, so that block's ordering starts with another filament than
+// the start G-code loaded, and it makes no tool change before the block. GCode::process_layer starts the layer with the
+// loaded filament; the copy's tower planned from its ordering's first one, so the first change went the other way:
+// "append_tcr unexpected toolchange: layer_idx=0 ... requested=1 expected=0 initial=1".
 TEST_CASE("Object towers: a copy that ends on another filament than it starts with (owner's two-part objects)", "[ObjectTowers]")
 {
     Print print;
@@ -495,19 +497,33 @@ TEST_CASE("Object towers: a copy that ends on another filament than it starts wi
 
     const ByObjectPlan &plan = print.by_object_plan();
     REQUIRE(plan.blocks.size() == 2);
-    const ByObjectPlan::Ordering &first = plan.orderings[size_t(plan.blocks[0].ordering)];
-    // The case this covers: the first copy's ordering ends on another filament than it starts with.
-    REQUIRE(first.tool_ordering.first_extruder() != first.tool_ordering.last_extruder());
-    // The first block prints with the ordering the export uses for it.
-    CHECK(first.first_extruder == (unsigned int) -1);
+    // The case this covers: the first block's ordering starts with another filament than the start G-code loads.
+    const ToolOrdering fresh(*plan.blocks[0].instance->print_object, (unsigned int) -1);
+    REQUIRE(fresh.first_extruder() != fresh.last_extruder());
+    CHECK(plan.blocks[0].loaded_extruder == fresh.first_extruder());
+    CHECK(plan.blocks[0].first_extruder != plan.blocks[0].loaded_extruder);
+    // Later blocks start after their entry change.
+    CHECK(plan.blocks[1].loaded_extruder == plan.blocks[1].first_extruder);
     REQUIRE(print.object_wipe_towers().size() == 2);
+    // Each tower's first change starts from the filament loaded when its block starts.
     for (const std::unique_ptr<ObjectWipeTower> &tower : print.object_wipe_towers()) {
         const ByObjectBlock *block = nullptr;
         for (const ByObjectBlock &b : plan.blocks)
             if (b.instance == tower->instance)
                 block = &b;
         REQUIRE(block != nullptr);
-        CHECK(tower->tool_ordering->first_extruder() == block->first_extruder);
+        const WipeTower::ToolChangeResult *first_change = nullptr;
+        for (const std::vector<WipeTower::ToolChangeResult> &layer : tower->data->tool_changes) {
+            for (const WipeTower::ToolChangeResult &tcr : layer)
+                if (tcr.initial_tool != tcr.new_tool) {
+                    first_change = &tcr;
+                    break;
+                }
+            if (first_change != nullptr)
+                break;
+        }
+        REQUIRE(first_change != nullptr);
+        CHECK(first_change->initial_tool == int(block->loaded_extruder));
     }
 
     std::string gcode;

@@ -6639,12 +6639,12 @@ void Print::plan_print_by_object()
         status.set_current_extruder_id(extruder);
     };
 
-    // As the export's loop: no filament asked for yet, so the first copy keeps ToolOrdering(object, -1) (the ordering the
-    // export prints it with). Starting from that ordering's own last filament rebuilt the first block as
-    // ToolOrdering(object, last) whenever the copy ends on another filament than it starts with, and a per-object prime
-    // tower planned from it disagreed with the export on the first layer ("append_tcr unexpected toolchange").
-    unsigned int       final_extruder = (unsigned int) -1;
+    unsigned int       final_extruder = plan.orderings[size_t(current)].tool_ordering.last_extruder();
     const PrintObject *prev_object    = instances[idx]->print_object;
+    // The filament the start G-code loads: the first copy's ToolOrdering(object, -1) starts with it. The export chains
+    // even the first block from that ordering's last filament (as above) but makes no tool change before it, so the
+    // first block starts with this one loaded, whatever its own ordering starts with.
+    const unsigned int start_extruder = plan.orderings[size_t(current)].tool_ordering.first_extruder();
     for (; idx < instances.size(); ++idx) {
         const PrintObject &object = *instances[idx]->print_object;
         ByObjectBlock      block;
@@ -6666,6 +6666,8 @@ void Print::plan_print_by_object()
         block.ordering               = current;
         block.first_extruder         = ordering.first_extruder();
         block.last_extruder          = ordering.last_extruder();
+        // Later blocks start after the export's block-entry change to their first filament.
+        block.loaded_extruder        = plan.blocks.empty() ? start_extruder : block.first_extruder;
         for (const LayerTools &lt : ordering)
             for (unsigned int filament : lt.extruders)
                 load(filament);
@@ -8532,6 +8534,8 @@ void Print::_make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, con
         }
     }
 
+    // The filament loaded when the tower's first layer starts (the plate tower: the ordering's first).
+    unsigned int loaded_extruder = (unsigned int) -1;
     if (plate_tower) {
         // Let the ToolOrdering class know there will be initial priming extrusions at the start of the print.
         data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2);
@@ -8549,6 +8553,9 @@ void Print::_make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, con
                 // The copy prints nothing.
                 return;
             data.tool_ordering = m_by_object_plan.orderings[size_t(block->ordering)].tool_ordering;
+            // The first block starts with the start G-code's filament, which its ordering need not start with
+            // (ByObjectBlock::loaded_extruder); the export's first layer starts with it, so the tower does too.
+            loaded_extruder = block->loaded_extruder;
         } else
             data.tool_ordering = ToolOrdering(*tower_object, (unsigned int) -1, bUseWipeTower2);
     }
@@ -8628,7 +8635,8 @@ void Print::_make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, con
 
     if (!bUseWipeTower2) {
         // in BBL machine, wipe tower is only use to prime extruder. So just use a global wipe volume.
-        WipeTower wipe_tower(m_config, pos, m_origin, m_config.prime_volume, data.tool_ordering.first_extruder(),
+        WipeTower wipe_tower(m_config, pos, m_origin, m_config.prime_volume,
+                             loaded_extruder != (unsigned int) -1 ? loaded_extruder : data.tool_ordering.first_extruder(),
                              data.tool_ordering.empty() ? 0.f : data.tool_ordering.back().print_z);
         // Edge: a Type1 tower on a non-Bambu printer (wipe_tower_type override) must tag its G-code
         // the way the export's GCodeProcessor reads it (";TYPE:" rather than "; FEATURE: "), or the
@@ -8694,7 +8702,7 @@ void Print::_make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, con
         // to pass to wipe_tower (so that it can use it for planning the layout of the tower)
         {
             // BBS: priming logic is removed, so get the initial extruder by first_extruder()
-            unsigned int current_extruder_id = data.tool_ordering.first_extruder();
+            unsigned int current_extruder_id = loaded_extruder != (unsigned int) -1 ? loaded_extruder : data.tool_ordering.first_extruder();
             // Local-Z (Subdivide Mix Layer) and mixed color sublayer passes print first on their layer and change
             // filament directly on a Type1 tower (WipeTowerIntegration::tool_change, local_z_unplanned). The layer's
             // tower changes then start from the filament the last pass left loaded, as GCode::process_layer()

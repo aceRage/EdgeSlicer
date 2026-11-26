@@ -1374,6 +1374,10 @@ struct ByObjectBlock
     int                                    ordering        = -1;
     unsigned int                           first_extruder  = (unsigned int) -1;
     unsigned int                           last_extruder   = (unsigned int) -1;
+    // The filament loaded when the block's first layer starts: the start G-code's for the first block (which gets no
+    // tool change before it, though its ordering may start with another), else first_extruder. GCode::process_layer
+    // starts each layer with the loaded filament, so a copy's prime tower plans from this one.
+    unsigned int                           loaded_extruder = (unsigned int) -1;
     MultiNozzleUtils::NozzleStatusRecorder nozzle_status_before;
 };
 
