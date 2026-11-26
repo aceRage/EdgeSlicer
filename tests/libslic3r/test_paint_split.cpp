@@ -7,6 +7,7 @@
 
 #include <libslic3r/AABBMesh.hpp>
 #include <libslic3r/CutUtils.hpp>
+#include <libslic3r/ColorSplit.hpp>
 #include <libslic3r/Geometry.hpp>
 #include <libslic3r/MeshBoolean.hpp>
 #include <libslic3r/Model.hpp>
@@ -16,8 +17,10 @@
 #include <libslic3r/TriangleSelector.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <map>
@@ -1285,7 +1288,73 @@ TEST_CASE("Paint split loops: owner's painted figure", "[.][PaintSplitGrinch]")
                                << c.depth << ", sheet " << c.sheet.indices.size() << " faces, size " << (sb.defined ? sb.size().norm() : 0.));
             }
             WARN("  cutters built, first failed edge " << bad_cut);
+            if (const char* dump = std::getenv("PAINT_SPLIT_DUMP"); dump != nullptr && *dump != 0) {
+                // Diagnostics: the part near each edge, the region's facets, the cut surfaces and the paint lines.
+                static int region_no = 0;
+                ++region_no;
+                const std::string base = std::string(dump) + "/r" + std::to_string(region_no);
+                std::ofstream f(base + ".txt");
+                BoundingBoxf3 rb;
+                for (const auto& lp : r.loops[0])
+                    for (const DrawCutSample& smp : lp.pts)
+                        rb.merge(smp.pos);
+                rb.min -= Vec3d(15., 15., 15.);
+                rb.max += Vec3d(15., 15., 15.);
+                for (size_t fi = 0; fi < r.surface.indices.size(); ++fi) {
+                    const Vec3i32& t = r.surface.indices[fi];
+                    const Vec3d g = (r.surface.vertices[t[0]] + r.surface.vertices[t[1]] + r.surface.vertices[t[2]]).cast<double>() / 3.;
+                    if (!rb.contains(g))
+                        continue;
+                    f << (r.facet_comp[fi] == 0 ? "S" : "M");
+                    for (int k = 0; k < 3; ++k)
+                        f << " " << r.surface.vertices[t[k]].x() << " " << r.surface.vertices[t[k]].y() << " " << r.surface.vertices[t[k]].z();
+                    f << "\n";
+                }
+                for (size_t l = 0; l < r.loops[0].size(); ++l) {
+                    const PaintSplitFollowCut c = paint_split_follow_cut(tm.its, r.loops[0][l], PaintSplitFollowParams(), tm.bounding_box());
+                    for (const Vec3i32& t : c.preview.indices) {
+                        f << "C" << l;
+                        for (int k = 0; k < 3; ++k)
+                            f << " " << c.preview.vertices[t[k]].x() << " " << c.preview.vertices[t[k]].y() << " " << c.preview.vertices[t[k]].z();
+                        f << "\n";
+                    }
+                    for (size_t k = 0; k < r.loops[0][l].pts.size(); ++k) {
+                        const Vec3d a = r.loops[0][l].pts[k].pos, b = r.loops[0][l].pts[(k + 1) % r.loops[0][l].pts.size()].pos;
+                        f << "L" << l << " " << a.x() << " " << a.y() << " " << a.z() << " " << b.x() << " " << b.y() << " " << b.z() << "\n";
+                    }
+                }
+            }
             const PaintSplitPieces p = paint_split_assign_cutters(tm.its, r, 0, cutters);
+            if (std::getenv("PAINT_SPLIT_SKIN") != nullptr) {
+                // Option A (skin cut): the colour split's shells on the selection alone.
+                for (const bool unlimited : { false, true }) {
+                    ColorSplitDepths dd;
+                    dd.D = 3.; dd.ws = 0.9; dd.cap_top = 0.6; dd.cap_bottom = 0.6; dd.layer_height = 0.2; dd.unlimited = unlimited;
+                    try {
+                        const auto t0 = std::chrono::steady_clock::now();
+                        const ColorSplitResult cs = split_volume_by_paint(tm.its, mask, dd, ColorSplitParams(), [](int) { return true; });
+                        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                        double vp = 0.;
+                        for (const auto& [fil, m] : cs.pieces)
+                            vp += its_volume(m);
+                        if (const char* dump = std::getenv("PAINT_SPLIT_DUMP"); dump != nullptr && *dump != 0 && !cs.pieces.empty()) {
+                            static int skin_no = 0;
+                            std::ofstream f(std::string(dump) + "/skin" + std::to_string(++skin_no) + (unlimited ? "u" : "3") + ".txt");
+                            for (const auto& [fil, m] : cs.pieces)
+                                for (const Vec3i32& t : m.indices) {
+                                    f << "S";
+                                    for (int k = 0; k < 3; ++k)
+                                        f << " " << m.vertices[t[k]].x() << " " << m.vertices[t[k]].y() << " " << m.vertices[t[k]].z();
+                                    f << std::endl;
+                                }
+                        }
+                        WARN("  skin " << (unlimited ? "unlimited" : "3 mm") << ": piece " << vp << " mm3, body " << its_volume(cs.body) << " mm3, "
+                                       << cs.pieces.size() << " piece mesh(es), " << secs << " s, " << cs.warnings.size() << " warning(s)");
+                    } catch (const std::exception& e) {
+                        WARN("  skin failed: " << e.what());
+                    }
+                }
+            }
             WARN("state " << s << ": " << edges << " edges, " << r.holes_filled[0] << " holes filled, area " << r.area[0] << " mm2 -> "
                           << (p.ok() ? "ok" : paint_split_error_message(p.error)) << " bad_loop " << p.bad_loop << ", pieces "
                           << (p.ok() ? 2 + p.loose.size() : 0) << ", piece vol " << p.piece_volume << ", body vol " << p.body_volume
