@@ -990,6 +990,7 @@ public:
     std::vector<int> support_liveview_cams;
     std::vector<int> support_record_cams;
     std::vector<int> enable_record_cams;
+    long long        camera_record_cam_ctl_start { 0 }; // time(nullptr) of the last per-camera toggle here
     bool has_birdseye_camera() const { return GUI::BirdsEye::has_birdseye(support_liveview_cams); }
     void apply_ipcam_cameras(const GUI::BirdsEye::IpcamCameras& cams);
     enum LiveviewLocal {
@@ -1291,6 +1292,9 @@ public:
     // Asks the printer to stream camera `camera_id` (4 Live View, 5 BirdsEye) on its one live-view
     // stream. Every viewer of that stream (Device page, Stream tab, phone) sees the switch.
     int command_switch_camera(int camera_id);
+    // Per-camera "record while printing" (ipcam_record_set with camera_id; Device page camera
+    // settings). Updates enable_record_cams at once and holds it for 3 s against older pushes.
+    int command_ipcam_record_cam(int camera_id, bool on);
     int command_xcam_control(std::string module_name, bool on_off, std::string lvl = "");
     int command_xcam_control_ai_monitoring(bool on_off, std::string lvl);
     int command_xcam_control_first_layer_inspector(bool on_off, bool print_halt);

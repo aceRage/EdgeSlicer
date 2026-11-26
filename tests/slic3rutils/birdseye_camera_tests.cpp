@@ -153,3 +153,62 @@ TEST_CASE("BirdsEye: camera commands need a signature on a secured printer", "[B
     CHECK(Slic3r::GUI::bambu_command_needs_signature("camera", "change_liveview_cam_idx"));
     CHECK(Slic3r::GUI::bambu_command_needs_signature("camera", "ipcam_record_set"));
 }
+
+// ---- per-camera recording (PR 2) ---------------------------------------------------------------------
+
+TEST_CASE("BirdsEye: the per-camera recording command", "[BirdsEye]")
+{
+    const json on = record_camera_command(5, true, "20002");
+    REQUIRE(on.size() == 1);
+    const json& c = on["camera"];
+    CHECK(c["command"] == "ipcam_record_set");
+    CHECK(c["sequence_id"] == "20002");
+    CHECK(c["camera_id"] == 5);
+    CHECK(c["camera_id"].is_number_integer());
+    CHECK(c["control"] == "enable");
+    CHECK(c.size() == 4);
+    CHECK_FALSE(c.contains("peer_name"));
+    CHECK(record_camera_command(4, false, "1")["camera"]["control"] == "disable");
+    CHECK(on.dump() == R"({"camera":{"camera_id":5,"command":"ipcam_record_set","control":"enable","sequence_id":"20002"}})");
+}
+
+TEST_CASE("BirdsEye: which recording switches the camera settings show", "[BirdsEye]")
+{
+    SECTION("both cameras recordable")
+    {
+        const RecordSwitches r = record_switches({4, 5});
+        CHECK(r.main);
+        CHECK(r.birdseye);
+        CHECK_FALSE(r.legacy());
+    }
+    SECTION("only the BirdsEye camera recordable")
+    {
+        const RecordSwitches r = record_switches({5});
+        CHECK_FALSE(r.main);
+        CHECK(r.birdseye);
+        CHECK_FALSE(r.legacy());
+    }
+    SECTION("nothing listed, or only ids without a switch: the single older switch")
+    {
+        CHECK(record_switches({}).legacy());
+        CHECK(record_switches({7, 9}).legacy());
+    }
+}
+
+TEST_CASE("BirdsEye: a local toggle updates the enabled list at once", "[BirdsEye]")
+{
+    CHECK(with_recording({4}, 5, true) == std::vector<int>{4, 5});
+    CHECK(with_recording({4, 5}, 5, true) == std::vector<int>{4, 5});
+    CHECK(with_recording({4, 5}, 4, false) == std::vector<int>{5});
+    CHECK(with_recording({}, 4, false).empty());
+    CHECK(is_recording({4, 5}, 5));
+    CHECK_FALSE(is_recording({4}, 5));
+}
+
+TEST_CASE("BirdsEye: pushes are ignored for 3 s after a local toggle", "[BirdsEye]")
+{
+    CHECK(take_pushed_record_list(0, 1000));     // never toggled here
+    CHECK_FALSE(take_pushed_record_list(1000, 1000));
+    CHECK_FALSE(take_pushed_record_list(1000, 1003));
+    CHECK(take_pushed_record_list(1000, 1004));
+}
