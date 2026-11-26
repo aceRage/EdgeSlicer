@@ -6129,18 +6129,18 @@ struct PrecomputedLayer
     std::vector<PrecomputedOverhangLayer> overhang_layers;
 };
 
-// Whether process_layer() prepares the overhang estimator for `layer`. This is the rule the serial
-// code always had and it must stay that way, because the estimator measures each prepared layer against
-// the layer prepared before it: a region's first (Standard) enable_overhang_speed value, not "any
-// flow-variant column". Which layers get prepared decides which layer a later wall is compared with, so
-// a different rule would change the G-code. Orca #14788: _extrude also asks the estimator when the overhang
-// fan can switch on (`overhang_fan`, see overhang_fan_enabled()), with the overhang slowdown off, so every
-// layer with extrusions is prepared then.
+// Whether process_layer() prepares the overhang estimator for `layer`. Any filament may print the layer, and
+// process_layer() prepares it before the layer's tool changes, so a region's overhang speed counts if it is
+// enabled for any nozzle (or any flow-variant column). The estimator measures against layer->lower_layer, so
+// which layers get prepared does not decide the comparison layer. Orca #14788: _extrude also asks the estimator
+// when the overhang fan can switch on (`overhang_fan`, see overhang_fan_enabled()), with the overhang slowdown
+// off, so every layer with extrusions is prepared then.
 static bool prepares_overhang_estimator(const Layer &layer, bool overhang_fan)
 {
     const LayerRegionPtrs &regions = layer.regions();
     return std::any_of(regions.begin(), regions.end(), [overhang_fan](const LayerRegion *region) {
-        return region->has_extrusions() && (overhang_fan || region->region().config().enable_overhang_speed.values.front());
+        return region->has_extrusions() &&
+            (overhang_fan || any_enabled(region->region().config().enable_overhang_speed));
     });
 }
 

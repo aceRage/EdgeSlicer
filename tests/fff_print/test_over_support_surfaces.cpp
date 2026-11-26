@@ -831,6 +831,11 @@ uint32_t float_bits(float value)
     return bits;
 }
 
+bool same_processed_point(const ProcessedPoint &a, const ProcessedPoint &b)
+{
+    return a.p == b.p && float_bits(a.speed) == float_bits(b.speed) && float_bits(a.overlap) == float_bits(b.overlap);
+}
+
 void check_identical_walls(const Walls &actual, const Walls &expected)
 {
     REQUIRE(actual.size() == expected.size());
@@ -848,12 +853,33 @@ void check_identical_walls(const Walls &actual, const Walls &expected)
     }
 }
 
+bool any_difference(const Walls &a, const Walls &b)
+{
+    return !std::equal(a.begin(), a.end(), b.begin(), b.end(),
+                       [](const std::vector<ProcessedPoint> &wa, const std::vector<ProcessedPoint> &wb) {
+                           return std::equal(wa.begin(), wa.end(), wb.begin(), wb.end(), same_processed_point);
+                       });
+}
+
 const Layer *first_overhang_layer(const PrintObject &object)
 {
     for (const Layer *layer : object.layers()) {
         if (layer == nullptr || layer->lower_layer == nullptr || !layer->has_extrusions())
             continue;
         return layer;
+    }
+    return nullptr;
+}
+
+// A layer on the caged slope, with two layers below it. Consecutive slope layers have different
+// outlines, so measuring a wall against two_below is observably different from measuring it against
+// one_below. TestMesh::overhang's first such layer is still a vertical stem, so the two trees match.
+const Layer *caged_slope_layer(const PrintObject &object)
+{
+    for (const Layer *layer : object.layers()) {
+        if (layer != nullptr && layer->print_z > 8. && layer->lower_layer != nullptr &&
+            layer->lower_layer->lower_layer != nullptr && layer->has_extrusions())
+            return layer;
     }
     return nullptr;
 }
@@ -941,7 +967,52 @@ TEST_CASE("Overhang data computed ahead of the generator gives the same wall spe
     check_identical_walls(estimate_walls(precomputed, object, *layer), expected);
 }
 
-TEST_CASE("Overhang distances measured against another layer than the previous one are not used", "[ExtrusionProcessor]")
+// process_layer() prepares the estimator only for the layers that need overhang detection, so the layer it was prepared
+// for before may be a lower one than the layer below, the same layer again, or none at all. Whether the distances are
+// queried or computed ahead, the walls must come out as if the estimator had been prepared for every layer.
+TEST_CASE("Walls are measured against the layer below them whichever layer was prepared before", "[ExtrusionProcessor][Regression]")
+{
+    // Nothing, the layer two below, or the same layer.
+    const int  prepared_before = GENERATE(0, 1, 2);
+    const bool precomputed     = GENERATE(false, true);
+    CAPTURE(prepared_before, precomputed);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_overhang_speed", "1"},
+        {"layer_height", "0.2"},
+        {"skirt_loops", "0"},
+        {"brim_type", "no_brim"},
+    });
+    Print print;
+    init_and_process_print({caged_overhang_mesh()}, print, config);
+    const PrintObject *object = print.objects().front();
+    const Layer       *layer  = caged_slope_layer(*object);
+    REQUIRE(layer != nullptr);
+    const Layer *one_below = layer->lower_layer;
+    REQUIRE(one_below != nullptr);
+    const Layer *two_below = one_below->lower_layer;
+    REQUIRE(two_below != nullptr);
+
+    ExtrusionQualityEstimator continuous;
+    continuous.prepare_for_new_layer(object, one_below);
+    continuous.prepare_for_new_layer(object, layer);
+    const Walls expected = estimate_walls(continuous, object, *layer);
+    // Measured against the layer two below, the walls differ, so matching `expected` below is no coincidence.
+    ExtrusionQualityEstimator stale;
+    stale.prepare_for_new_layer(object, one_below);
+    REQUIRE(any_difference(estimate_walls(stale, object, *layer), expected));
+
+    const Layer *const prepared_layers[] = {nullptr, two_below, layer};
+    ExtrusionQualityEstimator estimator;
+    if (prepared_layers[prepared_before] != nullptr)
+        estimator.prepare_for_new_layer(object, prepared_layers[prepared_before]);
+    if (precomputed)
+        estimator.set_precomputed_layers({precompute_overhang_layer(object, *layer)});
+    estimator.prepare_for_new_layer(object, layer);
+    check_identical_walls(estimate_walls(estimator, object, *layer), expected);
+}
+
+TEST_CASE("Overhang data computed for another layer is not used", "[ExtrusionProcessor]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -951,26 +1022,25 @@ TEST_CASE("Overhang distances measured against another layer than the previous o
         {"brim_type", "no_brim"},
     });
     Print print;
-    init_and_process_print({TestMesh::overhang}, print, config);
+    init_and_process_print({caged_overhang_mesh()}, print, config);
     const PrintObject *object    = print.objects().front();
-    const Layer       *layer     = nullptr;
-    for (const Layer *l : object->layers()) {
-        if (l != nullptr && l->lower_layer != nullptr && l->lower_layer->lower_layer != nullptr && l->has_extrusions()) {
-            layer = l;
-            break;
-        }
-    }
+    const Layer       *layer     = caged_slope_layer(*object);
     REQUIRE(layer != nullptr);
-    const Layer *two_below = layer->lower_layer->lower_layer;
+    const Layer *one_below = layer->lower_layer;
+    REQUIRE(one_below != nullptr);
 
     ExtrusionQualityEstimator queried;
-    queried.prepare_for_new_layer(object, two_below);
+    queried.prepare_for_new_layer(object, one_below);
     queried.prepare_for_new_layer(object, layer);
     const Walls expected = estimate_walls(queried, object, *layer);
+    // Measures the walls against the layer below one_below, the layer the data computed for one_below holds.
+    ExtrusionQualityEstimator two_below;
+    two_below.prepare_for_new_layer(object, one_below);
+    REQUIRE(any_difference(estimate_walls(two_below, object, *layer), expected));
 
     ExtrusionQualityEstimator precomputed;
-    precomputed.prepare_for_new_layer(object, two_below);
-    precomputed.set_precomputed_layers({precompute_overhang_layer(object, *layer)});
+    precomputed.prepare_for_new_layer(object, one_below);
+    precomputed.set_precomputed_layers({precompute_overhang_layer(object, *one_below)});
     precomputed.prepare_for_new_layer(object, layer);
     check_identical_walls(estimate_walls(precomputed, object, *layer), expected);
 }
@@ -1071,11 +1141,13 @@ TEST_CASE("Curled walls from an earlier slice are dropped once overhang speed is
     CHECK_FALSE(has_curled_lines(*print.objects().front()));
 }
 
-TEST_CASE("Overhang data is precomputed for the layers the serial code prepares, by the first overhang speed value", "[ExtrusionProcessor]")
+TEST_CASE("Overhang data is precomputed for the layers the serial code prepares, when overhang speed is on for any column",
+          "[ExtrusionProcessor]")
 {
-    // process_layer() prepares the estimator for a layer when a region has extrusions and its FIRST
-    // enable_overhang_speed value is on. A second (High Flow) column that is on must not make another
-    // layer qualify, or the estimator would compare walls with a different layer than the serial code does.
+    // process_layer() prepares the estimator for a layer when a region has extrusions and overhang speed is on for
+    // any nozzle / flow-variant column. _extrude reads process_flow_value, so a High Flow or second-nozzle column
+    // that is on still estimates; the estimator measures against lower_layer, so preparing those layers no longer
+    // changes which layer a later wall is compared with.
     struct Case
     {
         std::vector<unsigned char> overhang_speed;
@@ -1085,7 +1157,7 @@ TEST_CASE("Overhang data is precomputed for the layers the serial code prepares,
         {{1}, true},
         {{1, 0}, true},
         {{0}, false},
-        {{0, 1}, false},
+        {{0, 1}, true},
     };
     for (const Case &c : cases) {
         std::string label;
