@@ -143,6 +143,25 @@ TEST_CASE("A filament_map within the nozzle range is not changed", "[MultiFilame
     CHECK(print.config().filament_map.values == std::vector<int>({ 1, 2 }));
 }
 
+TEST_CASE("Filament maps longer than the filament list are cut to the filament count", "[MultiFilament][FilamentMap]")
+{
+    // OrcaSlicer #17774: a printer switch can leave plate maps sized for the old filament count.
+    DynamicPrintConfig config = two_nozzle_map_config("1,2,1,1");
+    config.set_key_value("filament_volume_map", new ConfigOptionInts({ 0, 0, 0, 0 }));
+    config.set_key_value("filament_nozzle_map", new ConfigOptionInts({ 0, 1, 0, 0 }));
+    REQUIRE(config.option<ConfigOptionInts>("filament_map")->values.size() == 4);
+    REQUIRE(config.option<ConfigOptionInts>("filament_volume_map")->values.size() == 4);
+    REQUIRE(config.option<ConfigOptionInts>("filament_nozzle_map")->values.size() == 4);
+    REQUIRE(config.option<ConfigOptionFloats>("filament_diameter")->values.size() == 2);
+    Print print;
+    print.is_BBL_printer() = true;
+    init_and_process_print({ TestMesh::cube_20x20x20 }, print, config);
+    CHECK(print.config().filament_map.values == std::vector<int>({ 1, 2 }));
+    CHECK(print.config().filament_volume_map.values.size() == 2);
+    CHECK(print.config().filament_nozzle_map.values.size() == 2);
+    CHECK(gcode_body(slice_two_nozzle(config)) == gcode_body(slice_two_nozzle(two_nozzle_map_config("1,2"))));
+}
+
 TEST_CASE("A physical_extruder_map entry outside the nozzle range still exports", "[MultiFilament][FilamentMap]")
 {
     const std::string map = GENERATE(as<std::string>{}, "0,-1", "0,2", "0,100", "-1,0");
