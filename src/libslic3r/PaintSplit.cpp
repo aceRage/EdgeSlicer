@@ -1175,6 +1175,8 @@ PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, cons
             if (kept.empty() || carried < 0.5 * sel_area) {
                 // The skin round this edge did not say clearly which side the region is on: try the other side.
                 PaintSplitPlane flipped = planes[i];
+                // Offset is towards the piece, so it flips with the side: mirror the plane about the loop's centre.
+                flipped.point           = flipped.point - 2. * flipped.normal * flipped.normal.dot(flipped.point - lc);
                 flipped.normal          = -flipped.normal;
                 std::swap(flipped.u, flipped.v);
                 std::vector<Manifold> kept2;
