@@ -37,13 +37,13 @@ so they take the same third-party geometry path for new saves, with settings int
 
 ### Application tag and version
 
-`BambuStudio-02.08.00.00`: the major.minor line of the Bambu Studio the key table was generated
+`BambuStudio-02.09.00.00`: the major.minor line of the Bambu Studio the key table was generated
 from, patch 0 (`BambuExport::export_version()`). Chosen against Bambu Studio's version checks:
 
 - The CLI refuses a file whose major.minor is newer than its own (`BambuStudio.cpp:1909`); the
   GUI shows its "newer version" dialog when `file > app` and the minor or `patch / 100` differ
   (`Plater.cpp:8488-8526`), and loads the settings anyway. A same-line file loads silently in any
-  2.8.x; an older Bambu Studio warns (truthfully: the settings target 2.8) but still loads.
+  2.9.x; an older Bambu Studio warns (truthfully: the settings target 2.9) but still loads.
 - Anything older than 2.7.0 would switch on Bambu's old-file migrations: prime-tower parameter
   rewrites below 2.0.0 (`Plater.cpp:8685`), `enable_wrapping_detection` forced off below 2.2.0 and
   `skirt_per_object` reset below 2.7.0 (`BambuStudio.cpp:1914-1948`), plate translation below 1.5.9.

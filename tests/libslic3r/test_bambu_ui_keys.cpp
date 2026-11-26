@@ -142,3 +142,16 @@ TEST_CASE("Lines Bambu hides on Bambu Lab printers are ours and listed", "[Bambu
         CHECK(ours(k));
     }
 }
+
+// Bambu's machine_hotend_change_time is stored but never read by Bambu; our machine_tool_change_time
+// adds estimate time on every tool change, so the Bambu view must not show it in that key's place.
+TEST_CASE("machine_hotend_change_time is not mapped to our tool change time", "[BambuUiKeys][BambuKnownKeys]")
+{
+    CHECK(inferred("machine_hotend_change_time") == nullptr);
+    CHECK(reviewed_missing("machine_hotend_change_time"));
+    // sub_top_surface_pattern keeps its view-only mapping (D1).
+    const auto *sub = inferred("sub_top_surface_pattern");
+    REQUIRE(sub != nullptr);
+    CHECK(std::string(sub->ours) == "undertop_surface_pattern");
+}
+

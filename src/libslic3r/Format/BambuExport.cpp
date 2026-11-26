@@ -784,7 +784,7 @@ std::string bambu_key_name(const std::string &our_key)
 
 std::string export_version()
 {
-    // "02.08.02.61" -> "02.08.00.00": the schema line the key list targets, without claiming a
+    // "02.09.01.70" -> "02.09.00.00": the schema line the key list targets, without claiming a
     // particular Bambu Studio build. Bambu compares this against its own version: a file from the
     // same major.minor line loads silently, an older Bambu Studio warns that the file is newer.
     std::vector<std::string> parts;
