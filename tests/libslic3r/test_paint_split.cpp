@@ -21,6 +21,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1247,6 +1248,39 @@ TEST_CASE("Paint split loops: owner's painted figure", "[.][PaintSplitGrinch]")
                 BoundingBoxf3 sb;
                 for (const Vec3f& v : c.sheet.vertices)
                     sb.merge(v.cast<double>());
+                {
+                    // Diagnostics: how much of the cut surface's rim lies inside the part (a rim inside cannot part it).
+                    indexed_triangle_set pv = c.preview;
+                    its_merge_vertices(pv);
+                    std::map<std::pair<int, int>, int> use;
+                    for (const Vec3i32& t : pv.indices)
+                        for (int k = 0; k < 3; ++k) {
+                            int x = t[k], y = t[(k + 1) % 3];
+                            if (x > y) std::swap(x, y);
+                            ++use[{ x, y }];
+                        }
+                    std::set<int> rim;
+                    int nonmanifold = 0;
+                    for (const auto& [e, n] : use) {
+                        if (n == 1) { rim.insert(e.first); rim.insert(e.second); }
+                        nonmanifold += n > 2;
+                    }
+                    static AABBMesh* aabb_mesh = nullptr;
+                    if (aabb_mesh == nullptr) aabb_mesh = new AABBMesh(tm.its);
+                    int inside = 0;
+                    double worst = 0.;
+                    for (int v : rim) {
+                        int fi = -1; Vec3d cp;
+                        const Vec3d q = pv.vertices[v].cast<double>();
+                        const double d2 = aabb_mesh->squared_distance(q, fi, cp);
+                        if (fi >= 0 && (q - cp).dot(its_face_normal(tm.its, fi).cast<double>()) < 0.) {
+                            ++inside;
+                            worst = std::max(worst, std::sqrt(d2));
+                        }
+                    }
+                    WARN("    rim " << rim.size() << " vertices, " << inside << " inside the part (deepest " << worst << " mm), "
+                                    << nonmanifold << " non-manifold edges, preview " << pv.indices.size() << " faces");
+                }
                 WARN("  edge " << l << ": " << r.loops[0][l].length << " mm, separates " << c.separates << ", ignored " << c.ignored << ", depth "
                                << c.depth << ", sheet " << c.sheet.indices.size() << " faces, size " << (sb.defined ? sb.size().norm() : 0.));
             }

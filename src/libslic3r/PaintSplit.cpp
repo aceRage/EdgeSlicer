@@ -1412,7 +1412,8 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
     double r = 0.;
     for (const DrawCutSample& smp : stroke.path())
         r = std::max(r, (smp.pos - c).norm());
-    const double centre_depth = std::sqrt(AABBMesh(mesh).squared_distance(c));
+    const AABBMesh aabb_part(mesh);
+    const double   centre_depth = std::sqrt(aabb_part.squared_distance(c));
     const bool   plug         = centre_depth < std::max(1., params.depth);
     out.separates             = !plug;
     // The skirt must leave the skin even where the paint line sits in a crease (fur trim over a face).
@@ -1425,6 +1426,32 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
         const double sign = draw_cut_outward_side(stroke, n, &mesh).dot(n) >= 0. ? 1. : -1.;
         dp.angle_deg      = sign * std::clamp(90. - std::abs(params.angle_deg), 0., 90.);
     }
+    // Inside the part: the closest skin faces away from the point.
+    auto inside = [&](const Vec3d& q) {
+        int   f = -1;
+        Vec3d cp;
+        aabb_part.squared_distance(q, f, cp);
+        return f >= 0 && (q - cp).dot(its_face_normal(mesh, f).cast<double>()) < 0.;
+    };
+    // The rim of a surface: vertices on edges used once (after welding).
+    auto rim_of = [](indexed_triangle_set& surf) {
+        its_merge_vertices(surf);
+        std::map<std::pair<int, int>, int> use;
+        for (const Vec3i32& t : surf.indices)
+            for (int k = 0; k < 3; ++k) {
+                int x = t[k], y = t[(k + 1) % 3];
+                if (x > y)
+                    std::swap(x, y);
+                ++use[{ x, y }];
+            }
+        std::set<int> rim;
+        for (const auto& [e, cnt] : use)
+            if (cnt == 1) {
+                rim.insert(e.first);
+                rim.insert(e.second);
+            }
+        return rim;
+    };
     // Depth, lowered until the band's inset no longer folds the core (a small hole cannot take 3 mm).
     double depth = std::max(0.05, params.depth);
     for (int k = 0; k < 8; ++k) {
@@ -1440,6 +1467,41 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
     out.stage = 4;
     out.depth     = depth;
     out.preview = draw_cut_preview_surface(stroke, dp, bbox, 0., nullptr);
+    std::set<int> rim = rim_of(out.preview);
+    auto rim_inside = [&]() {
+        int k = 0;
+        for (int v : rim)
+            k += inside(out.preview.vertices[size_t(v)].cast<double>());
+        return k;
+    };
+    // A plug whose skirt went into the part has its wall the wrong way round: build it the other way.
+    if (plug && rim_inside() * 2 > int(rim.size())) {
+        dp.angle_deg = -dp.angle_deg;
+        out.preview  = draw_cut_preview_surface(stroke, dp, bbox, 0., nullptr);
+        rim          = rim_of(out.preview);
+    }
+    // The rim must lie outside the part, or the sheet leaves the piece joined round it: push a rim vertex still
+    // inside (a paint line in a crease, under a fur trim) on along its skirt until it is out.
+    {
+        const std::vector<DrawCutSample>& path = stroke.path();
+        for (int v : rim) {
+            Vec3d q = out.preview.vertices[size_t(v)].cast<double>();
+            if (!inside(q))
+                continue;
+            size_t best = 0;
+            for (size_t i = 1; i < path.size(); ++i)
+                if ((path[i].pos - q).squaredNorm() < (path[best].pos - q).squaredNorm())
+                    best = i;
+            Vec3d d = q - path[best].pos;
+            if (d.norm() < 1e-6)
+                continue;
+            d.normalize();
+            for (int step = 0; step < 60 && inside(q); ++step)
+                q += 0.5 * d;
+            q += 0.5 * d;
+            out.preview.vertices[size_t(v)] = q.cast<float>();
+        }
+    }
     // The cut itself is the band + core sheet only (not the closure the draw cut adds to make a solid, which
     // reaches far past the edge): a thin sheet the region is separated along.
     out.stage = 5;
