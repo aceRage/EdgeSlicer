@@ -8044,6 +8044,9 @@ std::vector<Points> Print::object_towers_first_layer_corners() const
 // Per-object prime towers (PR 3 of tests/design_per_object_prime_towers.md).
 // ---------------------------------------------------------------------------------------------
 
+// What normalize_fdm_2 calls the number of objects: print by object builds a prime tower only for a plate with one
+// copy on it (the plater and the CLI's tower placement count copies). Several copies of one object are one PrintObject,
+// and counting PrintObjects left the tower on for them, so the G-code printed the copies layer by layer.
 size_t Print::printed_copies_count() const
 {
     size_t count = 0;
