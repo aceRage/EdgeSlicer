@@ -22,7 +22,6 @@
 #include <boost/algorithm/string/split.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
-#include <boost/nowide/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -47,6 +46,17 @@
 #endif
 
 using namespace Slic3r;
+
+// Scratch folder for the project files these tests write. It sits inside this process's own
+// temporary folder (TemporaryDirListener in libslic3r_tests.cpp, removed at the end of the run), so
+// test executables running in parallel never share it. A fixed %TEMP%/snorca_tests was shared by
+// every test executable running at the same time, with fixed file names in it.
+static boost::filesystem::path snorca_tests_dir()
+{
+    static const boost::filesystem::path dir = boost::filesystem::temp_directory_path() /
+        ("edgeslicer_libslic3r_tests_" + std::to_string(Slic3r::get_current_pid())) / "snorca_tests";
+    return dir;
+}
 
 SCENARIO("Reading 3mf file", "[3mf]") {
     GIVEN("umlauts in the path of the file") {
@@ -198,7 +208,7 @@ SCENARIO("Mirrored instance transforms survive 3mf round trips", "[3mf][Regressi
             // The bbs exporter writes scratch files through Model::get_backup_path(), which is
             // rooted at temporary_dir(). Headless tests must set that, or the path resolves to
             // the root of the current drive.
-            const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+            const boost::filesystem::path tmp_root = snorca_tests_dir();
             boost::filesystem::create_directories(tmp_root);
             Slic3r::set_temporary_dir(tmp_root.string());
             const std::string test_file = (tmp_root / (bbs_format ? "mirrored_bbs.3mf" : "mirrored_std.3mf")).string();
@@ -283,7 +293,7 @@ SCENARIO("A project built from the static default config survives a project 3MF 
             // The exporter writes its scratch config through Model::get_backup_path(), which is rooted at
             // temporary_dir(). The application sets that at startup; a test that exercises the project
             // writer has to as well, or the path resolves to the root of the current drive.
-            const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+            const boost::filesystem::path tmp_root = snorca_tests_dir();
             boost::filesystem::create_directories(tmp_root);
             Slic3r::set_temporary_dir(tmp_root.string());
             const std::string test_file = (tmp_root / "full_print_config_project.3mf").string();
@@ -345,7 +355,7 @@ TEST_CASE("A project 3MF keeps the prime tower rotation angle and position", "[3
     store_config.set_key_value("wipe_tower_x", new ConfigOptionFloats({ 120.25 }));
     store_config.set_key_value("wipe_tower_y", new ConfigOptionFloats({ 80.5 }));
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "wipe_tower_rotation_project.3mf").string();
@@ -401,7 +411,7 @@ TEST_CASE("A part's source transform is the same after two project round trips",
     src_object->add_instance();
     src_object->ensure_on_bed();
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
@@ -468,11 +478,11 @@ TEST_CASE("A project 3MF can be stored under a non-ASCII file name", "[3mf][Regr
     src_object->ensure_on_bed();
     DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
-    // As the application does at startup (Snapmaker_Orca.cpp), so boost::filesystem paths are UTF-8.
-    boost::nowide::nowide_filesystem();
+    // boost::filesystem paths are UTF-8 here: libslic3r_tests.cpp imbues them once at the start of the
+    // run, as the application does at startup. Never imbue mid-run (see TemporaryDirListener).
     const std::string leaf     = u8"\u6CE3\u8840_\u00E9_test.3mf";
     const std::string tmp_leaf = leaf + ".tmp";
     const std::string test_dir = tmp_root.string();
@@ -514,7 +524,6 @@ TEST_CASE("A project 3MF can be stored under a non-ASCII file name", "[3mf][Regr
 // miniz through the ANSI code page.
 TEST_CASE("A project 3MF packs and restores an auxiliary file with a non-ASCII name", "[3mf][Regression][Utf8Path]")
 {
-    boost::nowide::nowide_filesystem();
     Model src_model;
     ModelObject *src_object = src_model.add_object();
     src_object->name = "cube";
@@ -523,7 +532,7 @@ TEST_CASE("A project 3MF packs and restores an auxiliary file with a non-ASCII n
     src_object->ensure_on_bed();
     DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
 
@@ -576,7 +585,7 @@ TEST_CASE("A failed 3MF store reports the exporter's error text", "[3mf][Regress
     src_object->add_instance();
     src_object->ensure_on_bed();
     DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
 
@@ -601,7 +610,7 @@ TEST_CASE("A project 3MF keeps the exclude object outline tolerance", "[3mf][Con
     DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
     store_config.set_key_value("exclude_object_tolerance", new ConfigOptionFloat(0.2));
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "exclude_object_tolerance_project.3mf").string();
@@ -682,7 +691,7 @@ SCENARIO("Support group data survives a project 3MF round trip", "[3mf][SupportG
             // rooted at temporary_dir(). The application sets that at startup; a test that
             // exercises the project writer has to as well, or the path resolves to the root of
             // the current drive.
-            const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+            const boost::filesystem::path tmp_root = snorca_tests_dir();
             boost::filesystem::create_directories(tmp_root);
             Slic3r::set_temporary_dir(tmp_root.string());
 
@@ -870,7 +879,7 @@ SCENARIO("A sliced plate carries the multi-nozzle slice_info schema through a 3M
 
         WHEN("the plate is stored into a 3MF and read back") {
             const std::string test_file = std::string(TEST_DATA_DIR) + "/test_3mf/h2c_slice_info.3mf";
-            const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+            const boost::filesystem::path tmp_root = snorca_tests_dir();
             boost::filesystem::create_directories(tmp_root);
             Slic3r::set_temporary_dir(tmp_root.string());
 
@@ -1054,7 +1063,7 @@ SCENARIO("A rack plate's nozzle_diameters survive a 3MF round trip", "[3mf][H2C]
     }
 
     const std::string test_file = std::string(TEST_DATA_DIR) + "/test_3mf/h2c_rack_nozzle_diameters.3mf";
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
 
@@ -1143,7 +1152,7 @@ static void build_multi_object_model(Model& model)
 
 SCENARIO("model_settings.config's object order does not depend on where the Model was allocated", "[3mf][Determinism]") {
     GIVEN("two independently-built models with the same objects in the same order") {
-        const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+        const boost::filesystem::path tmp_root = snorca_tests_dir();
         boost::filesystem::create_directories(tmp_root);
         Slic3r::set_temporary_dir(tmp_root.string());
 
@@ -1299,7 +1308,7 @@ TEST_CASE("Deft: write a 3-filament painted-cube project 3MF for the CLI slice-d
         {0., 0.}, {256., 0.}, {256., 256.}, {0., 256.}
     };
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string out = (tmp_root / "det_mmu_bar_b.3mf").string();
@@ -1350,7 +1359,7 @@ TEST_CASE("Deft: write a single-filament P1S-shaped project 3MF as the slice-det
         {0., 0.}, {256., 0.}, {256., 256.}, {0., 256.}
     };
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string out = (tmp_root / "det_control_p1s.3mf").string();
@@ -1420,7 +1429,7 @@ static bool replace_in_3mf_entry(const std::string &path, const std::string &suf
 
 static void prepare_3mf_temp_dir()
 {
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
 }
@@ -1497,7 +1506,7 @@ static bool load_project(const std::string &path, Model &model, bool *is_bambu_s
 static std::string make_temp_3mf_path(const std::string &name)
 {
     prepare_3mf_temp_dir();
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     return (tmp_root / name).string();
 }
 
@@ -1923,7 +1932,7 @@ TEST_CASE("Volume config values with XML special characters survive a 3MF round 
 TEST_CASE("A default project with plain values writes byte-identical model_settings.config", "[3mf][Regression]")
 {
     prepare_3mf_temp_dir();
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
 
     auto make_plain = []() {
         Model        model;
@@ -2396,7 +2405,7 @@ TEST_CASE("backup ui-task notification survives null-callback window", "[3mf][bb
 SCENARIO("thumbnail relationships are declared only for thumbnails that were written", "[3mf][thumbnail]")
 {
     GIVEN("a project with one plate") {
-        const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+        const boost::filesystem::path tmp_root = snorca_tests_dir();
         boost::filesystem::create_directories(tmp_root);
         Slic3r::set_temporary_dir(tmp_root.string());
 
@@ -3060,7 +3069,7 @@ std::vector<std::string> zip_entry_names(const std::string &path)
 // "../" climbed out of 3D/Objects. The name is now made fit for a file name; the object keeps its own.
 TEST_CASE("An object's name with a slash makes no folder in the project 3MF", "[3mf][Regression]")
 {
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "object_name_with_slash.3mf").string();
@@ -3126,7 +3135,7 @@ TEST_CASE("An object's name with a slash makes no folder in the project 3MF", "[
 // big picture's freed pointer where its own was meant.)
 TEST_CASE("The small plate thumbnail of a picture wider than tall is the picture shrunk", "[3mf][thumbnail][Regression]")
 {
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "small_thumbnail_wide.3mf").string();
@@ -3206,7 +3215,7 @@ TEST_CASE("BBS 3MF round-trips a plate's skirt start angle", "[3mf][Regression]"
     src_object->ensure_on_bed();
     DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "plate_skirt_start_angle.3mf").string();
