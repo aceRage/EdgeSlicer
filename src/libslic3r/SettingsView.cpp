@@ -153,6 +153,32 @@ bool group_visible(const ViewFilter &filter, const std::vector<ConfigOptionMode>
     return false;
 }
 
+bool add_settings_key_offered(SettingsView view, bool bbl_printer, const std::string &key, const std::set<std::string> *overrides)
+{
+    if (view != SettingsView::Bambu)
+        return true; // Basic / Advanced: the menus are not filtered
+    const std::string base = SettingsViewKeys::base_key(key);
+    if (overrides != nullptr && overrides->count(base) != 0)
+        return true; // an existing override always stays listed
+    // As line_show(): one of our Developer keys is never part of the Bambu view (support_air_filtration is
+    // on Bambu's list but Developer here), with the Developer flag on or off; only an override lists it.
+    const ConfigOptionDef *def = print_config_def.get(base);
+    if (def != nullptr && def->mode == comDevelop)
+        return false;
+    return SettingsViewKeys::on_bambu_list(base) && !(bbl_printer && SettingsViewKeys::hidden_by_bambu_on_bbl(base));
+}
+
+std::vector<std::string> filter_add_settings_keys(SettingsView view, bool bbl_printer, const std::vector<std::string> &keys,
+                                                  const std::set<std::string> *overrides)
+{
+    std::vector<std::string> out;
+    out.reserve(keys.size());
+    for (const std::string &key : keys)
+        if (add_settings_key_offered(view, bbl_printer, key, overrides))
+            out.push_back(key);
+    return out;
+}
+
 const Preset *settings_view_reference(const PresetCollection &presets)
 {
     const Preset *parent = presets.get_selected_preset_parent();

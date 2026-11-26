@@ -106,6 +106,20 @@ bool group_visible(const ViewFilter &filter, const std::vector<ConfigOptionMode>
                    const std::vector<std::vector<std::string>> &line_ids);
 
 // ---------------------------------------------------------------------------------------------
+// Right-click "Add settings" menus of the object list (design D11, PR 5). Basic and Advanced offer what
+// they always did (the menus are not level-filtered). The Bambu view offers only keys on Bambu Studio's
+// list, plus the keys the item already overrides (they stay listed whatever the view), so a value
+// nobody can see is never left in force. Developer mode behaves as in the tabs: our Developer keys are
+// never on the Bambu list, so in Bambu they are offered only as an existing override.
+// ---------------------------------------------------------------------------------------------
+// One key. `overrides`: base keys the object / part / modifier already carries (may be nullptr).
+bool add_settings_key_offered(SettingsView view, bool bbl_printer, const std::string &key,
+                              const std::set<std::string> *overrides);
+// Order-preserving filter of `keys` by add_settings_key_offered().
+std::vector<std::string> filter_add_settings_keys(SettingsView view, bool bbl_printer, const std::vector<std::string> &keys,
+                                                  const std::set<std::string> *overrides);
+
+// ---------------------------------------------------------------------------------------------
 // "Changed" (design rule A, fallback B): the keys of the edited preset whose value differs from the
 // system preset it inherits from. A root user preset (no "inherits": its own base) and an external
 // preset with no parent have no system preset: they are compared with the option defaults instead.

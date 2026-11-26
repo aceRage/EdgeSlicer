@@ -507,3 +507,41 @@ TEST_CASE("Basic hides Z-buckling bias, the Thin features group and the Bambu de
     // Other widget-only rows keep showing at every level.
     CHECK(widget_line_show(level(comSimple), false) == LineShow::Shown);
 }
+
+TEST_CASE("Add-settings menus follow the view and keep existing overrides", "[SettingsView][Menu]")
+{
+    const std::string develop_key = "support_air_filtration"; // our Developer key, on Bambu's list
+    REQUIRE(mode_of(develop_key) == comDevelop);
+    REQUIRE(SettingsViewKeys::on_bambu_list(on_list_simple));
+    REQUIRE_FALSE(SettingsViewKeys::on_bambu_list(off_list));
+
+    const std::vector<std::string> keys = { on_list_simple, off_list, develop_key };
+
+    // Basic and Advanced: today's unfiltered menu, whatever the overrides.
+    CHECK(filter_add_settings_keys(SettingsView::Default, false, keys, nullptr) == keys);
+    CHECK(filter_add_settings_keys(SettingsView::Default, true, keys, nullptr) == keys);
+
+    // Bambu: only Bambu's list; our off-list and Developer keys drop out (the Developer flag changes nothing).
+    CHECK(filter_add_settings_keys(SettingsView::Bambu, false, keys, nullptr) == std::vector<std::string>{ on_list_simple });
+    const std::set<std::string> none;
+    CHECK(filter_add_settings_keys(SettingsView::Bambu, false, keys, &none) == std::vector<std::string>{ on_list_simple });
+
+    // Existing overrides stay listed, in the original order, off-list and Developer ones too.
+    const std::set<std::string> own = { off_list, develop_key };
+    CHECK(filter_add_settings_keys(SettingsView::Bambu, false, keys, &own) == keys);
+    CHECK(add_settings_key_offered(SettingsView::Bambu, false, off_list, &own));
+    CHECK_FALSE(add_settings_key_offered(SettingsView::Bambu, false, off_list, nullptr));
+    // An "#index" id is matched by its base key.
+    CHECK(add_settings_key_offered(SettingsView::Bambu, false, off_list + std::string("#1"), &own));
+
+    // Bambu's BBL-only hides apply on a Bambu Lab printer, unless the key is already overridden.
+    REQUIRE(SettingsViewKeys::hidden_by_bambu_on_bbl("default_jerk"));
+    CHECK(add_settings_key_offered(SettingsView::Bambu, false, "default_jerk", nullptr) ==
+          SettingsViewKeys::on_bambu_list("default_jerk"));
+    CHECK_FALSE(add_settings_key_offered(SettingsView::Bambu, true, "default_jerk", nullptr));
+    const std::set<std::string> jerk = { "default_jerk" };
+    CHECK(add_settings_key_offered(SettingsView::Bambu, true, "default_jerk", &jerk));
+
+    // Every key on the Bambu list that is not a Developer key is offered in the Bambu menu.
+    CHECK(add_settings_key_offered(SettingsView::Bambu, false, on_list_simple, nullptr));
+}
