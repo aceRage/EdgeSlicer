@@ -952,6 +952,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "ironing_fan_speed",
         "single_extruder_multi_material_priming",
         "cooling_filter_enabled",
+        "volumetric_speed_coefficients",
         "activate_air_filtration",
         "activate_air_filtration_during_print",
         "activate_air_filtration_on_completion",
@@ -1095,6 +1096,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "nozzle_temperature_initial_layer"
             || opt_key == "filament_minimal_purge_on_wipe_tower"
             || opt_key == "filament_max_volumetric_speed"
+            || opt_key == "filament_adaptive_volumetric_speed"
             || opt_key == "filament_loading_speed"
             || opt_key == "filament_loading_speed_start"
             || opt_key == "filament_unloading_speed"

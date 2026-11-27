@@ -12532,8 +12532,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // bridge it is ~162 mm/s where the profile asks for 45, so a mistyped or misresolved setting
     // silently prints ~3.6x too fast. Report it here, with the setting name, for exactly the
     // reason the writer guard reports: the user must be told WHICH value was ignored.
-    const double filament_max_volumetric_speed =
-        m_filament_flow.max_volumetric_speed_for(m_config, m_writer.extruder()->id());
+    // Orca #12688 / BBS: with adaptive volumetric speed on, the cap is also limited by the fit of this
+    // path's layer height and line width. Off (every stock preset): the cached value, unchanged.
+    const double filament_max_volumetric_speed = m_filament_flow.adaptive_max_volumetric_speed(
+        m_writer.extruder()->id(), m_filament_flow.max_volumetric_speed_for(m_config, m_writer.extruder()->id()),
+        path.height, path.width);
     const bool speed_was_invalid = !(speed >= 1e-6);
     if (speed_was_invalid)
         speed = filament_max_volumetric_speed / _mm3_per_mm;

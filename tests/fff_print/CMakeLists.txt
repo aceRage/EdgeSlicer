@@ -123,6 +123,7 @@ add_executable(${_TEST_NAME}_tests
 	test_tool_ordering.cpp
 	test_adaptive_pressure_advance.cpp
 	test_cooling_filter_gcode.cpp
+	test_adaptive_volumetric_speed.cpp
 	test_extruder_variant_arrays.cpp
 	test_filament_map_roundtrip.cpp
 	test_filament_map_bounds.cpp

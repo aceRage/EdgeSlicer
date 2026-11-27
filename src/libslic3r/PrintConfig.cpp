@@ -11,7 +11,10 @@
 #include "Format/BambuKeyAliases.hpp"
 #include "ToolSlots.hpp"
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <set>
+#include <sstream>
 #include <string_view>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/case_conv.hpp>
@@ -3208,6 +3211,25 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 2. });
+
+    // Orca #12688 / Bambu Studio 02.09.01.70: the flow cap fitted from layer height and line width.
+    // Off by default; the stock presets all carry 0. Bambu shows it as an Advanced line; Orca keeps it in
+    // developer mode with the note below. Stored per flow variant, like filament_max_volumetric_speed.
+    def = this->add("filament_adaptive_volumetric_speed", coBools);
+    def->label = L("Adaptive volumetric speed");
+    def->tooltip = L("When enabled, the extrusion flow is limited by the smaller of "
+        "the fitted value (calculated from line width and layer height) and the user-defined maximum flow."
+        " When disabled, only the user-defined maximum flow is applied.\n\n"
+        "Note: Experimental and incomplete feature imported from BBS. Functional for some profiles that already have the variable saved.");
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionBoolsNullable {false});
+
+    // Six coefficients "a b c d e f" of f(h, w) = a*h^2 + b*w^2 + c*h*w + d*h + e*w + f, in mm3/s, for layer
+    // height h and line width w. Written by Bambu's calibration; empty or all zero means no fit.
+    def        = this->add("volumetric_speed_coefficients", coStrings);
+    def->label = L("Max volumetric speed multinomial coefficients");
+    def->set_default_value(new ConfigOptionStrings{""});
 
     // BBS: per-filament flush settings (Bambu Studio PrintConfig.cpp 2547-2575). GCode.cpp turns them
     // into the flush_temperatures / flush_volumetric_speeds placeholders of the BBL change_filament
@@ -11919,6 +11941,9 @@ const std::vector<std::string>& filament_flow_variant_options()
         "nozzle_temperature_initial_layer",
         "nozzle_temperature",
         "filament_max_volumetric_speed",
+        // Orca #12688 / BBS: the fitted flow cap is stored per variant slot too.
+        "filament_adaptive_volumetric_speed",
+        "volumetric_speed_coefficients",
         "fan_min_speed",
         "fan_max_speed",
         "additional_cooling_fan_speed",
@@ -12507,6 +12532,40 @@ bool ResolvedFilamentFlow::uncached_enable_pressure_advance(const ConfigBase &co
     return get_value_at(config, *opt, ConfigFlowDomain::Filament, filament_id);
 }
 
+double VolumetricSpeedFit::max_volumetric_speed(double layer_height, double line_width) const
+{
+    if (!valid)
+        return std::numeric_limits<double>::max();
+    const double x = layer_height;
+    const double y = line_width;
+    return c[0] * x * x + c[1] * y * y + c[2] * x * y + c[3] * x + c[4] * y + c[5];
+}
+
+VolumetricSpeedFit parse_volumetric_speed_coefficients(const std::string &coefficients)
+{
+    VolumetricSpeedFit fit;
+    std::istringstream ss(coefficients);
+    std::string        token;
+    size_t             count = 0;
+    while (ss >> token) {
+        if (count == 6)
+            return {}; // seven or more numbers: not a fit
+        try {
+            size_t used = 0;
+            const double v = std::stod(token, &used);
+            if (used != token.size() || !std::isfinite(v))
+                return {};
+            fit.c[count++] = v;
+        } catch (...) {
+            return {};
+        }
+    }
+    if (count != 6 || std::all_of(std::begin(fit.c), std::end(fit.c), [](double v) { return v == 0.; }))
+        return {};
+    fit.valid = true;
+    return fit;
+}
+
 ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
 {
     ResolvedFilamentFlow out;
@@ -12533,6 +12592,26 @@ ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
             out.process_extruder_idx.reserve(count);
             for (size_t i = 0; i < count; ++i)
                 out.process_extruder_idx.push_back(Slic3r::process_config_idx(config, out.process_layout_size, static_cast<unsigned int>(i)));
+        }
+    }
+    // Orca #12688: adaptive volumetric speed. Nil (inherit) reads as off; only a filament that turned it on and
+    // has a usable fit gets an entry.
+    {
+        const auto *adaptive = config.option<ConfigOptionBoolsNullable>("filament_adaptive_volumetric_speed");
+        const auto *coeffs   = config.option<ConfigOptionStrings>("volumetric_speed_coefficients");
+        if (adaptive != nullptr && coeffs != nullptr && !adaptive->values.empty() && !coeffs->values.empty()) {
+            const size_t                    n = flow_variant_filament_count(config);
+            std::vector<VolumetricSpeedFit> fits(n);
+            bool                            any = false;
+            for (size_t i = 0; i < n; ++i) {
+                const size_t idx = get_config_idx(config, ConfigFlowDomain::Filament, static_cast<unsigned int>(i));
+                if (adaptive->is_nil(idx) || !adaptive->get_at(idx))
+                    continue;
+                fits[i] = parse_volumetric_speed_coefficients(coeffs->get_at(idx));
+                any |= fits[i].valid;
+            }
+            if (any)
+                out.adaptive_fit = std::move(fits);
         }
     }
     const auto *ratio   = config.option<ConfigOptionFloats>("filament_flow_ratio");

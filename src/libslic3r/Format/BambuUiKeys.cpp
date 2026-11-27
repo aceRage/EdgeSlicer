@@ -544,7 +544,6 @@ const std::vector<const char *> &reviewed_missing()
         "detect_floating_vertical_shell",
         "embedding_wall_into_infill",
         "enable_wrapping_detection",
-        "filament_adaptive_volumetric_speed",
         "filament_bridge_speed",
         "filament_enable_overhang_speed",
         "filament_overhang_1_4_speed",

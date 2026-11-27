@@ -1351,7 +1351,7 @@ static std::vector<std::string> s_Preset_filament_options {
     "filament_extruder_variant", "filament_self_index", // Ultra (dual-nozzle)
     "filament_nozzle_variants", // per-nozzle process P4: values per nozzle size / flow / tool
     /*"filament_colour", */ "default_filament_colour","required_nozzle_HRC","filament_diameter", "pellet_flow_coefficient", "filament_type", "filament_soluble", "filament_is_support",
-    "filament_max_volumetric_speed",
+    "filament_max_volumetric_speed", "filament_adaptive_volumetric_speed", "volumetric_speed_coefficients",
     "filament_flow_ratio", "filament_density", "filament_cost", "filament_z_offset", "filament_minimal_purge_on_wipe_tower",
     "nozzle_temperature", "nozzle_temperature_initial_layer",
     // BBS

@@ -6634,6 +6634,8 @@ void TabFilament::build()
         //BBS
         optgroup = page->new_optgroup(L("Volumetric speed limitation"), L"param_volumetric_speed");
         optgroup->append_single_option_line("filament_max_volumetric_speed");
+        // Orca #12688 / Bambu Studio: cap the flow at the fit of layer height and line width as well.
+        optgroup->append_single_option_line("filament_adaptive_volumetric_speed");
 
         // Per-nozzle process P4 (spec 09-07 "Phase 5"): values this filament takes on particular nozzles, e.g. a hotter
         // temperature and a higher volumetric speed on a 0.6. Resolved when the print is sliced
@@ -7324,6 +7326,16 @@ void TabFilament::toggle_options()
         const int variant_index = int(flow_variant_view_index());
         bool pa = m_config->opt_bool("enable_pressure_advance", variant_index);
         toggle_option("pressure_advance", pa);
+
+        // Orca #12688: the fit needs six usable coefficients, which only a calibrated profile carries. A line
+        // that is already on stays editable, so it can always be switched off.
+        {
+            const auto *adaptive = m_config->option<ConfigOptionBoolsNullable>("filament_adaptive_volumetric_speed");
+            const bool  adaptive_on = adaptive != nullptr && !adaptive->values.empty() && !adaptive->is_nil(size_t(variant_index)) &&
+                                      adaptive->get_at(size_t(variant_index));
+            toggle_option("filament_adaptive_volumetric_speed",
+                adaptive_on || parse_volumetric_speed_coefficients(m_config->opt_string("volumetric_speed_coefficients", variant_index)).valid);
+        }
 
         // BBS: 控制床温选项的显示
         auto support_multi_bed_types = is_BBL_printer || cfg.opt_bool("support_multi_bed_types");
