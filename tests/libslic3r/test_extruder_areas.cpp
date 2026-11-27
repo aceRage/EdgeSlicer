@@ -1100,13 +1100,79 @@ SCENARIO("slice_info reports the X2D's second extruder as Bowden", "[ExtruderAre
 
     DynamicPrintConfig cfg;
     cfg.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ int(etDirectDrive) }));
-    // No variant list: the single value is repeated (the old padding).
+    // No variant list: Direct Drive for every extruder.
     CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etDirectDrive), int(etDirectDrive) });
     CHECK(slice_info_extruder_types(cfg, 1) == std::vector<int>{ int(etDirectDrive) });
-    // A full-length value is kept as it is.
+    // Flow variants PR 1 (D3): an extruder is Bowden when its variant list or its extruder_type entry says so; a Direct
+    // Drive entry never overrides the list.
     cfg.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ int(etBowden), int(etDirectDrive) }));
     cfg.set_key_value("extruder_variant_list", new ConfigOptionStrings({ "Direct Drive Standard", "Bowden Standard" }));
-    CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etBowden), int(etDirectDrive) });
+    CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etBowden), int(etBowden) });
+}
+
+SCENARIO("the X2D's right extruder retracts with Bambu's Bowden values", "[FlowVariants][X2D]")
+{
+    // Bambu's X2D 0.4: Direct Drive 0.8 mm at 30 mm/s, Bowden 2 mm at 20 mm/s. Before flow variants PR 1 both
+    // filaments read the first two Direct Drive slots (0.8 mm at 30 mm/s).
+    auto floats_of = [](const ConfigBase &cfg, const char *key) { return cfg.option<ConfigOptionFloats>(key)->values; };
+    GIVEN("filament 1 on the left extruder, filament 2 on the right one")
+    {
+        const DynamicPrintConfig cfg = x2d_config("Manual", "1,2");
+        CHECK(resolved_extruder_types(cfg) == std::vector<int>{ int(etDirectDrive), int(etBowden) });
+        Model model;
+        add_x2d_cube(model, 60., 1);
+        add_x2d_cube(model, 200., 2);
+        Print print;
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        THEN("each filament gets its extruder's machine values")
+        {
+            CHECK(floats_of(print.full_print_config(), "retraction_length") == std::vector<double>{ 0.8, 2. });
+            CHECK(floats_of(print.full_print_config(), "retraction_speed") == std::vector<double>{ 30., 20. });
+            CHECK(floats_of(print.full_print_config(), "deretraction_speed") == std::vector<double>{ 30., 20. });
+            // PLA Basic sets no retraction speed of its own, so the machine's reaches the G-code.
+            CHECK(print.config().retraction_speed.values == std::vector<double>{ 30., 20. });
+        }
+        THEN("the map the slice already has changes nothing") { CHECK_FALSE(print.realign_printer_variants_to_filament_map({ 1, 2 })); }
+    }
+    GIVEN("automatic grouping, both filaments on the left before the slice")
+    {
+        const DynamicPrintConfig cfg = x2d_config("Auto For Flush", "1,1");
+        Model model;
+        add_x2d_cube(model, 60., 1);
+        add_x2d_cube(model, 200., 2);
+        Print print;
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        CHECK(floats_of(print.full_print_config(), "retraction_length") == std::vector<double>{ 0.8, 0.8 });
+        WHEN("the grouping puts filament 2 on the right extruder")
+        {
+            REQUIRE(print.realign_printer_variants_to_filament_map({ 1, 2 }));
+            THEN("filament 2 follows it")
+            {
+                CHECK(floats_of(print.full_print_config(), "retraction_length") == std::vector<double>{ 0.8, 2. });
+                CHECK(print.config().retraction_speed.values == std::vector<double>{ 30., 20. });
+                CHECK_FALSE(print.realign_printer_variants_to_filament_map({ 1, 2 }));
+            }
+        }
+    }
+}
+
+SCENARIO("H2D retraction vectors are untouched by the drive fix", "[FlowVariants][H2D]")
+{
+    // Both H2D extruders are Direct Drive: one value per extruder index, the first two slots, as before.
+    DynamicPrintConfig cfg = h2d_config("by layer", "Manual", "2,1");
+    const std::vector<double> all = cfg.option<ConfigOptionFloats>("retraction_length")->values;
+    REQUIRE(all.size() >= 2);
+    CHECK_FALSE(has_mixed_extruder_types(cfg));
+    Model model;
+    add_cube(model, 60., 1);
+    add_cube(model, 200., 2);
+    Print print;
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    CHECK(print.full_print_config().option<ConfigOptionFloats>("retraction_length")->values == std::vector<double>{ all[0], all[1] });
+    CHECK_FALSE(print.realign_printer_variants_to_filament_map({ 1, 2 }));
 }
 
 // Review #1056 S1: with the side scrape on (H3C presets; a user may turn it on on the H2D), the nozzle travels up to

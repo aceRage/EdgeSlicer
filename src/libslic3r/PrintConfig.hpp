@@ -831,24 +831,32 @@ bool is_printer_extruder_variant_option(const std::string &key);
 // the same thing).
 std::vector<std::vector<size_t>> printer_extruder_variant_slots(const ConfigBase &config);
 
-// The slot of extruder `extruder_idx`'s current variant (extruder_type + nozzle_volume_type), its first
-// slot when that variant is not listed, or -1 when printer_extruder_id / printer_extruder_variant differ
+// The slot of extruder `extruder_idx`'s current variant (its resolved_extruder_types drive + nozzle_volume_type),
+// its first slot when that variant is not listed, or -1 when printer_extruder_id / printer_extruder_variant differ
 // in size or do not list the extruder.
 int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx);
 
-// extruder_type per extruder (ExtruderType values) as the 3MF slice_info reports it, `extruder_count` long.
+// Flow variants PR 1 (owner decision D3): each extruder's drive (ExtruderType values), `extruder_count` long.
 // PrintConfigDef::handle_legacy drops a profile's extruder_type on load, so the option usually holds its
-// one-element Direct Drive default; when it is shorter than the extruder count, each extruder's type is read
-// off its extruder_variant_list entry ("Bowden Standard,..." -> Bowden), which is what Bambu Studio's
-// extruder_type says for the same profile (X2D: Direct Drive, Bowden). Entries with nothing to go on repeat
-// the last known value.
+// one-element Direct Drive default. The drive is therefore read off the extruder's extruder_variant_list entry
+// ("Bowden Standard,..." -> Bowden, the X2D's right extruder); an extruder_type entry counts only when it names
+// Bowden. Everything else is Direct Drive. Without a count: one entry per nozzle_diameter value.
+std::vector<int> resolved_extruder_types(const ConfigBase &config, size_t extruder_count);
+std::vector<int> resolved_extruder_types(const ConfigBase &config);
+// Whether resolved_extruder_types names more than one drive (the X2D).
+bool has_mixed_extruder_types(const ConfigBase &config);
+
+// extruder_type per extruder as the 3MF slice_info reports it: resolved_extruder_types, or the option's own
+// values for a count of 0.
 std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count);
 
 // The G-code reads per-extruder settings by tool index. In a multi-extruder printer config
 // (single_extruder_multi_material off) in the per-variant layout, cut every per-variant vector down to
 // one value per extruder: each extruder's current variant, or, on a Bambu nozzle-grouping machine
 // (support_different_extruders), the first value per extruder index as the slicer has always read them
-// there. Leaves any other config alone.
+// there. A grouping machine with mixed drives (the X2D) reads them by filament id, so there each vector gets
+// one value per filament: the current variant of the extruder filament_map puts it on (flow variants PR 1).
+// Leaves any other config alone. Not idempotent on that mixed-drive path: apply it to an unresolved config.
 class DynamicPrintConfig;
 void resolve_printer_extruder_variants(DynamicPrintConfig &config);
 
@@ -882,6 +890,9 @@ template<class ConfigT> bool keep_legacy_surface_filaments(ConfigT &config, bool
 
 // The slot resolve_printer_extruder_variants reads for each extruder, or empty when it leaves the config alone.
 std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config);
+// On a mixed-drive grouping machine (X2D) the slot each filament reads (its extruder's, by
+// process_extruder_for_filament), one per filament; empty on every other machine.
+std::vector<size_t> printer_extruder_variant_filament_sources(const DynamicPrintConfig &config);
 
 // The index of extruder `extruder_idx`'s value of `key` that the slicer uses: its slot from `sources`
 // (printer_extruder_variant_sources) when `key` is a per-variant vector of the layout's length, else

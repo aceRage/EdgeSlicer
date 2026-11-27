@@ -12061,9 +12061,10 @@ int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx)
     const auto *variants = config.option<ConfigOptionStrings>("printer_extruder_variant");
     if (ids == nullptr || variants == nullptr || ids->values.size() != variants->values.size())
         return -1;
-    const auto *types   = config.option<ConfigOptionEnumsGeneric>("extruder_type");
     const auto *volumes = config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
-    const int   type    = types != nullptr && extruder_idx < types->values.size() ? types->values[extruder_idx] : int(etDirectDrive);
+    // Flow variants PR 1 (D3): the drive as resolved_extruder_types derives it. extruder_type itself is dropped on
+    // load, so the X2D's right extruder used to look for "Direct Drive Standard" and fall back to its first slot.
+    const int   type    = resolved_extruder_types(config, extruder_idx + 1)[extruder_idx];
     NozzleVolumeType volume = volumes != nullptr && extruder_idx < volumes->values.size() ? NozzleVolumeType(volumes->values[extruder_idx]) :
                                                                                             nvtStandard;
     if (volume == nvtHybrid)
@@ -12081,36 +12082,39 @@ int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx)
     return first;
 }
 
-std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count)
+std::vector<int> resolved_extruder_types(const ConfigBase &config, size_t extruder_count)
 {
-    std::vector<int> types;
-    if (const auto *opt = config.option<ConfigOptionEnumsGeneric>("extruder_type"))
-        types = opt->values;
-    if (extruder_count == 0 || types.size() >= extruder_count) {
-        if (types.size() > extruder_count)
-            types.resize(extruder_count);
-        return types;
-    }
-    const auto *variants = config.option<ConfigOptionStrings>("extruder_variant_list");
-    std::vector<int> out(extruder_count, types.empty() ? int(etDirectDrive) : types.back());
+    const auto      *types    = config.option<ConfigOptionEnumsGeneric>("extruder_type");
+    const auto      *variants = config.option<ConfigOptionStrings>("extruder_variant_list");
+    std::vector<int> out(extruder_count, int(etDirectDrive));
     for (size_t e = 0; e < extruder_count; ++e) {
-        if (variants != nullptr && e < variants->values.size()) {
-            const std::string &v = variants->values[e];
-            if (boost::starts_with(v, "Bowden")) {
-                out[e] = int(etBowden);
-                continue;
-            }
-            if (boost::starts_with(v, "Direct Drive")) {
-                out[e] = int(etDirectDrive);
-                continue;
-            }
-        }
-        if (e < types.size())
-            out[e] = types[e];
-        else if (e > 0)
-            out[e] = out[e - 1];
+        const bool listed_bowden = variants != nullptr && e < variants->values.size() && boost::starts_with(variants->values[e], "Bowden");
+        const bool named_bowden  = types != nullptr && e < types->values.size() && types->values[e] == int(etBowden);
+        if (listed_bowden || named_bowden)
+            out[e] = int(etBowden);
     }
     return out;
+}
+
+std::vector<int> resolved_extruder_types(const ConfigBase &config)
+{
+    const auto *nozzle_diameter = dynamic_cast<const ConfigOptionVectorBase *>(config.option("nozzle_diameter"));
+    return resolved_extruder_types(config, nozzle_diameter != nullptr ? std::max<size_t>(1, nozzle_diameter->size()) : 1);
+}
+
+bool has_mixed_extruder_types(const ConfigBase &config)
+{
+    const std::vector<int> types = resolved_extruder_types(config);
+    return std::adjacent_find(types.begin(), types.end(), std::not_equal_to<>()) != types.end();
+}
+
+std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count)
+{
+    if (extruder_count == 0) {
+        const auto *opt = config.option<ConfigOptionEnumsGeneric>("extruder_type");
+        return opt != nullptr ? opt->values : std::vector<int>();
+    }
+    return resolved_extruder_types(config, extruder_count);
 }
 
 std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config)
@@ -12123,14 +12127,31 @@ std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &c
     if (slots.empty() || nozzle_diameter == nullptr || nozzle_diameter->size() != slots.size())
         return {};
 
-    // Which slot each extruder reads. Bambu's grouping machines (H2D, H2C, X2D) index these vectors by
-    // filament, not by extruder, so they keep the values Preset::normalize used to cut them down to.
+    // Which slot each extruder reads. Bambu's grouping machines (H2D, H2C) index these vectors by filament, not
+    // by extruder, so they keep the values Preset::normalize used to cut them down to. A grouping machine whose
+    // extruders have different drives (the X2D: left Direct Drive, right Bowden) reads each extruder's own slot,
+    // which printer_extruder_variant_filament_sources then hands to that extruder's filaments (flow variants PR 1).
     int        extruder_count = 0;
-    const bool grouping       = config.support_different_extruders(extruder_count);
+    const bool grouping       = config.support_different_extruders(extruder_count) && !has_mixed_extruder_types(config);
     std::vector<size_t> sources(slots.size());
     for (size_t e = 0; e < slots.size(); ++e)
         sources[e] = grouping ? e : size_t(std::max(0, printer_extruder_variant_slot(config, e)));
     return sources;
+}
+
+std::vector<size_t> printer_extruder_variant_filament_sources(const DynamicPrintConfig &config)
+{
+    int extruder_count = 0;
+    if (!config.support_different_extruders(extruder_count) || !has_mixed_extruder_types(config))
+        return {};
+    const std::vector<size_t> sources   = printer_extruder_variant_sources(config);
+    const size_t              filaments = flow_variant_filament_count(config);
+    if (sources.empty() || filaments == 0)
+        return {};
+    std::vector<size_t> out(filaments);
+    for (size_t f = 0; f < filaments; ++f)
+        out[f] = sources[std::min(sources.size() - 1, process_extruder_for_filament(config, (unsigned int) f, sources.size()))];
+    return out;
 }
 
 size_t printer_extruder_variant_value_index(const ConfigBase &config, const std::vector<size_t> &sources, const std::string &key,
@@ -12158,9 +12179,13 @@ bool upgrade_missing_power_loss_recovery(DynamicPrintConfig &config)
 
 void resolve_printer_extruder_variants(DynamicPrintConfig &config)
 {
-    const std::vector<size_t> sources = printer_extruder_variant_sources(config);
+    std::vector<size_t> sources = printer_extruder_variant_sources(config);
     if (sources.empty())
         return;
+    // A mixed-drive grouping machine (X2D) reads these vectors by filament: one value per filament, from the slot
+    // of the extruder filament_map puts it on (flow variants PR 1). Every other machine keeps one value per extruder.
+    if (std::vector<size_t> per_filament = printer_extruder_variant_filament_sources(config); !per_filament.empty())
+        sources = std::move(per_filament);
     const size_t slot_count = config.option<ConfigOptionInts>("printer_extruder_id")->values.size();
     for (const std::string &key : print_config_def.extruder_option_keys()) {
         if (!is_printer_extruder_variant_option(key))

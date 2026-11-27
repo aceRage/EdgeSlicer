@@ -2412,6 +2412,9 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
                             const_cast<DynamicPrintConfig*>(m_print_full_config)->option<ConfigOptionEnumsGeneric>("filament_volume_type", true)->values =
                                 m_print->config().filament_volume_type.values;
                     }
+                    // Flow variants PR 1: on the X2D (left Direct Drive, right Bowden) each filament retracts with the
+                    // values of the extruder the grouping put it on. A no-op on every other printer.
+                    m_print->realign_printer_variants_to_filament_map(em);
                 }
             }
             // Ultra (dual-nozzle): warning-level so it survives the fork's default log filter; lets a slice

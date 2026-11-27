@@ -404,3 +404,120 @@ TEST_CASE("Each extruder page's cut retraction line has its own id", "[ExtruderV
     CHECK(first != second);
     CHECK(second != 0);
 }
+
+// ---- Flow variants PR 1: the X2D's drives (left Direct Drive, right Bowden) ---------------------------------------
+
+namespace {
+
+// X2D-like: two extruders, the left one Direct Drive, the right one Bowden, each with Standard / High Flow / E3D
+// slots (Bambu's X2D printer layout). Retraction per slot: left 0.8 mm at 30 mm/s, right 2 mm at 20 mm/s, with
+// +0.1 per slot so every slot is told apart. `filaments` filaments, mapped by `filament_map`.
+DynamicPrintConfig mixed_drive_config(const std::vector<int> &filament_map)
+{
+    DynamicPrintConfig config = printer_defaults();
+    config.set_key_value("single_extruder_multi_material", new ConfigOptionBool(false));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4 }));
+    config.set_key_value("printer_extruder_id", new ConfigOptionInts({ 1, 1, 1, 2, 2, 2 }));
+    config.set_key_value("printer_extruder_variant",
+                         new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive High Flow", "Direct Drive E3D High Flow",
+                                                   "Bowden Standard", "Bowden High Flow", "Bowden E3D High Flow" }));
+    config.set_key_value("extruder_variant_list",
+                         new ConfigOptionStrings({ "Direct Drive Standard,Direct Drive High Flow,Direct Drive E3D High Flow",
+                                                   "Bowden Standard,Bowden High Flow,Bowden E3D High Flow" }));
+    config.set_key_value("retraction_length", new ConfigOptionFloats({ 0.8, 0.9, 1.0, 2.0, 2.1, 2.2 }));
+    config.set_key_value("retraction_speed", new ConfigOptionFloats({ 30, 31, 32, 20, 21, 22 }));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats(std::vector<double>(filament_map.size(), 1.75)));
+    config.set_key_value("filament_map", new ConfigOptionInts(filament_map));
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("resolved_extruder_types derives each extruder's drive", "[FlowVariants]")
+{
+    SECTION("the X2D's variant list names its right extruder Bowden") {
+        const DynamicPrintConfig x2d = mixed_drive_config({ 1, 2 });
+        CHECK(resolved_extruder_types(x2d) == std::vector<int>{ int(etDirectDrive), int(etBowden) });
+        CHECK(has_mixed_extruder_types(x2d));
+    }
+    SECTION("an H2D-like machine is Direct Drive on both sides") {
+        const DynamicPrintConfig dual = toolchanger_config(2, { "Direct Drive Standard", "Direct Drive High Flow" });
+        CHECK(resolved_extruder_types(dual) == std::vector<int>{ int(etDirectDrive), int(etDirectDrive) });
+        CHECK_FALSE(has_mixed_extruder_types(dual));
+    }
+    SECTION("an extruder_type entry counts only when it names Bowden") {
+        DynamicPrintConfig single = printer_defaults();
+        single.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4 }));
+        single.set_key_value("extruder_variant_list", new ConfigOptionStrings({ "Direct Drive Standard" }));
+        CHECK(resolved_extruder_types(single) == std::vector<int>{ int(etDirectDrive) });
+        // A Geeetech-style single Bowden extruder (or a Bambu 3MF that keeps the key).
+        single.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ int(etBowden) }));
+        CHECK(resolved_extruder_types(single) == std::vector<int>{ int(etBowden) });
+        CHECK_FALSE(has_mixed_extruder_types(single));
+        // A Direct Drive entry never overrides a Bowden variant list.
+        DynamicPrintConfig x2d = mixed_drive_config({ 1, 2 });
+        x2d.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ int(etDirectDrive), int(etDirectDrive) }));
+        CHECK(resolved_extruder_types(x2d) == std::vector<int>{ int(etDirectDrive), int(etBowden) });
+    }
+    SECTION("no key and no variant list is Direct Drive") {
+        DynamicPrintConfig bare;
+        CHECK(resolved_extruder_types(bare, 2) == std::vector<int>{ int(etDirectDrive), int(etDirectDrive) });
+        CHECK(resolved_extruder_types(bare) == std::vector<int>{ int(etDirectDrive) });
+    }
+}
+
+TEST_CASE("The X2D's right extruder retracts with its Bowden slot", "[FlowVariants]")
+{
+    // The bug: on a grouping machine filament f read slot f of the 6-slot vector, so the right (Bowden) extruder's
+    // filament got Direct Drive High Flow (0.9 here; Bambu's X2D: 0.8 mm at 30 mm/s instead of 2 mm at 20 mm/s), and
+    // a third filament got slot 0.
+    SECTION("each filament reads the slot of its filament_map extruder") {
+        DynamicPrintConfig config = mixed_drive_config({ 1, 2, 2 });
+        int                count  = 0;
+        REQUIRE(config.support_different_extruders(count));
+        CHECK(printer_extruder_variant_sources(config) == std::vector<size_t>{ 0, 3 });
+        CHECK(printer_extruder_variant_filament_sources(config) == std::vector<size_t>{ 0, 3, 3 });
+        resolve_printer_extruder_variants(config);
+        CHECK(floats(config, "retraction_length") == std::vector<double>{ 0.8, 2.0, 2.0 });
+        CHECK(floats(config, "retraction_speed") == std::vector<double>{ 30, 20, 20 });
+        // The layout itself stays as the preset wrote it.
+        CHECK(ints(config, "printer_extruder_id").size() == 6);
+    }
+    SECTION("swapping the map swaps the values") {
+        DynamicPrintConfig config = mixed_drive_config({ 2, 1 });
+        resolve_printer_extruder_variants(config);
+        CHECK(floats(config, "retraction_length") == std::vector<double>{ 2.0, 0.8 });
+    }
+    SECTION("a High Flow nozzle on the right reads Bowden High Flow") {
+        DynamicPrintConfig config = mixed_drive_config({ 1, 2 });
+        config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = { nvtStandard, nvtHighFlow };
+        resolve_printer_extruder_variants(config);
+        CHECK(floats(config, "retraction_length") == std::vector<double>{ 0.8, 2.1 });
+    }
+    SECTION("the printer tab's right extruder page edits the slot the slicer reads") {
+        const DynamicPrintConfig  config  = mixed_drive_config({ 1, 2 });
+        const std::vector<size_t> sources = printer_extruder_variant_sources(config);
+        CHECK(printer_extruder_variant_value_index(config, sources, "retraction_length", 0) == 0);
+        CHECK(printer_extruder_variant_value_index(config, sources, "retraction_length", 1) == 3);
+    }
+}
+
+TEST_CASE("Machines without mixed drives keep their retraction vectors", "[FlowVariants]")
+{
+    // H2D / H2C (two Direct Drive extruders): unchanged by flow variants PR 1, still one value per extruder index,
+    // whatever the filament count or map.
+    DynamicPrintConfig dual = toolchanger_config(2, { "Direct Drive Standard", "Direct Drive High Flow" });
+    dual.set_key_value("filament_diameter", new ConfigOptionFloats({ 1.75, 1.75, 1.75 }));
+    dual.set_key_value("filament_map", new ConfigOptionInts({ 2, 2, 1 }));
+    CHECK(printer_extruder_variant_filament_sources(dual).empty());
+    resolve_printer_extruder_variants(dual);
+    CHECK(floats(dual, "retraction_length") == std::vector<double>{ 1.0, 1.1 });
+
+    // A toolchanger (5 extruders) keeps each extruder's own slot.
+    DynamicPrintConfig tools = toolchanger_config(5, VARIANTS3);
+    tools.set_key_value("filament_diameter", new ConfigOptionFloats(std::vector<double>(5, 1.75)));
+    CHECK(printer_extruder_variant_filament_sources(tools).empty());
+    resolve_printer_extruder_variants(tools);
+    CHECK(floats(tools, "retraction_length") == std::vector<double>{ 1.0, 2.0, 3.0, 4.0, 5.0 });
+}
+
