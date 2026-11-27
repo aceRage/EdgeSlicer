@@ -1406,9 +1406,9 @@ struct ByObjectPlan
     }
 };
 
-// Per-object prime towers (PR 3 of tests/design_per_object_prime_towers.md): with prime_tower_per_object on a plate printed
-// by object, every copy that changes filament gets its own Bambu-style (Type 1) tower beside it, printed inside that
-// copy's block, up to the block's last tool change.
+// Per-object prime towers (PR 3 and PR 4 of tests/design_per_object_prime_towers.md): with prime_tower_per_object on a plate
+// printed by object, every copy that changes filament gets its own tower beside it (Type 1 on Bambu Lab printers, Type 2
+// on the U1, Voron and other WipeTower2 printers), printed inside that copy's block, up to the block's last tool change.
 // - ObjectTowerPlan: where the towers go, decided from the model alone (the copies' outlines and an estimate of each
 //   tower's size), so validate() before slicing, process() and the export see the same towers. At most
 //   max_object_towers candidates, in model list order (object, then instance) among copies whose object uses more than
@@ -1719,7 +1719,7 @@ public:
 
     // Per-object prime towers (see ObjectTowerPlan).
     // The plate asks for them: printed by object, more than one printed copy, prime_tower_per_object on and the prime
-    // tower kept on by normalize_fdm_2 (a Type 1 printer, more than one filament, no spiral vase), no smooth timelapse.
+    // tower kept on by normalize_fdm_2 (more than one filament, no spiral vase), no smooth timelapse.
     // has_wipe_tower() (the plate tower) is false on such a plate, as it was when normalize turned the tower off.
     bool                        object_towers_requested() const;
     // Why a plate that asks for them gets none (a feature that does not combine with them); empty when none.
@@ -1921,8 +1921,6 @@ private:
     std::string                                             m_object_towers_signature;
     ToolOrdering                                            m_object_tower_statistics_ordering;
     WipeTowerData                                           m_object_tower_statistics { m_object_tower_statistics_ordering };
-    // enable_prime_tower as the user set it, before normalize_fdm_2 (apply()).
-    bool                                                    m_requested_enable_prime_tower { false };
     // EdgeSlicer: support_interface_nozzle_temperature resolved per filament (apply()).
     SupportInterfaceTemperatures                            m_support_interface_temperatures;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.
