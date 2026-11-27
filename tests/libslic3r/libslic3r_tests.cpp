@@ -1,5 +1,7 @@
 #include <catch_main.hpp>
 
+#include <edge_test_scratch.hpp>
+
 #include "libslic3r/Utils.hpp"
 #define NANOSVG_IMPLEMENTATION
 #include "nanosvg/nanosvg.h"
@@ -7,6 +9,7 @@
 #include "nanosvg/nanosvgrast.h"
 
 #include <boost/filesystem.hpp>
+#include <boost/nowide/filesystem.hpp>
 
 #include <string>
 
@@ -21,10 +24,19 @@ struct TemporaryDirListener : Catch::TestEventListenerBase
     void testRunStarting(Catch::TestRunInfo const &info) override
     {
         TestEventListenerBase::testRunStarting(info);
+        // UTF-8 boost::filesystem paths for the whole run, as the application sets them at startup
+        // (Snapmaker_Orca.cpp). It must happen here, before any test runs, and never in a test:
+        // path::imbue() swaps a process-wide locale and frees the old codecvt facet, while the 3MF
+        // backup worker thread (_BBS_Backup_Manager, bbs_3mf.cpp) may be converting a path with it.
+        // Every Model that load_bbs_3mf gave a backup folder queues a RemoveBackup task for that
+        // thread when it is destroyed, so a test that imbued right after earlier 3MF round trips
+        // crashed with SIGSEGV now and then (edgebuild jobs 2105, 2119).
+        boost::nowide::nowide_filesystem();
         m_dir = boost::filesystem::temp_directory_path() /
             ("edgeslicer_libslic3r_tests_" + std::to_string(Slic3r::get_current_pid()));
         boost::filesystem::create_directories(m_dir);
         Slic3r::set_temporary_dir(m_dir.string());
+        edge_test::set_run_dir(m_dir);
     }
 
     void testRunEnded(Catch::TestRunStats const &stats) override

@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 // SVG (and text) volumes that follow a curved surface as a part, a modifier or a cut
@@ -134,7 +135,7 @@ double total_area(const std::vector<indexed_triangle_set> &per_filament)
 
 std::string temp_3mf(const std::string &name)
 {
-    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path dir = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(dir);
     set_temporary_dir(dir.string());
     return (dir / name).string();
