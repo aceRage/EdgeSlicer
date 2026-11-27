@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -172,6 +173,8 @@ struct TowerMoves
 {
     BoundingBoxf box;
     double       max_z      = 0.;
+    // The lowest Z any move of the block goes to (towers or not).
+    double       min_any_z  = std::numeric_limits<double>::max();
     size_t       extrusions = 0;
 };
 
@@ -204,7 +207,7 @@ TowerMoves tower_moves(const std::string &block)
             switch (word.front()) {
             case 'X': x = value; has_x = true; break;
             case 'Y': y = value; has_y = true; break;
-            case 'Z': z = value; break;
+            case 'Z': z = value; out.min_any_z = std::min(out.min_any_z, z); break;
             case 'E': e = value; break;
             default: break;
             }
@@ -247,6 +250,9 @@ void check_type2_blocks(Print &print)
                             << " - " << expected.max.transpose());
         CHECK(expected.contains(moves.box.min));
         CHECK(expected.contains(moves.box.max));
+        // Never below the bed. The first tower change of a later block once 'unlifted' the z-hop the travel to the copy
+        // had taken, below the first layer (U1: G1 Z-.15).
+        CHECK(moves.min_any_z >= print.config().z_offset.value - 1e-6);
         // Never taller than its own copy (1 mm cubes).
         const double top = unscale<double>(tower.instance->print_object->size().z());
         CHECK(moves.max_z <= top + print.config().z_offset.value + 0.25);
