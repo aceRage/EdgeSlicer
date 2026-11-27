@@ -540,7 +540,6 @@ const std::vector<const char *> &reviewed_missing()
         "conformal_pole",
         "conformal_ray_count",
         "conformal_stagger",
-        "cooling_filter_enabled",
         "default_ams_type",
         "detect_floating_vertical_shell",
         "embedding_wall_into_infill",

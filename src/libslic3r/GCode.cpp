@@ -4880,7 +4880,6 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     if (int(e) < int(vend->size()) && vend->get_at(int(e)).find("Bambu") == std::string::npos) { all_bbl = false; break; }
             this->placeholder_parser().set("is_all_bbl_filament", new ConfigOptionBool(all_bbl));
             this->placeholder_parser().set("has_tpu_in_first_layer", new ConfigOptionBool(false));
-            this->placeholder_parser().set("cooling_filter_enabled", new ConfigOptionBool(false));
             this->placeholder_parser().set("max_print_z", new ConfigOptionFloat(0.));
             this->placeholder_parser().set("is_prime_tower_interface", new ConfigOptionBool(false));
             this->placeholder_parser().set("filament_tower_interface_purge_volume", new ConfigOptionFloat(0.));

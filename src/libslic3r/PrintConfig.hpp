@@ -2443,6 +2443,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 nozzle_hrc))
     ((ConfigOptionBool,                auxiliary_fan))
     ((ConfigOptionBool,                support_air_filtration))
+    ((ConfigOptionBool,                support_cooling_filter))  // Orca #14685: the printer has a cooling filter (not air filtration)
+    ((ConfigOptionBool,                cooling_filter_enabled))  // Orca #14685: the cooling filter is fitted; read by machine G-code
     ((ConfigOptionEnum<PrinterStructure>,printer_structure))
     ((ConfigOptionBool,                farthest_point_timelapse))
     ((ConfigOptionBool,                support_chamber_temp_control))

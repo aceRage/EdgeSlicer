@@ -5423,6 +5423,18 @@ void PrintConfigDef::init_fff_params()
     def->mode=comDevelop;
     def->set_default_value(new ConfigOptionBool(true));
 
+    // Orca #14685 / Bambu Studio 02.09.01.70: printer capability flag that switches the accessory UI between
+    // air filtration and the cooling filter (the two share one duct, a printer has one or the other).
+    def = this->add("support_cooling_filter", coBool);
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("cooling_filter_enabled", coBool);
+    def->label = L("Use cooling filter");
+    def->tooltip = L("Enable this if the printer supports a cooling filter");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("gcode_flavor", coEnum);
     def->label = L("G-code flavor");
     def->tooltip = L("What kind of G-code the printer is compatible with.");

@@ -7680,6 +7680,7 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("auxiliary_fan", "auxiliary-fan");
         optgroup->append_single_option_line("support_chamber_temp_control", "chamber-temperature");
         optgroup->append_single_option_line("support_air_filtration", "air-filtration");
+        optgroup->append_single_option_line("cooling_filter_enabled");
 
         // Only a Snapmaker tool changer can do this; toggle_options() hides the whole line for
         // every other printer, so nobody is offered a switch their machine will ignore.
@@ -9031,6 +9032,12 @@ void TabPrinter::toggle_options()
         // "Unload filaments after print" is a Snapmaker tool-changer preference: the flag goes
         // to the printer with the print start, and only that firmware's PRINT_END acts on it.
         toggle_line("unload_filaments_at_end", is_snapmaker_toolchanger(*m_config));
+
+        // Orca #14685: the cooling filter and air filtration are alternative accessories on one duct;
+        // show the one the printer profile declares (support_cooling_filter), like Bambu Studio.
+        const bool cooling_filter_printer = m_config->opt_bool("support_cooling_filter");
+        toggle_line("support_air_filtration", !cooling_filter_printer);
+        toggle_line("cooling_filter_enabled", cooling_filter_printer);
     }
 
     if (m_active_page->title() == L("Multimaterial")) {
