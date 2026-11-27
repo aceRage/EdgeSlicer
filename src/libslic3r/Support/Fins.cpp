@@ -462,6 +462,8 @@ std::vector<FinSlice> slice_fins(const std::vector<FinLayer> &layers, const FinS
             sec.erase(std::remove_if(sec.begin(), sec.end(), [min_area](const ExPolygon &e) { return e.area() < min_area; }), sec.end());
             if (sec.empty())
                 break;
+            if (i == 0 && report != nullptr)
+                ++report->fins_standing;
             if (f.painted && z >= f.need_z - 2. - EPSILON)
                 reached = true;
 
@@ -567,6 +569,13 @@ fins::FinReport generate_fin_supports(PrintObject &object, const std::function<v
     }
 
     std::vector<fins::FinSlice> slices = fins::slice_fins(layers, st, plan, &obstacles, &blockers, &report, throw_if_canceled);
+    // What the other support took: the plan sliced without it, so a fin or tine that disappears is never silent.
+    {
+        fins::FinReport free_report;
+        fins::slice_fins(layers, st, plan, nullptr, &blockers, &free_report, throw_if_canceled);
+        report.fins_lost  = free_report.fins_standing > report.fins_standing ? free_report.fins_standing - report.fins_standing : 0;
+        report.tines_lost = free_report.tines > report.tines ? free_report.tines - report.tines : 0;
+    }
 
     // How far the fins reach beyond the object's own footprint.
     {

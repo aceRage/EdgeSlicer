@@ -1145,11 +1145,12 @@ void PrintObject::generate_support_material()
                     Slic3r::format(_u8L("Object %1%: support fins are set to Painted but no fin spots are painted, so none were generated. "
                                         "Paint them with the support painting tool, or set the fins to Auto."), name),
                     PrintStateBase::SlicingFinsPaintedUnpainted);
-            if (fr.tines_skipped > 0)
+            if (fr.fins_lost > 0 || fr.tines_lost > 0)
                 this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
-                    Slic3r::format(_u8L("Object %1%: %2% fin tine(s) were left out where other support prints in the same place. "
-                                        "The tines stay on the part's own layers; the fins there hold the part with fewer of them."),
-                                   name, fr.tines_skipped),
+                    Slic3r::format(_u8L("Object %1%: other support prints where its support fins would stand, so %2% fin(s) and %3% tine(s) "
+                                        "were left out (fins never print over other support, and tines stay on the part's own layers). "
+                                        "Turn supports off on that side, or block them there with the support painting tool."),
+                                   name, fr.fins_lost, fr.tines_lost),
                     PrintStateBase::SlicingFinsTinesSkipped);
             if (m_print->config().print_sequence == PrintSequence::ByObject && fr.beyond_footprint > EPSILON)
                 this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,

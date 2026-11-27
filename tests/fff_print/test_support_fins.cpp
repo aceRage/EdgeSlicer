@@ -143,14 +143,22 @@ void check_slices(const Synth &s, const fins::FinSettings &st, const fins::FinPl
 
 // --- live slicing ---------------------------------------------------------------------------------
 
-enum class Part { TiltedCube, LeaningPlate };
+// TiltedCube: a 20 mm cube balanced on an edge along X (its 45 degree sides need no support at a 30 degree
+// threshold). CubeWithLedge: the same with a horizontal 11 x 6 x 2 mm ledge off its +X side, which does: other
+// support next to the fins, not in their place.
+enum class Part { TiltedCube, LeaningPlate, CubeWithLedge };
 
 TriangleMesh part_mesh(Part part)
 {
-    if (part == Part::TiltedCube) {
+    if (part == Part::TiltedCube || part == Part::CubeWithLedge) {
         TriangleMesh m = make_cube(20., 20., 20.);
         m.translate(-10.f, -10.f, -10.f);
         m.rotate_x(float(M_PI / 4.));
+        if (part == Part::CubeWithLedge) {
+            TriangleMesh ledge = make_cube(11., 6., 2.);
+            ledge.translate(9.f, -3.f, -4.f);
+            m.merge(ledge);
+        }
         return m;
     }
     TriangleMesh m = make_cube(30., 4., 25.);
@@ -185,7 +193,7 @@ DynamicPrintConfig fin_config(const Settings &extra)
 template<class Prepare> void slice_part(FinPrint &p, Part part, const Settings &extra, Prepare prepare)
 {
     ModelObject *object = p.model.add_object();
-    object->name        = part == Part::TiltedCube ? "tilted_cube" : "leaning_plate";
+    object->name        = part == Part::TiltedCube ? "tilted_cube" : part == Part::LeaningPlate ? "leaning_plate" : "cube_with_ledge";
     object->add_volume(part_mesh(part));
     object->add_instance();
     object->ensure_on_bed();
@@ -241,6 +249,7 @@ struct AlignmentResult
     size_t off_grid    = 0;  // support layers not at any object layer's height (the independent heights at work)
     size_t overlap     = 0;  // tines printed where another support layer overlapping in Z prints too
     size_t duplicate_z = 0;  // two support layers at one print_z
+    size_t other       = 0;  // support layers printing something besides the fins (so the case is not fins alone)
 };
 
 // The hard requirement: every tine on an object layer's print_z, with that layer's height, one support layer
@@ -255,8 +264,11 @@ AlignmentResult check_alignment(const PrintObject &po)
     for (const SupportLayer *sl : sls) {
         const bool on_grid = std::any_of(po.layers().begin(), po.layers().end(),
                                          [sl](const Layer *l) { return std::abs(l->print_z - sl->print_z) < EPSILON; });
-        if (! on_grid)
+        if (! on_grid) {
             ++r.off_grid;
+            if (area_mm2(coverage(*sl)) > 1.)
+                ++r.other;
+        }
     }
 
     // The fins as the planner places them with nothing in the way: their tines' paths, and their footprint.
@@ -288,6 +300,14 @@ AlignmentResult check_alignment(const PrintObject &po)
                 }
             }
         }
+        // Something besides the fins on the support layer at this object layer.
+        for (const SupportLayer *sl : sls)
+            if (std::abs(sl->print_z - layer.print_z) < EPSILON) {
+                ExPolygons fins_here = slices[i].body;
+                expolygons_append(fins_here, slices[i].tine_areas);
+                if (area_mm2(diff_ex(coverage(*sl), offset_ex(fins_here, scaled<float>(0.5)))) > 1.)
+                    ++r.other;
+            }
         // A tine printed on its layer never shares its place with another support layer overlapping that layer's
         // Z range (the fin walls are checked against obstacles in the planner tests).
         for (const auto &[own, tine] : printed_tines) {
@@ -372,6 +392,7 @@ TEST_CASE("Support fins: a cube balanced on its edge gets fins on both sides", "
     check_slices(s, st, plan, slices);
     CHECK(srep.tines > 0);
     CHECK(srep.tines_skipped == 0);
+    CHECK(srep.fins_standing == 4);
     // The 45 degree side covers the fin a little above its depth: no fin above the part's widest point.
     for (size_t i = 0; i < slices.size(); ++i)
         if (s.layers[i].print_z > 0.5 * 20. * M_SQRT2)
@@ -489,10 +510,13 @@ TEST_CASE("Support fins: tine layers", "[SupportFins]")
 
 TEST_CASE("Support fins: tines land exactly on object layers", "[SupportFins]")
 {
-    auto check = [](const PrintObject &po, bool expect_all) {
+    auto check = [](const PrintObject &po, bool expect_all, bool other_support = false) {
         const AlignmentResult r = check_alignment(po);
+        if (other_support)
+            CHECK(r.other > 0);
         WARN("candidates " << r.candidates << ", found " << r.found << ", misplaced " << r.misplaced << ", off-grid support layers "
-                           << r.off_grid << ", overlaps " << r.overlap << ", support layers " << po.support_layers().size());
+                           << r.off_grid << ", other support " << r.other << ", overlaps " << r.overlap << ", support layers "
+                           << po.support_layers().size());
         CHECK(r.candidates > 0);
         CHECK(r.found > 0);
         CHECK(r.misplaced == 0);
@@ -538,16 +562,25 @@ TEST_CASE("Support fins: tines land exactly on object layers", "[SupportFins]")
                    { { "enable_support", "1" }, { "support_type", "normal(auto)" }, { "support_threshold_angle", "30" },
                      { "independent_support_layer_height", "1" }, { "support_top_z_distance", "0.15" },
                      { "support_bottom_z_distance", "0.15" }, { "layer_height", "0.2" } });
-        check(p.po(), false);
+        check(p.po(), false, true);
     }
-    SECTION("tree supports with an independent support layer height")
+    SECTION("tree supports with an independent support layer height, next to the fins")
     {
         FinPrint p;
-        slice_part(p, Part::LeaningPlate,
+        slice_part(p, Part::CubeWithLedge,
                    { { "enable_support", "1" }, { "support_type", "tree(auto)" }, { "support_threshold_angle", "30" },
                      { "independent_support_layer_height", "1" }, { "support_top_z_distance", "0.15" },
                      { "support_bottom_z_distance", "0.15" }, { "layer_height", "0.2" } });
-        check(p.po(), false);
+        check(p.po(), false, true);
+    }
+    SECTION("normal supports with an independent support layer height, next to the fins")
+    {
+        FinPrint p;
+        slice_part(p, Part::CubeWithLedge,
+                   { { "enable_support", "1" }, { "support_type", "normal(auto)" }, { "support_threshold_angle", "30" },
+                     { "independent_support_layer_height", "1" }, { "support_top_z_distance", "0.15" },
+                     { "support_bottom_z_distance", "0.15" }, { "layer_height", "0.2" } });
+        check(p.po(), false, true);
     }
     SECTION("normal supports with the fins in their way")
     {

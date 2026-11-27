@@ -134,6 +134,11 @@ struct FinReport
     size_t             blocked               = 0;  // fins removed by painted support blockers
     size_t             tines                 = 0;
     size_t             tines_skipped         = 0;  // tines left out where other support prints
+    size_t             fins_standing         = 0;  // fins that stand on the bed (have a first layer)
+    // The live generator's count of what other support took (it slices the plan once without the other
+    // support too): fins that no longer stand and tines that are not printed, whatever the reason.
+    size_t             fins_lost             = 0;
+    size_t             tines_lost            = 0;
     // How far the fins reach beyond the object's own footprint (its outline's bounding box), mm.
     double             beyond_footprint      = 0.;
 };

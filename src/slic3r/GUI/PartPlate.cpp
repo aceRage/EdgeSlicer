@@ -2861,6 +2861,9 @@ void PartPlate::set_vase_mode_related_object_config(int obj_id) {
 	// Side stabilizers are support-role layers a vase cannot carry (Print::validate rejects them).
 	if (global_config->has("stabilizer_supports"))
 		new_conf.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
+	// So are support fins.
+	if (global_config->has("support_fins"))
+		new_conf.set_key_value("support_fins", new ConfigOptionEnum<SupportFinsMode>(sfmOff));
 	const auto applying_keys = global_config->diff(new_conf);
 
 	for (ModelObject* object : obj_ptrs) {
@@ -5123,6 +5126,10 @@ int PartPlateList::notify_instance_update(int obj_id, int instance_id, bool is_n
 		const DynamicPrintConfig& global_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
 		const DynamicPrintConfig& stabilizer_src = config.has("stabilizer_supports") ? config : global_config;
 		if (stabilizer_src.has("stabilizer_supports") && stabilizer_src.opt_enum<StabilizerMode>("stabilizer_supports") != smOff)
+			return false;
+		// And its support fins.
+		const DynamicPrintConfig& fins_src = config.has("support_fins") ? config : global_config;
+		if (fins_src.has("support_fins") && fins_src.opt_enum<SupportFinsMode>("support_fins") != sfmOff)
 			return false;
 		if (config.has("wall_loops") && config.opt_int("wall_loops") == 1 &&
 			config.has("top_shell_layers") && config.opt_int("top_shell_layers") == 0 &&
