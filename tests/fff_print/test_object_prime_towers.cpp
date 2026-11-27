@@ -997,7 +997,8 @@ ArrangePolygons arrange_by_object(Model &model, const DynamicPrintConfig &cfg, c
     if (&m == &H2D) {
         // Left nozzle X 0..325, right 25..350.
         auto rect = [](double x0, double x1) { return Pointfs{ Vec2d(x0, 0), Vec2d(x1, 0), Vec2d(x1, 320), Vec2d(x0, 320) }; };
-        REQUIRE(arrangement::clip_bed_to_nozzle_reach(bed, compute_extruder_areas(rect(0, 350), { rect(0, 325), rect(25, 350) }, {})));
+        REQUIRE(arrangement::clip_bed_to_nozzle_reach(bed, compute_extruder_areas(rect(0, 350), { rect(0, 325), rect(25, 350) }, {}),
+                                                       scaled(std::max(0.f, -std::min(params.bed_shrink_x, params.bed_shrink_y)))));
     }
     arrangement::arrange(selected, unselected, bed, params);
     for (ArrangePolygon &ap : selected)

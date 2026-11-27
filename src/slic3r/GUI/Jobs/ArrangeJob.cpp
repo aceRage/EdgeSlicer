@@ -683,7 +683,8 @@ void ArrangeJob::process(Ctl &ctl)
 
     Points      bedpts = get_shrink_bedpts(m_plater->config(),params);
     // EdgeSlicer "Avoid nozzle reach zones": arrange on the part of the bed every nozzle reaches.
-    arrangement::clip_bed_to_nozzle_reach(bedpts, m_reach_areas);
+    // Printing by object the bed was grown by half the clearance (update_arrange_params); the reach keeps that growth.
+    arrangement::clip_bed_to_nozzle_reach(bedpts, m_reach_areas, scaled(std::max(0.f, -std::min(params.bed_shrink_x, params.bed_shrink_y))));
 
     partplate_list.preprocess_exclude_areas(params.excluded_regions, 1, scale_(1));
     for (arrangement::ArrangePolygon &ap : m_reach_regions)
