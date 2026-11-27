@@ -2369,8 +2369,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                filament_adhesiveness_category))
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
-    ((ConfigOptionBoolsNullable,       filament_adaptive_volumetric_speed))  // Orca #12688: cap flow at the fitted value too
-    ((ConfigOptionStrings,             volumetric_speed_coefficients))  // "a b c d e f" of the fit, see VolumetricSpeedFit
     // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,
     // stored per flow variant (read them with get_value_at, ConfigFlowDomain::Filament).
     ((ConfigOptionIntsNullable,        filament_flush_temp))  // 0 = use nozzle_temperature_range_high
@@ -2473,8 +2471,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 nozzle_hrc))
     ((ConfigOptionBool,                auxiliary_fan))
     ((ConfigOptionBool,                support_air_filtration))
-    ((ConfigOptionBool,                support_cooling_filter))  // Orca #14685: the printer has a cooling filter (not air filtration)
-    ((ConfigOptionBool,                cooling_filter_enabled))  // Orca #14685: the cooling filter is fitted; read by machine G-code
     ((ConfigOptionEnum<PrinterStructure>,printer_structure))
     ((ConfigOptionBool,                farthest_point_timelapse))
     ((ConfigOptionBool,                support_chamber_temp_control))
@@ -2656,6 +2652,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Not a tower option: Bambu Studio 02.09.01.70 filament_metal_stickiness, read by reduce_infill_retraction_mode
     // = Auto (GCode.cpp). It lives here because GCodeConfig is at the macro nesting limit (C1009).
     ((ConfigOptionEnumsGeneric,       filament_metal_stickiness))
+    // Orca #14685: the printer has a cooling filter (not air filtration); the cooling filter is fitted (read by machine G-code).
+    ((ConfigOptionBool,               support_cooling_filter))
+    ((ConfigOptionBool,               cooling_filter_enabled))
+    // Orca #10780 / #12688: cap the flow at the fit of layer height and line width too; the fit "a b c d e f"
+    // (see VolumetricSpeedFit). Here for the same macro nesting limit.
+    ((ConfigOptionBoolsNullable,      filament_adaptive_volumetric_speed))
+    ((ConfigOptionStrings,            volumetric_speed_coefficients))
 )
 
 // This object is mapped to Perl as Slic3r::Config::Print.
