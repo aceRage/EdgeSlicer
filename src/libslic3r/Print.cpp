@@ -3386,8 +3386,6 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         // notices are raised again when the towers are made (psWipeTower), for the preview and the CLI.
         if (m_config.prime_tower_per_object.value && this->printed_copies_count() > 1) {
             std::vector<std::string> notices;
-            if (m_requested_enable_prime_tower && this->wipe_tower_type() == WipeTowerType::Type2 && extruders.size() > 1)
-                notices.push_back(L("Prime tower per object is not available for this printer yet. The objects print without prime towers."));
             if (this->object_towers_requested())
                 if (const std::string reason = this->object_towers_unsupported_reason(); !reason.empty())
                     notices.push_back(reason);
@@ -8070,8 +8068,7 @@ bool Print::object_towers_requested() const
     // keeps its own (refused) behaviour.
     return m_config.prime_tower_per_object.value && m_config.enable_prime_tower.value &&
            m_config.print_sequence == PrintSequence::ByObject && !this->enable_timelapse_print() && !m_config.spiral_mode.value &&
-           m_config.filament_diameter.values.size() > 1 && this->printed_copies_count() > 1 &&
-           this->wipe_tower_type() == WipeTowerType::Type1;
+           m_config.filament_diameter.values.size() > 1 && this->printed_copies_count() > 1;
 }
 
 std::string Print::object_towers_unsupported_reason() const
@@ -8197,6 +8194,9 @@ ObjectTowerPlan Print::plan_object_towers() const
 
     for (size_t idx = 0; idx < copies.size(); ++idx) {
         Copy &copy = copies[idx];
+        // PR 5, D13: an object the user took out (object setting) gets no tower and does not count toward the cap.
+        if (!copy.object->config().object_prime_tower.value)
+            continue;
         const std::vector<unsigned int> filaments = object_filaments(*copy.object);
         if (filaments.size() < 2)
             continue;
@@ -8210,15 +8210,17 @@ ObjectTowerPlan Print::plan_object_towers() const
         placement.instance = copy.instance;
         const coord_t own_gap = own_gap_of(*copy.object);
         const double height = unscale<double>(copy.object->size().z());
-        const WipeTowerFootprint footprint = estimate_wipe_tower_footprint(m_config, WipeTowerType::Type1, filaments,
+        const WipeTowerFootprint footprint = estimate_wipe_tower_footprint(m_config, this->wipe_tower_type(), filaments,
                                                                            copy.object->config().layer_height.value, height);
         placement.width      = footprint.width;
         placement.depth      = footprint.depth;
         placement.brim_width = footprint.brim_width;
+        placement.height     = height;
         // The outline relative to its anchor (brim included).
         const Polygon     local  = placed_wipe_tower_footprint(m_config, footprint, Vec2d::Zero());
         const BoundingBox tb     = get_extents(local);
         const BoundingBox cb     = get_extents(copy.hull);
+        placement.copy_center    = unscale(cb.center()) - Vec2d(origin3.x(), origin3.y());
         // Candidate anchors (bed coordinates, scaled): right, left, behind, in front of the copy, each slid along that
         // side in 5 mm steps from its middle outwards, as far as the tower still runs at least 5 mm alongside the copy
         // (a tower wider than a small copy, or a copy at the bed's edge, needs to overhang its side).
@@ -8249,36 +8251,64 @@ ObjectTowerPlan Print::plan_object_towers() const
         for (coord_t x : slide(x_lo, x_hi))
             anchors.emplace_back(x, cb.min.y() - own_gap - tb.max.y());
 
-        double best_score = -1.;
-        for (const Point &anchor : anchors) {
-            Polygon tower = local;
+        // Whether a tower anchored there is clear (on the bed, off the exclusions, within reach, its gap to its own copy
+        // and the unit clear of every other unit); score: the distance to the nearest other unit.
+        auto clear_at = [&](const Point &anchor, Polygon &tower, double &score) {
+            tower = local;
             tower.translate(anchor);
             if (!diff(Polygons{ tower }, Polygons{ bed }).empty())
-                continue;
+                return false;
             if (!intersection(excluded, Polygons{ tower }).empty())
-                continue;
+                return false;
             if (areas.multi() && !areas.shared.empty() && !footprint_within(Polygons{ tower }, areas.shared, 0.1))
-                continue;
+                return false;
             if (!intersection(offset(tower, float(own_gap) - float(scale_(0.1))), Polygons{ copy.hull }).empty())
-                continue;
+                return false;
             const Polygon unit = object_tower_unit(copy.hull, tower);
-            bool          clear = true;
-            double        score = std::numeric_limits<double>::max();
-            for (size_t other = 0; other < copies.size() && clear; ++other) {
+            score              = std::numeric_limits<double>::max();
+            for (size_t other = 0; other < copies.size(); ++other) {
                 if (other == idx)
                     continue;
                 const Polygon other_unit = object_tower_unit(copies[other].hull, copies[other].tower);
                 if (object_tower_units_collide(unit, other_unit, unit_distance))
-                    clear = false;
-                else {
-                    // Prefer the side away from the other copies.
-                    const BoundingBox a = get_extents(tower), b = get_extents(other_unit);
-                    const double dx = std::max<double>(0., double(std::max(a.min.x() - b.max.x(), b.min.x() - a.max.x())));
-                    const double dy = std::max<double>(0., double(std::max(a.min.y() - b.max.y(), b.min.y() - a.max.y())));
-                    score = std::min(score, std::hypot(dx, dy));
-                }
+                    return false;
+                // Prefer the side away from the other copies.
+                const BoundingBox a = get_extents(tower), b = get_extents(other_unit);
+                const double dx = std::max<double>(0., double(std::max(a.min.x() - b.max.x(), b.min.x() - a.max.x())));
+                const double dy = std::max<double>(0., double(std::max(a.min.y() - b.max.y(), b.min.y() - a.max.y())));
+                score = std::min(score, std::hypot(dx, dy));
             }
-            if (!clear)
+            return true;
+        };
+
+        // PR 5: a tower the user dragged stands at its offset from the copy's centre, if that is clear; otherwise it is
+        // placed automatically, with a warning (design 2.5: never moved silently).
+        const PrintObjectConfig &object_config = copy.object->config();
+        const Vec2d drag_offset(object_config.prime_tower_offset_x.value, object_config.prime_tower_offset_y.value);
+        if (std::abs(drag_offset.x()) > EPSILON || std::abs(drag_offset.y()) > EPSILON) {
+            const Point anchor = cb.center() + Point::new_scale(drag_offset.x(), drag_offset.y());
+            Polygon     tower;
+            double      score = 0.;
+            if (clear_at(anchor, tower, score)) {
+                placement.placed      = true;
+                placement.from_offset = true;
+                placement.outline     = tower;
+                placement.pos         = unscale(anchor) - Vec2d(origin3.x(), origin3.y());
+            } else {
+                placement.offset_rejected = true;
+                placement.requested_pos   = unscale(anchor) - Vec2d(origin3.x(), origin3.y());
+                plan.warnings.push_back((boost::format(L("The prime tower of %1% is not clear where it was moved to (off the bed, too "
+                                                         "close to an object, or outside what every nozzle reaches), so it is placed "
+                                                         "automatically.")) % name).str());
+            }
+        }
+
+        double best_score = -1.;
+        for (size_t i = 0; i < anchors.size() && !placement.from_offset; ++i) {
+            const Point &anchor = anchors[i];
+            Polygon      tower;
+            double       score = 0.;
+            if (!clear_at(anchor, tower, score))
                 continue;
             if (score > best_score + scale_(0.5)) {
                 best_score         = score;
@@ -8316,10 +8346,6 @@ void Print::make_object_wipe_towers(bool raise_notices)
     m_object_towers_signature = this->object_towers_signature();
 
     std::vector<std::string> notices;
-    if (m_config.prime_tower_per_object.value && m_requested_enable_prime_tower && m_config.print_sequence == PrintSequence::ByObject &&
-        this->printed_copies_count() > 1 && this->wipe_tower_type() == WipeTowerType::Type2 && this->extruders(true).size() > 1)
-        // PR 4 adds the Type 2 (U1, Voron, Prusa MMU) towers; until then the plate prints as without the setting.
-        notices.push_back(L("Prime tower per object is not available for this printer yet. The objects print without prime towers."));
     if (this->object_towers_requested()) {
         if (const std::string reason = this->object_towers_unsupported_reason(); !reason.empty())
             notices.push_back(reason);
@@ -8968,9 +8994,15 @@ void Print::_make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, con
             m_fake_wipe_tower.outer_wall = wipe_tower.get_outer_wall();
         }
     } else {
+        // A copy's tower (per-object prime towers, PR 4) starts with the filament loaded when its block starts
+        // (ByObjectBlock::loaded_extruder, as the Type 1 branch above): its block's ordering is not reordered for
+        // priming, so all_extruders().back() need not be that filament.
+        const unsigned int copy_start_extruder = plate_tower ? (unsigned int) -1 :
+                                                 loaded_extruder != (unsigned int) -1 ? loaded_extruder :
+                                                                                        data.tool_ordering.first_extruder();
         // Initialize the wipe tower.
         WipeTower2 wipe_tower(m_config, m_default_region_config, pos, m_origin, wipe_volumes,
-                              data.tool_ordering.first_extruder());
+                              plate_tower ? data.tool_ordering.first_extruder() : copy_start_extruder);
         const std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> layers_to_print = tower_layers_to_print();
         size_t layers_to_print_idx = 0;
 
@@ -8982,13 +9014,25 @@ void Print::_make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, con
         for (size_t i = 0; i < number_of_extruders; ++i)
             wipe_tower.set_extruder(i, tower_temperature_config);
 
-        data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
-            wipe_tower.prime((float)this->skirt_first_layer_height(), data.tool_ordering.all_extruders(), false));
+        if (plate_tower) {
+            data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
+                wipe_tower.prime((float)this->skirt_first_layer_height(), data.tool_ordering.all_extruders(), false));
+        } else {
+            // No print-start priming for a copy's tower (design 2.4): its block starts mid-print. The generator still
+            // runs its priming pass, with the block's starting filament last, so the tower is laid out as a plate
+            // tower whose priming is off (single_extruder_multi_material_priming, the U1's default) is today; the
+            // priming lines themselves are dropped, and the export never asks for them (no plate tower).
+            std::vector<unsigned int> tools = data.tool_ordering.all_extruders();
+            tools.erase(std::remove(tools.begin(), tools.end(), copy_start_extruder), tools.end());
+            tools.push_back(copy_start_extruder);
+            wipe_tower.prime((float) this->skirt_first_layer_height(), tools, false);
+            data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>();
+        }
 
         // Lets go through the wipe tower layers and determine pairs of extruder changes for each
         // to pass to wipe_tower (so that it can use it for planning the layout of the tower)
         {
-            unsigned int current_extruder_id = data.tool_ordering.all_extruders().back();
+            unsigned int current_extruder_id = plate_tower ? data.tool_ordering.all_extruders().back() : copy_start_extruder;
             for (auto &layer_tools : data.tool_ordering.layer_tools()) { // for all layers
                 if (!layer_tools.has_wipe_tower)
                     continue;
@@ -9056,8 +9100,11 @@ void Print::_make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, con
                             volume_to_wipe -= (float) get_value_at(m_config, m_config.filament_minimal_purge_on_wipe_tower, ConfigFlowDomain::Filament, extruder_id);
 
                             // try to assign some infills/objects for the wiping:
-                            volume_to_wipe = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
-                                                                                                    volume_to_wipe);
+                            // Not for a copy's tower (design D9): the marking walks every object of the plate, and the
+                            // other copies print in other blocks. Its whole flush goes to the tower.
+                            if (plate_tower)
+                                volume_to_wipe = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
+                                                                                                        volume_to_wipe);
 
                             // add back the minimal amount toforce on the wipe tower:
                             volume_to_wipe += (float) get_value_at(m_config, m_config.filament_minimal_purge_on_wipe_tower, ConfigFlowDomain::Filament, extruder_id);
@@ -9137,7 +9184,14 @@ void Print::_make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, con
         const bool will_ram         = (m_config.single_extruder_multi_material && printer_rams) || filament_rams;
         data.final_purge_drop     = false;
         data.final_purge_will_ram = will_ram;
-        if (need_final_purge) {
+        if (! plate_tower) {
+            // A copy's tower ends with its block (per-object prime towers, design 2.4): no final purge, which would
+            // also unload the filament at the end of every block and count in the tower's used filament.
+            data.final_purge_will_ram  = false;
+            data.final_purge           = Slic3r::make_unique<WipeTower::ToolChangeResult>(WipeTower::ToolChangeResult{});
+            data.used_filament         = wipe_tower.get_used_filament();
+            data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
+        } else if (need_final_purge) {
             // Target the tower's own last active layer, not the object's top print_z, so the
             // extra layer sits on the real tower instead of mid-air. finish_layer() runs every
             // layer, so layer_finished() is true at the end and the extra set_layer is always
@@ -9171,9 +9225,7 @@ void Print::_make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, con
             data.number_of_toolchanges = stay_tower.get_number_of_toolchanges();
             data.final_purge           = Slic3r::make_unique<WipeTower::ToolChangeResult>(
                 *data.final_purge_no_drop);
-            // A copy's tower has no final purge to choose (per-object prime towers end with the copy's block).
-            if (plate_tower)
-                this->select_final_purge_variant(data);
+            this->select_final_purge_variant(data);
         } else {
             data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(WipeTower::ToolChangeResult{});
             data.used_filament         = wipe_tower.get_used_filament();

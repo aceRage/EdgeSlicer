@@ -10054,6 +10054,32 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Per-object prime towers, PR 5: the object setting that drops one object's tower (design D13), and where the user
+    // dragged a tower (offset from the copy's bounding-box centre to the tower's front left corner; 0, 0 is automatic).
+    def = this->add("object_prime_tower", coBool);
+    def->label = L("Prime tower for this object");
+    def->category = L("Support");
+    def->tooltip = L("With Prime tower per object on, this object gets its own prime tower. Turn it off for an object "
+                     "whose colour changes need no priming.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("prime_tower_offset_x", coFloat);
+    def->label = L("Prime tower offset X");
+    def->tooltip = L("Where this object's prime tower was moved to, from the object's centre. 0 places it automatically.");
+    def->sidetext = L("mm");
+    def->mode = comDevelop;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("prime_tower_offset_y", coFloat);
+    def->label = L("Prime tower offset Y");
+    def->tooltip = L("Where this object's prime tower was moved to, from the object's centre. 0 places it automatically.");
+    def->sidetext = L("mm");
+    def->mode = comDevelop;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
     def = this->add("flush_volumes_vector", coFloats);
     // BBS: remove _L()
     def->label = ("Purging volumes - load/unload volumes");
@@ -13298,10 +13324,9 @@ bool DynamicPrintConfig::keeps_object_prime_towers(const ConfigBase &config, int
     const ConfigOption *sequence = config.option("print_sequence");
     if (sequence == nullptr || PrintSequence(sequence->getInt()) != PrintSequence::ByObject)
         return false;
-    if (const ConfigOption *spiral = config.option("spiral_mode"); spiral != nullptr && spiral->getBool())
-        return false;
-    // Type 2 towers (U1, Voron, Prusa MMU) per object come in a later PR: they keep today's "no tower".
-    return resolve_wipe_tower_type(config) == WipeTowerType::Type1;
+    // Both tower types build per-object towers: Type 1 (Bambu Lab) and, since PR 4, Type 2 (U1, Voron, Prusa MMU).
+    const ConfigOption *spiral = config.option("spiral_mode");
+    return spiral == nullptr || !spiral->getBool();
 }
 
 t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int used_filaments)

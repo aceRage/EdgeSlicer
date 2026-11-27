@@ -5835,7 +5835,7 @@ int CLI::run(int argc, char **argv)
                 // leaves that room (the slicer places the tower beside the copy afterwards).
                 if (arrange_cfg.is_seq_print && selected.size() > 1 && m_print_config.has("prime_tower_per_object") &&
                     m_print_config.opt_bool("prime_tower_per_object") && m_print_config.has("enable_prime_tower") &&
-                    m_print_config.opt_bool("enable_prime_tower") && resolve_wipe_tower_type(m_print_config) == WipeTowerType::Type1) {
+                    m_print_config.opt_bool("enable_prime_tower")) {
                     auto filament_key = [this](const ModelObject &object, const char *key) -> int {
                         if (const ConfigOption *opt = object.config.option(key); opt != nullptr && opt->getInt() > 0)
                             return opt->getInt();
@@ -5846,6 +5846,9 @@ int CLI::run(int argc, char **argv)
                         if (ap.itemid < 0 || size_t(ap.itemid) >= selected_objects.size())
                             continue;
                         const ModelObject &object = *selected_objects[size_t(ap.itemid)];
+                        // PR 5, D13: an object taken out of the per-object towers needs no room for one.
+                        if (const ConfigOption *own = object.config.option("object_prime_tower"); own != nullptr && !own->getBool())
+                            continue;
                         std::vector<unsigned int> filaments;
                         for (const ModelVolume *volume : object.volumes)
                             if (volume->is_model_part())
@@ -5858,7 +5861,7 @@ int CLI::run(int argc, char **argv)
                         sort_remove_duplicates(filaments);
                         if (filaments.size() < 2)
                             continue;
-                        const WipeTowerFootprint tower = estimate_wipe_tower_footprint(m_print_config, WipeTowerType::Type1, filaments, layer_height,
+                        const WipeTowerFootprint tower = estimate_wipe_tower_footprint(m_print_config, resolve_wipe_tower_type(m_print_config), filaments, layer_height,
                                                                                        object.instance_bounding_box(0).size().z());
                         if (tower.depth <= EPSILON)
                             continue;

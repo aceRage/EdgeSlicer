@@ -12,6 +12,8 @@
 #include <boost/log/trivial.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 
 namespace Slic3r { namespace GUI {
 
@@ -25,6 +27,19 @@ int find_volume(const ModelObject &o, const std::string &name)
         if (o.volumes[i]->is_model_part() && o.volumes[i]->name == name)
             return int(i);
     return -1;
+}
+
+std::vector<std::string> &last_log_lines()
+{
+    static std::vector<std::string> lines;
+    return lines;
+}
+
+std::string secs(double s)
+{
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.1f", s);
+    return buf;
 }
 
 void set_piece(ModelVolume &v, const std::string &name, int filament)
@@ -63,6 +78,7 @@ void PaintSplitJob::process(Ctl &ctl)
         attrs = attrs | ModelObjectCutAttribute::KeepAsParts;
 
     ModelObjectPtrs pieces;
+    const auto      t_start = std::chrono::steady_clock::now();
     for (size_t k = 0; k < m_plan.pieces.size(); ++k) {
         if (ctl.was_canceled())
             return;
@@ -86,6 +102,18 @@ void PaintSplitJob::process(Ctl &ctl)
             m_bad_loop  = rep.bad_loop;
             m_bad_label = p.label;
             return;
+        }
+        // Step 0 of the refinement plan: where the time goes, per region.
+        {
+            const PaintSplitTimes &t = rep.times;
+            m_log.push_back(GUI::format(_u8L("%1%: field %2% s, cut %3% s, paint %4% s"), p.label, secs(t.field + t.mesh + t.smooth),
+                                        secs(t.repair + t.cut + t.wrapper), secs(t.paint)));
+            BOOST_LOG_TRIVIAL(info) << "Paint split " << p.label << ": total " << t.total << " s; repair " << t.repair << " s, field "
+                                    << t.field << " s, mesh " << t.mesh << " s, smooth " << t.smooth << " s, cut " << t.cut
+                                    << " s, wrapper " << t.wrapper << " s, paint " << t.paint << " s ("
+                                    << (rep.exact_paint ? "exact" : "remap") << "); claim " << rep.claim.triangles << " triangles, voxel "
+                                    << rep.claim.voxel << " mm, near the skin " << rep.claim.near_skin_voxel << " mm; piece "
+                                    << rep.piece_volume << " mm3";
         }
         m_returned += rep.returned_components;
         m_attached += rep.attached_components;
@@ -159,7 +187,11 @@ void PaintSplitJob::process(Ctl &ctl)
 
     m_results = pieces;
     m_results.push_back(current);
+    m_total_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
+    BOOST_LOG_TRIVIAL(info) << "Paint split: " << m_plan.pieces.size() << " region(s) in " << m_total_s << " s";
 }
+
+const std::vector<std::string> &PaintSplitJob::last_log() { return last_log_lines(); }
 
 void PaintSplitJob::finalize(bool canceled, std::exception_ptr &eptr)
 {
@@ -179,6 +211,12 @@ void PaintSplitJob::finalize(bool canceled, std::exception_ptr &eptr)
         return;
     }
     if (m_error != PaintSplitError::None || m_results.empty()) {
+        // The regions cut before the refusal still say where their time went (step 0).
+        std::vector<std::string> &log = last_log_lines();
+        log                           = m_log;
+        if (m_error != PaintSplitError::None)
+            log.insert(log.begin(), GUI::format(_u8L("Paint Split stopped at %1%: %2%"), m_bad_label.empty() ? std::string("?") : m_bad_label,
+                                                _u8L(paint_split_error_message(m_error))));
         notes->push_plater_warning_notification(
             format(_u8L("Paint Split did not split \"%1%\": %2%"), m_name,
                    m_error == PaintSplitError::None ? _u8L("nothing to split.") :
@@ -226,6 +264,12 @@ void PaintSplitJob::finalize(bool canceled, std::exception_ptr &eptr)
     }
     for (PaintSplitWarning w : m_warnings)
         notes->push_notification(_u8L(paint_split_warning_message(w)));
+    // The time line (design 8.1 step 0): a notification now, the per-region lines in the gizmo's Output Log.
+    const std::string         total = GUI::format(_u8L("Paint Split: %1% region(s) in %2% s."), m_plan.pieces.size(), secs(m_total_s));
+    std::vector<std::string> &log   = last_log_lines();
+    log                             = m_log;
+    log.insert(log.begin(), total);
+    notes->push_notification(total);
 }
 
 }} // namespace Slic3r::GUI

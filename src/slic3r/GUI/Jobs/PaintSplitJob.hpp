@@ -54,6 +54,10 @@ public:
     void process(Ctl &ctl) override;
     void finalize(bool canceled, std::exception_ptr &eptr) override;
 
+    // The last Apply's Output Log lines (design 8.1 step 0: a total and one time line per region), shown by the
+    // gizmo when it opens again. UI thread only.
+    static const std::vector<std::string> &last_log();
+
 private:
     Plater             *m_plater{ nullptr };
     ObjectID            m_object_id;
@@ -69,6 +73,8 @@ private:
     int                 m_bad_loop{ -1 };
     int                 m_rest_count{ 0 };
     std::string         m_bad_label;
+    std::vector<std::string> m_log; // per region: "Region n: field x s, cut y s, paint z s"
+    double              m_total_s{ 0. };
 };
 
 }} // namespace Slic3r::GUI

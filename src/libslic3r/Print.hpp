@@ -1406,9 +1406,9 @@ struct ByObjectPlan
     }
 };
 
-// Per-object prime towers (PR 3 of tests/design_per_object_prime_towers.md): with prime_tower_per_object on a plate printed
-// by object, every copy that changes filament gets its own Bambu-style (Type 1) tower beside it, printed inside that
-// copy's block, up to the block's last tool change.
+// Per-object prime towers (PR 3 and PR 4 of tests/design_per_object_prime_towers.md): with prime_tower_per_object on a plate
+// printed by object, every copy that changes filament gets its own tower beside it (Type 1 on Bambu Lab printers, Type 2
+// on the U1, Voron and other WipeTower2 printers), printed inside that copy's block, up to the block's last tool change.
 // - ObjectTowerPlan: where the towers go, decided from the model alone (the copies' outlines and an estimate of each
 //   tower's size), so validate() before slicing, process() and the export see the same towers. At most
 //   max_object_towers candidates, in model list order (object, then instance) among copies whose object uses more than
@@ -1428,6 +1428,16 @@ struct ObjectTowerPlacement
     double               width      = 0.;
     double               depth      = 0.;
     double               brim_width = 0.;
+    // PR 5 (GUI): the estimated height (the copy's), and the centre of the copy's bounding box in plate coordinates,
+    // which the object's prime_tower_offset_x/y are measured from.
+    double               height     = 0.;
+    Vec2d                copy_center { 0., 0. };
+    // The tower stands where the user dragged it (the object's prime_tower_offset_x/y).
+    bool                 from_offset = false;
+    // The object asks for a dragged position that is not clear (requested_pos, plate coordinates): the tower is placed
+    // automatically instead, with a warning, and the GUI draws the dragged one red.
+    bool                 offset_rejected = false;
+    Vec2d                requested_pos { 0., 0. };
 };
 
 struct ObjectTowerPlan
@@ -1435,7 +1445,8 @@ struct ObjectTowerPlan
     static constexpr size_t max_object_towers = 2;
     // The candidates within the cap, in model list order, placed or not.
     std::vector<ObjectTowerPlacement> towers;
-    // One line per copy printed without a tower the user asked for (over the cap, no room).
+    // One line per copy printed without a tower the user asked for (over the cap, no room), or whose dragged tower is
+    // not clear where it was put.
     std::vector<std::string>          warnings;
 
     const ObjectTowerPlacement *find(const PrintInstance *instance) const
@@ -1723,7 +1734,7 @@ public:
 
     // Per-object prime towers (see ObjectTowerPlan).
     // The plate asks for them: printed by object, more than one printed copy, prime_tower_per_object on and the prime
-    // tower kept on by normalize_fdm_2 (a Type 1 printer, more than one filament, no spiral vase), no smooth timelapse.
+    // tower kept on by normalize_fdm_2 (more than one filament, no spiral vase), no smooth timelapse.
     // has_wipe_tower() (the plate tower) is false on such a plate, as it was when normalize turned the tower off.
     bool                        object_towers_requested() const;
     // Why a plate that asks for them gets none (a feature that does not combine with them); empty when none.
@@ -1925,8 +1936,6 @@ private:
     std::string                                             m_object_towers_signature;
     ToolOrdering                                            m_object_tower_statistics_ordering;
     WipeTowerData                                           m_object_tower_statistics { m_object_tower_statistics_ordering };
-    // enable_prime_tower as the user set it, before normalize_fdm_2 (apply()).
-    bool                                                    m_requested_enable_prime_tower { false };
     // EdgeSlicer: support_interface_nozzle_temperature resolved per filament (apply()).
     SupportInterfaceTemperatures                            m_support_interface_temperatures;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.

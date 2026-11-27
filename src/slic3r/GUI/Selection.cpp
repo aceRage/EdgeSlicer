@@ -1234,7 +1234,7 @@ void Selection::translate(const Vec3d &displacement, TransformationType transfor
                 transform_instance_relative(v, volume_data, transformation_type, Geometry::translation_transform(displacement), m_cache.dragging_center);
         } else {
             if (v.is_wipe_tower) {//in world cs
-                int           plate_idx           = v.object_idx() - 1000;
+                int           plate_idx           = tower_volume_plate(v.object_idx());
                 BoundingBoxf3 plate_bbox          = wxGetApp().plater()->get_partplate_list().get_plate(plate_idx)->get_bounding_box();
                 {
                     // Dual-nozzle printers (H2D / H2C / X2D): every nozzle purges into the tower, so keep it where
@@ -2522,6 +2522,9 @@ void Selection::update_type()
                 {
                     bool               is_wipe_tower   = it->first >= 1000;
                     int                actual_obj_id   = is_wipe_tower ? it->first - 1000 : it->first;
+                    // A per-object prime tower (2000 and up) has no object behind its id either.
+                    if (actual_obj_id < 0 || actual_obj_id >= int(m_model->objects.size()))
+                        continue;
                     const ModelObject *model_object    = m_model->objects[actual_obj_id];
                     unsigned int volumes_count = (unsigned int)model_object->volumes.size();
                     unsigned int instances_count = (unsigned int)model_object->instances.size();
