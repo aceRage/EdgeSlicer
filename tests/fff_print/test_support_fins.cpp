@@ -248,7 +248,7 @@ struct AlignmentResult
 AlignmentResult check_alignment(const PrintObject &po)
 {
     AlignmentResult r;
-    const SupportLayerPtrs &sls = po.support_layers();
+    const std::vector<const SupportLayer *> sls = po.support_layers().vector();
     for (size_t k = 1; k < sls.size(); ++k)
         if (sls[k]->print_z <= sls[k - 1]->print_z + EPSILON)
             ++r.duplicate_z;
