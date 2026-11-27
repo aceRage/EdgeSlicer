@@ -521,7 +521,6 @@ const std::vector<InferredEquivalent> &inferred_equivalents()
 {
     static const std::vector<InferredEquivalent> list = {
         { "sub_top_surface_pattern", "undertop_surface_pattern" }, // pattern of the solid layer under a top surface
-        { "machine_hotend_change_time", "machine_tool_change_time" }, // statistics-only change time (Bambu: hotend rack swap, ours: tool change)
     };
     return list;
 }
@@ -545,12 +544,10 @@ const std::vector<const char *> &reviewed_missing()
         "default_ams_type",
         "detect_floating_vertical_shell",
         "embedding_wall_into_infill",
-        "enable_height_slowdown",
         "enable_wrapping_detection",
         "filament_adaptive_volumetric_speed",
         "filament_bridge_speed",
         "filament_enable_overhang_speed",
-        "filament_metal_stickiness",
         "filament_overhang_1_4_speed",
         "filament_overhang_2_4_speed",
         "filament_overhang_3_4_speed",
@@ -565,7 +562,7 @@ const std::vector<const char *> &reviewed_missing()
         "first_x_layer_optional_fan_speed",
         "first_x_layer_part_fan_speed",
         "infill_rotate_step",
-        "initial_layer_infill_line_width",
+        "machine_hotend_change_time",
         "modifier_ignore_infill",
         "optional_cooling_fan_speed",
         "optional_fan_full_speed_layer",
@@ -579,12 +576,6 @@ const std::vector<const char *> &reviewed_missing()
         "pre_start_fan_time",
         "seam_placement_away_from_overhangs",
         "seam_slope_gap",
-        "slowdown_end_acc",
-        "slowdown_end_height",
-        "slowdown_end_speed",
-        "slowdown_start_acc",
-        "slowdown_start_height",
-        "slowdown_start_speed",
         "smooth_coefficient",
         "smooth_speed_discontinuity_area",
         "vertical_shell_speed",

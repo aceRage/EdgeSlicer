@@ -51,6 +51,10 @@ public:
 
 protected:
     void on_switch_recording(wxCommandEvent& event);
+    // BirdsEye printers: one "record while printing" switch per camera the printer lists in
+    // support_record_cams (Live View 4, BirdsEye 5), replacing the single switch (design D5).
+    void on_switch_record_cam(int camera_id, SwitchButton* sw);
+    void update_record_cams();
     void on_set_resolution();
     void sdcard_absent_hint();
     void on_camera_source_changed(wxCommandEvent& event);
@@ -70,6 +74,12 @@ private:
     bool  m_is_in_interval{ false };
     wxStaticText* m_text_recording;
     SwitchButton* m_switch_recording;
+    wxStaticText* m_text_record_main { nullptr };
+    SwitchButton* m_switch_record_main { nullptr };
+    wxStaticText* m_text_record_birdseye { nullptr };
+    SwitchButton* m_switch_record_birdseye { nullptr };
+    wxStaticText* m_text_storage { nullptr }; // "External storage: Installed / Not installed / Abnormal"
+    wxStaticText* m_text_record_hint { nullptr }; // why the per-camera switches are greyed out
     wxStaticText* m_text_vcamera;
     SwitchButton* m_switch_vcamera;
     wxStaticText* m_text_liveview_retry;

@@ -880,7 +880,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "max_volumetric_extrusion_rate_slope",
         "max_volumetric_extrusion_rate_slope_segment_length",
         "extrusion_rate_smoothing_external_perimeter_only",
-        "reduce_infill_retraction",
+        "reduce_infill_retraction_mode",
+        "filament_metal_stickiness",
         "filename_format",
         "retraction_minimum_travel",
         "retract_before_wipe",
@@ -1258,6 +1259,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             osteps.emplace_back(posSimplifySupportPath);
         } else if (
                opt_key == "initial_layer_line_width"
+            || opt_key == "initial_layer_infill_line_width" // BBS 02.09.01.70 Print.cpp:406
             || opt_key == "nozzle_initial_layer_line_width" // per-nozzle process P5
             || opt_key == "nozzle_line_width" // per-nozzle process P6
             || opt_key == "nozzle_layer_height" // H3C fix: a chosen process's layer height sizes the coarse nozzles' slabs

@@ -294,6 +294,22 @@ std::string              format_nozzle_change_block(int  old_filament_id,
                                                     int  precool_temp,
                                                     int  physical_extruder);
 
+// Bambu Studio 02.09.01.70 height slowdown (GCode::slowDownByHeight, GCode.cpp:7513-7563). Free functions so
+// libslic3r_tests can reach them (tests/fff_print/test_height_slowdown.cpp).
+struct HeightSlowdown
+{
+    bool   active    = false;  // the limits apply to this path (and to the travel to its first point)
+    double max_speed = 1000.;  // mm/s: print speed, travel speed and travel_speed_z cap; also the (non-BBL) jerk cap
+    double max_acc   = 100000.; // mm/s^2: print and travel acceleration cap
+};
+// The roles Bambu Studio slows down: everything from walls to gap fill (Bambu tests "role > erNone && role <= erGapFill").
+// Skirt, brim, support, wipe tower and custom moves are never slowed down.
+bool height_slowdown_role(ExtrusionRole role);
+// Active from start_height up (strictly below it, or when start_height >= end_height, nothing is capped); the
+// limits go linearly from the start to the end values between the two heights and stay at the end values above.
+HeightSlowdown height_slowdown_limits(bool enabled, double start_height, double end_height, double start_speed, double end_speed,
+                                      double start_acc, double end_acc, double print_z);
+
 class GCode {
 
 public:
@@ -950,6 +966,13 @@ private:
     // (> 0), else Orca's first_layer_travel_acceleration (absolute or % of the travel acceleration), else 0 (the caller
     // keeps the initial layer acceleration). Defined after process_flow_value.
     double first_layer_travel_acceleration_override() const;
+
+    // Bambu Studio 02.09.01.70 GCode::slowDownByHeight: the limits for this path at the current layer's print_z,
+    // from the process variant of the current filament (Bambu's NOZZLE_CONFIG).
+    HeightSlowdown height_slowdown_for(const ExtrusionPath &path);
+    // Set by _extrude() around the travel to a slowed-down path's first point; travel_to() caps the travel
+    // acceleration (and, off Bambu Lab printers, the travel jerk) by it, as Bambu caps m_travel_accelerations.
+    HeightSlowdown m_height_slowdown_travel;
 
     // Snapmaker: flow variant — read a process-domain vector option
     template<typename VectorOption>

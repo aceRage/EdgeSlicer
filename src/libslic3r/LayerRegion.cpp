@@ -129,7 +129,11 @@ Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_laye
             initial_width           = &nozzle_initial_width;
         }
     }
-    if (use_initial_layer_width && initial_width->value > 0) {
+    if (use_initial_layer_width && use_initial_layer_infill_width(role, print_config.initial_layer_infill_line_width.value,
+                                             initial_width == &nozzle_initial_width)) {
+        // Bambu Studio 02.09.01.70 PrintRegion.cpp:30-31.
+        config_width = ConfigOptionFloatOrPercent(print_config.initial_layer_infill_line_width.value, false);
+    } else if (use_initial_layer_width && initial_width->value > 0) {
         config_width = *initial_width;
     } else if (role == frExternalPerimeter) {
         config_width = m_region->config().outer_wall_line_width;

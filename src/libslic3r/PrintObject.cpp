@@ -2026,6 +2026,14 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "over_support_speed"
             // EdgeSlicer, Fine detail: applied in GCode::_extrude only.
             || opt_key == "fine_detail_speed"
+            // Bambu Studio 02.09.01.70 height slowdown: applied in GCode::_extrude only (BS PrintObject.cpp:1852-1859).
+            || opt_key == "enable_height_slowdown"
+            || opt_key == "slowdown_start_height"
+            || opt_key == "slowdown_start_speed"
+            || opt_key == "slowdown_start_acc"
+            || opt_key == "slowdown_end_height"
+            || opt_key == "slowdown_end_speed"
+            || opt_key == "slowdown_end_acc"
             || opt_key == "bed_mesh_min"
             || opt_key == "bed_mesh_max"
             || opt_key == "adaptive_bed_mesh_margin"

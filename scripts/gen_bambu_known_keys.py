@@ -41,7 +41,7 @@ import sys
 ADD_RE = re.compile(
     r'(?:(\w+)\s*=\s*)?def\s*=\s*this->(add|add_nullable)\(\s*'
     r'("(?:[^"\\]|\\.)*"(?:\s*\+\s*[\w.]+)?|[\w.]+)\s*,\s*(co\w+)\s*\)')
-KEYS_MAP_RE = re.compile(r'static\s+(?:const\s+)?t_config_enum_values\s+s_keys_map_(\w+)\s*=?\s*\{(.*?)\n\};', re.S)
+KEYS_MAP_RE = re.compile(r'static\s+(?:const\s+)?t_config_enum_values\s+s_keys_map_(\w+)\s*=?\s*\{(.*?)\}\s*;', re.S)
 KEYS_MAP_ENTRY_RE = re.compile(r'\{\s*"([^"]+)"\s*,\s*([^}]+?)\s*\}')
 VECTOR_LIST_RE = r'(?:const\s+)?std::vector<std::string>\s+%s\s*=\s*\{(.*?)\};'
 SET_LIST_RE = r'std::set<std::string>\s+%s\s*=\s*\{(.*?)\};'

@@ -481,6 +481,22 @@ static const t_config_enum_values s_keys_map_StabilizerMode = {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(StabilizerMode)
 
+// Bambu Studio 02.09.01.70 PrintConfig.cpp:929-942.
+static const t_config_enum_values s_keys_map_ReduceInfillRetractionMode = {
+    { "Disabled", rirDisabled },
+    { "Auto",     rirAuto },
+    { "Enabled",  rirEnabled }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(ReduceInfillRetractionMode)
+
+static const t_config_enum_values s_keys_map_FilamentMetalStickiness = {
+    { "None",   fmsNone },
+    { "Low",    fmsLow },
+    { "Medium", fmsMedium },
+    { "High",   fmsHigh }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FilamentMetalStickiness)
+
 static const t_config_enum_values s_keys_map_StabilizerColumnShape = {
     { "round",        scsRound       },
     { "rounded_rect", scsRoundedRect },
@@ -1873,6 +1889,75 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Enable this option to slow printing down for different overhang degree.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBools { true });
+
+    // Bambu Studio 02.09.01.70 height slowdown (PrintConfig.cpp:2169-2232, used by GCode::slowDownByHeight,
+    // GCode.cpp:7513-7563). Same keys, labels and defaults; per process variant like Bambu's NOZZLE_CONFIG
+    // (process_flow_variant_options).
+    def = this->add("enable_height_slowdown", coBools);
+    def->label = L("Slow down by height");
+    def->category = L("Speed");
+    def->tooltip = L("Enable this option to slow printing down by height.\n\n"
+                     "From Starting height to Ending height, the print speed, the travel speed and the "
+                     "accelerations of walls, infill and gap fill are capped by a limit that goes linearly "
+                     "from the starting to the ending values. Above Ending height the ending values apply. "
+                     "Below Starting height nothing is capped. Tall, narrow prints wobble less this way.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBools { false });
+
+    def = this->add("slowdown_start_height", coFloats);
+    def->label = L("Starting height");
+    def->category = L("Speed");
+    def->tooltip = L("The height starts to slow down");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0. });
+
+    def = this->add("slowdown_start_speed", coFloats);
+    def->label = L("Speed at starting height");
+    def->category = L("Speed");
+    def->tooltip = L("The speed limit at Starting height. Print and travel speeds above it are lowered to it.");
+    def->sidetext = L("mm/s");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 1000. });
+
+    def = this->add("slowdown_start_acc", coFloats);
+    def->label = L("Acceleration at starting height");
+    def->category = L("Speed");
+    def->tooltip = L("The acceleration limit at Starting height. Print and travel accelerations above it are lowered to it.");
+    def->sidetext = u8"mm/s²";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 100000. });
+
+    def = this->add("slowdown_end_height", coFloats);
+    def->label = L("Ending height");
+    def->category = L("Speed");
+    def->tooltip = L("The height finishes slowing down, "
+                     "Ending height should be larger than Starting height, or the slowing down will not work!");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 400. });
+
+    def = this->add("slowdown_end_speed", coFloats);
+    def->label = L("Speed at ending height");
+    def->category = L("Speed");
+    def->tooltip = L("The speed limit at Ending height and above.");
+    def->sidetext = L("mm/s");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 1000. });
+
+    def = this->add("slowdown_end_acc", coFloats);
+    def->label = L("Acceleration at ending height");
+    def->category = L("Speed");
+    def->tooltip = L("The acceleration limit at Ending height and above.");
+    def->sidetext = u8"mm/s²";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 100000. });
 
     // Port of Neotko Overhang Shadow (cf1255c). Off by default; no Libre Mode lock; not enabled in any profile.
     def = this->add("overhang_shadow_inner_wall", coBool);
@@ -3670,6 +3755,26 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionInts{ 0 });
 
+    // Bambu Studio 02.09.01.70 PrintConfig.cpp:3310-3327 (Filament > Basic information).
+    def = this->add("filament_metal_stickiness", coEnums);
+    def->label = L("Metal stickiness");
+    def->tooltip = L("Indicates how strongly the filament tends to stick to the metal nozzle and leave residue. "
+                     "\"None\" means untested or custom filament, behaves the same as Low. "
+                     "Low: e.g. PLA - retraction can be safely skipped in infill areas. "
+                     "Medium: moderate stickiness - use with caution. "
+                     "High: e.g. PETG - retraction should not be skipped to avoid oozing artifacts on outer walls.");
+    def->enum_keys_map = &ConfigOptionEnum<FilamentMetalStickiness>::get_enum_values();
+    def->enum_values.push_back("None");
+    def->enum_values.push_back("Low");
+    def->enum_values.push_back("Medium");
+    def->enum_values.push_back("High");
+    def->enum_labels.push_back(L("None"));
+    def->enum_labels.push_back(L("Low"));
+    def->enum_labels.push_back(L("Medium"));
+    def->enum_labels.push_back(L("High"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnumsGeneric{ fmsNone });
+
     // Ultra: per-filament additive Z offset (OrcaSlicer #4660)
     def = this->add("filament_z_offset", coFloats);
     def->label = L("Filament Z offset");
@@ -4239,6 +4344,19 @@ void PrintConfigDef::init_fff_params()
     def->max_literal = 10;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
+
+    // Bambu Studio 02.09.01.70 (PrintConfig.cpp:3994-4005, used by PrintRegion::flow, PrintRegion.cpp:30-31).
+    def = this->add("initial_layer_infill_line_width", coFloat);
+    def->label = L("Initial layer infill");
+    def->category = L("Quality");
+    def->tooltip = L("Line width of the infill of initial layer, including sparse infill, solid infill and top surface. "
+                     "Walls, support and everything else of the initial layer are not affected and keep using the line width "
+                     "of initial layer. Zero means to use the line width of initial layer.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max_literal = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
 
     def = this->add("initial_layer_print_height", coFloat);
@@ -7117,13 +7235,25 @@ void PrintConfigDef::init_fff_params()
     // start and end point is from the change_filament_gcode
     def->set_default_value(new ConfigOptionPoints{Vec2d(30, -3), Vec2d(54, 245)});
 
-    def = this->add("reduce_infill_retraction", coBool);
+    // Bambu Studio 02.09.01.70 PrintConfig.cpp:5272-5289. Replaced our reduce_infill_retraction bool
+    // (handle_legacy maps it: 1 -> Enabled, 0 -> Disabled). Our default stays Disabled, the old bool's
+    // false (Bambu's is Auto), so profiles that never set it slice as before.
+    def = this->add("reduce_infill_retraction_mode", coEnum);
     def->label = L("Reduce infill retraction");
-    def->tooltip = L("Don't retract when the travel is in infill area absolutely. That means the oozing can't been seen. "
-                     "This can reduce times of retraction for complex model and save printing time, but make slicing and "
-                     "G-code generating slower.");
+    def->tooltip = L("Controls whether retraction is skipped when traveling within the infill area. "
+                     "\"Auto\" enables this optimization for filaments with low metal stickiness (e.g. PLA) "
+                     "and disables it for medium/high metal stickiness filaments (e.g. PETG) to avoid oozing artifacts. "
+                     "\"Enabled\" always skips retraction in infill areas regardless of filament type. "
+                     "\"Disabled\" always retracts normally.");
+    def->enum_keys_map = &ConfigOptionEnum<ReduceInfillRetractionMode>::get_enum_values();
+    def->enum_values.push_back("Disabled");
+    def->enum_values.push_back("Auto");
+    def->enum_values.push_back("Enabled");
+    def->enum_labels.push_back(L("Disabled"));
+    def->enum_labels.push_back(L("Auto"));
+    def->enum_labels.push_back(L("Enabled"));
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
+    def->set_default_value(new ConfigOptionEnum<ReduceInfillRetractionMode>(rirDisabled));
 
     def = this->add("ooze_prevention", coBool);
     def->label = L("Enable");
@@ -11839,6 +11969,14 @@ const std::vector<std::string>& process_flow_variant_options()
         "overhang_3_4_speed",
         "overhang_4_4_speed",
         "enable_overhang_speed",
+        // Bambu Studio 02.09.01.70 height slowdown: NOZZLE_CONFIG (per variant) in GCode::slowDownByHeight.
+        "enable_height_slowdown",
+        "slowdown_start_height",
+        "slowdown_start_speed",
+        "slowdown_start_acc",
+        "slowdown_end_height",
+        "slowdown_end_speed",
+        "slowdown_end_acc",
         "slowdown_for_curled_perimeters",
         "default_acceleration",
         "outer_wall_acceleration",
@@ -12550,6 +12688,16 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
             value = "auto";
         else if (value == "0" || value == "false")
             value = "off";
+    } else if (opt_key == "reduce_infill_retraction") {
+        // Bambu parity PR 2 (owner D3, 2026-11-25): the bool became Bambu Studio's three-way
+        // reduce_infill_retraction_mode (02.09.01.70 PrintConfig.cpp:5272-5289). On stays "always skip"
+        // (Enabled), so old projects, presets and other vendors' profiles slice as before; Bambu itself
+        // reads an old 1 as Auto (Config.cpp:999-1005). An empty value (key-only pass) only renames.
+        opt_key = "reduce_infill_retraction_mode";
+        if (value == "1" || boost::iequals(value, "true"))
+            value = "Enabled";
+        else if (value == "0" || boost::iequals(value, "false"))
+            value = "Disabled";
     } else if (opt_key == "draft_shield" && value == "limited") {
         value = "disabled";
     } else if (opt_key == "support_interface_filament_source") {

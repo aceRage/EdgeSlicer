@@ -37,17 +37,6 @@ bool one_wall_top_from_bambu(std::string &v)
     return true;
 }
 
-// reduce_infill_retraction (bool) <-> reduce_infill_retraction_mode ("Disabled" | "Auto" | "Enabled").
-bool reduce_retraction_to_bambu(std::string &v) { v = v == "1" ? "Enabled" : "Disabled"; return true; }
-bool reduce_retraction_from_bambu(std::string &v)
-{
-    // "Auto" decides per filament (on for low metal stickiness such as PLA, off for PETG); there
-    // is no single bool that means that, so ours keeps its own value.
-    if (v == "Enabled")  { v = "1"; return true; }
-    if (v == "Disabled") { v = "0"; return true; }
-    return false;
-}
-
 // wipe_tower_wall_type ("rectangle" | "cone" | "rib") <-> prime_tower_rib_wall (bool).
 // Lossy on export: Bambu has no cone tower, a cone goes out as a plain (non-rib) wall.
 bool tower_wall_to_bambu(std::string &v) { v = v == "rib" ? "1" : "0"; return true; }
@@ -121,7 +110,6 @@ std::vector<Alias> make_aliases()
     { "support_ironing",                "enable_support_ironing",               nullptr, nullptr, nullptr },
     { "dont_slow_down_outer_wall",      "no_slow_down_for_cooling_on_outwalls", nullptr, nullptr, nullptr },
     { "role_based_wipe_speed",          "role_base_wipe_speed",                 nullptr, nullptr, nullptr },
-    { "reduce_infill_retraction",       "reduce_infill_retraction_mode",        reduce_retraction_to_bambu, reduce_retraction_from_bambu, nullptr },
     { "wipe_tower_rib_width",           "prime_tower_rib_width",                nullptr, nullptr, nullptr },
     { "wipe_tower_extra_rib_length",    "prime_tower_extra_rib_length",         nullptr, nullptr, nullptr },
     { "wipe_tower_fillet_wall",         "prime_tower_fillet_wall",              nullptr, nullptr, nullptr },

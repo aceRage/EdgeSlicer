@@ -402,7 +402,6 @@ in each direction:
 | `enable_support_ironing` | `support_ironing` | same | **new** |
 | `no_slow_down_for_cooling_on_outwalls` | `dont_slow_down_outer_wall` | same | **new** |
 | `role_base_wipe_speed` | `role_based_wipe_speed` | same | **new** |
-| `reduce_infill_retraction_mode` | `reduce_infill_retraction` | `Enabled` -> 1, `Disabled` -> 0, `Auto` -> not loaded | **new** |
 | `prime_tower_rib_width` | `wipe_tower_rib_width` | same | **new** |
 | `prime_tower_extra_rib_length` | `wipe_tower_extra_rib_length` | same | **new** |
 | `prime_tower_fillet_wall` | `wipe_tower_fillet_wall` | same | **new** |
@@ -435,9 +434,11 @@ equivalent are `fuzzy_skin = disabled_fuzzy` (Bambu: off and ignore paint) and
 - A key-only pass (the first `handle_legacy` call on a JSON array, `different_settings_to_system`)
   only renames. For a JSON array whose key is an alias, `load_from_json_document` deserializes the
   assembled value under the Bambu name, so `handle_legacy` sees the whole value and converts it.
-- A Bambu value with no equivalent here (`reduce_infill_retraction_mode = Auto`, decided per
-  filament) is not loaded: the key is dropped like any unknown key and ours keeps its own or its
-  inherited value. Nothing is invented.
+- A Bambu value with no equivalent here is not loaded: the key is dropped like any unknown key and
+  ours keeps its own or its inherited value. Nothing is invented. (`reduce_infill_retraction_mode
+  = Auto` was the example until Bambu parity PR 2 ported the key under Bambu's own name together
+  with `filament_metal_stickiness`. Our old `reduce_infill_retraction` bool now loads as it:
+  1 -> `Enabled`, 0 -> `Disabled`.)
 - Lossy on export, by design: `wipe_tower_wall_type = cone` goes out as a plain wall and comes back
   as `rectangle`; `ironing_angle = -1` is left out; `ensure_critical_only` comes back as
   `ensure_moderate`. The `[BambuAliases]` test "What Export Bambu 3MF cannot say ..." pins these.

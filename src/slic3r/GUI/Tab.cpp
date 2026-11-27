@@ -3546,6 +3546,8 @@ void TabPrint::build()
         optgroup = page->new_optgroup(L("Line width"), L"param_line_width");
         optgroup->append_single_option_line("line_width","quality_settings_line_width");
         optgroup->append_single_option_line("initial_layer_line_width","quality_settings_line_width");
+        // Bambu Studio 02.09.01.70 Tab.cpp:3118, right under the initial layer line width.
+        optgroup->append_single_option_line("initial_layer_infill_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("outer_wall_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("inner_wall_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("top_surface_line_width","quality_settings_line_width");
@@ -3828,6 +3830,15 @@ void TabPrint::build()
         optgroup->append_single_option_line("support_interface_speed", "speed_settings_other_layers_speed#support-interface");
         optgroup->append_single_option_line("small_support_perimeter_speed", "speed_settings_other_layers_speed#small-tree-support-perimeters");
         optgroup->append_single_option_line("small_support_perimeter_threshold", "speed_settings_other_layers_speed#small-tree-support-perimeters-threshold");
+        // Bambu Studio 02.09.01.70 Tab.cpp:3285-3291: Speed > Other layers speed (Bambu puts them after its
+        // overhang speed line, which has a group of its own here).
+        optgroup->append_single_option_line("enable_height_slowdown");
+        optgroup->append_single_option_line("slowdown_start_height");
+        optgroup->append_single_option_line("slowdown_start_speed");
+        optgroup->append_single_option_line("slowdown_start_acc");
+        optgroup->append_single_option_line("slowdown_end_height");
+        optgroup->append_single_option_line("slowdown_end_speed");
+        optgroup->append_single_option_line("slowdown_end_acc");
         optgroup = page->new_optgroup(L("Overhang speed"), L"param_overhang_speed", 15);
         optgroup->append_single_option_line("enable_overhang_speed", "speed_settings_overhang_speed#slow-down-for-overhang");
         optgroup->append_single_option_line("slowdown_for_curled_perimeters", "speed_settings_overhang_speed#slow-down-for-curled-perimeters");
@@ -4229,7 +4240,7 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
         optgroup->append_single_option_line("fuzzy_skin_skip_overhangs", "others_settings_fuzzy_skin#skip-fuzzy-skin-on-overhangs");
 
         optgroup = page->new_optgroup(L("G-code output"), L"param_gcode");
-        optgroup->append_single_option_line("reduce_infill_retraction", "others_settings_g_code_output#reduce-infill-retraction");
+        optgroup->append_single_option_line("reduce_infill_retraction_mode", "others_settings_g_code_output#reduce-infill-retraction");
         optgroup->append_single_option_line("gcode_add_line_number", "others_settings_g_code_output#add-line-number");
         optgroup->append_single_option_line("gcode_comments", "others_settings_g_code_output#verbose-g-code");
         optgroup->append_single_option_line("gcode_label_objects", "others_settings_g_code_output#label-objects");
@@ -6424,6 +6435,8 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_is_support");
         // Orca #10780 (Bambu Studio Tab.cpp): developer mode only.
         optgroup->append_single_option_line("filament_adhesiveness_category");
+        // Bambu Studio 02.09.01.70 Tab.cpp:4804: read by Process > Others > Reduce infill retraction = Auto.
+        optgroup->append_single_option_line("filament_metal_stickiness");
         //optgroup->append_single_option_line("filament_colour");
         optgroup->append_single_option_line("required_nozzle_HRC");
         optgroup->append_single_option_line("default_filament_colour");
