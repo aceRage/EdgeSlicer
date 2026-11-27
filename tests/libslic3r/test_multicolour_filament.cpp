@@ -2,6 +2,7 @@
 // helpers, the 3MF round trip and the Bambu export. tests/design_multicolour_filament_view.md.
 // The no-G-code guarantee through a real slice is in tests/fff_print/test_multicolour_visual_only.cpp.
 
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/AppConfig.hpp"
@@ -510,7 +511,7 @@ Loaded3mf round_trip(DynamicPrintConfig store_config, const std::string &name)
     object->add_instance();
     object->ensure_on_bed();
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / name).string();

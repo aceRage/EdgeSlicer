@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <libslic3r/AABBMesh.hpp>
@@ -505,7 +506,7 @@ TEST_CASE("Flexi joint parameters survive a 3MF round trip", "[FlexiJoint]")
     // The PROJECT writer, not Format/3mf.cpp's generic one: Metadata/cut_information.xml is a
     // BambuStudio-lineage part and only store_bbs_3mf/load_bbs_3mf handle it. This is the pair
     // the application itself saves and opens projects with.
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "edgeslicer_flexi_params.3mf").string();
@@ -582,7 +583,7 @@ TEST_CASE("Hinge parameters survive a 3MF round trip", "[FlexiJoint]")
     REQUIRE(has_flexi_joint(mo));
     model.add_default_instances();
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "edgeslicer_hinge_params.3mf").string();
@@ -2729,7 +2730,7 @@ TEST_CASE("Thread and bayonet parameters survive a 3MF round trip", "[FlexiJoint
         cases.push_back({ "edgeslicer_bayonet_params.3mf", p });
     }
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
 

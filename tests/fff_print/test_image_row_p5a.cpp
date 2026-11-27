@@ -5,6 +5,7 @@
 //
 // Like test_image_row_walls.cpp these slice to G-code and read the moves back, because the wall
 // split happens at G-code emission time and the G-code is the only place its result exists.
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <boost/filesystem.hpp>
@@ -342,7 +343,7 @@ TEST_CASE("Image Row 5a: a wall-bound row and its picture survive save and reloa
     GCodeProcessorResult before;
     slice_to_result(model, config, before);
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "image_row_p5a_walls.3mf").string();

@@ -8,6 +8,7 @@
 // into the model as an object or a part and survives a 3MF round trip, and that the source object's
 // live stabilizers go off.
 
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <algorithm>
@@ -220,7 +221,7 @@ bool slice_project(Bench &b)
 // Stores `model` as a project and loads it back.
 bool round_trip(Model &model, Model &loaded, const char *name)
 {
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string  file   = (tmp_root / name).string();

@@ -2,6 +2,7 @@
 // stability, subdivision producing a watertight mesh with no T-joints, and the 3MF round trip.
 //
 // Spec: docs/superpowers/specs/2026-09-07-imagemap-phase2-imagefill.md
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/ImageFill.hpp"
@@ -779,7 +780,7 @@ TEST_CASE("Image Fill: apply, save, reload - the painting and the asset are bit-
 
     DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "image_fill_project.3mf").string();
@@ -1122,7 +1123,7 @@ TEST_CASE("Image Fill: write the Bar B project - a cube with a three-colour imag
     CHECK(res.facets_painted == res.leaves_total);
     CHECK(res.leaves_total == volume->mesh().its.indices.size() * 256);
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string out = (tmp_root / "image_fill_bar_b.3mf").string();
@@ -1200,7 +1201,7 @@ TEST_CASE("Image Fill Phase 3: write the Bar B project - a plaque with a black-t
     // this row being the only, first, enabled custom row, its virtual id is 4.
     const int virtual_id = int(colors.size()) + 1;
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string out = (tmp_root / "image_row_bar_b.3mf").string();
