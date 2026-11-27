@@ -264,7 +264,8 @@ void ps_taubin(indexed_triangle_set& its, const std::vector<float>& weight, int 
 
 // ----------------------------------------------------------------------------------------- near-skin refinement
 
-// Splits every edge whose ends both lie within `band` of the skin and puts the new vertex on the zero set
+// Splits every edge with an end within `band` of the skin (a claim triangle meeting the skin at a shallow angle
+// can cross it with both corners farther out than that) and puts the new vertex on the zero set
 // (searched along the edge's normal). Conforming: each triangle is split by the pattern of its split edges.
 void ps_refine_near_skin(indexed_triangle_set& its, std::vector<float>& dist, const PsField& field, double band)
 {
@@ -285,7 +286,7 @@ void ps_refine_near_skin(indexed_triangle_set& its, std::vector<float>& dist, co
         const Vec3i32& t = its.indices[f];
         for (int k = 0; k < 3; ++k) {
             const int a = t[k], b = t[(k + 1) % 3];
-            if (dist[size_t(a)] < band && dist[size_t(b)] < band)
+            if (std::min(dist[size_t(a)], dist[size_t(b)]) < band)
                 edges.emplace_back(ekey(a, b), uint32_t(f));
         }
     }
