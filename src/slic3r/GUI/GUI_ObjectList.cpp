@@ -2865,8 +2865,8 @@ bool ObjectList::del_subobject_from_object(const int obj_idx, const int idx, con
 
     // BBS: support partplage logic
     int n_plates = wxGetApp().plater()->get_partplate_list().get_plate_count();
-	if ((obj_idx >= 1000 && obj_idx < 1000 + n_plates) || idx<0)
-		// Cannot delete a wipe tower or volume with negative id
+	if ((obj_idx >= 1000 && obj_idx < 1000 + n_plates) || is_object_tower_volume_id(obj_idx) || idx<0)
+		// Cannot delete a wipe tower (the plate's or an object's) or volume with negative id
 		return false;
 
     ModelObject* object = (*m_objects)[obj_idx];

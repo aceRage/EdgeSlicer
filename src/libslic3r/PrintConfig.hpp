@@ -1749,6 +1749,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     // a volume's config, so these cannot split or merge a region.
     ((ConfigOptionString,              image_fill_params))
     ((ConfigOptionFloat,               image_fill_detail))
+    // Per-object prime towers (PR 5 of tests/design_per_object_prime_towers.md), read by Print::plan_object_towers():
+    //  * object_prime_tower: the object's copies get a tower (D13 opt-out, object settings only);
+    //  * prime_tower_offset_x/y: where the user dragged the tower, from the copy's bounding-box centre to the tower's
+    //    front left corner (0, 0 = placed automatically). Developer keys outside the settings lists, saved with the
+    //    object in model_settings.config. All three change psWipeTower and the G-code only.
+    ((ConfigOptionBool,                object_prime_tower))
+    ((ConfigOptionFloat,               prime_tower_offset_x))
+    ((ConfigOptionFloat,               prime_tower_offset_y))
     ((ConfigOptionEnum<PaintDepthMode>, paint_depth_mode))
     ((ConfigOptionInt,                 paint_depth_walls))
     ((ConfigOptionFloat,               paint_depth_mm))

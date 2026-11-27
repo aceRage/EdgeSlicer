@@ -4117,6 +4117,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("preload_all_filaments", "multimaterial_settings_prime_tower");
         // Per-object prime towers (print by object; shown with the tower on).
         optgroup->append_single_option_line("prime_tower_per_object", "multimaterial_settings_prime_tower");
+        // ... and an object's own opt-out (shown in the object settings only, see ConfigManipulation).
+        optgroup->append_single_option_line("object_prime_tower", "multimaterial_settings_prime_tower");
 
         optgroup = page->new_optgroup(L("Filament for Features"), L"param_filament_for_features");
         optgroup->append_single_option_line("wall_filament", "multimaterial_settings_filament_for_features#walls");
