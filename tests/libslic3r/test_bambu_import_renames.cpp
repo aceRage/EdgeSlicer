@@ -234,7 +234,6 @@ DynamicPrintConfig aliased_project()
         { "extruder_clearance_radius", "65" },
         { "dont_slow_down_outer_wall", "1,0" },
         { "role_based_wipe_speed", "0" },
-        { "reduce_infill_retraction", "1" },
         { "wipe_tower_rib_width", "12" },
         { "wipe_tower_extra_rib_length", "3" },
         { "wipe_tower_fillet_wall", "0" },
@@ -312,9 +311,6 @@ TEST_CASE("Bambu Studio's names load as our keys, with the value converted", "[B
     // Value conversions.
     CHECK(legacy("prime_tower_rib_wall", "1") == "wipe_tower_wall_type=rib");
     CHECK(legacy("prime_tower_rib_wall", "0") == "wipe_tower_wall_type=rectangle");
-    CHECK(legacy("reduce_infill_retraction_mode", "Enabled") == "reduce_infill_retraction=1");
-    CHECK(legacy("reduce_infill_retraction_mode", "Disabled") == "reduce_infill_retraction=0");
-    CHECK(legacy("reduce_infill_retraction_mode", "Auto") == "=Auto"); // no single bool: ours keeps its value
     CHECK(legacy("top_one_wall_type", "all top") == "only_one_wall_top=1");
     CHECK(legacy("top_one_wall_type", "not apply") == "only_one_wall_top=0");
     CHECK(legacy("filament_colour_type", "0,1") == "filament_colour_mode=1,0");
@@ -322,7 +318,6 @@ TEST_CASE("Bambu Studio's names load as our keys, with the value converted", "[B
     CHECK(legacy("filament_multi_colour", "\"#FF0000 #0000FF\";\"#00FF00\"") == "filament_multi_colors=#FF0000|#0000FF;#00FF00");
     // A key-only pass (different_settings_to_system, the first look at a JSON array) only renames.
     CHECK(legacy("prime_tower_rib_wall", "") == "wipe_tower_wall_type=");
-    CHECK(legacy("reduce_infill_retraction_mode", "") == "reduce_infill_retraction=");
     // Enum values Bambu spells differently for a key we share.
     CHECK(legacy("sparse_infill_pattern", "2dlattice") == "sparse_infill_pattern=lateral-lattice");
     CHECK(legacy("top_surface_pattern", "2dlattice") == "top_surface_pattern=lateral-lattice");
@@ -331,7 +326,8 @@ TEST_CASE("Bambu Studio's names load as our keys, with the value converted", "[B
     CHECK(legacy("ensure_vertical_shell_thickness", "partial") == "ensure_vertical_shell_thickness=ensure_moderate");
     // Our own keys and values pass through untouched.
     CHECK(legacy("wipe_tower_wall_type", "cone") == "wipe_tower_wall_type=cone");
-    CHECK(legacy("reduce_infill_retraction", "1") == "reduce_infill_retraction=1");
+    // Bambu parity PR 2: Bambu's reduce_infill_retraction_mode is ours now, under its own name.
+    CHECK(legacy("reduce_infill_retraction_mode", "Auto") == "reduce_infill_retraction_mode=Auto");
     CHECK(legacy("sparse_infill_pattern", "gyroid") == "sparse_infill_pattern=gyroid");
     // The different_settings_to_system list is rewritten into our names.
     CHECK(legacy("different_settings_to_system", "prime_tower_rib_wall;sparse_infill_density") ==
@@ -510,7 +506,7 @@ TEST_CASE("Bambu Studio presets map their renamed keys", "[BambuAliases][Config]
         // enable_support_ironing 1, reduce_infill_retraction_mode Disabled, prime_tower_fillet_wall 0,
         // prime_tower_rib_wall 0, prime_tower_max_speed 200, top_one_wall_type "not apply".
         CHECK(cfg.opt_bool("support_ironing"));
-        CHECK(cfg.opt_serialize("reduce_infill_retraction") == "0");
+        CHECK(cfg.opt_serialize("reduce_infill_retraction_mode") == "Disabled");
         CHECK(cfg.opt_serialize("wipe_tower_fillet_wall") == "0");
         CHECK(cfg.opt_serialize("wipe_tower_wall_type") == "rectangle");
         CHECK(cfg.opt_float("wipe_tower_max_purge_speed") == Approx(200.));
@@ -521,12 +517,12 @@ TEST_CASE("Bambu Studio presets map their renamed keys", "[BambuAliases][Config]
         ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
         REQUIRE(load_json(data_path("fdm_process_common.json"), cfg, ctxt));
         // enable_support_ironing 0, prime_tower_max_speed 90, sparse_infill_lattice_angle_1/2 -45/45,
-        // reduce_infill_retraction_mode "Auto" (no single bool: not loaded).
+        // reduce_infill_retraction_mode "Auto" (loaded as itself since Bambu parity PR 2).
         CHECK(cfg.has("support_ironing"));
         CHECK(cfg.opt_float("wipe_tower_max_purge_speed") == Approx(90.));
         CHECK(cfg.opt_float("lateral_lattice_angle_1") == Approx(-45.));
         CHECK(cfg.opt_float("lateral_lattice_angle_2") == Approx(45.));
-        CHECK_FALSE(cfg.has("reduce_infill_retraction"));
+        CHECK(cfg.opt_serialize("reduce_infill_retraction_mode") == "Auto");
     }
     SECTION("a Bambu machine preset that still carries the legacy extruder_clearance_radius keeps it") {
         // Bambu Lab H2D 0.4 nozzle.json: extruder_clearance_radius 49 (a leftover Bambu Studio itself
