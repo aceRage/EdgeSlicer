@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/PrintConfig.hpp"
@@ -29,7 +30,7 @@ struct TempTree
     boost::filesystem::path root;
 
     explicit TempTree(const std::string &tag)
-        : root(boost::filesystem::temp_directory_path() / "snorca_tests" /
+        : root(edge_test::snorca_tests_dir() /
                boost::filesystem::unique_path(tag + "_%%%%%%%%"))
     {
         boost::filesystem::create_directories(root);

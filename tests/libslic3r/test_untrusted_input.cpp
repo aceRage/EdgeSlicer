@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/Config.hpp"
@@ -3367,7 +3368,7 @@ void store_svg_project(const fs::path &path, const std::string &svg)
     object->add_instance();
     object->ensure_on_bed();
 
-    const fs::path tmp = fs::temp_directory_path() / "snorca_tests";
+    const fs::path tmp = edge_test::snorca_tests_dir();
     fs::create_directories(tmp);
     Slic3r::set_temporary_dir(tmp.string());
 

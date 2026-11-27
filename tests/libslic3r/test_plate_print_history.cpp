@@ -1,6 +1,7 @@
 // Per-plate print history (libslic3r/PlatePrintHistory.hpp): the list's rules (cap, ordering, what
 // turns a plate "printed", when it counts as modified since its last send), its JSON, and its
 // round trip through a project 3MF (one <metadata key="edgeslicer_print_history"> per plate).
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -110,7 +111,7 @@ Stored store_and_load(const std::string &history_json,
     plate->print_history = history_json;
     plate->dual_nozzle_confirm = "{\"v\":1,\"ok\":true}";
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "plate_history_project.3mf").string();
