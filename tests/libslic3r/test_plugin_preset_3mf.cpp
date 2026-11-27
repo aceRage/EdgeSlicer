@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -18,7 +19,7 @@ using namespace Slic3r;
 
 TEST_CASE("slicing_pipeline_plugin and plugins survive a project 3MF round-trip", "[3mf][Config][plugins]")
 {
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
 
@@ -118,7 +119,7 @@ std::string plugin_test_zip_entry(const std::string &zip_path, const std::string
 // Stores a one-cube project with `config` and returns Metadata/project_settings.config.
 std::string stored_project_settings(DynamicPrintConfig &config, bool bambu_compat, const std::string &name)
 {
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
 
