@@ -5,6 +5,8 @@ add_executable(${_TEST_NAME}_tests
 	test_data.hpp
 	test_extrusion_entity.cpp
 	test_extrusion_processor.cpp
+	test_height_slowdown.cpp
+	test_infill_retraction_mode.cpp
 	test_fill.cpp
 	test_narrow_solid_infill.cpp
 	test_flow.cpp
@@ -45,6 +47,8 @@ add_executable(${_TEST_NAME}_tests
 	test_printgcode.cpp
 	test_h2c_timelapse_placement.cpp
 	test_h2c_tower_wait_pos.cpp
+	test_flush_by_nozzle_held.cpp
+	test_wipe_tower_data.cpp
 	test_nozzle_process_gcode.cpp
 	test_tool_slots_gcode.cpp
 	test_nozzle_widths_gcode.cpp
@@ -53,6 +57,7 @@ add_executable(${_TEST_NAME}_tests
 	test_nozzle_override_gcode.cpp
 	test_nozzle_tool_process_gcode.cpp
 	test_nozzle_rack_slots_gcode.cpp
+	test_h2c_rack_pins_by_object.cpp
 	test_nozzle_layer_height_gcode.cpp
 	test_mixed_width_tower.cpp
 	test_bbs_tower_ramming.cpp
@@ -104,6 +109,7 @@ add_executable(${_TEST_NAME}_tests
 	test_empty_first_layer_warning.cpp
 	test_extra_bridge_layer_determinism.cpp
 	test_bridge_controls.cpp
+	test_bridge_anchor.cpp
 	test_ironing_overrides.cpp
 	test_bed_temperature.cpp
 	test_chamber_temperature.cpp

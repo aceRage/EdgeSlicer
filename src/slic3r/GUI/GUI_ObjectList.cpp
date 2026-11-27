@@ -19,6 +19,7 @@
 #include "libslic3r/PaintTransfer.hpp"
 #include "libslic3r/MeshRepair.hpp"
 #include "libslic3r/MeshRemesh.hpp"
+#include "libslic3r/RepairPaint.hpp"
 #include "libslic3r/Airbrush/AirbrushBake.hpp"
 #include "libslic3r/MeshRound.hpp"
 #include "libslic3r/SliceBake.hpp"
@@ -6527,14 +6528,15 @@ void ObjectList::repair_by_remesh()
                                 << " -> " << rep.triangles_after << " triangles, flat bottom "
                                 << (rep.kept_bottom_flat ? "kept" : (rep.fell_back ? "declined: " + rep.note : "off"))
                                 << ", sharp vertices snapped " << rep.sharp_snapped;
-        // Edge (Airbrush P3, A4): re-bake the colour field on the remeshed part (positions kept).
-        const std::shared_ptr<const TriangleMesh>     old_mesh  = mv.mesh_ptr();
-        const TriangleSelector::TriangleSplittingData old_paint = mv.mmu_segmentation_facets.get_data();
+        // The painting (supports, seam, colour, fuzzy skin) is carried from the old surface to the
+        // remeshed one (positions kept), and an airbrush field is re-baked on it. The new surface
+        // can sit up to about a voxel off the old one, hence the tolerance.
+        const double voxel = o.voxel_size > 0. ? o.voxel_size : remesh_auto_voxel_size(mv.mesh().its);
+        const RepairPaint::Saved saved(mv);
         mv.set_mesh(std::move(its));
         mv.set_new_unique_id();
         mv.calculate_convex_hull();
-        if (mv.airbrush_field)
-            Airbrush::airbrush_after_mesh_replaced(mv, old_mesh->its, old_paint);
+        RepairPaint::restore(saved, mv, std::max(RepairPaint::auto_tolerance(mv.mesh().its), float(3. * voxel)));
         return true;
     };
 
@@ -6543,7 +6545,8 @@ void ObjectList::repair_by_remesh()
         ModelObject* mo = object(obj_idx);
         if (mo == nullptr)
             return;
-        plater->clear_before_change_mesh(obj_idx);
+        // No clear_before_change_mesh(): it would wipe the painting of every part of the object,
+        // and remesh_volume() carries it over to the new facets instead.
         bool any = false;
         for (size_t i = 0; i < mo->volumes.size(); ++i) {
             if (!vols.empty() && std::find(vols.begin(), vols.end(), int(i)) == vols.end())
@@ -6598,9 +6601,9 @@ void ObjectList::repair_by_remesh()
 //
 // Structurally this is repair_by_remesh's twin - same selection walk, same dialog
 // shape, same per-part loop - because it IS the same round trip with a different
-// filter in the middle. It clears painted data the same way, through
-// clear_before_change_mesh(), because the mesh is re-extracted from a lattice and
-// every index changes.
+// filter in the middle. It keeps the painting the same way too: the mesh is
+// re-extracted from a lattice and every index changes, so the painting is resampled
+// from the old surface onto the new facets (RepairPaint).
 void ObjectList::round_all_edges(bool close_gizmos)
 {
     if (!voxel_ops_available())
@@ -6683,13 +6686,14 @@ void ObjectList::round_all_edges(bool close_gizmos)
                                                ? std::string("kept (mirrored base, no slab)")
                                                : "kept (slab " + std::to_string(rep.bottom_margin_used) + " mm)")
                                         : (rep.fell_back ? "declined: " + rep.note : std::string("off")));
-        const std::shared_ptr<const TriangleMesh>     old_mesh  = mv.mesh_ptr();
-        const TriangleSelector::TriangleSplittingData old_paint = mv.mmu_segmentation_facets.get_data();
+        // The mesh is rebuilt from a lattice, so every facet index changes: the painting is
+        // resampled from the old surface onto the new facets. Edges move in by up to the radius.
+        const RepairPaint::Saved saved(mv);
         mv.set_mesh(std::move(its));
         mv.set_new_unique_id();
         mv.calculate_convex_hull();
-        if (mv.airbrush_field)
-            Airbrush::airbrush_after_mesh_replaced(mv, old_mesh->its, old_paint);
+        RepairPaint::restore(saved, mv,
+                             std::max(RepairPaint::auto_tolerance(mv.mesh().its), float(std::max(1.5 * rep.radius_used, 3. * rep.voxel_used))));
         return true;
     };
 
@@ -6698,9 +6702,7 @@ void ObjectList::round_all_edges(bool close_gizmos)
         ModelObject* mo = object(obj_idx);
         if (mo == nullptr)
             return;
-        // The mesh is rebuilt from a lattice, so every facet index changes and the
-        // painted data cannot follow. Same call Remesh makes, for the same reason.
-        plater->clear_before_change_mesh(obj_idx);
+        // No clear_before_change_mesh(): round_volume() carries the painting over.
         bool any = false;
         for (size_t i = 0; i < mo->volumes.size(); ++i) {
             if (!vols.empty() && std::find(vols.begin(), vols.end(), int(i)) == vols.end())
@@ -7174,7 +7176,8 @@ void ObjectList::fix_through_netfabb()
             msg += "\n";
         }
 
-        plater->clear_before_change_mesh(obj_idx);
+        // No clear_before_change_mesh(): fix_model_by_win10_sdk_gui() carries each repaired part's
+        // painting over to its new facets, and the parts it does not touch keep theirs as they are.
         std::string res;
         if (!fix_model_by_win10_sdk_gui(*(object(obj_idx)), vol_idx, progress_dlg, msg, res))
             return false;

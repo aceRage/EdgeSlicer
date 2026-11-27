@@ -1,0 +1,535 @@
+<title>Preferences Layout Mockup</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: one dialog, six top tabs, each tab a stack of collapsible sections;
+   every section is a two-column table (setting + description | value). */
+:root {
+  --bg: #eef1f1;
+  --surface: #ffffff;
+  --stripe: #f6f8f8;
+  --head: #e9eeee;
+  --line: #dbe2e2;
+  --fg: #1a2324;
+  --muted: #586768;
+  --accent: #00897b;
+  --accent-soft: #d9f0ed;
+  --on-accent: #ffffff;
+  --changed: #b4530a;
+  --changed-soft: #fdebd8;
+  --warn: #8a5a00;
+  --warn-soft: #fbefc9;
+  --track: #b9c4c4;
+  --font: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --mono: Consolas, "SF Mono", Menlo, monospace;
+  --value-col: 300px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15191a; --surface: #202627; --stripe: #252c2d; --head: #2b3334; --line: #374143;
+    --fg: #e5ebeb; --muted: #9babac; --accent: #2fb8a7; --accent-soft: #173d39; --on-accent: #06211e;
+    --changed: #f0a35a; --changed-soft: #43301c; --warn: #e6bb55; --warn-soft: #3d3319; --track: #56635f;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15191a; --surface: #202627; --stripe: #252c2d; --head: #2b3334; --line: #374143;
+  --fg: #e5ebeb; --muted: #9babac; --accent: #2fb8a7; --accent-soft: #173d39; --on-accent: #06211e;
+  --changed: #f0a35a; --changed-soft: #43301c; --warn: #e6bb55; --warn-soft: #3d3319; --track: #56635f;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 14px; line-height: 1.4;
+  padding-block: 24px 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+.lead h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; text-wrap: balance; }
+.lead p { margin: 0; color: var(--muted); max-width: 68ch; }
+
+.dialog { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.titlebar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.titlebar h2 { font-size: 15px; font-weight: 600; margin: 0; flex: 1 1 auto; }
+.search { flex: 0 1 280px; min-width: 0; }
+.search input { width: 100%; }
+
+input[type="text"], input[type="number"], input[type="search"], select {
+  font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--track);
+  border-radius: 4px; padding: 5px 8px; min-width: 0; height: 30px;
+}
+select { padding-right: 4px; max-width: 100%; }
+button { font: inherit; color: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.tabs { display: flex; overflow-x: auto; border-bottom: 1px solid var(--line); background: var(--head); }
+.tab { flex: 0 0 auto; background: none; border: 0; border-bottom: 3px solid transparent; padding: 10px 16px 8px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.tab:hover { color: var(--fg); }
+.tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); background: var(--surface); }
+.tab .hits { margin-left: 6px; font-size: 12px; font-weight: 600; padding: 0 6px; border-radius: 9px; background: var(--accent-soft); color: var(--fg); }
+
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+.toolbar .spacer { flex: 1 1 auto; }
+.link { background: none; border: 0; padding: 2px 4px; color: var(--accent); font-weight: 600; font-size: 13px; }
+.link:hover { text-decoration: underline; }
+
+.panels { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
+.panel { display: flex; flex-direction: column; gap: 10px; }
+.panel-name { display: none; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 6px 0 0; }
+.searching .panel-name { display: block; }
+.empty { color: var(--muted); padding: 24px 0; text-align: center; }
+
+.colhead, .row { display: grid; grid-template-columns: minmax(0, 1fr) var(--value-col) 28px; column-gap: 12px; align-items: center; }
+.colhead { padding: 0 12px 0 38px; font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.searching .colhead { display: none; }
+
+details.section { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+details.section > summary { list-style: none; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--head); cursor: pointer; user-select: none; }
+details.section > summary::-webkit-details-marker { display: none; }
+.chev { width: 16px; height: 16px; flex: 0 0 auto; transition: transform .12s; color: var(--muted); }
+details[open] > summary .chev { transform: rotate(90deg); }
+.sec-title { font-weight: 600; }
+.sec-meta { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.pill { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 9px; white-space: nowrap; }
+.pill.changed { background: var(--changed-soft); color: var(--changed); }
+.pill.restart { background: var(--accent-soft); color: var(--fg); }
+.pill.exp { background: var(--warn-soft); color: var(--warn); }
+
+.row { padding: 7px 12px 7px 38px; border-top: 1px solid var(--line); min-height: 44px; position: relative; }
+.row:nth-child(even) { background: var(--stripe); }
+.row.child { padding-left: 62px; }
+.row.child::before { content: ""; position: absolute; left: 44px; top: 0; bottom: 50%; width: 10px; border-left: 1px solid var(--track); border-bottom: 1px solid var(--track); }
+.row.mod::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--changed); }
+.name { min-width: 0; }
+.label { font-weight: 500; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.desc { color: var(--muted); font-size: 12.5px; margin-top: 1px; max-width: 62ch; }
+.value { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+.value input[type="text"] { flex: 1 1 120px; }
+.value .path { font-family: var(--mono); font-size: 12px; }
+.value input[type="number"] { width: 84px; text-align: right; font-variant-numeric: tabular-nums; }
+.unit { color: var(--muted); font-size: 12.5px; }
+.value input[type="range"] { flex: 1 1 120px; min-width: 0; accent-color: var(--accent); }
+.value output { width: 44px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.btn { background: var(--surface); border: 1px solid var(--track); border-radius: 4px; padding: 0 12px; height: 30px; white-space: nowrap; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+.reset { width: 26px; height: 26px; border: 0; border-radius: 4px; background: none; color: var(--changed); font-size: 16px; line-height: 1; visibility: hidden; }
+.row.mod .reset { visibility: visible; }
+.reset:hover { background: var(--changed-soft); }
+
+.sw { width: 40px; height: 22px; border-radius: 11px; border: 0; background: var(--track); position: relative; flex: 0 0 auto; padding: 0; transition: background .12s; }
+.sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--surface); transition: transform .12s; }
+.sw[aria-checked="true"] { background: var(--accent); }
+.sw[aria-checked="true"]::after { transform: translateX(18px); }
+.row.off .name, .row.off .value { opacity: .45; }
+
+.footer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--head); color: var(--muted); font-size: 13px; }
+.footer .spacer { flex: 1 1 auto; }
+
+.map { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; }
+.map h2 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
+.map-scroll { overflow-x: auto; }
+.map table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.map th, .map td { text-align: left; padding: 6px 10px 6px 0; border-top: 1px solid var(--line); vertical-align: top; }
+.map th { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); border-top: 0; }
+.map td:first-child { font-weight: 600; white-space: nowrap; }
+.map td:last-child { color: var(--muted); }
+
+@media (max-width: 640px) {
+  .colhead { display: none; }
+  .row { grid-template-columns: minmax(0, 1fr) 28px; row-gap: 6px; padding-left: 12px; }
+  .row.child { padding-left: 30px; }
+  .row.child::before { left: 14px; }
+  .name { grid-column: 1 / -1; }
+  .value { justify-content: flex-start; }
+  .sec-meta .count { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .chev, .sw, .sw::after { transition: none; } }
+</style>
+
+<div class="wrap">
+  <div class="lead">
+    <h1>Preferences layout mockup</h1>
+    <p id="leadText"></p>
+  </div>
+
+  <div class="dialog" id="dialog">
+    <div class="titlebar">
+      <h2>Preferences</h2>
+      <div class="search"><input type="search" id="search" placeholder="Search all settings" aria-label="Search all settings"></div>
+    </div>
+    <div class="tabs" role="tablist" id="tabs"></div>
+    <div class="toolbar">
+      <span id="tabSummary"></span>
+      <span class="spacer"></span>
+      <button class="link" id="expandAll" type="button">Expand all</button>
+      <button class="link" id="collapseAll" type="button">Collapse all</button>
+    </div>
+    <div class="panels" id="panels"></div>
+    <div class="footer">
+      <span id="changedSummary"></span>
+      <button class="link" id="resetAll" type="button" hidden>Reset all</button>
+      <span class="spacer"></span>
+      <span>Changes apply immediately</span>
+      <button class="btn primary" type="button" id="closeBtn">Close</button>
+    </div>
+  </div>
+
+  <div class="map">
+    <h2>Where today's sections go</h2>
+    <div class="map-scroll">
+      <table>
+        <thead><tr><th>New tab</th><th>Sections</th><th>Comes from</th></tr></thead>
+        <tbody id="mapBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+// Row builders. o: {restart, exp, child, from}
+const T = (label, desc, on, o) => ({ k: 'toggle', label, desc, v: !!on, ...o });
+const S = (label, desc, opts, i, o) => ({ k: 'select', label, desc, opts, v: i || 0, ...o });
+const N = (label, desc, v, unit, o) => ({ k: 'num', label, desc, v, unit, ...o });
+const X = (label, desc, v, o) => ({ k: 'text', label, desc, v, ...o });
+const P = (label, desc, v, btns, o) => ({ k: 'path', label, desc, v, btns: btns || ['Browse'], ...o });
+const B = (label, desc, btn, o) => ({ k: 'button', label, desc, btn, ...o });
+const R = (label, desc, v, o) => ({ k: 'range', label, desc, v, ...o });
+const C = { child: 1 }, RS = { restart: 1 };
+
+const TABS = [
+{ id: 'general', name: 'General', from: 'General Settings, Dark Mode, Privacy', sections: [
+  { t: 'Language and region', rows: [
+    S('Language', 'Switching the language restarts EdgeSlicer.', ['English', 'Deutsch', 'Français', 'Español', '日本語', '简体中文'], 0, RS),
+    S('Login region', 'Changing the region signs you out and restarts.', ['Asia-Pacific', 'Chinese Mainland', 'Europe', 'North America', 'Others'], 3, RS),
+    S('Units', '', ['Metric (mm, g)', 'Imperial (in, oz)'], 0),
+  ]},
+  { t: 'Startup', rows: [
+    S('Default page', 'The page opened on startup.', ['Home', 'Prepare'], 0),
+    T('Show splash screen', 'Show the splash screen during startup.', 1),
+    T('Show "Tip of the day" after start', 'Useful hints are displayed at startup.', 1),
+    T('Allow only one EdgeSlicer instance', 'Starting EdgeSlicer again reactivates the running instance instead.', 0),
+    T('Reopen the open projects at the next start', 'Projects in the project strip come back as they were, unsaved changes included.', 1),
+  ]},
+  { t: 'Updates', rows: [
+    T('Check for new versions on startup', '', 1),
+    S('Update channel', 'Which builds the update check offers.', ['Stable', 'Nightly'], 0, C),
+    T('Update built-in presets automatically', 'Keeps the printer, filament and process presets that ship with EdgeSlicer current.', 1),
+  ]},
+  { t: 'Appearance', rows: [
+    T('Dark mode', 'The current theme chooses light or dark (main menu > Themes...).', 0),
+  ]},
+  { t: 'Privacy', rows: [
+    T('Send crash reports', 'Opt-in. Sends a crash dump and build details when EdgeSlicer crashes. See the privacy note for what is sent.', 0),
+  ]},
+]},
+{ id: 'view', name: '3D View', from: 'General Settings (camera rows), Graphics', sections: [
+  { t: 'Camera and mouse', rows: [
+    S('Camera style', 'Default: LMB+move rotates, RMB/MMB+move pans. Touchpad: Alt+move rotates, Shift+move pans.', ['Default', 'Touchpad'], 0),
+    N('Orbit speed multiplier', 'Multiplies the orbit speed for finer or coarser camera movement.', 1.0, '×'),
+    T('Zoom to mouse position', 'Zoom towards the pointer rather than the window center.', 1),
+    T('Use free camera', 'Off uses the constrained camera.', 0),
+    T('Swap pan and rotate mouse buttons', '', 0),
+    T('Reverse mouse zoom', 'Reverses the direction of zoom with the mouse wheel.', 0),
+  ]},
+  { t: 'Selection and tool panels', rows: [
+    S('Selection highlight', 'Glow: white edge with a soft halo. Thin outline: crisp line, best for assemblies with touching parts.', ['Glow', 'Thin outline'], 0),
+    R('Selection glow strength', 'Percent of the default halo. 0 % leaves only the edge line. Glow style only.', 100, C),
+    R('Gizmo panel opacity', 'Background opacity of the tool panels on the 3D view. Applies immediately.', 85),
+    T('Bottom-referenced Z position', "Show and edit the Move panel's Z as the height of the object's bottom above the bed.", 0),
+    T('Hide other plates while moving', 'While the Move tool is open, show only the plate you are working on.', 0),
+  ]},
+  { t: 'G-code preview', rows: [
+    S('Default preview view type', 'The colour scheme the sliced preview opens with.', ['Line type', 'Filament', 'Speed', 'Layer height', 'Flow'], 0),
+    T('Dim lower layers', 'When scrubbing the layer slider, darken the layers below the current one.', 0),
+    N('Dimmed layer brightness', '', 35, '%', C),
+  ]},
+  { t: 'Rendering quality', rows: [
+    S('MSAA multiplier', 'Multisample anti-aliasing for the 3D view.', ['Disabled', '2x', '4x', '8x', '16x'], 2, RS),
+    T('FXAA post-processing', 'A cheaper smoothing pass applied after rendering.', 0),
+    T('Smooth normals', 'Shade curved surfaces smoothly instead of per facet.', 0),
+    N('FPS cap', '0 = unlimited.', 0, 'FPS'),
+    T('Show FPS overlay', 'Displays the viewport FPS in the top-right corner.', 0),
+  ]},
+  { t: 'Realistic view', rows: [
+    T('Realistic view', 'Renders objects more realistically, with the options below. Also in View > Realistic View.', 0),
+    T('Phong shading', '', 1, C),
+    T('SSAO ambient occlusion', '', 1, C),
+    T('Shadows', 'Cast shadows on the plate, other objects, and each object onto itself.', 1, C),
+  ]},
+]},
+{ id: 'projects', name: 'Projects & Files', from: 'Project (General and Extras), Downloads, ZIP files, Associate files, Associate web links', sections: [
+  { t: 'Opening projects', rows: [
+    S('Load behaviour', 'Should printer, filament and process settings be loaded when opening a .3mf?', ['Load All', 'Ask When Relevant', 'Always Ask', 'Load Geometry Only', 'Load Geometry With Object Settings'], 1),
+    S('Open files from Explorer / Finder in', '', ['New project tab', 'The current project'], 0),
+    T('Keep my printer when opening project files', 'Switch back to your last printer instead of the one embedded in the file.', 0),
+    T('Drop imported models to the bed', 'Off keeps the Z position stored in the file.', 1),
+    T('Show the STEP mesh settings dialog', 'A parameter dialog appears during STEP import.', 1),
+  ]},
+  { t: 'Warnings when loading', rows: [
+    T('Skip settings mapping warnings', 'Apply defaults or automatic fixes silently for unrecognized or invalid settings.', 0),
+    T('No warnings for 3MF with modified G-code', '', 0),
+    B('Unsaved-project choice', 'Forget the remembered answer to "save before closing?".', 'Clear'),
+  ]},
+  { t: 'Project strip and recent files', rows: [
+    N('Maximum open projects', '', 8, ''),
+    N('Maximum recent files', '', 18, ''),
+    T('Add model files (stl/step) to the recent list', '', 0),
+  ]},
+  { t: 'Saving and backup', rows: [
+    T('Auto-save project', 'Periodically save the project to its own file. Only projects already saved once.', 0),
+    N('Auto-save interval', '', 300, 's', C),
+    T('Auto-backup', 'Back up the project periodically for restoring after a crash.', 1),
+    N('Backup interval', '', 10, 's', C),
+  ]},
+  { t: 'Folders', rows: [
+    P('Downloads', 'Where models opened from web links are saved.', 'C:\\Users\\me\\Downloads'),
+    P('Vault downloads', 'Where files fetched from the Vaults home tab are saved.', 'C:\\Users\\me\\EdgeSlicer\\vaults', ['Browse', 'Default']),
+    P('Extracted ZIP files', 'Size: 412 MB in 9 folder(s).', '%APPDATA%\\EdgeSlicer\\zip_work', ['Open folder', 'Clean now']),
+    T('Delete extracted ZIP files automatically', '', 1),
+    N('Delete after', '1 to 3650 days.', 30, 'days', C),
+  ]},
+  { t: 'File associations', rows: [
+    T('.3mf files', 'Set EdgeSlicer as the default application.', 1),
+    T('.stl files', '', 0),
+    T('.step / .stp files', '', 0),
+  ]},
+  { t: 'Web link associations', closed: 1, rows: [
+    T('orcaslicer://', 'Printables.com (Orca links). Current association: this instance.', 1),
+    T('prusaslicer://', 'Printables.com. Current association: none.', 0),
+    T('bambustudio://', 'Makerworld.com. Current association: none.', 0),
+    T('cura://', 'Thingiverse.com. Current association: none.', 0),
+  ]},
+]},
+{ id: 'slicing', name: 'Slicing & Presets', from: 'General Settings (slicing rows), Presets (General and Extras), Cost', sections: [
+  { t: 'Slicing', rows: [
+    T('Auto slice after changes', 'Slice again whenever a slicing-related setting changes.', 0),
+    N('Auto slice delay', 'Lets several edits be grouped. 0 slices immediately.', 2, 's', C),
+    T('Warn when memory is low during slicing', '', 1),
+    T('Auto arrange plate after cloning', '', 1),
+    T('Show print-by-object caution notices', '', 1),
+    T('Allow high/low temperature filament mixing', 'Print high- and low-temperature filaments together. Asks for confirmation when turned on.', 0),
+  ]},
+  { t: 'Flushing volumes', rows: [
+    T('Recalculate when a colour changes', '', 1),
+    T('Recalculate when a filament changes', '', 1),
+  ]},
+  { t: 'Preset behaviour', rows: [
+    T('Remember printer configuration', 'Switch filament and process presets for each printer automatically.', 1),
+    T('Remember last print action', "Restore the print button's last option (Print, Print plate, Export G-code...) on startup.", 1),
+    T('Prefer last used print profile', "When a project's print profile is missing, pick the one you last used at that layer height.", 0),
+    T('Seamless system filament edits', 'Edit a built-in filament without first saving a copy under a new name.', 0),
+    B('Unsaved-preset choice', 'Forget the remembered answer to "keep unsaved preset changes?".', 'Clear'),
+  ]},
+  { t: 'Bambu Studio presets', rows: [
+    T('Import Bambu Studio user presets', 'At startup, mirror your custom Bambu Studio print and filament presets. One-way.', 0, RS),
+    B('Import now', 'Re-run the import and refresh the lists immediately.', 'Sync now'),
+    B('Re-import presets removed earlier', '', 'Re-pull all'),
+  ]},
+  { t: 'Cost', rows: [
+    T('Include costs in exported G-code', '', 0),
+    X('Currency symbol', 'Shown next to costs in the slice summary.', '$'),
+    B('Your own costs', 'Filament prices per kilogram and machine rates per hour that apply over the presets.', 'Costs...'),
+  ]},
+]},
+{ id: 'devices', name: 'Printers & Network', from: 'Bambu Network, Spool Manager, Phone access, G-Code Archive, General Settings (multi-device, auto sign-in)', sections: [
+  { t: 'Bambu network', rows: [
+    T('Enable Bambu network plugin', 'Connect to Bambu Lab printers by cloud login or LAN.', 1, RS),
+    T('Stealth mode', "No Bambu cloud telemetry. Safe for LAN-only use; turn off to sign in to a Bambu account.", 0, C),
+    T('New Bambu LiveView', "EdgeSlicer's own camera view for Bambu printers.", 1, C),
+    T('Allow abnormal storage', 'Use storage the printer marks as abnormal. At your own risk.', 0, C),
+  ]},
+  { t: 'Accounts and devices', rows: [
+    T('Sign in to my Snapmaker account at startup', '', 1),
+    T('Multi-device management', 'Send a task to several devices at once and manage them together.', 1, RS),
+  ]},
+  { t: 'Spool Manager', rows: [
+    T('Enable Spoolman integration', 'Connect to a self-hosted Spoolman server for spool inventory and usage tracking.', 0),
+    X('Server URL', 'For example http://10.0.0.5:7912', 'http://10.0.0.5:7912', C),
+    T('Deduct filament usage when sending a print', 'Subtract the sliced weight from the spools bound to each slot.', 0, C),
+  ]},
+  { t: 'Phone access', rows: [
+    T('Start hidden', 'Serve the phone without opening a window.', 0),
+    T('Remember Snapmaker printer certificates', 'Lets the phone connect a Snapmaker printer without you at the PC. The private key stays on this PC.', 0),
+  ]},
+  { t: 'G-code archive', rows: [
+    T('Store G-code files', 'Keep a copy of every file sent to a printer so it can be sent again later.', 1),
+    P('Storage folder', '', '%APPDATA%\\EdgeSlicer\\gcode_archive', ['Browse'], C),
+    N('Maximum retention', 'The oldest files are deleted past this count.', 200, 'files', C),
+  ]},
+]},
+{ id: 'advanced', name: 'Apps & Advanced', from: 'Bambu Studio, Blender, FreeCAD, Model browser, Layerling, Python plugins, Troubleshooting, Develop mode', sections: [
+  { t: 'External apps', rows: [
+    P('Bambu Studio path', 'Used by "Open in Bambu Studio".', 'C:\\Program Files\\Bambu Studio\\bambu-studio.exe'),
+    P('Blender path', '', ''),
+    P('FreeCAD path', '', ''),
+    B('FreeCAD add-on', 'Adds "Send to EdgeSlicer" inside FreeCAD.', 'Install add-on'),
+  ]},
+  { t: 'Optional tabs', rows: [
+    T('Model browser', 'Browse model sites in a tab.', 1, { exp: 'Beta' }),
+    T('Layerling tab', 'Browser CAD with "Send to EdgeSlicer". Downloaded on first use.', 0),
+  ]},
+  { t: 'Python plugins', rows: [
+    T('Enable Python plugins', '', 0, { restart: 1, exp: 'Experimental' }),
+    T('Allow plugins on the early slicing steps', 'These steps run unsandboxed.', 0, C),
+    T('Allow plugins not signed by a known publisher', '', 0, C),
+  ]},
+  { t: 'Troubleshooting', rows: [
+    S('Log level', '', ['fatal', 'error', 'warning', 'info', 'debug', 'trace'], 3),
+  ]},
+  { t: 'Developer', closed: 1, rows: [
+    T('Develop mode', 'Shows developer-only settings and the Develop page.', 0),
+    T('Skip AMS blacklist check', '', 0, C),
+  ]},
+]},
+];
+
+const $ = (s, r) => (r || document).querySelector(s);
+const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+};
+const CHEV = '<svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function control(r, id) {
+  switch (r.k) {
+    case 'toggle': return `<button type="button" class="sw ctl" role="switch" id="${id}" aria-checked="${r.v}" aria-label="${esc(r.label)}"></button>`;
+    case 'select': return `<select class="ctl" id="${id}" aria-label="${esc(r.label)}">${r.opts.map((o, i) => `<option${i === r.v ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+    case 'num': return `<input class="ctl" type="number" id="${id}" value="${r.v}" step="any" aria-label="${esc(r.label)}">${r.unit ? `<span class="unit">${esc(r.unit)}</span>` : ''}`;
+    case 'text': return `<input class="ctl" type="text" id="${id}" value="${esc(r.v)}" aria-label="${esc(r.label)}">`;
+    case 'path': return `<input class="ctl path" type="text" id="${id}" value="${esc(r.v)}" placeholder="Not set" aria-label="${esc(r.label)}">${r.btns.map(b => `<button type="button" class="btn">${esc(b)}</button>`).join('')}`;
+    case 'range': return `<input class="ctl" type="range" id="${id}" min="0" max="100" value="${r.v}" aria-label="${esc(r.label)}"><output>${r.v} %</output>`;
+    case 'button': return `<button type="button" class="btn" id="${id}">${esc(r.btn)}</button>`;
+  }
+}
+
+let total = 0, sectionTotal = 0;
+const closedState = store.get('prefs-mock-closed', null);
+
+function render() {
+  const tabs = $('#tabs'), panels = $('#panels');
+  TABS.forEach((tab, ti) => {
+    tabs.insertAdjacentHTML('beforeend', `<button type="button" class="tab" role="tab" id="tab-${tab.id}" aria-controls="panel-${tab.id}" data-tab="${tab.id}">${esc(tab.name)}<span class="hits" hidden></span></button>`);
+    let html = `<div class="panel" role="tabpanel" id="panel-${tab.id}" aria-labelledby="tab-${tab.id}"><p class="panel-name">${esc(tab.name)}</p><div class="colhead"><span>Setting</span><span>Value</span><span></span></div>`;
+    tab.sections.forEach((sec, si) => {
+      sectionTotal++;
+      const key = `${tab.id}-${si}`;
+      const closed = closedState ? closedState.includes(key) : !!sec.closed;
+      html += `<details class="section" data-key="${key}"${closed ? '' : ' open'}><summary>${CHEV}<span class="sec-title">${esc(sec.t)}</span><span class="sec-meta"><span class="pill changed" hidden></span><span class="count">${sec.rows.length} ${sec.rows.length === 1 ? 'setting' : 'settings'}</span></span></summary><div class="rows">`;
+      sec.rows.forEach((r, ri) => {
+        total++;
+        const id = `pref-${ti}-${si}-${ri}`;
+        const pills = (r.restart ? '<span class="pill restart">Restart</span>' : '') + (r.exp ? `<span class="pill exp">${esc(r.exp)}</span>` : '');
+        html += `<div class="row${r.child ? ' child' : ''}" data-kind="${r.k}" data-text="${esc((r.label + ' ' + (r.desc || '') + ' ' + sec.t).toLowerCase())}"><div class="name"><div class="label">${esc(r.label)}${pills}</div>${r.desc ? `<div class="desc">${esc(r.desc)}</div>` : ''}</div><div class="value">${control(r, id)}</div><button type="button" class="reset" title="Reset to default" aria-label="Reset ${esc(r.label)} to default">&#8634;</button></div>`;
+      });
+      html += '</div></details>';
+    });
+    html += '</div>';
+    panels.insertAdjacentHTML('beforeend', html);
+    $('#mapBody').insertAdjacentHTML('beforeend', `<tr><td>${esc(tab.name)}</td><td>${tab.sections.map(s => esc(s.t)).join(', ')}</td><td>${esc(tab.from)}</td></tr>`);
+  });
+  panels.insertAdjacentHTML('beforeend', '<p class="empty" id="empty" hidden>No settings match that search.</p>');
+  $('#leadText').textContent = `${total} settings from today's General, Extras and Develop pages, regrouped into ${TABS.length} tabs and ${sectionTotal} collapsible sections. Each section is a table: the setting and its help text on the left, the value on the right. Controls work, so try the search, collapse a section, or change a value.`;
+  $$('.ctl').forEach(c => { c.dataset.def = val(c); });
+}
+
+function val(c) { return c.classList.contains('sw') ? c.getAttribute('aria-checked') : c.value; }
+function setVal(c, v) {
+  if (c.classList.contains('sw')) c.setAttribute('aria-checked', v); else c.value = v;
+  if (c.type === 'range') c.nextElementSibling.textContent = v + ' %';
+}
+
+// Child rows follow the nearest preceding top-level row; they grey out when that row is a switch that is off.
+function refresh() {
+  let changed = 0;
+  $$('details.section').forEach(sec => {
+    let parentOn = true, n = 0;
+    $$('.row', sec).forEach(row => {
+      const c = $('.ctl', row);
+      if (!row.classList.contains('child')) parentOn = !(c && c.classList.contains('sw')) || val(c) === 'true';
+      const off = row.classList.contains('child') && !parentOn;
+      row.classList.toggle('off', off);
+      $$('.ctl, .btn', row).forEach(e => { e.disabled = off; });
+      const mod = !!c && val(c) !== c.dataset.def;
+      row.classList.toggle('mod', mod);
+      if (mod) n++;
+    });
+    const pill = $('.pill.changed', sec);
+    pill.hidden = !n; pill.textContent = n + ' changed';
+    changed += n;
+  });
+  $('#changedSummary').textContent = changed ? `${changed} ${changed === 1 ? 'setting differs' : 'settings differ'} from the defaults` : 'All settings are at their defaults';
+  $('#resetAll').hidden = !changed;
+}
+
+let current = store.get('prefs-mock-tab', TABS[0].id);
+if (!TABS.some(t => t.id === current)) current = TABS[0].id;
+
+function showTab(id) {
+  current = id; store.set('prefs-mock-tab', id);
+  applyView();
+}
+
+function applyView() {
+  const q = $('#search').value.trim().toLowerCase();
+  const searching = !!q;
+  $('#dialog').classList.toggle('searching', searching);
+  let anyHit = false;
+  TABS.forEach(tab => {
+    const panel = $('#panel-' + tab.id), btn = $('#tab-' + tab.id);
+    let hits = 0;
+    $$('details.section', panel).forEach(sec => {
+      let secHits = 0;
+      $$('.row', sec).forEach(row => {
+        const hit = !searching || row.dataset.text.includes(q);
+        row.hidden = !hit; if (hit) secHits++;
+      });
+      sec.hidden = !secHits;
+      if (searching) { if (sec.dataset.was === undefined) sec.dataset.was = sec.open ? '1' : '0'; sec.open = true; }
+      else if (sec.dataset.was !== undefined) { sec.open = sec.dataset.was === '1'; delete sec.dataset.was; }
+      hits += secHits;
+    });
+    panel.hidden = searching ? !hits : tab.id !== current;
+    btn.setAttribute('aria-selected', String(!searching && tab.id === current));
+    const badge = $('.hits', btn);
+    badge.hidden = !searching || !hits; badge.textContent = hits;
+    if (hits) anyHit = true;
+  });
+  $('#empty').hidden = !searching || anyHit;
+  const tab = TABS.find(t => t.id === current);
+  const rows = tab.sections.reduce((a, s) => a + s.rows.length, 0);
+  $('#tabSummary').textContent = searching ? 'Showing matches from every tab' : `${tab.sections.length} sections, ${rows} settings`;
+  $('#expandAll').hidden = $('#collapseAll').hidden = searching;
+}
+
+function saveClosed() {
+  if ($('#dialog').classList.contains('searching')) return;
+  store.set('prefs-mock-closed', $$('details.section').filter(d => !d.open).map(d => d.dataset.key));
+}
+
+render(); refresh(); applyView();
+
+$('#tabs').addEventListener('click', e => {
+  const b = e.target.closest('.tab'); if (!b) return;
+  $('#search').value = ''; showTab(b.dataset.tab);
+});
+$('#search').addEventListener('input', applyView);
+$('#panels').addEventListener('click', e => {
+  const sw = e.target.closest('.sw');
+  if (sw) { sw.setAttribute('aria-checked', String(sw.getAttribute('aria-checked') !== 'true')); refresh(); return; }
+  const rs = e.target.closest('.reset');
+  if (rs) { const c = $('.ctl', rs.closest('.row')); setVal(c, c.dataset.def); refresh(); }
+});
+$('#panels').addEventListener('input', e => {
+  if (e.target.type === 'range') e.target.nextElementSibling.textContent = e.target.value + ' %';
+  if (e.target.classList.contains('ctl')) refresh();
+});
+$('#panels').addEventListener('toggle', saveClosed, true);
+function setAll(open) { $$('details.section', $('#panel-' + current)).forEach(d => { d.open = open; }); saveClosed(); }
+$('#expandAll').addEventListener('click', () => setAll(true));
+$('#collapseAll').addEventListener('click', () => setAll(false));
+$('#resetAll').addEventListener('click', () => { $$('.ctl').forEach(c => setVal(c, c.dataset.def)); refresh(); });
+</script>

@@ -125,7 +125,8 @@ SavePresetDialog::Item::Item(Preset::Type type, const std::string &suffix, wxBox
         sizer->Add(m_every_printer, 0, wxEXPAND | wxTOP | wxLEFT, BORDER_W);
     }
 
-    if (parent->m_mode == comDevelop) {
+    // Developer mode (a flag on top of the settings view since 2026-11-25; it used to be the comDevelop level).
+    if (wxGetApp().developer_mode_on()) {
         // A new user copy of a system preset inherits from the selected system preset.
         const std::string parent_name = PresetCollection::detach_parent_name(sel_preset);
         const bool        can_detach  = !parent_name.empty();

@@ -13,6 +13,32 @@ add_executable(${_TEST_NAME}_tests
     wizard_networking_tests.cpp
     print_host_sending_tests.cpp
     plugin_guard_tests.cpp
+    discord_presence_tests.cpp
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_lifecycle.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_install.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_config.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_json_depth.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_ultranet_isolation.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_host_api.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_capability_config.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_status.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_sort.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_scripts.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_audit.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_permission_validation.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_trust.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_capabilities_in_use.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_slicing_pipeline_config.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_slicing_pipeline_phase6.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_ipc.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_sandbox.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_h1.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_h2.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_h3.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_h4.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_h5.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_h7.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_landing_mediums.cpp>
     camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp
@@ -27,6 +53,7 @@ add_executable(${_TEST_NAME}_tests
     device_page_load_tests.cpp
     flutter_web_bundle_tests.cpp
     home_tab_tests.cpp
+    home_plugins_tests.cpp
     main_tabs_tests.cpp
     project_sessions_tests.cpp
     theme_pack_tests.cpp
@@ -121,8 +148,10 @@ add_executable(${_TEST_NAME}_tests
     stream_page_icon_tests.cpp
     dual_nozzle_layout_tests.cpp
     nozzle_temp_rows_tests.cpp
+    tool_temp_layout_tests.cpp
     nozzle_info_tests.cpp
     device_controls_tests.cpp
+    bambu_rack_temps_tests.cpp
     bambu_fans_tests.cpp
     bambu_ams_report_tests.cpp
     printer_timelapse_tests.cpp
@@ -138,6 +167,7 @@ add_executable(${_TEST_NAME}_tests
     # that run before it (hms_lookup_tests) call wxGetApp() whenever an app exists.
     theme_live_tests.cpp
     bambu_send_diagnosis_tests.cpp
+    birdseye_camera_tests.cpp
     ams_match_tests.cpp
     win_firewall_tests.cpp
     bambu_setup_notice_tests.cpp
@@ -178,14 +208,12 @@ add_executable(${_TEST_NAME}_tests
 # wrappers are compiled straight into the app targets rather than into a library (src/CMakeLists.txt
 # does the same), so the test executable has to carry the same files or it cannot link. The
 # Sentry SDK itself comes with libslic3r_gui (SLIC3R_SENTRY and sentry::sentry are PUBLIC there).
-if (WIN32 OR APPLE)
-    target_sources(${_TEST_NAME}_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryWrapper.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/bury_cfg/bury_point.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/common_func/common_func.cpp
-        )
-    target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
-endif ()
+# Linux needs the same objects once GUI_App is rebuilt (EDGE_PYTHON_PLUGINS rebuilds it).
+target_sources(${_TEST_NAME}_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryWrapper.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/bury_cfg/bury_point.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/common_func/common_func.cpp
+    )
 if (WIN32)
     target_sources(${_TEST_NAME}_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dev-utils/BaseException.cpp
@@ -198,9 +226,75 @@ elseif (APPLE)
 endif ()
 
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r)
+if (EDGE_PYTHON_PLUGINS)
+    target_link_libraries(${_TEST_NAME}_tests pybind11::embed)
+    if (APPLE)
+        target_link_options(${_TEST_NAME}_tests PRIVATE "LINKER:-rpath,@executable_path/python/lib")
+    elseif (UNIX AND NOT WIN32)
+        set_property(TARGET ${_TEST_NAME}_tests APPEND PROPERTY BUILD_RPATH "$ORIGIN/python/lib")
+    endif ()
+    add_executable(fake-plugin-host fake_plugin_host.cpp)
+    add_dependencies(${_TEST_NAME}_tests edge-plugin-host fake-plugin-host)
+    # Do not use $<TARGET_FILE_DIR:slic3rutils_tests> from other targets: that genex
+    # adds a reverse dependency and cycles with add_dependencies(tests helper).
+    if (CMAKE_CONFIGURATION_TYPES)
+        set(_tests_bin_dir "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>")
+    else ()
+        set(_tests_bin_dir "${CMAKE_CURRENT_BINARY_DIR}")
+    endif ()
+    # edge-plugin-host is defined in src/slic3r/; CMake forbids POST_BUILD from here.
+    add_custom_target(copy-edge-plugin-host-for-tests
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_tests_bin_dir}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:edge-plugin-host>"
+            "${_tests_bin_dir}/$<TARGET_FILE_NAME:edge-plugin-host>"
+        DEPENDS edge-plugin-host
+        COMMENT "Copying edge-plugin-host for plugin tests"
+        VERBATIM)
+    add_dependencies(${_TEST_NAME}_tests copy-edge-plugin-host-for-tests)
+    add_custom_command(TARGET fake-plugin-host POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_tests_bin_dir}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:fake-plugin-host>"
+            "${_tests_bin_dir}/$<TARGET_FILE_NAME:fake-plugin-host>"
+        COMMENT "Copying fake-plugin-host for spawn fail-fast tests"
+        VERBATIM)
+    add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:edge-plugin-host>"
+            "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/$<TARGET_FILE_NAME:edge-plugin-host>"
+        COMMENT "Copying edge-plugin-host for plugin tests"
+        VERBATIM)
+    add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:fake-plugin-host>"
+            "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/$<TARGET_FILE_NAME:fake-plugin-host>"
+        COMMENT "Copying fake-plugin-host for spawn fail-fast tests"
+        VERBATIM)
+    add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
+        COMMENT "Copying bundled Python runtime for plugin tests"
+        VERBATIM)
+    if (WIN32)
+        add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_PREFIX_PATH}/libpython/python${_bundled_python_abi}.dll"
+                "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
+            VERBATIM)
+    endif ()
+    if (ORCA_BUNDLED_UV_EXECUTABLE)
+        add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/tools/uv"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORCA_BUNDLED_UV_EXECUTABLE}"
+                "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/tools/uv/${ORCA_BUNDLED_UV_FILENAME}"
+            COMMENT "Copying bundled uv for plugin tests"
+            VERBATIM)
+    endif ()
+endif ()
 target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 if (MSVC)
-    target_link_libraries(${_TEST_NAME}_tests Setupapi.lib)
+    target_link_libraries(${_TEST_NAME}_tests Setupapi.lib Advapi32.lib)
 endif ()
 
 # hms_lookup_tests.cpp includes slic3r/GUI/HMS.hpp, which pulls GUI_App.hpp and so the wxWidgets
@@ -233,3 +327,28 @@ endif()
 
 catch_discover_tests(${_TEST_NAME}_tests TEST_PREFIX "${_TEST_NAME}: ")
 # add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests "${CATCH_EXTRA_ARGS} exclude:[NotWorking]")
+
+# ASan helpers are multi-gigabyte; skip the install copy on those builds.
+if (EDGE_PYTHON_PLUGINS AND NOT WIN32)
+    add_test(NAME macos_seatbelt_sdk_syntax
+        COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/check_macos_sandbox_sdk.sh")
+    set_tests_properties(macos_seatbelt_sdk_syntax PROPERTIES
+        TIMEOUT 60
+        LABELS "PluginSandbox")
+endif ()
+
+if (EDGE_PYTHON_PLUGINS AND UNIX AND NOT APPLE AND NOT SLIC3R_ASAN)
+    if (NOT CMAKE_INSTALL_BINDIR)
+        set(CMAKE_INSTALL_BINDIR bin)
+    endif ()
+    add_test(NAME plugin_host_install_rpath
+        COMMAND ${CMAKE_COMMAND}
+            -DCMAKE_COMMAND=${CMAKE_COMMAND}
+            -DBUILD_DIR=${CMAKE_BINARY_DIR}
+            -DBINDIR=${CMAKE_INSTALL_BINDIR}
+            -DCONFIG=$<CONFIG>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/check_plugin_host_install.cmake)
+    set_tests_properties(plugin_host_install_rpath PROPERTIES
+        TIMEOUT 180
+        LABELS "PluginIpc")
+endif ()

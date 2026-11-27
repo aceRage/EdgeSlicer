@@ -107,6 +107,8 @@
 
 #include "GUI.hpp"
 #include "GUI_Utils.hpp"
+#include "DiscordPresenceSnapshot.hpp"
+#include "slic3r/Utils/DiscordPresence.hpp"
 #include "3DScene.hpp"
 #include "MainFrame.hpp"
 #include "ProjectStrip.hpp"
@@ -117,6 +119,13 @@
 #include "AccountStatus.hpp"
 #include "GLCanvas3D.hpp"
 #include "GeneratedConfig.hpp"
+
+#ifdef EDGE_PYTHON_PLUGINS
+#include "slic3r/plugin/EdgePythonInclude.hpp"
+#include "slic3r/plugin/PluginManager.hpp"
+#include "slic3r/plugin/PluginPreferences.hpp"
+#include "slic3r/plugin/PythonInterpreter.hpp"
+#endif
 
 #include "../Utils/PresetUpdater.hpp"
 #include "../Utils/AppUpdateCheck.hpp"
@@ -137,6 +146,9 @@
 #include "slic3r/Utils/PluginLoadDiagnostics.hpp"
 #include "slic3r/Utils/VendorConnector.hpp"
 #include "HomePanel.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "PluginsInspectorDialog.hpp"
+#endif
 #include "PresetMirror.hpp"
 #include "PresetMirrorCore.hpp"
 #include "Tab.hpp"
@@ -2827,6 +2839,10 @@ GUI_App::~GUI_App()
     GUI_App::m_app_alive.store(false);
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": enter");
+#ifdef EDGE_PYTHON_PLUGINS
+    Slic3r::PluginManager::instance().shutdown();
+    Slic3r::PythonInterpreter::instance().shutdown();
+#endif
     if (app_config != nullptr) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": destroy app_config");
         delete app_config;
@@ -2846,6 +2862,17 @@ GUI_App::~GUI_App()
 
     stop_page_http_server();
     stop_http_server();
+}
+
+void GUI_App::notify_plugin_permissions_changed(const std::string& plugin_key)
+{
+#ifdef EDGE_PYTHON_PLUGINS
+    if (mainframe != nullptr && mainframe->m_home != nullptr)
+        mainframe->m_home->refresh_plugins();
+    PluginsInspectorDialog::notify_permissions_changed(plugin_key);
+#else
+    (void) plugin_key;
+#endif
 }
 
 // If formatted for github, plaintext with OpenGL extensions enclosed into <details>.
@@ -3280,8 +3307,55 @@ bool GUI_App::OnInit()
     }
 }
 
+void GUI_App::apply_discord_presence_setting()
+{
+    if (!app_config)
+        return;
+
+    const bool enabled = app_config->get_bool("discord_rich_presence");
+
+    // Opted out and never opted in: do not even construct the publisher, so the
+    // feature costs nothing at all for users who do not want it.
+    if (!enabled && !m_discord_presence)
+        return;
+
+    // Config overrides the compiled-in id, so no rebuild is needed to retarget.
+    std::string application_id = app_config->get("discord_rich_presence_app_id");
+    if (application_id.empty())
+        application_id = Slic3r::discord_default_application_id();
+
+    // The id is fixed for the publisher's lifetime, so a change must replace it.
+    if (m_discord_presence && m_discord_presence->application_id() != application_id)
+        m_discord_presence.reset();
+
+    if (!m_discord_presence)
+        m_discord_presence.reset(new Slic3r::DiscordPresence(application_id, std::string("EdgeSlicer ") + SLIC3R_VERSION));
+
+    m_discord_presence->set_enabled(enabled);
+}
+
+void GUI_App::update_discord_presence()
+{
+    if (!m_discord_presence || !m_discord_presence->is_enabled())
+        return;
+
+    const bool hide_names = app_config && app_config->get_bool("discord_rich_presence_hide_names");
+    m_discord_presence->update(collect_presence_snapshot(hide_names));
+}
+
 int GUI_App::OnExit()
 {
+    // The ZIP work-folder clean-up thread. MainFrame::shutdown() normally stopped it already, but this
+    // also runs when the window never got its close event: an unhandled exception that ended the main
+    // loop (OnExit then runs while the stack unwinds), or the end of the Windows session
+    // (wxApp::OnEndSession deletes the windows without closing them). Cancelled between files, so it
+    // is quick; it does not throw.
+    ZipCleanup::shutdown();
+
+    // Stop before the device manager goes away: the worker formats state that
+    // was read from it, and its destructor clears the presence from the profile.
+    m_discord_presence.reset();
+
     // Ultra: Flashforge device stack - shut their network lib down first
     MultiComMgr::inst()->uninitalize();
 
@@ -3289,6 +3363,9 @@ int GUI_App::OnExit()
     RemoteAccess::get().stop();
 
     stop_sync_user_preset();
+    // Orca #17682: its threads read the app config and the plater, which ~GUI_App deletes before the updater.
+    if (preset_updater != nullptr)
+        preset_updater->stop();
     // A Bambu Studio preset mirror started by a printer switch may still be writing.
     join_preset_mirror_worker();
 
@@ -3460,7 +3537,14 @@ bool GUI_App::on_init_inner()
     wxGetApp().Bind(wxEVT_END_SESSION, [this](wxCloseEvent &e) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "received wxEVT_END_SESSION";
         stop_sync_user_preset();
+        ZipCleanup::shutdown(); // its worker thread, before exit() destroys the statics
         Slic3r::NetworkAgent::unload_network_module();
+#ifdef EDGE_PYTHON_PLUGINS
+        // Orca #16136: AppKit calls exit() after wxEVT_END_SESSION, so OnExit()/~GUI_App()
+        // never run. Tear Python down here or PluginManager's static destructor aborts.
+        Slic3r::PluginManager::instance().shutdown();
+        Slic3r::PythonInterpreter::instance().shutdown();
+#endif
         e.Skip();
     });
 #endif
@@ -4129,10 +4213,30 @@ bool GUI_App::on_init_inner()
         if (plater_ != nullptr)
             // ensure the selected technology is ptFFF
             plater_->set_printer_technology(ptFFF);
+        // G-code viewer skips PluginManager::initialize. CLI::setup already swept leftover
+        // AppContainer ACEs after set_data_dir.
     }
     else {
         set_startup_splash_phase(_L("Loading current presets"), 85);
         load_current_presets();
+#ifdef EDGE_PYTHON_PLUGINS
+        // D10: the runtime stays off until the user enables "Python plugins" in Preferences
+        // (restart). Off: no Python, no plugin scan, no auto-load, no Home rail.
+        if (plugin_prefs::enabled(plugin_prefs::k_enable_python_plugins)) {
+            PluginManager& plugin_mgr = PluginManager::instance();
+            plugin_mgr.initialize();
+            plugin_mgr.discover_plugins(false, true);
+            // Sidecar enabled=true is the startup auto-load list. Discovery alone leaves the
+            // module unloaded, so Enable from Home would be the only way a restart restored it.
+            try {
+                plugin_mgr.load_enabled_plugins();
+            } catch (const std::exception& ex) {
+                BOOST_LOG_TRIVIAL(error) << "Plugin auto-load failed: " << ex.what();
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "Plugin auto-load failed";
+            }
+        }
+#endif
     }
     profiler.mark("load_current_presets");
 
@@ -4242,7 +4346,21 @@ bool GUI_App::on_init_inner()
         if (m_post_initialized && app_config->dirty() && app_config->save_due())
             app_config->save();
 
+        // Discord Rich Presence. This only bounds how often the state is read;
+        // the publisher does its own change detection and rate limiting, and
+        // returns immediately when the feature is switched off.
+        if (m_discord_presence) {
+            static auto s_last_discord_update = std::chrono::steady_clock::time_point{};
+            const auto  now                   = std::chrono::steady_clock::now();
+            if (now - s_last_discord_update >= std::chrono::seconds(1)) {
+                s_last_discord_update = now;
+                update_discord_presence();
+            }
+        }
+
     });
+
+    apply_discord_presence_setting();
 
     m_initialized = true;
 
@@ -8541,31 +8659,61 @@ Tab* GUI_App::get_layer_tab()
     return model_tabs_list[2];
 }
 
+// Settings views (owner, 2026-11-25): the level is the chosen view (user_mode simple / advanced,
+// settings_view bambu) plus Preferences > Developer mode as a flag on top: Basic stays Simple, Advanced
+// and Bambu become comDevelop with Developer mode on. The legacy user_mode "develop" (older builds)
+// reads as Advanced with Developer mode on; MainFrame migrates it on start.
+bool GUI_App::developer_mode_on()
+{
+    return app_config->get_bool("developer_mode") || app_config->get("user_mode") == "develop";
+}
+
 ConfigOptionMode GUI_App::get_mode()
 {
-    if (!app_config->has("user_mode"))
-        return comSimple;
-    //BBS
-    const auto mode = app_config->get("user_mode");
-    return mode == "advanced" ? comAdvanced :
-           mode == "simple" ? comSimple :
-           mode == "develop" ? comDevelop : comSimple;
+    return effective_level(get_view_choice(), developer_mode_on());
 }
 
 std::string GUI_App::get_mode_str()
 {
-    if (!app_config->has("user_mode"))
-        return "simple";
-    return app_config->get("user_mode");
+    // The effective level (hub payloads, logs), as before: simple / advanced / develop.
+    const ConfigOptionMode mode = get_mode();
+    return mode == comAdvanced ? "advanced" : mode == comDevelop ? "develop" : "simple";
 }
 
 void GUI_App::save_mode(const /*ConfigOptionMode*/int mode)
 {
-    //BBS
-    const std::string mode_str = mode == comAdvanced ? "advanced" :
-                                 mode == comSimple ? "simple" :
-                                 mode == comDevelop ? "develop" : "simple";
-    app_config->set("user_mode", mode_str);
+    // The level only: settings_view is kept. comDevelop (no caller since Preferences stopped using it)
+    // means Advanced with Developer mode on.
+    app_config->set("user_mode", mode == comSimple ? "simple" : "advanced");
+    if (mode == comDevelop)
+        app_config->set_bool("developer_mode", true);
+    update_mode();
+}
+
+SettingsView GUI_App::get_settings_view()
+{
+    return settings_view_from_string(app_config->get("settings_view"));
+}
+
+ViewChoice GUI_App::get_view_choice()
+{
+    return view_choice(app_config->get("user_mode"), app_config->get("settings_view"));
+}
+
+void GUI_App::save_view_choice(ViewChoice choice)
+{
+    if (choice == get_view_choice())
+        return;
+    const ViewChoiceConfig cfg = view_choice_config(choice);
+    BOOST_LOG_TRIVIAL(info) << "Settings view: user_mode " << cfg.user_mode << ", settings_view "
+                            << (cfg.settings_view.empty() ? std::string("(none)") : cfg.settings_view);
+    // Developer mode (a separate flag) is left as it is.
+    app_config->set("user_mode", cfg.user_mode);
+    if (cfg.settings_view.empty())
+        app_config->erase("app", "settings_view");
+    else
+        app_config->set("settings_view", cfg.settings_view);
+    m_settings_view_revealed.clear();
     update_mode();
 }
 
@@ -8622,7 +8770,11 @@ void GUI_App::update_mode()
 
 bool GUI_App::curved_tops_developer_lines_shown()
 {
-    return app_config->get_bool("developer_mode") && get_mode() == comDevelop;
+    // Developer mode on and the Developer lines shown: the Advanced view (comDevelop). Not in Basic (Simple
+    // level), and not in the Bambu view, where Developer lines are hidden unless changed: the overrides
+    // must never be in force with their lines hidden, so in Bambu they are ignored and their lines toggled
+    // off (ConfigManipulation).
+    return developer_mode_on() && get_mode() == comDevelop && get_settings_view() != SettingsView::Bambu;
 }
 
 void GUI_App::update_internal_development() {

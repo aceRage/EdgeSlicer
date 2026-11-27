@@ -42,6 +42,7 @@ namespace Slic3r {
 // Forward declarations.
 class GCode;
 struct WipeInwardSupport;
+struct WipeTowerData;
 
 namespace { struct Item; }
 struct PrintInstance;
@@ -289,6 +290,22 @@ std::string              format_nozzle_change_block(int  old_filament_id,
                                                     int  precool_temp,
                                                     int  physical_extruder);
 
+// Bambu Studio 02.09.01.70 height slowdown (GCode::slowDownByHeight, GCode.cpp:7513-7563). Free functions so
+// libslic3r_tests can reach them (tests/fff_print/test_height_slowdown.cpp).
+struct HeightSlowdown
+{
+    bool   active    = false;  // the limits apply to this path (and to the travel to its first point)
+    double max_speed = 1000.;  // mm/s: print speed, travel speed and travel_speed_z cap; also the (non-BBL) jerk cap
+    double max_acc   = 100000.; // mm/s^2: print and travel acceleration cap
+};
+// The roles Bambu Studio slows down: everything from walls to gap fill (Bambu tests "role > erNone && role <= erGapFill").
+// Skirt, brim, support, wipe tower and custom moves are never slowed down.
+bool height_slowdown_role(ExtrusionRole role);
+// Active from start_height up (strictly below it, or when start_height >= end_height, nothing is capped); the
+// limits go linearly from the start to the end values between the two heights and stay at the end values above.
+HeightSlowdown height_slowdown_limits(bool enabled, double start_height, double end_height, double start_speed, double end_speed,
+                                      double start_acc, double end_acc, double print_z);
+
 class GCode {
 
 public:
@@ -437,6 +454,8 @@ private:
 
         bool is_open() const { return f; }
         bool is_error() const;
+        // The OS error of the first failed write or flush, empty if none.
+        std::string last_error() const;
 
         void flush();
         void close();
@@ -456,10 +475,16 @@ private:
     private:
         FILE *f = nullptr;
         GCodeProcessor &m_processor;
+        int m_write_errno = 0;
     };
     void            _do_export(Print &print, GCodeOutputStream &file, ThumbnailsGeneratorCallback thumbnail_cb);
 
-    static std::vector<LayerToPrint>        		                   collect_layers_to_print(const PrintObject &object);
+    // An object's layers by print_z, its object and support layers paired. warn: report empty layers in between as a
+    // print warning (the "empty layer between" check). tower: a per-object prime tower of this copy, whose tower-only
+    // layers (WipeTowerData::virtual_support_layers) are merged in as support layers; none for the plate tower, which
+    // inserts its own into the first object's support layers.
+    static std::vector<LayerToPrint>        		                   collect_layers_to_print(const PrintObject &object, bool warn = true,
+                                                                                               const WipeTowerData *tower = nullptr);
     static std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>> collect_layers_to_print(const Print &print);
 
     std::string generate_skirt(const Print &print,
@@ -906,9 +931,10 @@ private:
     int  temperature_tool_for_filament(int filament_id) const;
     bool is_bbl_multi_extruder() const;
     void note_filament_loaded(int filament_id);
-    // Purge volume for a change old -> new that crosses extruders: the flush from the filament the
-    // target nozzle still holds, 0 when it holds nothing or already holds the new filament.
-    // Returns false (and leaves volume alone) when old and new share an extruder.
+    // Purge volume for a change old -> new onto another nozzle (the other extruder, or another nozzle
+    // of the same extruder's rack): the flush from the filament the target nozzle still holds, 0 when
+    // it holds nothing or already holds the new filament.
+    // Returns false (and leaves volume alone) when old and new share a nozzle.
     bool cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const;
     // hotend_as_extruder (H3C): the flush into the next filament's own rack hotend (0 when it is empty or holds it).
     float hotend_flush_volume(int new_filament_id) const;
@@ -927,6 +953,13 @@ private:
     // (> 0), else Orca's first_layer_travel_acceleration (absolute or % of the travel acceleration), else 0 (the caller
     // keeps the initial layer acceleration). Defined after process_flow_value.
     double first_layer_travel_acceleration_override() const;
+
+    // Bambu Studio 02.09.01.70 GCode::slowDownByHeight: the limits for this path at the current layer's print_z,
+    // from the process variant of the current filament (Bambu's NOZZLE_CONFIG).
+    HeightSlowdown height_slowdown_for(const ExtrusionPath &path);
+    // Set by _extrude() around the travel to a slowed-down path's first point; travel_to() caps the travel
+    // acceleration (and, off Bambu Lab printers, the travel jerk) by it, as Bambu caps m_travel_accelerations.
+    HeightSlowdown m_height_slowdown_travel;
 
     // Snapmaker: flow variant — read a process-domain vector option
     template<typename VectorOption>
@@ -971,6 +1004,8 @@ private:
     friend class WipeTowerIntegration;
     friend class PressureEqualizer;
     friend class Print;
+    // tests/fff_print/test_wipe_tower_data.cpp: collect_layers_to_print(object, warn, tower).
+    friend struct WipeTowerDataTestAccess;
     friend class SmallAreaInfillFlowCompensator;
 };
 

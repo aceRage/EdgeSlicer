@@ -21,9 +21,12 @@
 
 #include <float.h>
 #include <assert.h>
+#include <mutex>
 #include <regex>
 #include <cctype>
+#include <cerrno>
 #include <charconv>
+#include <cstring>
 #include <string>
 #include <system_error>
 
@@ -126,6 +129,8 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags_compatible = {
 
 const std::string GCodeProcessor::Flush_Start_Tag = " FLUSH_START";
 const std::string GCodeProcessor::Flush_End_Tag = " FLUSH_END";
+const std::string GCodeProcessor::VFlush_Start_Tag = " VFLUSH_START";
+const std::string GCodeProcessor::VFlush_End_Tag = " VFLUSH_END";
 
 //Orca: External device purge tag
 const std::string GCodeProcessor::External_Purge_Tag = " EXTERNAL_PURGE";
@@ -134,6 +139,7 @@ const float GCodeProcessor::Wipe_Width = 0.05f;
 const float GCodeProcessor::Wipe_Height = 0.05f;
 
 bool GCodeProcessor::s_IsBBLPrinter = true;
+bool GCodeProcessor::s_EstimateVirtualFlush = true;
 
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
 const std::string GCodeProcessor::Mm3_Per_Mm_Tag = "MM3_PER_MM:";
@@ -255,6 +261,8 @@ void GCodeProcessor::TimeMachine::reset()
     max_travel_acceleration = 0.0f;
     extrude_factor_override_percentage = 1.0f;
     time = 0.0f;
+    planning_time = 0.0;
+    estimate_only_pending = 0.0f;
     stop_times = std::vector<StopTime>();
     curr.reset();
     prev.reset();
@@ -385,6 +393,12 @@ void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, P
     // and an empty buffer keeps today's early-return unchanged (no behavior change).
     const bool drain_final = is_final && !m_additional_time_buffer.empty();
     if (blocks.size() < 2 && !drain_final) {
+        // EDGE: estimate-only time no block will carry any more goes to the total.
+        if (is_final && estimate_only_pending > 0.0f) {
+            time += double(estimate_only_pending);
+            gcode_time.cache += estimate_only_pending;
+            estimate_only_pending = 0.0f;
+        }
         // Not enough blocks to attribute the extra time to yet; buffer it so it is
         // applied on a later pass instead of being dropped.
         if (additional_time > 0.0f) {
@@ -444,16 +458,23 @@ void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, P
             }
         }
 
+        // EDGE: the estimate-only time (add_estimate_only_time) rides on this block in the estimate only.
+        // planning_time sums exactly what `time` summed before it existed.
+        const float estimate_only = estimate_only_pending;
+        estimate_only_pending     = 0.0f;
+        planning_time += double(block_time);
         time += double(block_time);
+        if (estimate_only > 0.0f)
+            time += double(estimate_only);
         // EDGE: += rather than upstream's =, so a move can never lose time it was given.
         const bool has_move = block.move_id > 0 && block.move_id < result.moves.size();
         assert(has_move);
         if (has_move)
-            result.moves[block.move_id].time[mode_id] += block_time;
-        gcode_time.cache += block_time;
+            result.moves[block.move_id].time[mode_id] += block_time + estimate_only;
+        gcode_time.cache += block_time + estimate_only;
         //BBS
         if (block.flags.prepare_stage)
-            prepare_time += block_time;
+            prepare_time += block_time + estimate_only;
 
         // actual speed profile, used to render toolpaths with the actual speed (OrcaSlicer #10735)
         if (mode == PrintEstimatedStatistics::ETimeMode::Normal && has_move) {
@@ -502,7 +523,7 @@ void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, P
             }
         }
 
-        g1_times_cache.push_back({ block.g1_line_id, block.remaining_internal_g1_lines, float(time) });
+        g1_times_cache.push_back({ block.g1_line_id, block.remaining_internal_g1_lines, float(time), float(planning_time) });
         // update times for remaining time to printer stop placeholders
         auto it_stop_time = std::lower_bound(stop_times.begin(), stop_times.end(), block.g1_line_id,
             [](const StopTime& t, unsigned int value) { return t.g1_line_id < value; });
@@ -524,12 +545,19 @@ void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, P
             for (size_t i = additional_buffer_idx; i < additional_buffer.size(); ++i)
                 leftover += additional_buffer[i].time;
             time += double(leftover);
+            planning_time += double(leftover);
             gcode_time.cache += leftover;
         } else {
             m_additional_time_buffer.insert(m_additional_time_buffer.end(),
                                             additional_buffer.begin() + additional_buffer_idx,
                                             additional_buffer.end());
         }
+    }
+
+    if (is_final && estimate_only_pending > 0.0f) {
+        time += double(estimate_only_pending);
+        gcode_time.cache += estimate_only_pending;
+        estimate_only_pending = 0.0f;
     }
 
     if (keep_last_n_blocks) {
@@ -813,6 +841,15 @@ const std::vector<std::pair<GCodeProcessor::EProducer, std::string>> GCodeProces
 };
 
 unsigned int GCodeProcessor::s_result_id = 0;
+
+// Orca #17540: results can be reset on several threads at once, as the layer cooling resets its own processor
+// during an export.
+static unsigned int next_result_id(unsigned int &last_id)
+{
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    return ++ last_id;
+}
 
 bool GCodeProcessor::contains_reserved_tag(const std::string& gcode, std::string& found_tag)
 {
@@ -1387,6 +1424,7 @@ void GCodeProcessor::reset()
     m_cached_position.reset();
     m_wiping = false;
     m_flushing = false;
+    m_virtual_flushing = false;
     m_wipe_tower = false;
     m_remaining_volume = 0.f;
 
@@ -1431,7 +1469,7 @@ void GCodeProcessor::reset()
     m_used_filaments.reset();
 
     m_result.reset();
-    m_result.id = ++s_result_id;
+    m_result.id = next_result_id(s_result_id);
 
     m_last_default_color_id = 0;
 
@@ -1517,7 +1555,7 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
 
     // process gcode
     m_result.filename = filename;
-    m_result.id = ++s_result_id;
+    m_result.id = next_result_id(s_result_id);
     // 1st move must be a dummy move
     m_result.moves.emplace_back(GCodeProcessorResult::MoveVertex());
     size_t parse_line_callback_cntr = 10000;
@@ -1545,7 +1583,7 @@ void GCodeProcessor::initialize(const std::string& filename)
 
     // process gcode
     m_result.filename = filename;
-    m_result.id = ++s_result_id;
+    m_result.id = next_result_id(s_result_id);
     // 1st move must be a dummy move
     m_result.moves.emplace_back(GCodeProcessorResult::MoveVertex());
 }
@@ -1613,6 +1651,12 @@ void GCodeProcessor::finalize(bool post_process)
 
     if (post_process)
         run_post_process();
+}
+
+float GCodeProcessor::get_planning_time(PrintEstimatedStatistics::ETimeMode mode) const
+{
+    return (mode < PrintEstimatedStatistics::ETimeMode::Count) ?
+        float(m_time_processor.machines[static_cast<size_t>(mode)].planning_time) : 0.0f;
 }
 
 float GCodeProcessor::get_time(PrintEstimatedStatistics::ETimeMode mode) const
@@ -2049,6 +2093,12 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
         case 'T':
             process_T(line); // Select Tool
             break;
+        case 's':
+        case 'S':
+            // A wait of a Bambu firmware flush ("SYNC T<s>" between "; VFLUSH_START" and "; VFLUSH_END").
+            if (s_EstimateVirtualFlush && m_virtual_flushing && ascii_iequals(cmd, "SYNC"))
+                process_SYNC(line);
+            break;
         default:
             break;
         }
@@ -2276,6 +2326,23 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     //BBS: flush end tag
     if (boost::starts_with(comment, GCodeProcessor::Flush_End_Tag)) {
         m_flushing = false;
+        return;
+    }
+
+    // The firmware flush of the H2D / H2C / X2D / H2S / P2S / A2L / H3C (VFlush_Start_Tag). Before, nothing here was read,
+    // so their flush was in neither the flushed filament nor the time.
+    if (boost::starts_with(comment, GCodeProcessor::VFlush_Start_Tag)) {
+        m_virtual_flushing = true;
+        return;
+    }
+    if (boost::starts_with(comment, GCodeProcessor::VFlush_End_Tag)) {
+        m_virtual_flushing = false;
+        return;
+    }
+    // ";VG1" is a move of the firmware: inside a VFLUSH block flushed filament and its time, outside it (the deretract
+    // ";VG1 E4 F.." after the T line) its time only.
+    if (s_EstimateVirtualFlush && boost::starts_with(comment, "VG1 ")) {
+        process_virtual_flush_move(comment);
         return;
     }
     
@@ -3073,17 +3140,7 @@ void GCodeProcessor::process_G1(const std::array<std::optional<double>, 4>& axes
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
     }
     else if (type == EMoveType::Unretract && m_flushing) {
-        float volume_flushed_filament = area_filament_cross_section * delta_pos[E];
-        if (m_remaining_volume > volume_flushed_filament)
-        {
-            m_used_filaments.update_flush_per_filament(m_last_extruder_id, volume_flushed_filament);
-            m_remaining_volume -= volume_flushed_filament;
-        }
-        else {
-            m_used_filaments.update_flush_per_filament(m_last_extruder_id, m_remaining_volume);
-            m_used_filaments.update_flush_per_filament(m_extruder_id, volume_flushed_filament - m_remaining_volume);
-            m_remaining_volume = 0.f;
-        }
+        book_flush_volume(area_filament_cross_section * delta_pos[E]);
     }
 
     // time estimate section
@@ -3691,6 +3748,20 @@ void GCodeProcessor::process_G29(const GCodeReader::GCodeLine& line)
 
 void GCodeProcessor::process_G10(const GCodeReader::GCodeLine& line)
 {
+    // Orca #17464: RepRapFirmware's G10 with parameters sets tool temperatures, offsets or workplaces; only a bare G10 retracts.
+    if (m_flavor == gcfRepRapFirmware &&
+        (line.has('P') || line.has('R') || line.has('S') || line.has('L') || line.has_x() || line.has_y() || line.has_z())) {
+        float new_temp;
+        if (line.has_value('S', new_temp)) {
+            float tool;
+            const int filament_id = line.has_value('P', tool) ? static_cast<int>(tool) : static_cast<int>(m_extruder_id);
+            // RRF turns a heater off with a negative temperature.
+            if (filament_id >= 0 && filament_id < static_cast<int>(m_extruder_temps.size()))
+                m_extruder_temps[filament_id] = std::max(new_temp, 0.f);
+        }
+        return;
+    }
+
     // Emulate G1 retract, decrement G1 count as it's will be incremented in process_G1, but it's fake G1
     GCodeReader::GCodeLine g10;
     g10.set(Axis::E, -this->m_parser.config().retraction_length.get_at(m_extruder_id));
@@ -4393,11 +4464,17 @@ public:
     {
         if (m_buffer.empty())
             return;
+        errno = 0;
         const size_t written = fwrite(m_buffer.data(), 1, m_buffer.size(), m_out.f);
         if (ferror(m_out.f) || written != m_buffer.size()) {
+            // Below the message, the system error says what went wrong.
+            const int   error   = errno;
+            std::string message = m_error_message;
+            if (error != 0)
+                message += (!message.empty() && message.back() == '\n' ? "" : "\n") + std::string(::strerror(error)) + "\n";
             m_out.close();
             boost::nowide::remove(m_out_path.c_str());
-            throw Slic3r::RuntimeError(m_error_message);
+            throw Slic3r::RuntimeError(message);
         }
         m_file_pos += m_buffer.size();
         m_buffer.clear();
@@ -4671,9 +4748,10 @@ void GCodeProcessor::run_post_process()
             }
 
             if (it != m_machines[Normal].g1_times_cache.end() && it->id == g1_lines_counter) {
-                m_times[Normal] = it->elapsed_time;
+                // EDGE: the lines are placed (preheat backtrace) and written by the time without the estimate-only time.
+                m_times[Normal] = it->planning_time;
                 if (!m_machines[Stealth].g1_times_cache.empty())
-                    m_times[Stealth] = (m_machines[Stealth].g1_times_cache.begin() + std::distance(m_machines[Normal].g1_times_cache.begin(), it))->elapsed_time;
+                    m_times[Stealth] = (m_machines[Stealth].g1_times_cache.begin() + std::distance(m_machines[Normal].g1_times_cache.begin(), it))->planning_time;
             }
 
             return ret;
@@ -5332,7 +5410,7 @@ std::map<unsigned int, std::vector<std::string>> GCodeProcessor::plan_pre_coolin
             }
         }
         if (it != cache.end() && it->id == g1_lines_counter) {
-            cur_time  = it->elapsed_time;
+            cur_time  = it->planning_time; // EDGE: without the estimate-only time (add_estimate_only_time)
             cur_g1_id = it->id;
         }
         return ret;
@@ -5920,6 +5998,75 @@ void GCodeProcessor::process_custom_gcode_time(CustomGCode::Type code)
             gcode_time.cache = 0.0f;
         }
     }
+}
+
+void GCodeProcessor::book_flush_volume(float volume)
+{
+    if (m_remaining_volume > volume) {
+        m_used_filaments.update_flush_per_filament(m_last_extruder_id, volume);
+        m_remaining_volume -= volume;
+    } else {
+        m_used_filaments.update_flush_per_filament(m_last_extruder_id, m_remaining_volume);
+        m_used_filaments.update_flush_per_filament(m_extruder_id, volume - m_remaining_volume);
+        m_remaining_volume = 0.f;
+    }
+}
+
+void GCodeProcessor::process_virtual_flush_move(const std::string_view comment)
+{
+    // ";VG1 E41.5 F623": the firmware pushes E mm of the new filament through the nozzle at F mm/min (the
+    // change_filament_gcode computes both from flush_length and the filaments' volumetric speeds). Nothing moves in
+    // X / Y / Z and the E axis of this file does not advance: the move is in the firmware.
+    float e = 0.f;
+    float f = 0.f;
+    size_t pos = comment.find(' ');
+    while (pos != std::string_view::npos) {
+        const size_t start = comment.find_first_not_of(' ', pos);
+        if (start == std::string_view::npos)
+            break;
+        pos = comment.find(' ', start);
+        const std::string_view word = comment.substr(start, pos == std::string_view::npos ? std::string_view::npos : pos - start);
+        if (word.size() < 2)
+            continue;
+        float value = 0.f;
+        if (!parse_number(word.substr(1), value))
+            continue;
+        if (word.front() == 'E' || word.front() == 'e')
+            e = value;
+        else if (word.front() == 'F' || word.front() == 'f')
+            f = value;
+    }
+    if (!(e > 0.f))
+        return;
+    if (m_virtual_flushing) {
+        const float filament_diameter = (static_cast<size_t>(m_extruder_id) < m_result.filament_diameters.size()) ?
+                                            m_result.filament_diameters[m_extruder_id] :
+                                            m_result.filament_diameters.back();
+        book_flush_volume(static_cast<float>(M_PI) * sqr(0.5f * filament_diameter) * e);
+    }
+    // The time of the move, in the estimate only: the planner placing pre-cooling lines must see the G-code as before
+    // (the owner, 2026-11-23: keep the G-code unchanged).
+    if (f > 0.f)
+        add_estimate_only_time(e / f * 60.f);
+}
+
+void GCodeProcessor::add_estimate_only_time(float seconds)
+{
+    if (!(seconds > 0.f))
+        return;
+    for (TimeMachine &machine : m_time_processor.machines)
+        if (machine.enabled)
+            machine.estimate_only_pending += seconds;
+}
+
+void GCodeProcessor::process_SYNC(const GCodeReader::GCodeLine& line)
+{
+    // "SYNC T15": a wait of the flush in seconds, as the template estimates it (H2D: ceil(flush_length / 125) * 5, then
+    // the heating and cooling between the print and the flush temperature, "compensate for heating and cooling"). A
+    // negative or zero value (no flush, no temperature change) adds nothing.
+    float seconds = 0.f;
+    if (line.has_value('T', seconds))
+        add_estimate_only_time(seconds);
 }
 
 void GCodeProcessor::process_filaments(CustomGCode::Type code)

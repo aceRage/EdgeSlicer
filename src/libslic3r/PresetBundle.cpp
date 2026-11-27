@@ -987,17 +987,17 @@ void PresetBundle::reset_project_embedded_presets()
     //update filament_presets
     for (size_t i = 0; i < filament_presets.size(); ++ i)
     {
-        Preset* selected_filament = this->filaments.find_preset(filament_presets[i], false);
+        // Snapmaker #1174: follow renamed_from, so a project naming a renamed system filament keeps it.
+        Preset* selected_filament = this->filaments.find_preset2(filament_presets[i], false);
         if (!selected_filament) {
-            //it should be the project embedded presets
+            // The project preset may have been removed. Resolve the printer's default as well,
+            // since it may still refer to a renamed system preset.
             Preset& current_printer = this->printers.get_selected_preset();
             const std::vector<std::string> &prefered_filament_profiles = current_printer.config.option<ConfigOptionStrings>("default_filament_profile")->values;
-            const std::string prefered_filament_profile = prefered_filament_profiles.empty() ? std::string() : prefered_filament_profiles.front();
-            if (!prefered_filament_profile.empty())
-                filament_presets[i] = prefered_filament_profile;
-            else
-            filament_presets[i] = this->filaments.first_visible().name;
+            if (!prefered_filament_profiles.empty())
+                selected_filament = this->filaments.find_preset2(prefered_filament_profiles.front(), false);
         }
+        filament_presets[i] = selected_filament ? selected_filament->name : this->filaments.first_visible().name;
     }
 }
 
@@ -3717,16 +3717,23 @@ bool PresetBundle::filament_nozzle_assignment_supported() const
 
 std::vector<size_t> PresetBundle::filament_nozzles() const
 {
-    const auto *nozzles = this->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
+    const auto *nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter");
     const auto *fmap    = this->project_config.option<ConfigOptionInts>("filament_map");
     const auto *assign  = this->project_config.option<ConfigOptionInts>("filament_nozzle_assignment");
     static const std::vector<int> none;
-    const bool   assignable = this->filament_nozzle_assignment_supported();
-    const size_t count      = this->filament_presets.size();
+    const bool   assignable   = this->filament_nozzle_assignment_supported();
+    const size_t count        = this->filament_presets.size();
+    const size_t nozzle_count = nozzles != nullptr ? nozzles->values.size() : 0;
+    // A Bambu grouping machine (H2D / H2C) with a manual map: filament_map decides also for one or two filaments
+    // (filament_map_decides_extruder; the mode is the project's, the variants the printer's).
+    const auto  *mode         = this->project_config.option("filament_map_mode");
+    const bool   manual       = mode != nullptr && (mode->getInt() == int(fmmManual) || mode->getInt() == int(fmmNozzleManual));
+    const bool   grouping     = manual && is_bambu_grouping_machine(printer, nozzle_count);
     std::vector<size_t> out(count, 0);
     for (size_t f = 0; f < count; ++f)
-        out[f] = physical_extruder_for_filament(nozzles != nullptr ? nozzles->values.size() : 0, count, fmap != nullptr ? fmap->values : none,
-                                                unsigned(f + 1), assignable && assign != nullptr ? assign->values : none);
+        out[f] = physical_extruder_for_filament(nozzle_count, count, fmap != nullptr ? fmap->values : none, unsigned(f + 1),
+                                                assignable && assign != nullptr ? assign->values : none, grouping);
     return out;
 }
 

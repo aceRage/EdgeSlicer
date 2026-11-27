@@ -15,6 +15,7 @@
 #include "GUI_App.hpp"
 #include "I18N.hpp"
 #include "Plater.hpp"
+#include "ImageToObjectDialog.hpp"
 #include "LayerlingPanel.hpp"
 #include "ObjectDataViewModel.hpp"
 
@@ -32,6 +33,7 @@
 #include "libslic3r/SupportSet.hpp"
 #include "SupportGroupsDialog.hpp"
 #include <algorithm>
+#include <set>
 #include <iterator>
 #include "slic3r/Utils/FixModelByWin10.hpp"
 #include "ParamsPanel.hpp"
@@ -188,7 +190,10 @@ std::map<std::string, std::vector<SimpleSettingData>>  SettingsFactory::PART_CAT
     { L("Speed"), {{"outer_wall_speed", "",1},{"inner_wall_speed", "",2},{"sparse_infill_speed", "",3},{"top_surface_speed", "",4}, {"internal_solid_infill_speed", "",5},
                     {"enable_overhang_speed", "",6}, {"overhang_1_4_speed", "",7}, {"overhang_2_4_speed", "",8}, {"overhang_3_4_speed", "",9}, {"overhang_4_4_speed", "",10},
                     {"bridge_speed", "",11}, {"gap_infill_speed", "",12}, {"internal_bridge_speed", "", 13},
-                    {"min_layer_time_pause", "", 14}
+                    {"min_layer_time_pause", "", 14},
+                    // Bambu Studio 02.09.01.70 GUI_Factories.cpp:116-117.
+                    {"enable_height_slowdown", "", 15}, {"slowdown_start_height", "", 16}, {"slowdown_start_speed", "", 17}, {"slowdown_start_acc", "", 18},
+                    {"slowdown_end_height", "", 19}, {"slowdown_end_speed", "", 20}, {"slowdown_end_acc", "", 21}
                     }},
     // Ultra (support groups): the curated part-level support keys, so a part's settings node
     // renders them in the same table style as Quality/Strength/Speed. An OBJECT takes its
@@ -485,9 +490,15 @@ static const Selection& get_selection()
 
 //				  category ->		vector 			 ( option	;  label )
 typedef std::map< std::string, std::vector< std::pair<std::string, std::string> > > FullSettingsHierarchy;
-static void get_full_settings_hierarchy(FullSettingsHierarchy& settings_menu, const bool is_part)
+// `item_overrides`: base keys the item already carries; they stay listed in every view.
+static void get_full_settings_hierarchy(FullSettingsHierarchy& settings_menu, const bool is_part,
+                                        const std::set<std::string>* item_overrides = nullptr)
 {
     auto options = SettingsFactory::get_options(is_part);
+    // Settings views: the Bambu view offers only Bambu Studio's keys (plus existing overrides);
+    // Basic / Advanced are unchanged (SettingsView.hpp, add_settings_key_offered).
+    options = filter_add_settings_keys(wxGetApp().get_settings_view(), wxGetApp().preset_bundle->is_bbl_vendor(),
+                                       options, item_overrides);
 
     const int filaments_cnt = filaments_count();
 
@@ -513,8 +524,12 @@ static wxMenu* create_settings_popupmenu(wxMenu* parent_menu, const bool is_obje
 {
     wxMenu* menu = new wxMenu;
 
+    // Rebuilt on every right-click, so a view change shows at once.
+    std::set<std::string> item_overrides;
+    add_override_keys(obj_list()->get_item_config(item).get(), item_overrides);
+
     FullSettingsHierarchy categories;
-    get_full_settings_hierarchy(categories, !is_object_settings);
+    get_full_settings_hierarchy(categories, !is_object_settings, &item_overrides);
 
     auto get_selected_options_for_category = [categories, item](const wxString& category_name) {
         wxArrayString names;
@@ -2042,6 +2057,15 @@ void MenuFactory::append_menu_items_mirror(wxMenu* menu)
         []() { return plater()->can_mirror(); }, m_parent);
 }
 
+void MenuFactory::append_menu_items_apply_transform(wxMenu* menu)
+{
+    // One item that opens a small dialog with a box for each of rotation, scale and position.
+    append_menu_item(menu, wxID_ANY, _L("Apply Transform") + dots,
+        _L("Make the current rotation, scale or position the new baseline, without moving anything"),
+        [](wxCommandEvent&) { plater()->apply_transformation_dialog(false, true, true); }, "", menu,
+        []() { return plater()->can_apply_transformation(false); }, m_parent);
+}
+
 void MenuFactory::append_menu_item_edit_text(wxMenu *menu)
 {
     wxString name        = _L("Edit text");
@@ -2154,6 +2178,21 @@ void MenuFactory::append_menu_item_edit_cut(wxMenu *menu)
     if (obj_list()->has_selected_editable_cut())
         append_menu_item(menu, wxID_ANY, menu_name, _L("Edit the cut that produced this object"),
             [](wxCommandEvent &) { obj_list()->edit_cut(); },
+            "", menu, []() { return true; }, m_parent);
+}
+
+// Dynamic, like "Edit cut..." above: only for an object made by "Image to object"
+void MenuFactory::append_menu_item_edit_image_object(wxMenu *menu)
+{
+    const wxString menu_name = _L("Edit image object") + dots;
+
+    auto menu_item_id = menu->FindItem(menu_name);
+    if (menu_item_id != wxNOT_FOUND)
+        menu->Destroy(menu_item_id);
+
+    if (can_edit_image_object())
+        append_menu_item(menu, wxID_ANY, menu_name, _L("Change the settings this object was made with from its image"),
+            [](wxCommandEvent &) { edit_image_object(); },
             "", menu, []() { return true; }, m_parent);
 }
 
@@ -2286,6 +2325,10 @@ void MenuFactory::create_default_menu()
     append_menu_item(&m_default_menu, wxID_ANY, _L("Add Models"), "", // ORCA: Add Models
         [](wxCommandEvent&) { plater()->add_file(); }, "menu_add_part", &m_default_menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
+    append_menu_item(&m_default_menu, wxID_ANY, _L("Image to object") + dots,
+        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter, a box with a lid or a clicker"),
+        [](wxCommandEvent&) { create_object_from_image(); }, "menu_add_part", &m_default_menu,
+        []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
 #else
     append_submenu(&m_default_menu, sub_menu_primitives, wxID_ANY, _L("Add Primitive"), "", "",
         []() {return true; }, m_parent);
@@ -2295,6 +2338,10 @@ void MenuFactory::create_default_menu()
         []() {return true; }, m_parent);
     append_menu_item(&m_default_menu, wxID_ANY, _L("Add Models"), "", // ORCA: Add Models
         [](wxCommandEvent&) { plater()->add_file(); }, "", &m_default_menu,
+        []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
+    append_menu_item(&m_default_menu, wxID_ANY, _L("Image to object") + dots,
+        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter, a box with a lid or a clicker"),
+        [](wxCommandEvent&) { create_object_from_image(); }, "", &m_default_menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
 #endif
 
@@ -2325,6 +2372,7 @@ void MenuFactory::create_common_object_menu(wxMenu* menu)
 
     append_menu_item_fix_through_netfabb(menu);
     append_menu_items_mirror(menu);
+    append_menu_items_apply_transform(menu);
 }
 
 void MenuFactory::create_object_menu()
@@ -2431,6 +2479,7 @@ void MenuFactory::create_extra_object_menu()
 
     // Mirror
     append_menu_items_mirror(&m_object_menu);
+    append_menu_items_apply_transform(&m_object_menu);
     // Delete
     append_menu_item_delete(&m_object_menu);
     m_object_menu.AppendSeparator();
@@ -2493,6 +2542,7 @@ void MenuFactory::create_part_menu()
     append_menu_item_export_stl_part(menu);
     append_menu_item_fix_through_netfabb(menu);
     append_menu_items_mirror(menu);
+    append_menu_items_apply_transform(menu);
     // Ultra: per-part visibility inside assemblies
     append_menu_items_visibility(menu);
     // "Separate": extract this one part into its own object, keeping its position
@@ -2513,6 +2563,7 @@ void MenuFactory::create_part_menu()
     menu->AppendSeparator();
     append_menu_item_change_type(menu);
     append_menu_items_mirror(&m_part_menu);
+    append_menu_items_apply_transform(&m_part_menu);
     append_menu_item(&m_part_menu, wxID_ANY, _L("Split"), _L("Split the selected object into multiple parts"),
         [](wxCommandEvent&) { plater()->split_volume(); }, "split_parts", nullptr,
         []() { return plater()->can_split(false); }, m_parent);
@@ -2529,6 +2580,7 @@ void MenuFactory::create_text_part_menu()
     append_menu_item_fix_through_netfabb(menu);
     append_menu_item_simplify(menu);
     append_menu_items_mirror(menu);
+    append_menu_items_apply_transform(menu);
     append_menu_item_export_stl_part(menu);
     append_menu_item_export_outline_dxf(menu);
     menu->AppendSeparator();
@@ -2545,6 +2597,7 @@ void MenuFactory::create_svg_part_menu()
     append_menu_item_fix_through_netfabb(menu);
     append_menu_item_simplify(menu);
     append_menu_items_mirror(menu);
+    append_menu_items_apply_transform(menu);
     append_menu_item_export_stl_part(menu);
     append_menu_item_export_outline_dxf(menu);
     menu->AppendSeparator();
@@ -2563,6 +2616,7 @@ void MenuFactory::create_bbl_part_menu()
     append_menu_item_center(menu);
     append_menu_item_drop(menu);
     append_menu_items_mirror(menu);
+    append_menu_items_apply_transform(menu);
     // Ultra: per-part visibility inside assemblies
     append_menu_items_visibility(menu);
     // "Separate": pull this one part out of the assembly into its own object, keeping its
@@ -2929,6 +2983,10 @@ void MenuFactory::create_plate_menu()
     append_menu_item(menu, wxID_ANY, _L("Add Models"), "", // ORCA: Add Models
         [](wxCommandEvent&) { plater()->add_file(); }, "menu_add_part", menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
+    append_menu_item(menu, wxID_ANY, _L("Image to object") + dots,
+        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter, a box with a lid or a clicker"),
+        [](wxCommandEvent&) { create_object_from_image(); }, "menu_add_part", menu,
+        []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
 #else
     append_submenu(menu, sub_menu_primitives, wxID_ANY, _L("Add Primitive"), "", "",
         []() {return true; }, m_parent);
@@ -2938,6 +2996,10 @@ void MenuFactory::create_plate_menu()
         []() {return true; }, m_parent);
     append_menu_item(menu, wxID_ANY, _L("Add Models"), "", // ORCA: Add Models
         [](wxCommandEvent&) { plater()->add_file(); }, "", menu,
+        []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
+    append_menu_item(menu, wxID_ANY, _L("Image to object") + dots,
+        _L("Make a printable object from the outline of a PNG or JPG image: a cookie cutter, a box with a lid or a clicker"),
+        [](wxCommandEvent&) { create_object_from_image(); }, "", menu,
         []() {return wxGetApp().plater()->can_add_model(); }, m_parent);
 #endif
 
@@ -2989,6 +3051,7 @@ wxMenu* MenuFactory::object_menu()
     append_menu_items_convert_unit(&m_object_menu);
     append_menu_items_flush_options(&m_object_menu);
     append_menu_item_edit_cut(&m_object_menu);
+    append_menu_item_edit_image_object(&m_object_menu);
     append_menu_item_copy_cut(&m_object_menu);
     append_menu_item_invalidate_cut_info(&m_object_menu);
     append_menu_item_edit_text(&m_object_menu);

@@ -366,6 +366,12 @@ void OG_CustomCtrl::OnMotion(wxMouseEvent& event)
 
     for (CtrlLine& line : ctrl_lines) {
         if (!line.is_visible) continue;
+        if (line.not_in_bambu && is_point_in_rect(pos, line.rect_chip)) {
+            tooltip = _L("Not shown in Bambu Studio. Shown because it differs from the system preset, the object overrides it, "
+                         "or you opened it from search.");
+            line.is_focused = false;
+            break;
+        }
         line.is_focused = is_point_in_rect(pos, line.rect_label);
         if (line.is_focused) {
             if (!suppress_hyperlinks && !line.og_line.label_path.empty())
@@ -493,16 +499,28 @@ void OG_CustomCtrl::OnLeaveWin(wxMouseEvent& event)
     event.Skip();
 }
 
-bool OG_CustomCtrl::update_visibility(ConfigOptionMode mode)
+bool OG_CustomCtrl::update_visibility(const ViewFilter& filter)
 {
     // BBS: new layout
     wxCoord    h_pos = (ctrlWidth + get_title_width() - titleWidth) * m_em_unit;
     wxCoord    h_pos2 = get_title_width() * m_em_unit;
     wxCoord    v_pos = 0;
 
+    // Settings views (SettingsView line_show): in Basic / Advanced / Developer every line is today's
+    // `line_mode <= level`, a widget-only row (no option) counting as Simple. In the Bambu view a
+    // widget-only row follows its group: shown while the group shows at least one option line.
+    bool has_visible_option_line = false;
+    if (filter.bambu())
+        for (const CtrlLine& line : ctrl_lines)
+            if (!line.is_separator() && !line.og_line.get_options().empty() && line.og_line.toggle_visible &&
+                Slic3r::shown(line_show(filter, line_option_ids(line.og_line), line_mode(line.og_line))))
+                has_visible_option_line = true;
+
     bool has_visible_lines = false;
     for (CtrlLine& line : ctrl_lines) {
-        line.update_visibility(mode);
+        line.update_visibility(line.og_line.get_options().empty() ?
+                                   widget_line_show(filter, has_visible_option_line, line_mode(line.og_line)) :
+                                   line_show(filter, line_option_ids(line.og_line), line_mode(line.og_line)));
         if (line.is_visible) {
             v_pos += (wxCoord)line.height;
 
@@ -720,16 +738,18 @@ void OG_CustomCtrl::CtrlLine::msw_rescale()
     correct_items_positions();
 }
 
-void OG_CustomCtrl::CtrlLine::update_visibility(ConfigOptionMode mode)
+void OG_CustomCtrl::CtrlLine::update_visibility(LineShow show)
 {
     if (og_line.is_separator())
         return;
     const std::vector<Option>& option_set = og_line.get_options();
 
     // A widget-only row (no option, e.g. the Printer settings Extruder page's "Nozzles in this project" button and the rack
-    // box) is shown in every mode. front() of its empty option list read null + 0x180 here (owner crash 2026-11-10, clicking
-    // Printer settings > Extruder 1 on any printer).
-    is_visible = og_line.toggle_visible && line_mode(og_line) <= mode;
+    // box) is shown in every mode (Bambu view: while its group shows an option line). front() of its empty option list read
+    // null + 0x180 here (owner crash 2026-11-10, clicking Printer settings > Extruder 1 on any printer): line_mode() and
+    // line_option_ids() handle the empty list.
+    is_visible   = og_line.toggle_visible && Slic3r::shown(show);
+    not_in_bambu = show == LineShow::ShownNotInBambu;
 
     if (draw_just_act_buttons)
         return;
@@ -836,6 +856,9 @@ void OG_CustomCtrl::CtrlLine::render(wxDC& dc, wxCoord h_pos, wxCoord v_pos)
         }
         // BBS
         h_pos = draw_text(dc, wxPoint(h_pos + flow_icon_offset, v_pos), label /* + ":" */, text_clr, ctrl->opt_group->label_width * ctrl->m_em_unit - flow_icon_offset, is_url_string, true);
+        rect_chip = wxRect();
+        if (not_in_bambu)
+            draw_not_in_bambu_chip(dc, v_pos, h_pos - ctrl->m_h_gap);
     }
 
     // If there's a widget, build it and set result to the correct position.
@@ -888,7 +911,7 @@ void OG_CustomCtrl::CtrlLine::render(wxDC& dc, wxCoord h_pos, wxCoord v_pos)
             draw_buttons(field);
         // update width for full_width fields
         if (option_set.front().opt.full_width && field && field->getWindow())
-            field->getWindow()->SetSize(ctrl->GetSize().x - h_pos2 + h_pos3 - h_pos - ctrl->m_em_unit * 3, -1);
+            field->getWindow()->SetSize(std::max(ctrl->GetSize().x - h_pos2 + h_pos3 - h_pos - ctrl->m_em_unit * 3, 0), -1);
         return;
     }
 
@@ -993,6 +1016,50 @@ wxCoord OG_CustomCtrl::CtrlLine::draw_text(wxDC &dc, wxPoint pos, const wxString
     }
 
     return pos.x + width + ctrl->m_h_gap;
+}
+
+void OG_CustomCtrl::CtrlLine::draw_not_in_bambu_chip(wxDC& dc, wxCoord v_pos, wxCoord column_end)
+{
+    // Colours from tests/mockups/view_modes.html (--chip / --chip-fg), light and dark. The chip is text, so
+    // the marker never relies on colour alone; its tooltip says why the line is shown.
+    const bool     dark = wxGetApp().dark_mode();
+    const wxColour bg   = dark ? wxColour("#352D55") : wxColour("#E8E2F6");
+    const wxColour fg   = dark ? wxColour("#D6CDFA") : wxColour("#4A3A86");
+
+    const wxFont   old_font  = dc.GetFont();
+    const wxColour old_text  = dc.GetTextForeground();
+    const wxPen    old_pen   = dc.GetPen();
+    const wxBrush  old_brush = dc.GetBrush();
+    wxFont font = Label::Body_10;
+    font.MakeBold();
+    dc.SetFont(font);
+
+    const int pad_x = ctrl->FromDIP(5);
+    const int pad_y = ctrl->FromDIP(1);
+    int       left  = (rect_label.IsEmpty() ? column_end : rect_label.GetRight()) + ctrl->FromDIP(6);
+    wxString  text  = _L("Not in Bambu Studio");
+    wxSize    ts    = dc.GetTextExtent(text);
+    if (left + ts.x + 2 * pad_x > column_end) {
+        text = "E"; // EdgeSlicer
+        ts   = dc.GetTextExtent(text);
+    }
+    const int w = ts.x + 2 * pad_x;
+    const int h = ts.y + 2 * pad_y;
+    if (left + w > column_end)
+        left = std::max(rect_label.IsEmpty() ? 0 : rect_label.GetLeft(), column_end - w);
+    const int top = v_pos + std::max(0, int(height - h) / 2);
+    rect_chip     = wxRect(left, top, w, h);
+
+    dc.SetPen(*wxTRANSPARENT_PEN);
+    dc.SetBrush(wxBrush(bg));
+    dc.DrawRoundedRectangle(rect_chip, h / 2.0);
+    dc.SetTextForeground(fg);
+    dc.DrawText(text, left + pad_x, top + pad_y);
+
+    dc.SetFont(old_font);
+    dc.SetTextForeground(old_text);
+    dc.SetPen(old_pen);
+    dc.SetBrush(old_brush);
 }
 
 wxPoint OG_CustomCtrl::CtrlLine::draw_blinking_bmp(wxDC& dc, wxPoint pos, bool is_blinking)

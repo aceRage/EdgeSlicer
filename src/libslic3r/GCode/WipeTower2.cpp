@@ -1518,9 +1518,19 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
                        Vec3d                                  plate_origin,
                        const std::vector<std::vector<float>>& wiping_matrix,
                        size_t                                 initial_tool)
+    : WipeTower2(config, default_region_config, Vec2d(config.wipe_tower_x.get_at(plate_idx), config.wipe_tower_y.get_at(plate_idx)),
+                 plate_origin, wiping_matrix, initial_tool)
+{}
+
+WipeTower2::WipeTower2(const PrintConfig&                     config,
+                       const PrintRegionConfig&               default_region_config,
+                       const Vec2d                           &wipe_tower_pos,
+                       Vec3d                                  plate_origin,
+                       const std::vector<std::vector<float>>& wiping_matrix,
+                       size_t                                 initial_tool)
     : m_semm(config.single_extruder_multi_material.value)
     , m_enable_filament_ramming(config.enable_filament_ramming.value)
-    , m_wipe_tower_pos(config.wipe_tower_x.get_at(plate_idx), config.wipe_tower_y.get_at(plate_idx))
+    , m_wipe_tower_pos(wipe_tower_pos.x(), wipe_tower_pos.y())
     , m_wipe_tower_width(float(config.prime_tower_width))
     , m_wipe_tower_rotation_angle(float(config.wipe_tower_rotation_angle))
     , m_wipe_tower_brim_width(float(config.prime_tower_brim_width))
@@ -3127,10 +3137,19 @@ std::vector<std::vector<float>> WipeTower2::extract_wipe_volumes(const PrintConf
 
     // Extract purging volumes for each extruder pair:
     std::vector<std::vector<float>> wipe_volumes;
-    const unsigned int              number_of_extruders = (unsigned int) (sqrt(wiping_matrix.size()) + EPSILON);
-    for (size_t i = 0; i < number_of_extruders; ++i)
-        wipe_volumes.push_back(
-            std::vector<float>(wiping_matrix.begin() + i * number_of_extruders, wiping_matrix.begin() + (i + 1) * number_of_extruders));
+    unsigned int                    number_of_extruders = (unsigned int) (sqrt(wiping_matrix.size()) + EPSILON);
+    if (flush_matrix_layout(wiping_matrix.size(), config.nozzle_diameter.size()).per_nozzle()) {
+        // One matrix per nozzle (Bambu Studio's 2 x N x N): the block of the nozzle the new filament prints from.
+        wipe_volumes = flush_matrix_for_changes(config.flush_volumes_matrix.values, config.nozzle_diameter.size(), config.filament_map.values);
+        number_of_extruders = (unsigned int) wipe_volumes.size();
+        if (!config.purge_in_prime_tower.value || !config.single_extruder_multi_material.value)
+            for (std::vector<float> &row : wipe_volumes)
+                std::fill(row.begin(), row.end(), 0.f);
+    } else {
+        for (size_t i = 0; i < number_of_extruders; ++i)
+            wipe_volumes.push_back(
+                std::vector<float>(wiping_matrix.begin() + i * number_of_extruders, wiping_matrix.begin() + (i + 1) * number_of_extruders));
+    }
 
     // Also include filament_minimal_purge_on_wipe_tower. This is needed for the preview.
     for (unsigned int i = 0; i < number_of_extruders; ++i)

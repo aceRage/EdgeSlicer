@@ -315,6 +315,55 @@ double far_wall_inner_wall_length(const Print &print, double print_z)
 
 } // namespace
 
+// Ported from OrcaSlicer #17680 (ab5b55278b). Edge has no multifilament_config harness, so the two
+// filaments are set up by hand.
+TEST_CASE("Internal bridges stay out of the area of another filament", "[PrintObject][InternalBridge][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00"};
+    config.set_deserialize_strict({{"enable_prime_tower", false},
+                                   {"sparse_infill_pattern", "rectilinear"},
+                                   {"sparse_infill_density", "15%"},
+                                   {"internal_bridge_angle", 0},
+                                   {"top_shell_layers", 3},
+                                   {"bottom_shell_layers", 2},
+                                   {"top_shell_thickness", 0},
+                                   {"bottom_shell_thickness", 0},
+                                   {"layer_height", 0.2},
+                                   {"initial_layer_print_height", 0.2}});
+    Print print;
+    Model model;
+    init_print({internal_bridge_step()}, print, model, config, false);
+    // The infill of the right half prints in filament 2, so the shoulder's bridges meet at x = 15.
+    // Both halves keep the walls of filament 1, so no wall separates their fill areas.
+    TriangleMesh right_half = make_cube(16, 26, 6);
+    right_half.translate(15, -1, -1);
+    ModelVolume *right = model.objects.front()->add_volume(std::move(right_half), ModelVolumeType::PARAMETER_MODIFIER, false);
+    right->config.set_key_value("solid_infill_filament", new ConfigOptionInt(2));
+    right->config.set_key_value("sparse_infill_filament", new ConfigOptionInt(2));
+    print.apply(model, config);
+    print.process();
+    double bridge_area = 0.;
+    double other_filament_area = 0.;
+    for (const Layer *layer : print.objects().front()->layers())
+        for (const LayerRegion *region : layer->regions()) {
+            const Polygons bridges = to_polygons(region->fill_surfaces.filter_by_type(stInternalBridge));
+            bridge_area += area(bridges);
+            for (const LayerRegion *other : layer->regions())
+                if (other->region().extruder(frSolidInfill) != region->region().extruder(frSolidInfill))
+                    other_filament_area += area(intersection(bridges, to_polygons(other->fill_expolygons)));
+        }
+    const double square_mm = scaled<double>(1.) * scaled<double>(1.);
+    REQUIRE(bridge_area > square_mm);
+    // Edge: a sliver one SCALED_EPSILON wide (about 0.001 mm2 here) stays along the border after the
+    // bridges are applied; without the clip the bridges reach millimetres into the other filament.
+    CHECK(other_filament_area < square_mm * 0.01);
+}
+
 TEST_CASE("Only one wall on top surfaces keeps the inner walls of narrow walls away from the top surface", "[PrintObject][Perimeters]")
 {
     // Orca #14929 (OD2): 0 re-onions the region beside the top surface, 2 clips the inner walls over it.

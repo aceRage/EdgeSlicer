@@ -17,9 +17,11 @@
 #include <vector>
 
 #include "libslic3r/Model.hpp"
+#include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Slicing.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
 using namespace Slic3r;
@@ -156,6 +158,114 @@ SCENARIO("Mixed nozzle: a filament resolves to the nozzle it is loaded into", "[
             REQUIRE(config.nozzle_diameter.get_at(3) == Approx(0.6));
         }
     }
+}
+
+// A Bambu two-extruder printer (H2D, H2C, X2D) feeds every filament from the AMS: filament_map puts it on the left or
+// the right extruder also when the plate has no more filaments than extruders. The own-index rule above is for
+// toolchangers only (EdgeSlicerRS measured an H2D 0.4 / 0.6 with the manual map 2,1 slicing filament 1 for the 0.4).
+TEST_CASE("Mixed nozzle: on a Bambu two-extruder printer filament_map decides for one or two filaments too", "[MixedNozzle][FilamentMap]")
+{
+    using Catch::Matchers::WithinAbs;
+    DynamicPrintConfig dyn = mixed_nozzle_config(0.4, 0.6);
+    dyn.option<ConfigOptionFloats>("min_layer_height")->values = { 0.08, 0.08 };
+    dyn.option<ConfigOptionFloats>("max_layer_height")->values = { 0.28, 0.42 };
+    // What makes it a grouping machine (DynamicPrintConfig::support_different_extruders): more than one nozzle variant.
+    dyn.option<ConfigOptionStrings>("extruder_variant_list", true)->values = { "Direct Drive Standard,Direct Drive High Flow",
+                                                                               "Direct Drive Standard,Direct Drive High Flow" };
+    int extruders = 0;
+    REQUIRE(dyn.support_different_extruders(extruders));
+    // A plate grouped by hand.
+    dyn.set_deserialize_strict("filament_map_mode", "Manual");
+    const PrintObjectConfig object_cfg = static_object_config(dyn);
+
+    SECTION("a crossed manual map 2,1: filament 1 prints on the right 0.6, filament 2 on the left 0.4")
+    {
+        dyn.option<ConfigOptionInts>("filament_map")->values = { 2, 1 };
+        const PrintConfig config = static_print_config(dyn);
+        CHECK(physical_extruder_for_filament(config, 1) == 1);
+        CHECK(physical_extruder_for_filament(config, 2) == 0);
+        CHECK(physical_extruder_for_filament(config, 0) == 0);
+        CHECK_THAT(nozzle_diameter_for_filament(config, 1), WithinAbs(0.6, 1e-9));
+        CHECK_THAT(nozzle_diameter_for_filament(config, 2), WithinAbs(0.4, 1e-9));
+        // The DynamicPrintConfig readers (the raw-value overload) agree.
+        CHECK(nozzle_for_filament(dyn, 1) == 1);
+        CHECK(nozzle_for_filament(dyn, 2) == 0);
+        CHECK_THAT(nozzle_diameter_for_filament(static_cast<const ConfigBase &>(dyn), 1), WithinAbs(0.6, 1e-9));
+        // The layer height envelope of an object printed in filament 1 is the right extruder's.
+        const SlicingParameters params = SlicingParameters::create_from_config(config, object_cfg, 20., { 0 }, Vec3d(1., 1., 1.));
+        CHECK_THAT(params.max_layer_height, WithinAbs(0.42, 1e-9));
+    }
+    SECTION("both filaments on one extruder (map 2,2)")
+    {
+        dyn.option<ConfigOptionInts>("filament_map")->values = { 2, 2 };
+        const PrintConfig config = static_print_config(dyn);
+        CHECK(physical_extruder_for_filament(config, 1) == 1);
+        CHECK(physical_extruder_for_filament(config, 2) == 1);
+    }
+    SECTION("an uncrossed map 1,2 gives what the filament number always gave")
+    {
+        const PrintConfig config = static_print_config(dyn);
+        CHECK(physical_extruder_for_filament(config, 1) == 0);
+        CHECK(physical_extruder_for_filament(config, 2) == 1);
+        const SlicingParameters params = SlicingParameters::create_from_config(config, object_cfg, 20., { 0 }, Vec3d(1., 1., 1.));
+        CHECK_THAT(params.max_layer_height, WithinAbs(0.28, 1e-9));
+    }
+    SECTION("Nozzle Manual decides like Manual")
+    {
+        dyn.set_deserialize_strict("filament_map_mode", "Nozzle Manual");
+        dyn.option<ConfigOptionInts>("filament_map")->values = { 2, 1 };
+        const PrintConfig config = static_print_config(dyn);
+        CHECK(physical_extruder_for_filament(config, 1) == 1);
+        CHECK(physical_extruder_for_filament(config, 2) == 0);
+    }
+    SECTION("an automatic map is the grouping's, not known when the geometry is cut: the old rule stays")
+    {
+        dyn.set_deserialize_strict("filament_map_mode", "Auto For Flush");
+        dyn.option<ConfigOptionInts>("filament_map")->values = { 2, 1 };
+        const PrintConfig config = static_print_config(dyn);
+        CHECK(physical_extruder_for_filament(config, 1) == 0);
+        CHECK(physical_extruder_for_filament(config, 2) == 1);
+        CHECK(nozzle_for_filament(dyn, 1) == 0);
+        CHECK_FALSE(filament_map_decides_extruder(dyn, 2));
+    }
+    SECTION("a map that names no extruder for a filament falls back to its own")
+    {
+        dyn.option<ConfigOptionInts>("filament_map")->values = { 2 };
+        const PrintConfig config = static_print_config(dyn);
+        CHECK(physical_extruder_for_filament(config, 1) == 1);
+        CHECK(physical_extruder_for_filament(config, 2) == 1); // own index 1
+        dyn.option<ConfigOptionInts>("filament_map")->values = { 0, 3 };
+        const PrintConfig bad = static_print_config(dyn);
+        CHECK(physical_extruder_for_filament(bad, 1) == 0);
+        CHECK(physical_extruder_for_filament(bad, 2) == 1);
+    }
+}
+
+TEST_CASE("Mixed nozzle: a toolchanger keeps the own-index rule whatever filament_map holds", "[MixedNozzle][FilamentMap]")
+{
+    // A U1-like machine: four identical tools, one variant, and a stale filament_map (all 1, what a fresh project or a
+    // switch from a Bambu printer leaves).
+    DynamicPrintConfig dyn = mixed_nozzle_config(0.4, 0.6);
+    dyn.set_num_extruders(4);
+    dyn.set_num_filaments(4);
+    dyn.option<ConfigOptionFloats>("nozzle_diameter")->values           = { 0.4, 0.6, 0.4, 0.6 };
+    dyn.option<ConfigOptionFloats>("filament_diameter")->values         = { 1.75, 1.75, 1.75, 1.75 };
+    dyn.option<ConfigOptionStrings>("filament_colour")->values          = { "#1", "#2", "#3", "#4" };
+    dyn.option<ConfigOptionInts>("filament_map")->values                = { 1, 1, 1, 1 };
+    dyn.option<ConfigOptionStrings>("extruder_variant_list", true)->values = std::vector<std::string>(4, "Direct Drive Standard");
+    int extruders = 0;
+    REQUIRE_FALSE(dyn.support_different_extruders(extruders));
+    const PrintConfig config = static_print_config(dyn);
+    for (unsigned int f = 1; f <= 4; ++f) {
+        CHECK(physical_extruder_for_filament(config, f) == f - 1);
+        CHECK(nozzle_for_filament(dyn, f) == f - 1);
+    }
+    // Two tools with several variants each but four of them is not a Bambu grouping machine either.
+    dyn.option<ConfigOptionStrings>("extruder_variant_list")->values =
+        std::vector<std::string>(4, "Direct Drive Standard,Direct Drive High Flow");
+    const PrintConfig many = static_print_config(dyn);
+    CHECK(physical_extruder_for_filament(many, 2) == 1);
+    CHECK(physical_extruder_for_filament(many, 4) == 3);
 }
 
 // ---------------------------------------------------------------------------------------------

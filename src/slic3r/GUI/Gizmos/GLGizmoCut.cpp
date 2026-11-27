@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <optional>
 #include <cmath>
 
 #include "slic3r/GUI/GUI_App.hpp"
@@ -505,9 +506,20 @@ bool GLGizmoCut3D::on_mouse(const wxMouseEvent &mouse_event)
             // (GLShaderProgram::set_uniform is a no-op for an unknown name). Nothing the
             // classification does could reach those pixels.
             // Check the internal part raycasters.
-            if (! m_part_selection.valid())
+            // Orca #17200: a right click on empty space must not build the cut parts, which changes the preview
+            // and disables "Cut to parts" and Reset.
+            const bool had_part_selection = m_part_selection.valid();
+            if (! had_part_selection) {
+                if (! is_mouse_over_selected_object(mouse_pos))
+                    return true;
                 process_contours();
-            m_part_selection.toggle_selection(mouse_pos);
+            }
+            if (! m_part_selection.toggle_selection(mouse_pos)) {
+                // The click hit the object but none of its cut parts: leave contour cutting as it was.
+                if (! had_part_selection)
+                    reset_cut_by_contours();
+                return true;
+            }
             check_and_update_connectors_state(); // after a contour is deactivated, its connectors are inside the object
             return true;
         }
@@ -524,6 +536,24 @@ bool GLGizmoCut3D::on_mouse(const wxMouseEvent &mouse_event)
     else if (pending_right_up && mouse_event.RightUp()) {
         pending_right_up = false;
         return true;
+    }
+    return false;
+}
+
+// Orca #17200: whether the mouse is over the object being cut, the cut plane ignored. Only tells whether building
+// the cut parts for a right click is worth it.
+bool GLGizmoCut3D::is_mouse_over_selected_object(const Vec2d& mouse_pos) const
+{
+    const Selection& selection = m_parent.get_selection();
+    const Camera&    camera    = wxGetApp().plater()->get_camera();
+    Vec3f position, normal;
+    for (unsigned int id : selection.get_volume_idxs()) {
+        const GLVolume* volume = selection.get_volume(id);
+        // Without the original raycaster the cut-part hit test decides.
+        if (volume == nullptr || volume->mesh_raycaster == nullptr)
+            return true;
+        if (volume->mesh_raycaster->closest_hit(mouse_pos, volume->world_matrix(), camera, position, normal))
+            return true;
     }
     return false;
 }
@@ -1011,20 +1041,13 @@ indexed_triangle_set GLGizmoCut3D::its_make_groove_plane()
     const float plane_half_height   = 0.5f * cut_plane_length;  // y
 
     const float slot_half_depth   = 0.5f * m_groove.depth;    // z
-    float slot_front_z          = slot_half_depth;
-    float slot_back_z           = -slot_half_depth;
 
     const float flap_taper_offset = plane_half_height * tan(m_groove.angle);
 
-    float slot_mouth_outer_x = slot_neck_half_width + flap_taper_offset; // upper_x extension
-    float slot_neck_outer_x = slot_mouth_half_width + flap_taper_offset; // lower_x extension
     // EDGE: upstream wrote Max(slot_neck_outer_x, slot_mouth_outer_x), a helper neither tree defines.
     // It is half the width Cut::calculate_groove_width() gives, which is also what the cut spaces the
     // dovetails by, so take it from there and the preview cannot drift from the cut.
     const float slot_outer_x_max = 0.5f * Cut::calculate_groove_width(m_groove, groove_radius());
-
-    float slot_neck_inner_x = slot_neck_half_width - flap_taper_offset; // upper_x narrowing
-    float slot_mouth_inner_x = slot_mouth_half_width - flap_taper_offset; // lower_x narrowing
 
     const float wall_thickness = 0.02f; // 0.02f * (float)get_grabber_mean_size(m_bounding_box);   // cut_plane_thiknes
 
@@ -1040,6 +1063,14 @@ indexed_triangle_set GLGizmoCut3D::its_make_groove_plane()
         bool is_first_groove = i == 0; // when a groove is not the last groove, then limit the extent of the right plane so that it doesnt overlap the next groove 
         bool is_last_groove  = i == groove_count - 1; // do the same in reverse if a groove is not the first groove
         size_t vertex_index_offset      = mesh.vertices.size();
+
+        // The back face below shifts these, so each groove starts from its own copy.
+        float slot_front_z       = slot_half_depth;
+        float slot_back_z        = -slot_half_depth;
+        float slot_mouth_outer_x = slot_neck_half_width + flap_taper_offset; // upper_x extension
+        float slot_neck_outer_x  = slot_mouth_half_width + flap_taper_offset; // lower_x extension
+        float slot_neck_inner_x  = slot_neck_half_width - flap_taper_offset; // upper_x narrowing
+        float slot_mouth_inner_x = slot_mouth_half_width - flap_taper_offset; // lower_x narrowing
 
         // Calculate the x-axis offset for this dovetail
         float groove_offset_factor_start = -.5 * ((groove_count - 1));
@@ -5887,28 +5918,31 @@ void GLGizmoCut3D::on_load(cereal::BinaryInputArchive& ar)
     m_transformed_bounding_box = transformed_bounding_box(m_ar_plane_center, m_rotation_m);
     set_center_pos(m_ar_plane_center);
 
+    // Restored in every mode, so an undo that also changes the mode brings them back too.
+    const bool groove_changed = !is_approx(m_groove.depth          , groove_depth) ||
+                                !is_approx(m_groove.width          , groove_width) ||
+                                !is_approx(m_groove.flaps_angle    , groove_flaps_angle) ||
+                                !is_approx(m_groove.angle          , groove_angle) ||
+                                !is_approx(m_groove.depth_tolerance, groove_depth_tolerance) ||
+                                !is_approx(m_groove.width_tolerance, groove_width_tolerance) ||
+                                m_groove_count != groove_count ||
+                                !is_approx(m_groove_gap, groove_gap);
+    if (groove_changed) {
+        m_groove_count          = groove_count;
+        m_groove_gap            = groove_gap;
+        m_groove.depth          = groove_depth;
+        m_groove.width          = groove_width;
+        m_groove.flaps_angle    = groove_flaps_angle;
+        m_groove.angle          = groove_angle;
+        m_groove.depth_tolerance= groove_depth_tolerance;
+        m_groove.width_tolerance= groove_width_tolerance;
+    }
+
     if (m_mode != mode)
         switch_to_mode(mode);
     else if (CutMode(m_mode) == CutMode::cutTongueAndGroove) {
-        if (!is_approx(m_groove.depth          , groove_depth) ||
-            !is_approx(m_groove.width          , groove_width) ||
-            !is_approx(m_groove.flaps_angle    , groove_flaps_angle) ||
-            !is_approx(m_groove.angle          , groove_angle) ||
-            !is_approx(m_groove.depth_tolerance, groove_depth_tolerance) ||
-            !is_approx(m_groove.width_tolerance, groove_width_tolerance) ||
-            m_groove_count != groove_count ||
-            !is_approx(m_groove_gap, groove_gap) )
-        {
-            m_groove_count          = groove_count;
-            m_groove_gap            = groove_gap;
-            m_groove.depth          = groove_depth;
-            m_groove.width          = groove_width;
-            m_groove.flaps_angle    = groove_flaps_angle;
-            m_groove.angle          = groove_angle;
-            m_groove.depth_tolerance= groove_depth_tolerance;
-            m_groove.width_tolerance= groove_width_tolerance;
+        if (groove_changed)
             update_plane_model();
-        }
         reset_cut_by_contours();
     }
 
@@ -6976,7 +7010,7 @@ std::vector<Cut::Part> GLGizmoCut3D::PartSelection::get_cut_parts()
 }
 
 
-void GLGizmoCut3D::PartSelection::toggle_selection(const Vec2d& mouse_pos)
+bool GLGizmoCut3D::PartSelection::toggle_selection(const Vec2d& mouse_pos)
 {
     // FIXME: Cache the transforms.
     const Camera& camera     = wxGetApp().plater()->get_camera();
@@ -7012,7 +7046,9 @@ void GLGizmoCut3D::PartSelection::toggle_selection(const Vec2d& mouse_pos)
             }
             ++cont_id;
         }
+        return true;
     }
+    return false;
 }
 
 void GLGizmoCut3D::PartSelection::turn_over_selection()
@@ -8821,11 +8857,17 @@ void GLGizmoCut3D::render_groove_int_input(const std::string& label, int& in_val
     if (ImGui::InputInt("##int_input", &val, 1, 5)) {
         val = std::clamp(val, min_val, max_val);
         if (val != in_val) {
-            Plater::TakeSnapshot snapshot(wxGetApp().plater(), GUI::format("%1%: %2%", _u8L("Groove change"), label), UndoRedo::SnapshotType::GizmoAction);
+            // One snapshot per edit, not per keystroke or auto-repeat step.
+            if (!m_int_input_snapshot_taken) {
+                Plater::TakeSnapshot snapshot(wxGetApp().plater(), GUI::format("%1%: %2%", _u8L("Groove change"), label), UndoRedo::SnapshotType::GizmoAction);
+                m_int_input_snapshot_taken = true;
+            }
             in_val     = val;
             is_changed = true;
         }
     }
+    if (!ImGui::IsItemActive())
+        m_int_input_snapshot_taken = false;
     m_imgui->request_frames_while_held(); // ORCA auto-repeat of the +/- buttons
     
     ImGui::SameLine();
@@ -9028,10 +9070,17 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
 
             ImGui::SameLine(1.5f * m_control_width);
 
-            m_imgui->disabled_begin(is_cut_plane_init && !has_connectors);
+            // Orca #17200: Reset also clears the upper/lower assignment of the cut parts, so it stays available
+            // while there is one.
+            m_imgui->disabled_begin(is_cut_plane_init && !has_connectors && !m_part_selection.valid());
                 act_name = _u8L("Reset cut");
-                if (m_imgui->button(wxString::FromUTF8(act_name), _L("Reset cutting plane and remove connectors"))) {
-                    Plater::TakeSnapshot snapshot(wxGetApp().plater(), act_name, UndoRedo::SnapshotType::GizmoAction);
+                if (m_imgui->button(wxString::FromUTF8(act_name),
+                                    // TRN: Part assignments are the upper/lower cut groups changed by right-clicking parts.
+                                    _L("Reset the cutting plane, remove connectors, and clear part assignments."))) {
+                    // The part assignment is not in the undo snapshots, so clearing it alone takes none.
+                    std::optional<Plater::TakeSnapshot> snapshot;
+                    if (!is_cut_plane_init || has_connectors)
+                        snapshot.emplace(wxGetApp().plater(), act_name, UndoRedo::SnapshotType::GizmoAction);
                     reset_cut_plane();
                     reset_connectors();
                     m_curved_sheet.reset();

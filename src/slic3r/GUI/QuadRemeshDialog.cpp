@@ -122,7 +122,7 @@ QuadRemeshDialog::QuadRemeshDialog(wxWindow          *parent,
 
     auto note_text = new ::Label(this, Label::Body_14,
                                  _L("The part is stored as triangles, two per quad. Painted "
-                                    "supports, seams and colours are cleared by a remesh."));
+                                    "supports, seams and colours are carried over to the new surface."));
     note_text->Wrap(FromDIP(320));
     // Light-mode tone only; UpdateDlgDarkUI() maps it for dark mode, as in FillBedDialog.
     note_text->SetForegroundColour(wxColour("#6B6B6B"));

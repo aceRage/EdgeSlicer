@@ -154,6 +154,8 @@ class GLGizmoCut3D : public GLGizmoBase
     float groove_radius() const { return m_groove_plane_radius > 0.f ? m_groove_plane_radius : float(m_radius); }
     int m_groove_count_init { 1 };
     int m_groove_count { 1 };
+    // The active edit of an integer groove field already has its undo snapshot.
+    bool m_int_input_snapshot_taken { false };
     float m_groove_gap { 10.f }; // distance between multiple dovetail cuts
     float m_groove_gap_init { 10.f }; 
 
@@ -919,7 +921,8 @@ class GLGizmoCut3D : public GLGizmoBase
         };
 
         void render(const Vec3d* normal, GLModel& sphere_model);
-        void toggle_selection(const Vec2d& mouse_pos);
+        // Whether the mouse was over a cut part, whose side was then switched.
+        bool toggle_selection(const Vec2d& mouse_pos);
         void turn_over_selection();
         ModelObject* model_object() { return m_model.objects.front(); }
         bool valid() const { return m_valid; }
@@ -1103,6 +1106,7 @@ protected:
     void reset_cut_plane();
     void set_connectors_editing(bool connectors_editing);
     void flip_cut_plane();
+    bool is_mouse_over_selected_object(const Vec2d& mouse_pos) const;
     void process_contours();
     void reset_cut_by_contours();
     void render_flip_plane_button(bool disable_pred = false);

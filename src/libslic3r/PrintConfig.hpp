@@ -454,6 +454,33 @@ enum CurvedTopsPattern {
     ctpMonotonic, ctpConcentric, ctpSpiral
 };
 
+// Bambu Studio 02.09.01.70 (PrintConfig.hpp:403-417): reduce_infill_retraction_mode replaced the
+// reduce_infill_retraction bool. Auto skips the infill-travel retraction only for filaments of low
+// metal stickiness. PrintConfigDef::handle_legacy maps the old bool: 1 -> Enabled, 0 -> Disabled
+// (owner decision D3, 2026-11-25; Bambu itself maps 1 -> Auto).
+enum ReduceInfillRetractionMode {
+    rirDisabled = 0, // always retract normally
+    rirAuto     = 1, // skip only for filaments of None/Low metal stickiness
+    rirEnabled  = 2  // always skip in the infill area, whatever the filament
+};
+
+// Bambu Studio 02.09.01.70: how strongly a filament sticks to the metal nozzle (read by Auto above).
+// None (untested or custom filament) behaves like Low.
+enum FilamentMetalStickiness {
+    fmsNone = 0, fmsLow, fmsMedium, fmsHigh
+};
+
+// Whether the infill-travel retraction may be skipped for this mode and the current filament's
+// filament_metal_stickiness (Bambu Studio 02.09.01.70 GCode.cpp:8466-8478).
+inline bool reduce_infill_retraction_applies(ReduceInfillRetractionMode mode, int metal_stickiness)
+{
+    if (mode == rirEnabled)
+        return true;
+    if (mode == rirAuto)
+        return metal_stickiness == int(fmsNone) || metal_stickiness == int(fmsLow);
+    return false;
+}
+
 // Side stabilizers (Support/Stabilizers.hpp): off, the automatic rings plus any painted points, or the
 // painted points only. Replaced a bool; PrintConfigDef::handle_legacy maps 1 to auto and 0 to off.
 enum StabilizerMode {
@@ -1142,6 +1169,8 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InputShaperType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DraftShield)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CurvedTopsPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ReduceInfillRetractionMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentMetalStickiness)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerColumnShape)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeThumbnailsFormat)
@@ -1387,11 +1416,41 @@ void handle_legacy_sla(DynamicPrintConfig &config);
 extern std::vector<std::map<int, int>>              get_extruder_ams_count(const std::vector<std::string> &strs);
 extern std::vector<std::map<NozzleVolumeType, int>> get_extruder_nozzle_stats(const std::vector<std::string> &strs);
 
+// How a flush_volumes_matrix of `size` values is laid out on a printer of `nozzle_nums` nozzles (extruders):
+// Bambu Studio writes one filaments x filaments block per nozzle, nozzle after nozzle (blocks == nozzle_nums);
+// this fork's GUI and command line write one block that every nozzle uses (blocks == 1). With `filaments` given,
+// a list of nozzle_nums blocks of that size is per nozzle; with filaments == 0 the size decides: a perfect
+// square is one block, nozzle_nums equal perfect squares one per nozzle. Any other length is read as one
+// square of floor(sqrt(size)) filaments, as the readers always did.
+struct FlushMatrixLayout
+{
+    size_t filaments = 0; // rows (and columns) of each block
+    size_t blocks    = 1; // 1, or nozzle_nums
+    bool   per_nozzle() const { return blocks > 1; }
+};
+FlushMatrixLayout flush_matrix_layout(size_t size, size_t nozzle_nums, size_t filaments = 0);
+
+// The filaments x filaments table a filament change is read from: entry [from][to] of the block of the nozzle `to`
+// prints from (filament_map, 1-based extruder per filament; a filament it does not place reads the first block),
+// so a change onto a nozzle flushes by that nozzle's matrix. A single block (or any length that is not one block
+// per nozzle) gives exactly the square the readers built before: floor(sqrt(size)) rows of the values as they are.
+std::vector<std::vector<float>> flush_matrix_for_changes(const std::vector<double> &values, size_t nozzle_nums,
+                                                         const std::vector<int> &filament_map, size_t filaments = 0);
+// One entry of flush_matrix_for_changes() (0 for a pair outside it), without building the table, in double.
+double flush_volume_for_change(const std::vector<double> &values, size_t nozzle_nums, const std::vector<int> &filament_map,
+                              size_t from, size_t to, size_t filaments = 0);
+
 // Ultra (dual-nozzle): slice one nozzle's sub-matrix out of a packed multi-nozzle flush matrix.
 // extruder_id == size_t(-1) (or nozzle_nums == 1) returns the whole (single-nozzle) matrix unchanged.
+// With filament_nums given, a list of exactly filament_nums x filament_nums values is the one matrix every
+// nozzle uses (as this fork writes two-extruder projects) and is returned whole for each nozzle, not cut in
+// nozzle_nums parts; one block per nozzle, or any other length, is cut as before.
 template<class T>
-static std::vector<T> get_flush_volumes_matrix(const std::vector<T> &fv_matrix, size_t extruder_id = size_t(-1), size_t nozzle_nums = 1)
+static std::vector<T> get_flush_volumes_matrix(const std::vector<T> &fv_matrix, size_t extruder_id = size_t(-1), size_t nozzle_nums = 1,
+                                               size_t filament_nums = 0)
 {
+    if (filament_nums > 0 && fv_matrix.size() == filament_nums * filament_nums)
+        return fv_matrix;
     if (extruder_id != size_t(-1) && nozzle_nums != 1) {
         return std::vector<T>(fv_matrix.begin() + size_t(fv_matrix.size() / nozzle_nums * extruder_id + EPSILON),
                               fv_matrix.begin() + size_t(fv_matrix.size() / nozzle_nums * (extruder_id + 1) + EPSILON));
@@ -2100,6 +2159,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats, top_surface_speed))
     //BBS
     ((ConfigOptionBools,                 enable_overhang_speed))
+    // Bambu Studio 02.09.01.70 height slowdown (PrintConfig.hpp:1261-1267, PrintRegionConfig there too).
+    ((ConfigOptionBools, enable_height_slowdown))
+    ((ConfigOptionFloats, slowdown_start_height))
+    ((ConfigOptionFloats, slowdown_start_speed))
+    ((ConfigOptionFloats, slowdown_start_acc))
+    ((ConfigOptionFloats, slowdown_end_height))
+    ((ConfigOptionFloats, slowdown_end_speed))
+    ((ConfigOptionFloats, slowdown_end_acc))
     ((ConfigOptionBool,                  overhang_shadow_inner_wall))
     ((ConfigOptionPercent,               overhang_shadow_speed_ratio))
     ((ConfigOptionPercent,               overhang_shadow_distance))
@@ -2523,7 +2590,8 @@ PRINT_CONFIG_CLASS_DEFINE(
 )
 
 // Bambu Studio 2.9.1 Type 1 tower options of the H3C, a class of their own: GCodeConfig and PrintConfig are at
-// MSVC's limit of macro nesting (fatal error C1009 with one option more).
+// MSVC's limit of macro nesting (fatal error C1009 with one option more). Also the overflow for later
+// GCodeConfig-style options (filament_metal_stickiness).
 PRINT_CONFIG_CLASS_DEFINE(
     PrintTowerConfig,
 
@@ -2549,6 +2617,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,             filament_tower_interface_purge_volume))
     // Orca #12266: set the print temperature back as an interface purge starts, so the nozzle cools during it.
     ((ConfigOptionBool,               enable_tower_interface_cooldown_during_tower))
+    // Not a tower option: Bambu Studio 02.09.01.70 filament_metal_stickiness, read by reduce_infill_retraction_mode
+    // = Auto (GCode.cpp). It lives here because GCodeConfig is at the macro nesting limit (C1009).
+    ((ConfigOptionEnumsGeneric,       filament_metal_stickiness))
     // Not a tower option; here only because GCodeConfig is at the macro limit (see above).
     // Transmission distance (TD): how deep light gets into a filament. Not used by slicing; it feeds
     // the colour models (dual wall dithering, see DualWallDither.hpp).
@@ -2623,6 +2694,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               during_print_exhaust_fan_speed))
     ((ConfigOptionInts,               complete_print_exhaust_fan_speed))
     ((ConfigOptionFloatOrPercent,     initial_layer_line_width))
+    ((ConfigOptionFloat,              initial_layer_infill_line_width)) // Bambu Studio 02.09.01.70
     // Per-nozzle process P5: per FILAMENT (index filament - 1), the first-layer width of the per-nozzle process of
     // the filament's nozzle (0 = that process uses the role widths); empty without per-nozzle processes.
     ((ConfigOptionFloatsOrPercents,   nozzle_initial_layer_line_width))
@@ -2645,7 +2717,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionPoint,              best_object_pos))
     ((ConfigOptionFloats,             slow_down_min_speed))
     ((ConfigOptionFloats,             nozzle_diameter))
-    ((ConfigOptionBool,               reduce_infill_retraction))
+    ((ConfigOptionEnum<ReduceInfillRetractionMode>, reduce_infill_retraction_mode))
     ((ConfigOptionBool,               ooze_prevention))
     ((ConfigOptionString,             filename_format))
     ((ConfigOptionStrings,            post_process))
@@ -3064,7 +3136,8 @@ bool hotend_as_extruder(const PrintConfig &config);
 // the rest of the per-extruder printer options are indexed by physical extruder, not by filament:
 // on an H2D/H2C (2 nozzles, up to 16 filaments) `nozzle_diameter.get_at(filament - 1)` silently
 // falls back to the FIRST nozzle for every filament past the second. filament_map (1-based) is the
-// assignment the tool orderer already computed. filament_id == 0 means "use whatever tool is
+// assignment the tool orderer already computed. On a Bambu grouping machine with a manual map it decides also when
+// the plate has no more filaments than nozzles (filament_map_decides_extruder). filament_id == 0 means "use whatever tool is
 // current" and resolves to extruder 0, matching what the old get_at(size_t(-1)) fallback did.
 // Ported from OrcaSlicer PR #13782 (LixNix, "Printing with different nozzle sizes"),
 // Flow.cpp::physical_extruder_for_filament.
@@ -3072,9 +3145,15 @@ size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int fi
 // The same mapping from the raw values, for callers that only hold a DynamicPrintConfig or the
 // preset bundle (the support overhang highlight in the 3D view).
 // `assignment` is filament_nozzle_assignment (per-nozzle process P2): a filament with an entry 1..nozzle_count
-// prints on that tool before any other rule.
+// prints on that tool before any other rule. `map_decides` is filament_map_decides_extruder(config, nozzle_count):
+// filament_map decides then whatever the filament count, where a printer with no more filaments than nozzles (a
+// toolchanger) otherwise prints each filament on its own tool. The PrintConfig overload passes it.
 size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &filament_map, unsigned int filament_id,
-                                      const std::vector<int> &assignment = {});
+                                      const std::vector<int> &assignment = {}, bool map_decides = false);
+// Whether filament_map gives every filament's extruder however few filaments there are: a Bambu grouping machine
+// (is_bambu_grouping_machine: H2D / H2C / X2D) with a manual map (filament_map_mode Manual or Nozzle Manual). An
+// automatic map is the grouping's result, written while slicing after the geometry was cut, so it does not decide here.
+bool filament_map_decides_extruder(const ConfigBase &config, size_t nozzle_count);
 // The 0-based tool filament_nozzle_assignment puts 1-based `filament_id` on, or -1 when it names none.
 int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozzle_count, unsigned int filament_id);
 // Per-nozzle process P4: the nozzle diameter 1-based `filament_id` prints with: nozzle_diameter of its physical

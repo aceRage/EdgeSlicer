@@ -1,0 +1,264 @@
+#ifndef slic3r_PythonInterpreter_hpp_
+#define slic3r_PythonInterpreter_hpp_
+
+// Via pybind11 so this file requests the same python3xx.lib as everything else.
+#include <cstddef>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
+#include <pytypedefs.h>
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <memory>
+#include <shared_mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace pybind11 {
+class scoped_interpreter;
+class error_already_set;
+}
+
+namespace Slic3r {
+
+class PythonRuntimeLease;
+
+// Print a Python exception's full traceback to sys.stderr (tee'd to the session
+// log) WITHOUT consuming err.
+//
+// Used by the ORCA_PY_OVERRIDE_AUDITED trampoline macro: the
+// traceback is logged centrally at the C++<->Python boundary, then the original
+// error_already_set is rethrown intact so downstream C++ catchers can still build
+// the user-facing dialog from err.what(). Because it is non-destructive it does
+// NOT call restore()/PyErr_Print() (those will empty err); it prints via Python's
+// traceback module instead.
+void log_python_exception_keep(pybind11::error_already_set& err);
+
+
+// RAII wrapper for Python interpreter initialization/finalization
+class PythonInterpreter
+{
+public:
+    static PythonInterpreter& instance();
+
+    // Initialize the Python interpreter
+    bool initialize();
+
+    // Check if interpreter is initialized
+    bool is_initialized() const { return m_initialized.load(std::memory_order_acquire); }
+
+    // Acquire a shared lease on the interpreter. Shutdown takes the exclusive side of this
+    // lock, so a caller that owns a lease can safely acquire the GIL and touch Python objects.
+    PythonRuntimeLease acquire_runtime_lease();
+
+    const std::string& last_error() const { return m_last_error; }
+
+    // Shared user-writable package directory added to sys.path for plugins.
+    static std::string shared_packages_dir();
+
+    // Interpreter start-up hook files at the top level of `dir`: sitecustomize / usercustomize
+    // (module or package, any extension) and *.pth, as file names, sorted. Python runs with site
+    // imports off (H1), so such files are inert here; a dependency that ships one is refused anyway.
+    static std::vector<std::string> find_startup_hook_files(const std::string& dir);
+
+    // Appends shared_packages_dir() to the end of sys.path (once). The app does it at the end of
+    // initialize(), after the audit hook; the sandboxed helper only after its OS sandbox is in
+    // place, so nothing a dependency installed is importable before then (H1).
+    bool add_shared_packages_to_sys_path(std::string& error);
+    bool shared_packages_on_sys_path() const { return m_shared_packages_added.load(std::memory_order_acquire); }
+
+    // Bundled Python executable path, or empty when no executable is found.
+    static std::string bundled_python_executable();
+
+    // Bundled Python home (the tree that contains Lib/encodings or lib/pythonX.Y/encodings).
+    static std::string bundled_python_home();
+
+    // Bundled uv executable path, or empty when uv is not bundled/found.
+    static std::string bundled_uv_path();
+
+    // Python ABI tag for the bundled interpreter, e.g. "cp312".
+    static std::string python_abi_tag();
+
+    // Finalize the Python interpreter. A plugin call that is still running, or a plugin thread that
+    // does not end, is waited for only briefly; the interpreter is then left unfinalized for the
+    // process exit to end, rather than keeping a closing app alive.
+    //
+    // If this thread already holds the GIL (Catch's fatal handler, a nested teardown), RestoreThread
+    // is skipped so it cannot self-deadlock. Tests use shutdown_would_restore_thread_state() instead
+    // of calling shutdown(), which can run only once per process.
+    void shutdown();
+
+    // True when shutdown() would call PyEval_RestoreThread. False when this thread already holds
+    // the GIL, or when there is no saved main-thread state.
+    bool shutdown_would_restore_thread_state() const;
+
+    // Runs the threading atexit hooks, which end idle worker threads, then waits for Python's
+    // non-daemon threads to end, up to timeout in all, and returns how many are still running.
+    // The caller must hold the GIL. Public so tests can reach it: shutdown() itself can
+    // only run once per process.
+    static int join_non_daemon_threads(std::chrono::milliseconds timeout);
+
+    // Add a path owned by one plugin load. The path is reference-counted across plugins and is
+    // removed when the final plugin using it is unloaded.
+    bool add_plugin_sys_path(const std::string& path, std::string& error);
+
+    // Unlink importlib cache files (including sys.pycache_prefix) for every .py under plugin_root
+    // so a planted .pyc cannot shadow the hashed source.
+    void invalidate_plugin_bytecode_caches(const std::string& plugin_root);
+
+    // Load a Python module from file path
+    PyObject* load_module_from_file(const std::string& file_path,
+                                    std::string&       error,
+                                    std::vector<std::string>* plugin_paths = nullptr,
+                                    std::vector<std::string>* plugin_modules = nullptr);
+    PyObject* load_module_from_whl(const std::string& whl_path,
+                                   const std::string& pkg_name,
+                                   std::string&       error,
+                                   std::vector<std::string>* plugin_paths = nullptr,
+                                   std::vector<std::string>* plugin_modules = nullptr,
+                                   const std::string& extract_root = {});
+    PyObject* load_module_from_directory(const std::string& dir_path,
+                                         const std::string& pkg_name,
+                                         std::string&       error,
+                                         std::vector<std::string>* plugin_paths = nullptr,
+                                         std::vector<std::string>* plugin_modules = nullptr);
+
+    // Remove the complete module namespace and plugin-owned paths, then release the root module
+    // reference. Safe to call with a null module when a load failed after adding paths.
+    void unload_module(PyObject* module,
+                       const std::string& module_name,
+                       const std::vector<std::string>& plugin_paths,
+                       const std::vector<std::string>& plugin_modules);
+
+    // Destructor finalizes Python if shutdown() was not called explicitly.
+    ~PythonInterpreter();
+
+    // asyncio loop class captured at interpreter init, before any plugin loads. Script runs
+    // construct loops from this class instead of asyncio.new_event_loop() so a plugin cannot
+    // replace the factory or the policy. Borrowed; nullptr if capture failed.
+    PyObject* event_loop_class() const { return m_event_loop_class; }
+
+private:
+    friend class PythonRuntimeLease;
+
+    PythonInterpreter() = default;
+    PythonInterpreter(const PythonInterpreter&) = delete;
+    PythonInterpreter& operator=(const PythonInterpreter&) = delete;
+
+    bool add_plugin_sys_path_locked(const std::string& path, std::string& error);
+    void remove_plugin_sys_paths_locked(const std::vector<std::string>& paths);
+    void record_plugin_modules_locked(const std::string& module_name,
+                                      const std::vector<std::string>& plugin_paths,
+                                      std::vector<std::string>* plugin_modules);
+    void remove_plugin_modules_locked(const std::vector<std::string>& plugin_modules);
+    void remove_module_tree_locked(const std::string& module_name);
+    void abandon();
+
+    std::atomic<bool> m_initialized{false};
+    std::atomic<bool> m_shared_packages_added{false};
+    bool              add_shared_packages_with_gil(std::string& error);
+    mutable std::shared_timed_mutex m_runtime_mutex;
+    PyThreadState* m_main_thread_state = nullptr; // thread state saved after releasing GIL post-initialize
+    std::unique_ptr<pybind11::scoped_interpreter> m_interpreter;
+    PyObject* m_event_loop_class = nullptr;
+    std::string m_last_error;
+    std::unordered_map<std::string, std::size_t> m_plugin_path_users;
+    std::unordered_map<std::string, bool>        m_plugin_path_owned;
+    std::unordered_map<std::string, std::size_t> m_plugin_module_users;
+    std::unordered_map<std::string, bool>        m_plugin_module_owned;
+};
+
+class PythonRuntimeLease
+{
+public:
+    PythonRuntimeLease() = default;
+    PythonRuntimeLease(PythonRuntimeLease&& other) noexcept;
+    PythonRuntimeLease& operator=(PythonRuntimeLease&& other) noexcept;
+    ~PythonRuntimeLease();
+
+    PythonRuntimeLease(const PythonRuntimeLease&)            = delete;
+    PythonRuntimeLease& operator=(const PythonRuntimeLease&) = delete;
+
+    explicit operator bool() const { return m_interpreter != nullptr; }
+
+private:
+    friend class PythonInterpreter;
+
+    explicit PythonRuntimeLease(PythonInterpreter& interpreter);
+    void release();
+
+    static thread_local PythonInterpreter* s_owner;
+    static thread_local unsigned int      s_depth;
+
+    PythonInterpreter*                  m_interpreter = nullptr;
+    std::shared_lock<std::shared_timed_mutex> m_lock;
+};
+
+inline PythonRuntimeLease PythonInterpreter::acquire_runtime_lease()
+{
+    return PythonRuntimeLease(*this);
+}
+
+// RAII helper for Python GIL (Global Interpreter Lock)
+class PythonGILState
+{
+public:
+    PythonGILState() {
+        m_runtime_lease = PythonInterpreter::instance().acquire_runtime_lease();
+        if (m_runtime_lease) {
+            m_state    = PyGILState_Ensure();
+            m_acquired = true;
+        }
+    }
+
+    ~PythonGILState() {
+        if (m_acquired)
+            PyGILState_Release(m_state);
+    }
+
+    explicit operator bool() const { return m_acquired; }
+
+private:
+    PythonRuntimeLease m_runtime_lease;
+    PyGILState_STATE   m_state{};
+    bool               m_acquired = false;
+};
+
+// RAII helper for Python object references
+class PyObjectPtr
+{
+public:
+    explicit PyObjectPtr(PyObject* obj = nullptr) : m_obj(obj) {}
+
+    ~PyObjectPtr() {
+        if (m_obj) {
+            Py_DECREF(m_obj);
+        }
+    }
+
+    PyObject* get() const { return m_obj; }
+    PyObject* release() {
+        PyObject* temp = m_obj;
+        m_obj = nullptr;
+        return temp;
+    }
+
+    void reset(PyObject* obj = nullptr) {
+        if (m_obj) {
+            Py_DECREF(m_obj);
+        }
+        m_obj = obj;
+    }
+
+    operator bool() const { return m_obj != nullptr; }
+
+private:
+    PyObject* m_obj;
+
+    PyObjectPtr(const PyObjectPtr&) = delete;
+    PyObjectPtr& operator=(const PyObjectPtr&) = delete;
+};
+
+} // namespace Slic3r
+
+#endif /* slic3r_PythonInterpreter_hpp_ */

@@ -143,7 +143,12 @@ PrintBase::ApplyStatus PrintObject::set_instances(PrintInstances &&instances)
     	[](const PrintInstance& lhs, const PrintInstance& rhs) { return lhs.model_instance == rhs.model_instance && lhs.shift == rhs.shift; });
     if (! equal) {
         status = PrintBase::APPLY_STATUS_CHANGED;
-        if (m_print->invalidate_steps({ psSkirtBrim, psGCodeExport }) ||
+        // Orca #17680: tree supports stay inside the bed shape, which they place at the first instance,
+        // so after that one moved they kept the old position until a setting changed.
+        const bool first_moved = instances.empty() || m_instances.empty() || instances.front().shift != m_instances.front().shift;
+        const bool support_follows_instances = this->has_support_material() && is_tree(m_config.support_type.value) && first_moved;
+        if ((support_follows_instances && this->invalidate_step(posSupportMaterial)) ||
+            m_print->invalidate_steps({ psSkirtBrim, psGCodeExport }) ||
             (! equal_length && m_print->invalidate_step(psWipeTower)))
             status = PrintBase::APPLY_STATUS_INVALIDATED;
         m_instances = std::move(instances);
@@ -351,6 +356,22 @@ void PrintObject::set_curved_tops_guard_inputs_used(std::string inputs)
     m_curved_tops_guard_inputs = std::move(inputs);
 }
 
+// Orca #17382: see Layer::anchor_bridges_in_neighbours(). Applied to the untyped slices restored from the raw slices,
+// so that the anchors follow the current wall widths. A layer only reads the lslices of the layers next to it, which
+// this does not change.
+template<typename ThrowOnCancel>
+static void anchor_bridges_in_neighbours(const LayerPtrs &layers, ThrowOnCancel throw_on_cancel)
+{
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, layers.size()),
+        [&layers, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {
+            for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
+                throw_on_cancel();
+                layers[layer_idx]->anchor_bridges_in_neighbours();
+            }
+        });
+    throw_on_cancel();
+}
+
 void PrintObject::make_perimeters()
 {
     // prerequisites
@@ -365,14 +386,14 @@ void PrintObject::make_perimeters()
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
 
-    // Revert the typed slices into untyped slices.
-    if (m_typed_slices) {
-        for (Layer *layer : m_layers) {
-            layer->restore_untyped_slices();
-            m_print->throw_if_canceled();
-        }
-        m_typed_slices = false;
+    // Revert the typed slices into untyped slices, together with the anchors handed to bridges by a previous run
+    // (Orca #17382).
+    for (Layer *layer : m_layers) {
+        layer->restore_untyped_slices();
+        m_print->throw_if_canceled();
     }
+    m_typed_slices = false;
+    anchor_bridges_in_neighbours(m_layers, [this]() { m_print->throw_if_canceled(); });
 
     // compare each layer to the one below, and mark those slices needing
     // one additional inner perimeter, like the top of domed objects-
@@ -522,6 +543,8 @@ void PrintObject::prepare_infill()
             layer->restore_untyped_slices_no_extra_perimeters();
             m_print->throw_if_canceled();
         }
+        // Orca #17382: the walls and the fill regions were generated with the anchors.
+        anchor_bridges_in_neighbours(m_layers, [this]() { m_print->throw_if_canceled(); });
     }
 
     // This will assign a type (top/bottom/internal) to $layerm->slices.
@@ -1496,6 +1519,16 @@ SupportLayerPtrs::iterator PrintObject::insert_support_layer(SupportLayerPtrs::i
     return m_support_layers.insert(pos, new SupportLayer(id, interface_id, this, height, print_z, slice_z));
 }
 
+SupportLayer* PrintObject::new_detached_support_layer(size_t id, size_t interface_id, coordf_t height, coordf_t print_z, coordf_t slice_z)
+{
+    return new SupportLayer(id, interface_id, this, height, print_z, slice_z);
+}
+
+void PrintObject::delete_detached_support_layer(SupportLayer *layer)
+{
+    delete layer;
+}
+
 // Called by Print::apply().
 // This method only accepts PrintObjectConfig and PrintRegionConfig option keys.
 bool PrintObject::invalidate_state_by_config_options(
@@ -1993,6 +2026,14 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "over_support_speed"
             // EdgeSlicer, Fine detail: applied in GCode::_extrude only.
             || opt_key == "fine_detail_speed"
+            // Bambu Studio 02.09.01.70 height slowdown: applied in GCode::_extrude only (BS PrintObject.cpp:1852-1859).
+            || opt_key == "enable_height_slowdown"
+            || opt_key == "slowdown_start_height"
+            || opt_key == "slowdown_start_speed"
+            || opt_key == "slowdown_start_acc"
+            || opt_key == "slowdown_end_height"
+            || opt_key == "slowdown_end_speed"
+            || opt_key == "slowdown_end_acc"
             || opt_key == "bed_mesh_min"
             || opt_key == "bed_mesh_max"
             || opt_key == "adaptive_bed_mesh_margin"
@@ -4124,6 +4165,15 @@ void PrintObject::bridge_over_infill()
                 total_fill_area   = closing(total_fill_area, float(SCALED_EPSILON));
                 expansion_area    = closing(expansion_area, float(SCALED_EPSILON));
                 expansion_area    = intersection(expansion_area, deep_infill_area);
+                // A bridge reaching into a region of another filament would print that region's area in its own filament.
+                std::map<unsigned int, Polygons> fill_area_by_filament;
+                for (const LayerRegion *region : layer->regions())
+                    append(fill_area_by_filament[region->region().extruder(frSolidInfill)], to_polygons(region->fill_expolygons));
+                if (fill_area_by_filament.size() > 1) {
+                    for (auto &filament_area : fill_area_by_filament)
+                        filament_area.second = closing(filament_area.second, float(SCALED_EPSILON));
+                } else
+                    fill_area_by_filament.clear();
                 // Orca: Preserve the real lower-layer anchors for every candidate in this
                 // layer. Replacing this shared set for one pattern also changes later regions,
                 // and synthetic straight lines can claim support where no infill is printed.
@@ -4260,6 +4310,8 @@ void PrintObject::bridge_over_infill()
                     bridging_area          = closing(bridging_area, flow.scaled_spacing());
                     bridging_area          = intersection(bridging_area, limiting_area);
                     bridging_area          = intersection(bridging_area, total_fill_area);
+                    if (!fill_area_by_filament.empty())
+                        bridging_area      = intersection(bridging_area, fill_area_by_filament.at(candidate.region->region().extruder(frSolidInfill)));
                     bridging_area          = diff(bridging_area, total_top_area);
                     expansion_area         = diff(expansion_area, bridging_area);
 
@@ -5080,6 +5132,11 @@ void PrintObject::generate_support_for_preview()
         this->_generate_support_material();
     this->clear_tree_support_preview_cache();
     this->throw_if_canceled();
+}
+
+double PrintObject::print_z_max() const
+{
+    return scale_(m_slicing_params.object_print_z_max);
 }
 
 void PrintObject::update_slicing_parameters()

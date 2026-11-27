@@ -261,7 +261,8 @@ bool GLGizmoMeasure::on_mouse(const wxMouseEvent &mouse_event)
                     case EMode::FeatureSelection: { item = { false, m_curr_feature, m_curr_feature }; break; }
                     case EMode::PointSelection:   {
                        item = { false, m_curr_feature, Measure::SurfaceFeature(*m_curr_point_on_feature_position)};
-                       auto local_pt = m_curr_feature->world_tran.inverse() * (*m_curr_point_on_feature_position);
+                       // Orca #17549: origin features live in the stretched detection frame.
+                       auto local_pt = measure_stretch(m_curr_feature->volume) * m_curr_feature->world_tran.inverse() * (*m_curr_point_on_feature_position);
                        item.feature->origin_surface_feature = std::make_shared<Measure::SurfaceFeature>(local_pt);
                        item.feature->world_tran             = m_curr_feature->world_tran;
                        item.feature->volume                 = m_curr_feature->volume;
@@ -709,13 +710,15 @@ void GLGizmoMeasure::on_render()
                     // Ultra: view-scaled pick radius (~8 px) expressed in MESH units, so vertices and edges
                     // stay pickable at any zoom and on scaled instances (the legacy limit was a fixed
                     // 0.5 mm in mesh space -- sub-pixel when zoomed out).
-                    const Transform3d hit_tran   = m_mesh_raycaster_map[m_last_hit_volume]->get_transform();
+                    // Orca #17549: the hit is on the volume's own mesh; features are in the stretched frame.
+                    const Transform3d stretch    = measure_stretch(m_last_hit_volume);
+                    const Transform3d hit_tran   = m_mesh_raycaster_map[m_last_hit_volume]->get_transform() * stretch.inverse();
                     const double      mesh_scale = std::max(1e-6, (hit_tran.linear() * Vec3d::UnitX()).norm());
                     const double      snap_radius = 8.0 * double(inv_zoom) / mesh_scale;
                     // Ultra: Triangle / Curve assembly modes pick the raw facet / a curved patch directly.
                     const int pick_kind = (m_measure_mode == EMeasureMode::ONLY_ASSEMBLY && m_assembly_mode == AssemblyMode::TRIANGLE_TRIANGLE) ? 1 :
                                           (m_measure_mode == EMeasureMode::ONLY_ASSEMBLY && m_assembly_mode == AssemblyMode::CURVE_CURVE)       ? 2 : 0;
-                    curr_feature = m_curr_measuring->get_feature(model_facet_idx, position_on_model, hit_tran, m_only_select_plane, snap_radius, pick_kind,
+                    curr_feature = m_curr_measuring->get_feature(model_facet_idx, stretch * position_on_model, hit_tran, m_only_select_plane, snap_radius, pick_kind,
                                                                  ultra_curve_pick_params());
                 }
             }
@@ -799,7 +802,9 @@ void GLGizmoMeasure::on_render()
         m_curr_feature.has_value() && m_curr_feature->volume == m_last_hit_volume &&
         m_selected_features.first.feature.has_value() && m_selected_features.first.feature->is_planar() &&
         m_selected_features.first.feature->volume != m_last_hit_volume) {
-        const indexed_triangle_set& its = m_curr_measuring->get_its();
+        // Orca #17549: hit_mesh / normal_mesh are in the volume's own frame, so read its own mesh.
+        const indexed_triangle_set* local_its = measure_local_its(m_last_hit_volume);
+        const indexed_triangle_set& its = local_its ? *local_its : m_curr_measuring->get_its();
         if (model_facet_idx < its.indices.size()) {
             const auto& f = its.indices[model_facet_idx];
             const Vec3d a = its.vertices[f[0]].cast<double>(), b = its.vertices[f[1]].cast<double>(), c = its.vertices[f[2]].cast<double>();
@@ -2379,6 +2384,8 @@ void GLGizmoMeasure::drop_volume_refs()
 {
     reset_all_pick();
     std::map<GLVolume *, std::shared_ptr<Measure::Measuring>>().swap(m_mesh_measure_map);
+    m_mesh_measure_transform.clear();
+    m_mesh_local_map.clear();
     m_curr_measuring.reset();
     m_curr_feature.reset();
     m_curr_point_on_feature_position.reset();
@@ -2487,7 +2494,20 @@ void GLGizmoMeasure::register_single_mesh_pick()
                 auto                 mesh = vol->mesh_ptr();
                 m_mesh_raycaster_map[v] = std::make_shared<PickRaycaster>(-1, *v->mesh_raycaster, world_tran.get_matrix());
                 m_mesh_raycaster_map[v]->set_transform(world_tran.get_matrix());
-                m_mesh_measure_map[v] = std::make_shared<Measure::Measuring>(mesh->its);
+                // Orca #17549 (Edge form): detect features on the stretched mesh when the volume is
+                // nonuniformly scaled. Upstream bakes the whole linear part; only the stretch is baked
+                // here, so the frame survives later moves and the mate code keeps its own-mesh frame.
+                const Transform3d stretch = Measure::detection_stretch(world_tran.get_matrix());
+                m_mesh_measure_transform[v] = stretch;
+                m_mesh_local_map[v]         = mesh;
+                if (stretch.isApprox(Transform3d::Identity())) {
+                    m_mesh_measure_map[v] = std::make_shared<Measure::Measuring>(mesh->its);
+                } else {
+                    indexed_triangle_set stretched = mesh->its;
+                    for (Vec3f &vertex : stretched.vertices)
+                        vertex = (stretch * vertex.cast<double>()).cast<float>();
+                    m_mesh_measure_map[v] = std::make_shared<Measure::Measuring>(stretched);
+                }
             }
         }
     }
@@ -2598,6 +2618,18 @@ bool Slic3r::GUI::GLGizmoMeasure::is_two_volume_in_same_model_object()
     return false;
 }
 
+Transform3d GLGizmoMeasure::measure_stretch(const void *volume) const
+{
+    auto it = m_mesh_measure_transform.find(static_cast<GLVolume *>(const_cast<void *>(volume)));
+    return it != m_mesh_measure_transform.end() ? it->second : Transform3d::Identity();
+}
+
+const indexed_triangle_set *GLGizmoMeasure::measure_local_its(GLVolume *v) const
+{
+    auto it = m_mesh_local_map.find(v);
+    return it != m_mesh_local_map.end() && it->second ? &it->second->its : nullptr;
+}
+
 Measure::Measuring *GLGizmoMeasure::get_measuring_of_mesh(GLVolume *v, Transform3d &tran)
 {
     for (auto glvolume:m_hit_order_volumes) {
@@ -2622,7 +2654,7 @@ void GLGizmoMeasure::update_world_plane_features(Measure::Measuring *cur_measuri
             feautre.world_plane_features->clear(); // resize(cur_plane_features->size());
             for (size_t i = 0; i < cur_plane_features->size(); i++) {
                 Measure::SurfaceFeature temp(cur_plane_features->at(i));
-                temp.translate(feautre.world_tran);
+                temp.translate(feautre.world_tran * measure_stretch(feautre.volume).inverse());
                 feautre.world_plane_features->push_back(std::move(temp));
             }
         }
@@ -2642,7 +2674,7 @@ void GLGizmoMeasure::update_feature_by_tran(Measure::SurfaceFeature &feature)
     case Measure::SurfaceFeatureType::Curve:
     case Measure::SurfaceFeatureType::Plane: {
         feature.clone(*feature.origin_surface_feature);
-        feature.translate(feature.world_tran);
+        feature.translate(feature.world_tran * measure_stretch(volume).inverse());
         if (feature.get_type() == Measure::SurfaceFeatureType::Circle) {
             m_feature_circle_first.last_circle_feature.reset();
             m_feature_circle_first.inv_zoom             = 0;
@@ -2733,12 +2765,15 @@ void GLGizmoMeasure::set_to_parallel(bool same_model_object, bool take_shot, boo
                 v->set_instance_rotation(rotation);
                 selection->rotate(v->object_idx(), v->instance_idx(), v->get_instance_transformation().get_matrix());
             } else {
-                Geometry::Transformation world_tran(v->world_matrix());
-                auto        new_tran         = r_m * world_tran.get_rotation_matrix();
-                Transform3d volume_rotation_tran = v->get_instance_transformation().get_rotation_matrix().inverse() * new_tran;
-                Vec3d       rotation             = Geometry::extract_euler_angles(volume_rotation_tran);
-                v->set_volume_rotation(rotation);
-                selection->rotate(v->object_idx(), v->instance_idx(), v->volume_idx(), v->get_volume_transformation().get_matrix());
+                // Orca #17552: under a nonuniformly scaled parent, Euler angles cannot express the rotated
+                // part, and setting them deformed it. Rotate about the part origin, keeping its position
+                // and its full affine transform.
+                const Transform3d &instance = v->get_instance_transformation().get_matrix();
+                Transform3d rotated_world = instance * v->get_volume_transformation().get_matrix();
+                rotated_world.linear() = rotation_matrix * rotated_world.linear().eval();
+                const Transform3d volume_tran = instance.inverse() * rotated_world;
+                v->set_volume_transformation(volume_tran);
+                selection->rotate(v->object_idx(), v->instance_idx(), v->volume_idx(), volume_tran);
             }
             wxGetApp().plater()->canvas3D()->do_rotate("");
             register_single_mesh_pick();
@@ -2862,7 +2897,8 @@ bool GLGizmoMeasure::ultra_plane_axis_world(GLVolume* v, const Measure::SurfaceF
     if (!v || !f.is_planar() || !f.plane_indices) return false; // Plane, Triangle or Curve (all carry a facet list)
     auto it = m_mesh_measure_map.find(v);
     if (it == m_mesh_measure_map.end() || !it->second) return false;
-    const indexed_triangle_set& its = it->second->get_its();
+    const indexed_triangle_set* local_its = measure_local_its(v); // W below is own mesh -> view
+    const indexed_triangle_set& its = local_its ? *local_its : it->second->get_its();
     const Transform3d& W  = f.world_tran;
     // Feature coords are already WORLD (baked via world_tran), so the normal is used as-is; only the
     // raw mesh vertices below need W applied.
@@ -3111,14 +3147,16 @@ void GLGizmoMeasure::ultra_fit_for_print_and_merge()
     {
         auto mt = m_mesh_measure_map.find(vt), ma = m_mesh_measure_map.find(va);
         Transform3d tW2p, aW2p;
-        if (mt != m_mesh_measure_map.end() && ma != m_mesh_measure_map.end() && mt->second && ma->second &&
+        const indexed_triangle_set *t_its = measure_local_its(vt), *a_its = measure_local_its(va);
+        if (t_its && a_its &&
+            mt != m_mesh_measure_map.end() && ma != m_mesh_measure_map.end() && mt->second && ma->second &&
             ultra_w2p(vt, *m_selected_features.first.feature,  tW2p) &&
             ultra_w2p(va, *m_selected_features.second.feature, aW2p)) {
             // mesh -> print == (view -> print) * (mesh -> view == world_tran); attachment taken AFTER the mate.
             const Transform3d t_mesh2print = tW2p * m_selected_features.first.feature->world_tran;
             const Transform3d a_mesh2print = M * (aW2p * m_selected_features.second.feature->world_tran);
-            const UltraFit::CollisionRoll cr = UltraFit::roll_by_collision(mt->second->get_its(), t_mesh2print,
-                                                                           ma->second->get_its(), a_mesh2print, d1, p1);
+            const UltraFit::CollisionRoll cr = UltraFit::roll_by_collision(*t_its, t_mesh2print,
+                                                                           *a_its, a_mesh2print, d1, p1);
             if (cr.ok) {
                 coll_pen = cr.penetration;
                 if (std::abs(cr.roll) > 1e-6) {
@@ -3323,7 +3361,8 @@ Measure::PatchFit GLGizmoMeasure::ultra_curve_fit_print(GLVolume* v, const Measu
     if (!v || f.get_type() != Measure::SurfaceFeatureType::Curve || !f.plane_indices) return fit;
     auto it = m_mesh_measure_map.find(v);
     if (it == m_mesh_measure_map.end() || !it->second) return fit;
-    fit = Measure::fit_patch(it->second->get_its(), *f.plane_indices);
+    const indexed_triangle_set* local_its = measure_local_its(v); // the fit is mapped with world_tran below
+    fit = Measure::fit_patch(local_its ? *local_its : it->second->get_its(), *f.plane_indices);
     if (!fit.ok) return fit;
     // mesh -> print == (view -> print) * (mesh -> view == world_tran)
     Transform3d w2p;
@@ -3647,7 +3686,8 @@ bool GLGizmoMeasure::ultra_exact_axis(GLVolume* v, const Measure::SurfaceFeature
         if (f.get_type() == Measure::SurfaceFeatureType::Curve) {
             auto it = m_mesh_measure_map.find(v);
             if (it != m_mesh_measure_map.end() && it->second) {
-                const Measure::PatchFit fit = Measure::fit_patch(it->second->get_its(), *f.plane_indices);
+                const indexed_triangle_set* local_its = measure_local_its(v);
+                const Measure::PatchFit fit = Measure::fit_patch(local_its ? *local_its : it->second->get_its(), *f.plane_indices);
                 if (fit.ok && fit.shape == Measure::PatchShape::Cylinder) {
                     c.axis = (f.world_tran.linear() * fit.axis).normalized();
                     c.aspect = std::numeric_limits<double>::max(); // an axis, not a square
@@ -3675,6 +3715,8 @@ bool GLGizmoMeasure::ultra_exact_footprint(const UltraExactAnchor& a, const Meas
     if (!vt || vt == a.volume || fb.volume != a.volume) return false;
     auto mt = m_mesh_measure_map.find(vt), mb = m_mesh_measure_map.find(a.volume);
     if (mt == m_mesh_measure_map.end() || mb == m_mesh_measure_map.end() || !mt->second || !mb->second) return false;
+    const indexed_triangle_set *t_local_its = measure_local_its(vt), *a_local_its = measure_local_its(a.volume);
+    if (!t_local_its || !a_local_its) return false;
     Vec3d nA, cA, nB, cB;
     if (!ultra_feature_dir_point(fa, nA, cA) || !ultra_feature_dir_point(fb, nB, cB)) return false;
 
@@ -3689,12 +3731,12 @@ bool GLGizmoMeasure::ultra_exact_footprint(const UltraExactAnchor& a, const Meas
     }
 
     UltraFit::ExactFootprintInput in;
-    in.t_its    = &mt->second->get_its();
+    in.t_its    = t_local_its;
     in.t_facets = fa.plane_indices;
     in.t_w      = fa.world_tran;
     in.t_normal = nA;
     in.t_centre = cA;
-    in.a_its    = &mb->second->get_its();
+    in.a_its    = a_local_its;
     in.a_facets = fb.plane_indices;
     in.a_w      = fb.world_tran;
     in.a_hit    = fb.world_tran * a.hit_mesh;

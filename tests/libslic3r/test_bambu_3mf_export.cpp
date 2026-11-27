@@ -241,7 +241,7 @@ void check_bambu_shape(const json &j, const std::string &where)
 
 } // namespace
 
-TEST_CASE("The Bambu key table is generated from Bambu Studio and is sane", "[3mf][BambuExport]")
+TEST_CASE("The Bambu key table is generated from Bambu Studio and is sane", "[3mf][BambuExport][BambuKnownKeys]")
 {
     CHECK(BambuExport::bambu_key_defs().size() > 500);
     CHECK(BambuExport::find_key("wall_loops") != nullptr);
@@ -251,8 +251,14 @@ TEST_CASE("The Bambu key table is generated from Bambu Studio and is sane", "[3m
     CHECK(BambuExport::find_key("only_one_wall_top") == nullptr);
     // Ours only.
     CHECK(BambuExport::find_key("make_overhang_printable") == nullptr);
-    CHECK(BambuExport::export_version() == "02.08.00.00");
-    CHECK(BambuExport::application_tag() == "BambuStudio-02.08.00.00");
+    CHECK(std::string(BambuExport::bambu_reference_version()) == "02.09.01.70");
+    // 02.09 keys that 02.08 did not know.
+    CHECK(BambuExport::find_key("prime_tower_side_scrape") != nullptr);
+    CHECK(BambuExport::find_key("sub_top_surface_pattern") != nullptr);
+    // Discarded by Bambu 02.09 handle_legacy(): not written any more.
+    CHECK(BambuExport::find_key("nozzle_type") == nullptr);
+    CHECK(BambuExport::export_version() == "02.09.00.00");
+    CHECK(BambuExport::application_tag() == "BambuStudio-02.09.00.00");
 }
 
 // If one of our enum options gains a value, the generated translation table must be regenerated
@@ -373,11 +379,11 @@ SCENARIO("Export Bambu 3MF writes a project Bambu Studio loads with its settings
     const json project = json::parse(zip_entry(path, "Metadata/project_settings.config"));
 
     THEN("the file says BambuStudio-<the Bambu Studio line the settings were converted for>") {
-        CHECK(application_tag_of(path) == "BambuStudio-02.08.00.00");
-        CHECK(project["version"] == "02.08.00.00");
+        CHECK(application_tag_of(path) == "BambuStudio-02.09.00.00");
+        CHECK(project["version"] == "02.09.00.00");
         const std::string slice_info = zip_entry(path, "Metadata/slice_info.config");
         if (!slice_info.empty())
-            CHECK(slice_info.find("\"02.08.00.00\"") != std::string::npos);
+            CHECK(slice_info.find("\"02.09.00.00\"") != std::string::npos);
     }
 
     THEN("the project settings hold only keys Bambu Studio knows, in Bambu's shapes") {
@@ -425,7 +431,7 @@ SCENARIO("Export Bambu 3MF writes a project Bambu Studio loads with its settings
         const json print = json::parse(zip_entry(path, "Metadata/process_settings_1.config"));
         check_bambu_shape(print, "process_settings_1.config");
         CHECK(print["name"] == "My print");
-        CHECK(print["version"] == "02.08.00.00");
+        CHECK(print["version"] == "02.09.00.00");
         CHECK(print["sparse_infill_pattern"] == "zig-zag");
         CHECK(!print.contains("make_overhang_printable"));
         const json filament = json::parse(zip_entry(path, "Metadata/filament_settings_1.config"));
@@ -471,7 +477,7 @@ SCENARIO("Export Bambu 3MF writes a project Bambu Studio loads with its settings
         REQUIRE(back.ok);
         CHECK(back.is_bbl_3mf);
         CHECK(back.version.maj() == 2);
-        CHECK(back.version.min() == 8);
+        CHECK(back.version.min() == 9);
         CHECK(back.plates.size() == 2);
         REQUIRE(back.model.objects.size() == 1);
         const ModelObject *obj = back.model.objects[0];

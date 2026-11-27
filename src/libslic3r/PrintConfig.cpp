@@ -480,6 +480,22 @@ static const t_config_enum_values s_keys_map_StabilizerMode = {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(StabilizerMode)
 
+// Bambu Studio 02.09.01.70 PrintConfig.cpp:929-942.
+static const t_config_enum_values s_keys_map_ReduceInfillRetractionMode = {
+    { "Disabled", rirDisabled },
+    { "Auto",     rirAuto },
+    { "Enabled",  rirEnabled }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(ReduceInfillRetractionMode)
+
+static const t_config_enum_values s_keys_map_FilamentMetalStickiness = {
+    { "None",   fmsNone },
+    { "Low",    fmsLow },
+    { "Medium", fmsMedium },
+    { "High",   fmsHigh }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FilamentMetalStickiness)
+
 static const t_config_enum_values s_keys_map_StabilizerColumnShape = {
     { "round",        scsRound       },
     { "rounded_rect", scsRoundedRect },
@@ -611,8 +627,27 @@ size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int fi
 {
     // A mixed filament prints through its components' nozzle (nozzle_filament_of, ToolSlots.hpp).
     filament_id = nozzle_filament_of(config, filament_id);
-    return physical_extruder_for_filament(config.nozzle_diameter.values.size(), config.filament_diameter.values.size(),
-                                          config.filament_map.values, filament_id, config.filament_nozzle_assignment.values);
+    const size_t nozzle_count   = config.nozzle_diameter.values.size();
+    const size_t filament_count = config.filament_diameter.values.size();
+    // filament_map_decides_extruder, looked up only where it changes the answer.
+    const bool map_decides = filament_count <= nozzle_count && nozzle_count >= 2 &&
+                             (config.filament_map_mode.value == fmmManual || config.filament_map_mode.value == fmmNozzleManual) &&
+                             is_bambu_grouping_machine(config, nozzle_count);
+    return physical_extruder_for_filament(nozzle_count, filament_count, config.filament_map.values, filament_id,
+                                          config.filament_nozzle_assignment.values, map_decides);
+}
+
+bool filament_map_decides_extruder(const ConfigBase &config, size_t nozzle_count)
+{
+    if (nozzle_count < 2)
+        return false;
+    // A manual map is the user's and the slice's grouping keeps it (ToolOrdering reads Print::filament_map_input()), so the
+    // extruder the geometry is cut for and the one the grouping prints on agree. An automatic map is only known once the
+    // grouping ran, after the geometry was cut: such a plate keeps the rule it always had.
+    const ConfigOption *mode = config.option("filament_map_mode");
+    if (mode == nullptr || (mode->getInt() != int(fmmManual) && mode->getInt() != int(fmmNozzleManual)))
+        return false;
+    return is_bambu_grouping_machine(config, nozzle_count);
 }
 
 int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozzle_count, unsigned int filament_id)
@@ -624,7 +659,7 @@ int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozz
 }
 
 size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &fmap, unsigned int filament_id,
-                                      const std::vector<int> &assignment)
+                                      const std::vector<int> &assignment, bool map_decides)
 {
     if (filament_id == 0)
         return 0;
@@ -638,8 +673,11 @@ size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count
     // When the printer has at least as many nozzles as filaments, every filament owns a physical
     // extruder (a toolchanger such as the U1, or any printer without an AMS sharing one nozzle),
     // so the filament index already IS the physical extruder. Only when more filaments share
-    // fewer nozzles do we need filament_map.
-    if (filament_count <= nozzle_count)
+    // fewer nozzles do we need filament_map - and on a Bambu grouping machine (H2D / H2C / X2D) with a
+    // manual map (filament_map_decides_extruder): there every filament comes from the AMS and the map puts
+    // it on the left or right extruder, also on a plate of one or two filaments (2,1 prints filament 1 on
+    // the right).
+    if (filament_count <= nozzle_count && !map_decides)
         return direct < nozzle_count ? direct : 0;
     if (direct < fmap.size() && fmap[direct] >= 1 && size_t(fmap[direct]) <= nozzle_count)
         return size_t(fmap[direct] - 1);
@@ -741,6 +779,67 @@ std::vector<std::map<int, int>> get_extruder_ams_count(const std::vector<std::st
         extruder_ams_counts.emplace_back(ams_count_info);
     }
     return extruder_ams_counts;
+}
+
+namespace {
+size_t flush_matrix_isqrt(size_t value)
+{
+    size_t root = size_t(std::sqrt(double(value)) + EPSILON);
+    while (root > 0 && root * root > value)
+        --root;
+    while ((root + 1) * (root + 1) <= value)
+        ++root;
+    return root;
+}
+} // namespace
+
+FlushMatrixLayout flush_matrix_layout(size_t size, size_t nozzle_nums, size_t filaments)
+{
+    FlushMatrixLayout layout;
+    layout.filaments = flush_matrix_isqrt(size);
+    if (nozzle_nums < 2)
+        return layout;
+    if (filaments > 0) {
+        if (size == nozzle_nums * filaments * filaments) {
+            layout.filaments = filaments;
+            layout.blocks    = nozzle_nums;
+        }
+        return layout;
+    }
+    if (layout.filaments * layout.filaments == size || size % nozzle_nums != 0)
+        return layout;
+    const size_t block = size / nozzle_nums;
+    const size_t root  = flush_matrix_isqrt(block);
+    if (root > 0 && root * root == block) {
+        layout.filaments = root;
+        layout.blocks    = nozzle_nums;
+    }
+    return layout;
+}
+
+double flush_volume_for_change(const std::vector<double> &values, size_t nozzle_nums, const std::vector<int> &filament_map,
+                               size_t from, size_t to, size_t filaments)
+{
+    const FlushMatrixLayout layout = flush_matrix_layout(values.size(), nozzle_nums, filaments);
+    const size_t            n      = layout.filaments;
+    if (from >= n || to >= n)
+        return 0.;
+    size_t block = 0;
+    if (layout.per_nozzle() && to < filament_map.size() && filament_map[to] >= 1 && size_t(filament_map[to]) <= layout.blocks)
+        block = size_t(filament_map[to]) - 1;
+    const size_t idx = block * n * n + from * n + to;
+    return idx < values.size() ? values[idx] : 0.;
+}
+
+std::vector<std::vector<float>> flush_matrix_for_changes(const std::vector<double> &values, size_t nozzle_nums,
+                                                         const std::vector<int> &filament_map, size_t filaments)
+{
+    const size_t                    n = flush_matrix_layout(values.size(), nozzle_nums, filaments).filaments;
+    std::vector<std::vector<float>> table(n, std::vector<float>(n, 0.f));
+    for (size_t from = 0; from < n; ++from)
+        for (size_t to = 0; to < n; ++to)
+            table[from][to] = float(flush_volume_for_change(values, nozzle_nums, filament_map, from, to, filaments));
+    return table;
 }
 
 // Parse the per-extruder nozzle-stat encoding "VolumeType#count|VolumeType#count|..." into a map per extruder.
@@ -1789,6 +1888,75 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Enable this option to slow printing down for different overhang degree.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBools { true });
+
+    // Bambu Studio 02.09.01.70 height slowdown (PrintConfig.cpp:2169-2232, used by GCode::slowDownByHeight,
+    // GCode.cpp:7513-7563). Same keys, labels and defaults; per process variant like Bambu's NOZZLE_CONFIG
+    // (process_flow_variant_options).
+    def = this->add("enable_height_slowdown", coBools);
+    def->label = L("Slow down by height");
+    def->category = L("Speed");
+    def->tooltip = L("Enable this option to slow printing down by height.\n\n"
+                     "From Starting height to Ending height, the print speed, the travel speed and the "
+                     "accelerations of walls, infill and gap fill are capped by a limit that goes linearly "
+                     "from the starting to the ending values. Above Ending height the ending values apply. "
+                     "Below Starting height nothing is capped. Tall, narrow prints wobble less this way.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBools { false });
+
+    def = this->add("slowdown_start_height", coFloats);
+    def->label = L("Starting height");
+    def->category = L("Speed");
+    def->tooltip = L("The height starts to slow down");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0. });
+
+    def = this->add("slowdown_start_speed", coFloats);
+    def->label = L("Speed at starting height");
+    def->category = L("Speed");
+    def->tooltip = L("The speed limit at Starting height. Print and travel speeds above it are lowered to it.");
+    def->sidetext = L("mm/s");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 1000. });
+
+    def = this->add("slowdown_start_acc", coFloats);
+    def->label = L("Acceleration at starting height");
+    def->category = L("Speed");
+    def->tooltip = L("The acceleration limit at Starting height. Print and travel accelerations above it are lowered to it.");
+    def->sidetext = u8"mm/s²";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 100000. });
+
+    def = this->add("slowdown_end_height", coFloats);
+    def->label = L("Ending height");
+    def->category = L("Speed");
+    def->tooltip = L("The height finishes slowing down, "
+                     "Ending height should be larger than Starting height, or the slowing down will not work!");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 400. });
+
+    def = this->add("slowdown_end_speed", coFloats);
+    def->label = L("Speed at ending height");
+    def->category = L("Speed");
+    def->tooltip = L("The speed limit at Ending height and above.");
+    def->sidetext = L("mm/s");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 1000. });
+
+    def = this->add("slowdown_end_acc", coFloats);
+    def->label = L("Acceleration at ending height");
+    def->category = L("Speed");
+    def->tooltip = L("The acceleration limit at Ending height and above.");
+    def->sidetext = u8"mm/s²";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 100000. });
 
     // Port of Neotko Overhang Shadow (cf1255c). Off by default; no Libre Mode lock; not enabled in any profile.
     def = this->add("overhang_shadow_inner_wall", coBool);
@@ -3600,6 +3768,26 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionInts{ 0 });
 
+    // Bambu Studio 02.09.01.70 PrintConfig.cpp:3310-3327 (Filament > Basic information).
+    def = this->add("filament_metal_stickiness", coEnums);
+    def->label = L("Metal stickiness");
+    def->tooltip = L("Indicates how strongly the filament tends to stick to the metal nozzle and leave residue. "
+                     "\"None\" means untested or custom filament, behaves the same as Low. "
+                     "Low: e.g. PLA - retraction can be safely skipped in infill areas. "
+                     "Medium: moderate stickiness - use with caution. "
+                     "High: e.g. PETG - retraction should not be skipped to avoid oozing artifacts on outer walls.");
+    def->enum_keys_map = &ConfigOptionEnum<FilamentMetalStickiness>::get_enum_values();
+    def->enum_values.push_back("None");
+    def->enum_values.push_back("Low");
+    def->enum_values.push_back("Medium");
+    def->enum_values.push_back("High");
+    def->enum_labels.push_back(L("None"));
+    def->enum_labels.push_back(L("Low"));
+    def->enum_labels.push_back(L("Medium"));
+    def->enum_labels.push_back(L("High"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnumsGeneric{ fmsNone });
+
     // Ultra: per-filament additive Z offset (OrcaSlicer #4660)
     def = this->add("filament_z_offset", coFloats);
     def->label = L("Filament Z offset");
@@ -3787,6 +3975,7 @@ void PrintConfigDef::init_fff_params()
                         "to shorten the effective vertical column length and improve Z-axis compression "
                         "buckling resistance. Filament use is preserved. No effect at ~30% sparse infill "
                         "density and above. Only applies when Sparse infill pattern is set to Gyroid.");
+    def->mode       = comAdvanced; // owner 2026-11-25: not in Basic
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("sparse_infill_pattern", coEnum);
@@ -4168,6 +4357,19 @@ void PrintConfigDef::init_fff_params()
     def->max_literal = 10;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
+
+    // Bambu Studio 02.09.01.70 (PrintConfig.cpp:3994-4005, used by PrintRegion::flow, PrintRegion.cpp:30-31).
+    def = this->add("initial_layer_infill_line_width", coFloat);
+    def->label = L("Initial layer infill");
+    def->category = L("Quality");
+    def->tooltip = L("Line width of the infill of initial layer, including sparse infill, solid infill and top surface. "
+                     "Walls, support and everything else of the initial layer are not affected and keep using the line width "
+                     "of initial layer. Zero means to use the line width of initial layer.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max_literal = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
 
     def = this->add("initial_layer_print_height", coFloat);
@@ -7046,13 +7248,25 @@ void PrintConfigDef::init_fff_params()
     // start and end point is from the change_filament_gcode
     def->set_default_value(new ConfigOptionPoints{Vec2d(30, -3), Vec2d(54, 245)});
 
-    def = this->add("reduce_infill_retraction", coBool);
+    // Bambu Studio 02.09.01.70 PrintConfig.cpp:5272-5289. Replaced our reduce_infill_retraction bool
+    // (handle_legacy maps it: 1 -> Enabled, 0 -> Disabled). Our default stays Disabled, the old bool's
+    // false (Bambu's is Auto), so profiles that never set it slice as before.
+    def = this->add("reduce_infill_retraction_mode", coEnum);
     def->label = L("Reduce infill retraction");
-    def->tooltip = L("Don't retract when the travel is in infill area absolutely. That means the oozing can't been seen. "
-                     "This can reduce times of retraction for complex model and save printing time, but make slicing and "
-                     "G-code generating slower.");
+    def->tooltip = L("Controls whether retraction is skipped when traveling within the infill area. "
+                     "\"Auto\" enables this optimization for filaments with low metal stickiness (e.g. PLA) "
+                     "and disables it for medium/high metal stickiness filaments (e.g. PETG) to avoid oozing artifacts. "
+                     "\"Enabled\" always skips retraction in infill areas regardless of filament type. "
+                     "\"Disabled\" always retracts normally.");
+    def->enum_keys_map = &ConfigOptionEnum<ReduceInfillRetractionMode>::get_enum_values();
+    def->enum_values.push_back("Disabled");
+    def->enum_values.push_back("Auto");
+    def->enum_values.push_back("Enabled");
+    def->enum_labels.push_back(L("Disabled"));
+    def->enum_labels.push_back(L("Auto"));
+    def->enum_labels.push_back(L("Enabled"));
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
+    def->set_default_value(new ConfigOptionEnum<ReduceInfillRetractionMode>(rirDisabled));
 
     def = this->add("ooze_prevention", coBool);
     def->label = L("Enable");
@@ -9594,7 +9808,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Balanced"));
     def->enum_labels.push_back(L("Fine text"));
     def->enum_labels.push_back(L("Custom"));
-    def->mode = comSimple;
+    def->mode = comAdvanced; // owner 2026-11-25: the Thin features group is not in Basic
     def->set_default_value(new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
 
     def = this->add("thin_feature_line_width", coPercent);
@@ -11758,6 +11972,14 @@ const std::vector<std::string>& process_flow_variant_options()
         "overhang_3_4_speed",
         "overhang_4_4_speed",
         "enable_overhang_speed",
+        // Bambu Studio 02.09.01.70 height slowdown: NOZZLE_CONFIG (per variant) in GCode::slowDownByHeight.
+        "enable_height_slowdown",
+        "slowdown_start_height",
+        "slowdown_start_speed",
+        "slowdown_start_acc",
+        "slowdown_end_height",
+        "slowdown_end_speed",
+        "slowdown_end_acc",
         "slowdown_for_curled_perimeters",
         "default_acceleration",
         "outer_wall_acceleration",
@@ -12469,6 +12691,16 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
             value = "auto";
         else if (value == "0" || value == "false")
             value = "off";
+    } else if (opt_key == "reduce_infill_retraction") {
+        // Bambu parity PR 2 (owner D3, 2026-11-25): the bool became Bambu Studio's three-way
+        // reduce_infill_retraction_mode (02.09.01.70 PrintConfig.cpp:5272-5289). On stays "always skip"
+        // (Enabled), so old projects, presets and other vendors' profiles slice as before; Bambu itself
+        // reads an old 1 as Auto (Config.cpp:999-1005). An empty value (key-only pass) only renames.
+        opt_key = "reduce_infill_retraction_mode";
+        if (value == "1" || boost::iequals(value, "true"))
+            value = "Enabled";
+        else if (value == "0" || boost::iequals(value, "false"))
+            value = "Disabled";
     } else if (opt_key == "draft_shield" && value == "limited") {
         value = "disabled";
     } else if (opt_key == "support_interface_filament_source") {

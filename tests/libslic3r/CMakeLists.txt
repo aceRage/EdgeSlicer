@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
 	test_model_rotate_center.cpp
+	test_apply_transform.cpp
 	test_orient.cpp
 	test_plugin_preset_3mf.cpp
 	test_plate_print_history.cpp
@@ -15,11 +16,15 @@ add_executable(${_TEST_NAME}_tests
 	test_bambu_multi_diameter.cpp
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp
+	test_bambu_parity_infill_retraction.cpp
+	test_bambu_ui_keys.cpp
+	test_settings_view.cpp
 	test_bambu_nil_override.cpp
 	test_untrusted_input.cpp
 	test_post_process_packed_gcode.cpp
 	test_zip_entry_path.cpp
 	test_zip_cleaner.cpp
+	test_coalescing_worker.cpp
 	test_zip_extract.cpp
 	test_zip_open.cpp
 	test_custom_models.cpp
@@ -36,10 +41,12 @@ add_executable(${_TEST_NAME}_tests
 	test_appconfig_trailing_newline.cpp
 	test_appconfig_auto_slice.cpp
 	test_appconfig_recent_projects.cpp
+	test_upload_name.cpp
 	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
 	test_lightning.cpp
+	test_arachne.cpp
 	test_arachne_walls.cpp
 	test_skirt_distance.cpp
 	test_ams_lookup.cpp
@@ -65,6 +72,8 @@ add_executable(${_TEST_NAME}_tests
 	test_inline_text.cpp
 	test_simple_shape.cpp
 	test_image_trace.cpp
+	test_outline_objects.cpp
+	test_image_object_recipe.cpp
 	test_dxf.cpp
 	test_svg_split.cpp
 	test_svg_import.cpp
@@ -90,6 +99,7 @@ add_executable(${_TEST_NAME}_tests
 	test_cut_paint.cpp
 	test_paint_transfer_cut.cpp
 	test_paint_transfer_boolean.cpp
+	test_repair_paint.cpp
 	test_cut_groove.cpp
 	test_cut.cpp
 	test_cut_mesh_caps.cpp
@@ -139,6 +149,7 @@ add_executable(${_TEST_NAME}_tests
 	test_fuzzy_skin.cpp
 	test_arc_fitting.cpp
 	test_geometry.cpp
+	test_measure.cpp
 	test_h2c_rack_nozzle_change.cpp
 	test_h2c_rack_park_preheat.cpp
 	test_h2d_byobject_toolchange.cpp
@@ -150,6 +161,7 @@ add_executable(${_TEST_NAME}_tests
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp
+	test_flush_matrix_reading.cpp
 	test_mixed_sublayer.cpp
 	test_cli_preset_slots.cpp
 	test_cli_amf_inch.cpp

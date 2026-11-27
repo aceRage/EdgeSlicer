@@ -282,6 +282,16 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         wxGetApp().app_config->set("user_mode", "simple");
         wxGetApp().app_config->set_bool("developer_mode", false);
         wxGetApp().app_config->save();
+    } else {
+        // Settings views: builds before 2026-11-25 stored Developer mode as user_mode "develop". It loads as
+        // Advanced with Developer mode on (the same lines show), and Developer mode is a flag from now on.
+        std::string user_mode = wxGetApp().app_config->get("user_mode");
+        bool        developer = wxGetApp().app_config->get_bool("developer_mode");
+        if (migrate_legacy_developer_user_mode(user_mode, developer)) {
+            wxGetApp().app_config->set("user_mode", user_mode);
+            wxGetApp().app_config->set_bool("developer_mode", developer);
+            wxGetApp().app_config->save();
+        }
     }
 
     wxGetApp().app_config->set_bool("internal_developer_mode", false);
@@ -2420,12 +2430,17 @@ std::vector<MainFrame::PrintSelectType> MainFrame::available_print_actions() con
         return actions;
     }
 
-    // BBL vendor (LAN or cloud): Print plate, optional Multi-device, both sliced-file exports,
-    // Export G-code. No Print all / Send / Send all on Edge. The native print flow is ePrintPlate
-    // / EVT_GLTOOLBAR_PRINT_PLATE (SelectMachineDialog). eSendGcode is the third-party print-host
+    // BBL vendor (LAN or cloud): Print plate, Send / Send all (upload to the printer's storage
+    // without starting a print, SendToPrinterDialog), optional Multi-device, both sliced-file
+    // exports, Export G-code. No Print all on Edge. The native print flow is ePrintPlate /
+    // EVT_GLTOOLBAR_PRINT_PLATE (SelectMachineDialog). eSendGcode is the third-party print-host
     // flow and additionally gates on can_send_gcode(); keep the label and the enum in sync with
-    // set_print_button_to_default(ePrintPlate) and the Ctrl+Shift+G shortcut.
+    // set_print_button_to_default(ePrintPlate) and the Ctrl+Shift+G shortcut. eSendToPrinter(All)
+    // are enabled by get_enable_print_status() and share Plater::send_gcode with Print plate, so
+    // the uploaded 3MF is the same file.
     actions.push_back(ePrintPlate);
+    actions.push_back(eSendToPrinter);
+    actions.push_back(eSendToPrinterAll);
     if (enable_multi_machine)
         actions.push_back(ePrintMultiMachine);
     actions.push_back(eExportSlicedFile);
@@ -4569,7 +4584,7 @@ void MainFrame::load_config_file()
  //   if (!wxGetApp().check_and_save_current_preset_changes(_L("Loading profile file"), "", false))
  //       return;
     wxFileDialog dlg(this, _L("Select profile to load:"),
-        !m_last_config.IsEmpty() ? get_dir_name(m_last_config) : wxGetApp().app_config->get_last_dir(),
+        from_u8(!m_last_config.IsEmpty() ? get_dir_name(m_last_config) : wxGetApp().app_config->get_last_dir()),
         "config.json", "Config files (*.json;*.zip;*.orca_printer;*.orca_filament)|*.json;*.zip;*.orca_printer;*.orca_filament", wxFD_OPEN | wxFD_MULTIPLE | wxFD_FILE_MUST_EXIST);
      wxArrayString files;
     if (dlg.ShowModal() != wxID_OK)
@@ -4622,7 +4637,7 @@ void MainFrame::load_config_file()
 void MainFrame::import_config_from_gcode()
 {
     wxFileDialog dlg(this, _L("Select a sliced G-code file to import settings from:"),
-        wxGetApp().app_config->get_last_dir(), "",
+        from_u8(wxGetApp().app_config->get_last_dir()), "",
         "G-code files (*.gcode;*.g;*.ngc)|*.gcode;*.g;*.ngc", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dlg.ShowModal() != wxID_OK)
         return;
@@ -4697,7 +4712,7 @@ bool MainFrame::load_config_file(const std::string &path)
 {
     // Ask user for a file name.
     wxDirDialog dlg(this, _L("choose a directory"),
-        !m_last_config.IsEmpty() ? get_dir_name(m_last_config) : wxGetApp().app_config->get_last_dir(), wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+        from_u8(!m_last_config.IsEmpty() ? get_dir_name(m_last_config) : wxGetApp().app_config->get_last_dir()), wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
     wxString path;
     if (dlg.ShowModal() == wxID_OK)
         path = dlg.GetPath();
@@ -5022,6 +5037,8 @@ void MainFrame::set_print_button_to_default(PrintSelectType select_type)
     case eExportSlicedFile:
     case eExportAllSlicedFile:
     case ePrintMultiMachine:
+    case eSendToPrinter:
+    case eSendToPrinterAll:
     case eSendToBambuConnect:
         apply_print_select_state(select_type);
         // Only the print-host flow (eSendGcode) needs a host. Export actions, eExportGcode
@@ -5034,8 +5051,7 @@ void MainFrame::set_print_button_to_default(PrintSelectType select_type)
         }
         break;
     default:
-        // unsupported from this entry point (ePrintAll / eSendToPrinter / eSendToPrinterAll /
-        // eUploadGcode are never offered on Edge).
+        // unsupported from this entry point (ePrintAll / eUploadGcode are never offered on Edge).
         return;
     }
 }

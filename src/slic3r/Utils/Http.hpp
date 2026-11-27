@@ -248,6 +248,18 @@ public:
 	// Whether an error string is that refusal. A refusal is a decision about where the transfer
 	// went, not a transport failure, so a caller's retry loop must not re-send the request.
 	static bool error_is_redirect_refusal(const std::string &error);
+#ifndef _WIN32
+    // If `env` is nullptr (SSL_CERT_FILE unset), the first system CA bundle that exists.
+    // Empty when the user set the variable (even to empty or a missing path) or when no bundle is found.
+    static std::string ssl_cert_file_fallback_path(const char *env);
+    // If SSL_CERT_FILE is unset, set it to a system CA bundle (does not overwrite a user-set value).
+    // Returns the path written, or empty if the variable was already set or no bundle exists.
+    static std::string ensure_ssl_cert_file_if_unset();
+    // Empty when `env` is unset or names an existing regular file. Otherwise a reason that
+    // SSL_CERT_FILE is set but unusable (empty value, or a missing / non-file path).
+    static std::string ssl_cert_file_unusable_reason(const char *env);
+#endif
+
 	// The certificate policy, as pure functions (unit-tested in tests/slic3rutils/http_tls_policy_tests.cpp).
 	// Host part of a URL, lower-cased, without userinfo, port, IPv6 brackets or a trailing dot.
 	static std::string url_host(const std::string &url);

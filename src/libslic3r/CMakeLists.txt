@@ -97,6 +97,8 @@ set(lisbslic3r_sources
     PaintDepth.hpp
     PaintTransfer.cpp
     PaintTransfer.hpp
+    RepairPaint.cpp
+    RepairPaint.hpp
     PaintWire.cpp
     PaintWire.hpp
     ColorSplit.cpp
@@ -224,6 +226,12 @@ set(lisbslic3r_sources
     CodeEmboss.hpp
     ImageTrace.cpp
     ImageTrace.hpp
+    OutlineObjects.cpp
+    OutlineObjects.hpp
+    ImageObjectRecipe.cpp
+    ImageObjectRecipe.hpp
+    MeshPreview.cpp
+    MeshPreview.hpp
     SimpleShape.cpp
     SimpleShape.hpp
     enum_bitmask.hpp
@@ -348,6 +356,8 @@ set(lisbslic3r_sources
     Format/BambuMultiDiameter.cpp
     Format/BambuMultiDiameter.hpp
     Format/BambuKnownKeys.cpp
+    Format/BambuUiKeys.cpp
+    Format/BambuUiKeys.hpp
     Format/GLTF.cpp
     Format/GLTF.hpp
     format.hpp
@@ -615,6 +625,8 @@ set(lisbslic3r_sources
     StartupProfile.hpp
     Preset.cpp
     Preset.hpp
+    SettingsView.cpp
+    SettingsView.hpp
     PresetFlowVariant.cpp
     PresetFlowVariant.hpp
     PrincipalComponents2D.cpp
@@ -820,6 +832,8 @@ set(lisbslic3r_sources
     ZipOpen.hpp
     ZipWorkCleaner.cpp
     ZipWorkCleaner.hpp
+    CoalescingWorker.cpp
+    CoalescingWorker.hpp
 )
 
 if (APPLE)

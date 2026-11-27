@@ -106,6 +106,9 @@ using namespace nlohmann;
 #include "slic3r/Utils/PaintCLI.hpp"
 #include "slic3r/Utils/WebView2Args.hpp"
 #include "slic3r/Utils/WinFirewall.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "slic3r/plugin/ipc/PluginSandbox.hpp"
+#endif
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
@@ -1741,7 +1744,8 @@ int CLI::run(int argc, char **argv)
     int current_printable_width, current_printable_depth, current_printable_height, shrink_to_new_bed = 0;
     int old_printable_height = 0, old_printable_width = 0, old_printable_depth = 0;
     Pointfs old_printable_area, old_exclude_area;
-    float old_max_radius = 0.f, old_height_to_rod = 0.f, old_height_to_lid = 0.f;
+    // double, like the current values they are compared with: a float copy of 47.4 never equals the double 47.4.
+    double old_max_radius = 0., old_height_to_rod = 0., old_height_to_lid = 0.;
     std::vector<double> old_max_layer_height, old_min_layer_height;
     std::string outfile_dir              =  m_config.opt_string("outputdir", true);
     const std::vector<std::string>              &load_configs               = m_config.option<ConfigOptionStrings>("load_settings", true)->values;
@@ -2526,7 +2530,7 @@ int CLI::run(int argc, char **argv)
                     if (config.option<ConfigOptionFloat>("extruder_clearance_height_to_lid"))
                         old_height_to_lid = config.opt_float("extruder_clearance_height_to_lid");
                     if (config.option<ConfigOptionFloat>("extruder_clearance_radius"))
-                        old_max_radius = float(sequential_clearance_radius(config));
+                        old_max_radius = sequential_clearance_radius(config);
                     if (config.option<ConfigOptionFloats>("max_layer_height"))
                         old_max_layer_height = config.option<ConfigOptionFloats>("max_layer_height")->values;
                     if (config.option<ConfigOptionFloats>("min_layer_height"))
@@ -3987,9 +3991,10 @@ int CLI::run(int argc, char **argv)
     // This runs AFTER the flush-volume block on purpose: that block is entered only when the
     // project already carries colours (or --filament-colour was given), and it sizes
     // flush_volumes_matrix filament_count x filament_count, which is a single-nozzle shape. Adding
-    // the colours before it would pull dual-nozzle slices into that branch and hand
-    // prepare_flush_matrices a matrix half the size it slices per nozzle. Leaving the branch alone
-    // keeps the 4x4 PrintConfig default, which every nozzle can be sliced out of.
+    // the colours before it would pull dual-nozzle slices into that branch. Leaving the branch alone
+    // keeps the 4x4 PrintConfig default; with another filament count prepare_flush_matrices reads
+    // it as the G-code writer does, one 4x4 square whose first filaments x filaments entries every
+    // nozzle uses.
     if (filament_count > 0) {
         ConfigOptionStrings *filament_colors_option = m_print_config.option<ConfigOptionStrings>("filament_colour", true);
         std::vector<std::string> &filament_colors = filament_colors_option->values;
@@ -4245,8 +4250,11 @@ int CLI::run(int argc, char **argv)
                                             cli_mixed_num_physical);
 
         if (ConfigOptionFloats *flush_opt = m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix")) {
-            const size_t n = size_t(std::sqrt(double(flush_opt->values.size())) + 0.001);
-            zero_mixed_flush_rows_and_cols(flush_opt->values, n, cli_mixed_filament_mgr, cli_mixed_num_physical);
+            // One N x N matrix, or one per nozzle (Bambu Studio's 2 x N x N on an H2D / H2C): each block is
+            // zeroed on its own diagonal and its mixed slots' rows and columns, not one floor(sqrt) square.
+            const ConfigOptionFloats *nozzles = m_print_config.option<ConfigOptionFloats>("nozzle_diameter");
+            zero_mixed_flush_rows_and_cols_for_nozzles(flush_opt->values, nozzles == nullptr ? 1 : nozzles->values.size(),
+                                                       cli_mixed_filament_mgr, cli_mixed_num_physical);
         }
 
         const std::string mixed_defs = cli_mixed_filament_definitions(m_print_config, nullptr);
@@ -5197,9 +5205,13 @@ int CLI::run(int argc, char **argv)
 
     if ((!need_arrange) && is_bbl_3mf && !shrink_to_new_bed && (plate_to_slice > 0))
     {
-        if (((old_height_to_rod != 0.f) && (old_height_to_rod != height_to_rod))
-            || ((old_height_to_lid != 0.f) && (old_height_to_lid != height_to_lid))
-            || ((old_max_radius != 0.f) && (old_max_radius != clearance_radius)))
+        // Compare with a tolerance so a project whose clearances equal the current ones keeps its saved positions.
+        auto clearance_changed = [](double old_value, double new_value) {
+            return (old_value != 0.) && (std::abs(old_value - new_value) > 1e-3);
+        };
+        if (clearance_changed(old_height_to_rod, height_to_rod)
+            || clearance_changed(old_height_to_lid, height_to_lid)
+            || clearance_changed(old_max_radius, clearance_radius))
         {
             if (is_seq_print_for_curr_plate) {
                 need_arrange = true;
@@ -6883,7 +6895,8 @@ int CLI::run(int argc, char **argv)
                                             continue;
                                         }
                                         if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter || status.message_type == PrintStateBase::SlicingHeadCollision ||
-                                            status.message_type == PrintStateBase::SlicingCurvedTopsHeadCheck) {
+                                            status.message_type == PrintStateBase::SlicingCurvedTopsHeadCheck ||
+                                            status.message_type == PrintStateBase::SlicingByObjectGantryReach) {
                                             sliced_plate_info.warning_message = status.text;
                                             sliced_plate_info.warnings.push_back(status.text);
                                             cli_record_warning(sliced_info, "slicing_warning_non_critical",
@@ -8052,6 +8065,12 @@ bool CLI::setup(int argc, char **argv)
             m_config.option(optdef.first, true);
 
     set_data_dir(m_config.opt_string("datadir"));
+#ifdef EDGE_PYTHON_PLUGINS
+    // CLI / headless slice never reaches GUI PluginManager::initialize. Sweep leftover
+    // AppContainer ACEs now that data_dir is known (data_dir journal plus the stable
+    // LocalAppData journal that covers python_home / helper / resources).
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+#endif
 
     //FIXME Validating at this stage most likely does not make sense, as the config is not fully initialized yet.
     if (!validity.empty()) {

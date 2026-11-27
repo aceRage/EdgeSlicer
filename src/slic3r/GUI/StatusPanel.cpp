@@ -25,6 +25,7 @@
 #include <wx/mstream.h>
 #include <wx/sstream.h>
 #include <wx/zstream.h>
+#include "ToolTempLayout.hpp"
 
 
 namespace Slic3r { namespace GUI {
@@ -977,7 +978,7 @@ void StatusBasePanel::init_bitmaps()
     m_bitmap_timelapse_off = ScalableBitmap(this, wxGetApp().dark_mode() ? "monitor_timelapse_off_dark" : "monitor_timelapse_off", 20);
     m_bitmap_vcamera_on = ScalableBitmap(this, wxGetApp().dark_mode() ? "monitor_vcamera_on_dark" : "monitor_vcamera_on", 20);
     m_bitmap_vcamera_off = ScalableBitmap(this, wxGetApp().dark_mode() ? "monitor_vcamera_off_dark" : "monitor_vcamera_off", 20);
-    m_bitmap_switch_camera = ScalableBitmap(this, wxGetApp().dark_mode() ? "camera_switch_dark" : "camera_switch", 20);
+    m_bitmap_switch_camera = ScalableBitmap(this, wxGetApp().dark_mode() ? "camera_custom_source_dark" : "camera_custom_source", 20);
 
 }
 
@@ -1063,7 +1064,9 @@ wxBoxSizer *StatusBasePanel::create_monitoring_page()
     m_bitmap_recording_img->SetToolTip(_L("Video"));
     m_bitmap_vcamera_img->SetToolTip(_L("Go Live"));
     m_setting_button->SetToolTip(_L("Camera Setting"));
-    m_camera_switch_button->SetToolTip(_L("Switch Camera View"));
+    // "Show custom camera", not "Switch Camera View": the BirdsEye swap in the video bar switches
+    // the printer's own cameras, and two look-alike "switch camera" buttons would be confusing.
+    m_camera_switch_button->SetToolTip(_L("Show custom camera"));
 
     bSizer_monitoring_title->Add(m_camera_switch_button, 0, wxALIGN_CENTER_VERTICAL | wxALL, FromDIP(5));
     bSizer_monitoring_title->Add(m_bitmap_sdcard_img, 0, wxALIGN_CENTER_VERTICAL | wxALL, FromDIP(5));
@@ -1261,7 +1264,12 @@ wxBoxSizer *StatusBasePanel::create_temp_axis_group(wxWindow *parent)
     content_sizer->Add(0, 0, 0, wxLEFT, FromDIP(18));
     content_sizer->Add(extruder_sizer, 0, wxEXPAND  | wxTOP | wxBOTTOM, FromDIP(12));
 
-    box->SetSizer(content_sizer);
+    // Content row, then the tool / rack strip (ToolTempList; hidden and zero-sized unless the
+    // printer has 9+ tools or a rack that reports temperatures).
+    wxBoxSizer *box_sizer = new wxBoxSizer(wxVERTICAL);
+    box_sizer->Add(content_sizer, 1, wxEXPAND);
+    box_sizer->Add(m_tool_temps->strip_sizer(), 0, wxEXPAND);
+    box->SetSizer(box_sizer);
     sizer->Add(box, 0, wxEXPAND | wxALL, FromDIP(9));
 
     return sizer;
@@ -1300,6 +1308,11 @@ wxBoxSizer *StatusBasePanel::create_temp_control(wxWindow *parent)
 
     sizer->Add(m_tempCtrl_nozzle_deputy, 0, wxEXPAND | wxALL, 1);
     sizer->Add(m_tempCtrl_nozzle, 0, wxEXPAND | wxALL, 1);
+
+    // 3+ tools: compact rows / grid here; 9+ tools and the H3C rack: a strip under the box.
+    m_tool_temps = std::make_unique<ToolTempList>(parent, m_tempCtrl_nozzle, tempinput_text_colour, tempinput_border_colour, nozzle_temp_range[0],
+                                                  nozzle_temp_range[1]);
+    sizer->Add(m_tool_temps->column_sizer(), 0, wxEXPAND);
 
     m_line_nozzle = new StaticLine(parent);
     m_line_nozzle->SetLineColour(STATIC_BOX_LINE_COL);
@@ -1479,10 +1492,12 @@ void StatusBasePanel::reset_temp_misc_control()
     m_tempCtrl_bed->GetTextCtrl()->SetValue(TEMP_BLANK_STR);
     m_tempCtrl_chamber->SetLabel(TEMP_BLANK_STR);
     m_tempCtrl_chamber->GetTextCtrl()->SetValue(TEMP_BLANK_STR);
+    if (m_tool_temps) m_tool_temps->reset_values();
     m_button_unload->Show();
 
     m_tempCtrl_nozzle->Enable(true);
     m_tempCtrl_nozzle_deputy->Enable(true);
+    if (m_tool_temps) m_tool_temps->enable(true);
     m_tempCtrl_chamber->Enable(true);
     m_tempCtrl_bed->Enable(true);
 
@@ -1823,6 +1838,10 @@ StatusPanel::StatusPanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, co
 
     Bind(wxCUSTOMEVT_SET_TEMP_FINISH, [this](wxCommandEvent e) {
         int id = e.GetInt();
+        if (m_tool_temps && m_tool_temps->on_finish(id, [this](TempInput *ctrl, int extruder_id, int &hold_count) {
+                send_nozzle_temp(ctrl, hold_count, extruder_id);
+            }))
+            return;
         if (id == m_tempCtrl_bed->GetType()) {
             on_set_bed_temp();
         } else if (id == m_tempCtrl_nozzle->GetType()) {
@@ -1834,6 +1853,11 @@ StatusPanel::StatusPanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, co
         }
     });
 
+
+    m_tool_temps->set_layout_callback([this]() {
+        Layout();
+        Refresh();
+    });
 
     // Connect Events
     m_project_task_panel->get_bitmap_thumbnail()->Connect(wxEVT_LEFT_DOWN, wxMouseEventHandler(StatusPanel::refresh_thumbnail_webrequest), NULL, this);
@@ -2473,6 +2497,7 @@ void StatusPanel::show_printing_status(bool ctrl_area, bool temp_area)
     if (!temp_area) {
         m_tempCtrl_nozzle->Enable(false);
         m_tempCtrl_nozzle_deputy->Enable(false);
+        m_tool_temps->enable(false);
         m_tempCtrl_bed->Enable(false);
         m_tempCtrl_chamber->Enable(false);
         m_switch_speed->Enable(false);
@@ -2484,6 +2509,7 @@ void StatusPanel::show_printing_status(bool ctrl_area, bool temp_area)
     } else {
         m_tempCtrl_nozzle->Enable();
         m_tempCtrl_nozzle_deputy->Enable();
+        m_tool_temps->enable(true);
         m_tempCtrl_bed->Enable();
         m_tempCtrl_chamber->Enable();
         m_switch_speed->Enable();
@@ -2494,6 +2520,35 @@ void StatusPanel::show_printing_status(bool ctrl_area, bool temp_area)
         m_switch_cham_fan->Enable();
     }
 }
+
+namespace {
+
+// MachineObject -> the strip's rack slots. Only a direct-connected rack (the H3C's kind, as
+// Bambu Studio shows rack temperatures only there). The temperatures are the phase 4 fields of
+// struct Nozzle (BambuRackTemps::parse_nozzle_temp); a rack that reports none gives no slots, so
+// no strip and the panel as before. Tool kinds come later (feat/craft-tool-kinds); until then
+// every slot is a nozzle.
+RackEntries rack_entries_of(MachineObject *obj)
+{
+    if (!obj || !obj->has_rack_ams()) return RackEntries();
+    std::vector<RackNozzleSample> samples;
+    for (const Nozzle &n : obj->m_nozzle_data.nozzles) {
+        RackNozzleSample s;
+        s.report_id = n.id;
+        s.addr_id   = n.addr_id;
+        s.exist     = n.exist;
+        s.diameter  = n.diameter;
+        s.high_flow = n.volume_exact == NozzleVolumeType::nvtHighFlow || n.volume_exact == NozzleVolumeType::nvtTPUHighFlow ||
+                      n.volume_exact == NozzleVolumeType::nvtE3DHighFlow;
+        s.has_temp  = n.has_temp;
+        s.temp      = n.temp;
+        s.target    = n.target_temp;
+        samples.push_back(s);
+    }
+    return rack_entries(samples);
+}
+
+} // namespace
 
 void StatusPanel::update_temp_ctrl(MachineObject *obj)
 {
@@ -2522,8 +2577,25 @@ void StatusPanel::update_temp_ctrl(MachineObject *obj)
         for (const Extder &e : obj->m_extder_data.extders) samples.push_back({e.id, e.temp, e.target_temp});
         nozzle_rows = nozzle_temp_rows(samples, obj->m_extder_data.total_extder_count, obj->m_extder_data.current_extder_id);
     }
+    // Rack slots (H3C) and the layout for this many tools (ToolTempLayout.hpp). One and two tools
+    // keep the two fixed rows below exactly as before; 3+ tools go to ToolTempList.
+    const RackEntries        rack       = rack_entries_of(obj);
+    const ToolTempLayoutPlan plan       = tool_temp_layout(int(nozzle_rows.size()), int(rack.slots.size()));
+    const bool               list_tools = !plan.uses_fixed_rows();
+    const int                nozzle_max_all = obj->nozzle_max_temperature > -1 ? obj->nozzle_max_temperature : nozzle_temp_range[1];
+    if (list_tools) {
+        set_nozzle_temp_layout(false);
+        set_tool_list_layout(true, plan.column == ToolColumn::InStrip);
+        m_tool_temps->update(plan, tool_entries_from_rows(nozzle_rows), rack.slots, nozzle_max_all);
+    } else {
+        set_tool_list_layout(false, false);
+        m_tool_temps->update(plan, {}, rack.slots, nozzle_max_all);
+    }
+
     const bool dual_nozzle = nozzle_rows.size() == 2;
-    if (dual_nozzle) {
+    if (list_tools) {
+        // the list did it all
+    } else if (dual_nozzle) {
         // Badges first: they change the rows' width, which the layout pass below measures.
         m_nozzle_deputy_ctrl_extruder_id = nozzle_rows[0].extruder_id;
         m_nozzle_ctrl_extruder_id        = nozzle_rows[1].extruder_id;
@@ -2532,11 +2604,17 @@ void StatusPanel::update_temp_ctrl(MachineObject *obj)
     } else {
         m_nozzle_ctrl_extruder_id = 0;
     }
-    set_nozzle_temp_layout(dual_nozzle);
+    if (!list_tools) set_nozzle_temp_layout(dual_nozzle);
 
-    const int nozzle_max = obj->nozzle_max_temperature > -1 ? obj->nozzle_max_temperature : nozzle_temp_range[1];
+    const int nozzle_max = nozzle_max_all;
 
-    if (!dual_nozzle) {
+    if (list_tools) {
+        // rows updated by m_tool_temps above
+    } else if (!dual_nozzle) {
+        // H3C: the nozzle on the extruder came from a rack slot; its number is the row's badge.
+        // Empty (and so unchanged) on every printer without a rack strip.
+        const wxString mounted_badge = (!rack.slots.empty() && rack.mounted_slot >= 0) ? wxString::Format("%d", rack.mounted_slot + 1) : wxString();
+        m_tempCtrl_nozzle->SetBadge(mounted_badge);
         m_tempCtrl_nozzle->SetCurrTemp((int) obj->m_extder_data.extders[0].temp);
         if (obj->nozzle_max_temperature > -1) {
             if (m_tempCtrl_nozzle) m_tempCtrl_nozzle->SetMaxTemp(obj->nozzle_max_temperature);
@@ -2612,6 +2690,25 @@ void StatusPanel::set_nozzle_temp_layout(bool dual)
 
     // The rows live in the temperature/axis box, which has its own sizer: size the box first,
     // then lay out its children (its height may not change when only the row sizes do).
+    Layout();
+    if (wxWindow *box = m_tempCtrl_nozzle->GetParent()) box->Layout();
+    Refresh();
+}
+
+void StatusPanel::set_tool_list_layout(bool list_carries_tools, bool column_empty)
+{
+    column_empty = list_carries_tools && column_empty;
+    if (list_carries_tools == m_tool_list_layout && column_empty == m_tool_column_empty) return;
+    m_tool_list_layout  = list_carries_tools;
+    m_tool_column_empty = column_empty;
+
+    if (list_carries_tools) {
+        nozzle_temp_input     = false;
+        m_temp_nozzle_timeout = 0;
+    }
+    m_tempCtrl_nozzle->Show(!list_carries_tools);
+    m_line_nozzle->Show(!column_empty);
+
     Layout();
     if (wxWindow *box = m_tempCtrl_nozzle->GetParent()) box->Layout();
     Refresh();
@@ -3716,11 +3813,14 @@ void StatusPanel::send_nozzle_temp(TempInput *ctrl, int &hold_count, int extrude
     try {
         long nozzle_temp;
         if (str.ToLong(&nozzle_temp) && obj) {
-            if (m_nozzle_dual_layout) {
+            // Two fixed rows or the 3+ tool list: address the extruder; one row: plain M104.
+            const bool per_extruder = m_nozzle_dual_layout || m_tool_list_layout;
+            if (per_extruder) {
                 // Same guard as Bambu Studio: the printer ignores a target for an empty hotend slot.
                 for (const Extder &e : obj->m_extder_data.extders) {
                     if (e.id == extruder_id && !e.nozzle_exist) {
-                        const wxString side = extruder_id == 1 ? _L("Left extruder") : _L("Right extruder");
+                        const wxString side = m_tool_list_layout ? wxString::Format(_L("Nozzle %d"), extruder_id + 1)
+                                              : extruder_id == 1 ? _L("Left extruder") : _L("Right extruder");
                         MessageDialog msg_dlg(this, wxString::Format(_L("%s hotend not detected. Cannot set nozzle temperature."), side), _L("Warning"),
                                               wxICON_WARNING | wxOK);
                         msg_dlg.ShowModal();
@@ -3734,7 +3834,7 @@ void StatusPanel::send_nozzle_temp(TempInput *ctrl, int &hold_count, int extrude
                 ctrl->SetTagTemp(wxString::Format("%d", nozzle_temp));
                 ctrl->Warning(false);
             }
-            if (m_nozzle_dual_layout) {
+            if (per_extruder) {
                 BOOST_LOG_TRIVIAL(info) << "set nozzle temp: extruder " << extruder_id << " -> " << nozzle_temp;
                 obj->command_set_nozzle_new(extruder_id, nozzle_temp);
             } else {
@@ -4788,6 +4888,7 @@ void StatusPanel::on_sys_color_changed()
     if (m_print_error_dlg) { m_print_error_dlg->msw_rescale(); }
     if (m_filament_setting_dlg) {m_filament_setting_dlg->msw_rescale();}
     rescale_camera_icons();
+    if (m_tool_temps) m_tool_temps->sys_color_changed();
 }
 
 void StatusPanel::msw_rescale()
@@ -4817,6 +4918,7 @@ void StatusPanel::msw_rescale()
     m_tempCtrl_nozzle->Rescale();
     m_tempCtrl_nozzle_deputy->SetMinSize(m_nozzle_dual_layout ? TEMP_CTRL_DUAL_MIN_SIZE : TEMP_CTRL_MIN_SIZE);
     m_tempCtrl_nozzle_deputy->Rescale();
+    if (m_tool_temps) m_tool_temps->rescale();
     m_line_nozzle->SetSize(wxSize(-1, FromDIP(1)));
     m_tempCtrl_bed->SetMinSize(TEMP_CTRL_MIN_SIZE);
     m_tempCtrl_bed->Rescale();

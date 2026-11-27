@@ -26,11 +26,14 @@ namespace GUI {
 class WebViewPanel;
 class HomeVendors;
 class HomeVaults;
+class HomePlugins;
 class ModelBrowserPanel;
 
 // The Home tab: a local page (resources/web/home) with a side menu of sections - Recent (the
 // recent projects), Library (the model files in folders the user picked, Utils/LibraryIndex.hpp),
-// Print History (the G-code archive) and Vendors (connectors to vendors' APIs, HomeVendors.hpp). The page only draws; everything on disk is read here and
+// Print History (the G-code archive), Vendors (connectors to vendors' APIs, HomeVendors.hpp) and,
+// when EDGE_PYTHON_PLUGINS is on, Plugins (HomePlugins.hpp; Python packages in orca_plugins).
+// The page only draws; everything on disk is read here and
 // every action runs here, for files this panel itself listed (Utils/HomeTabLogic.hpp has the rules).
 //
 // The old flutter start page (WebViewPanel: Snapmaker's model library) is kept behind it for the
@@ -67,6 +70,10 @@ public:
     // edgeslicer://connector?url=<https link>: shows Home > Vendors and starts "Import from link"
     // with the address filled in (the user still confirms the address and then the connector).
     void open_connector_link(const std::string& url);
+#ifdef EDGE_PYTHON_PLUGINS
+    // Grant / load callbacks: redraw Home > Plugins without the page asking.
+    void refresh_plugins();
+#endif
 
 private:
     void ensure_browser();
@@ -93,6 +100,9 @@ private:
     void open_downloaded(const std::string& path);
     void ensure_vendors();
     void ensure_vaults();
+#ifdef EDGE_PYTHON_PLUGINS
+    void ensure_plugins();
+#endif
     void reveal_archived(const std::string& id);
     void delete_archived(const std::string& id);
 
@@ -143,6 +153,9 @@ private:
 
     std::unique_ptr<HomeVendors> m_vendors; // made when the page first asks
     std::unique_ptr<HomeVaults>  m_vaults;  // the same
+#ifdef EDGE_PYTHON_PLUGINS
+    std::unique_ptr<HomePlugins> m_plugins; // Python packages; orca_plugins, never {data_dir}/plugins
+#endif
 
     // Worker threads report back through CallAfter only while this is alive.
     std::shared_ptr<bool> m_alive { std::make_shared<bool>(true) };

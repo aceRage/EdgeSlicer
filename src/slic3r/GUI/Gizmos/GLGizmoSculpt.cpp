@@ -4,6 +4,7 @@
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
+#include "libslic3r/RepairPaint.hpp"
 #include "libslic3r/QuadRemesh.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosCommon.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
@@ -1025,9 +1026,10 @@ void GLGizmoSculpt::do_subdivide()
 
     Plater *plater = wxGetApp().plater();
     Plater::TakeSnapshot snapshot(plater, _u8L("Subdivide for sculpting"), UndoRedo::SnapshotType::GizmoAction);
-    // A subdivision renumbers every facet, so the painted annotations have to go,
-    // exactly the way the Simplify gizmo and "Repair by remeshing" handle it.
-    plater->clear_before_change_mesh(m_object_idx);
+    // A subdivision renumbers every facet, so the painting cannot stay by index: it is
+    // resampled from the old surface onto the new facets (RepairPaint), the way the Simplify
+    // gizmo and "Repair by remeshing" handle it. Each new facet lies inside an old one.
+    const RepairPaint::Saved saved(*m_volume);
 
     // Pin the bed face through the subdivision: every new vertex that is the
     // midpoint of two bed-contact vertices is snapped back to z_min exactly, so
@@ -1041,6 +1043,7 @@ void GLGizmoSculpt::do_subdivide()
         pin_bed ? Sculpt::its_subdivide_midpoint(m_session->mesh(), m_session->bed_contact_vertices(), m_session->bed_z_min())
                 : Sculpt::its_subdivide_midpoint(m_session->mesh());
     m_volume->set_mesh(std::move(subdivided));
+    RepairPaint::restore(saved, *m_volume);
     m_volume->calculate_convex_hull();
     m_volume->invalidate_convex_hull_2d();
     m_volume->set_new_unique_id();

@@ -28,6 +28,7 @@
 #include "AmsTypes.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
+#include "BirdsEyeCamera.hpp"
 #include "NozzleInfo.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/Utils.hpp"
@@ -178,6 +179,11 @@ struct Nozzle
     int              stat{0};
     std::string      fila_id;
     std::string      color_m;
+    // H3C rack nozzle temperature ("temp", "stat" bits 3-4; GUI::BambuRackTemps). Read-only.
+    int              temp{0};
+    int              target_temp{0};
+    bool             has_temp{false}; // "temp" was reported
+    int              temp_state{-1};  // 0 idle / 1 heating / 2 keeping / 3 cooling, -1 = no "stat"
     int              addr_id{-1}; // rack position 0..8 (H3C), -1 = not reported
     int              snow{-1};    // slot feeding it now: ams_id << 8 | slot_id, -1 = not reported
     bool             exist{true}; // its bit in device.nozzle.exist (bit n = report id n); true when not reported
@@ -977,6 +983,16 @@ public:
     int  xcam_first_layer_hold_count = 0;
     std::string local_rtsp_url;
     std::string tutk_state;
+    // BirdsEye camera (BirdsEyeCamera.hpp): ipcam.current_liveview (-1 when the push did not say),
+    // ipcam.support_liveview_cams (2+ entries: the printer has a BirdsEye camera), and the per-camera
+    // recording lists ipcam.support_record_cams / ipcam.enable_record_cams.
+    int              liveview_current_camera { -1 };
+    std::vector<int> support_liveview_cams;
+    std::vector<int> support_record_cams;
+    std::vector<int> enable_record_cams;
+    long long        camera_record_cam_ctl_start { 0 }; // time(nullptr) of the last per-camera toggle here
+    bool has_birdseye_camera() const { return GUI::BirdsEye::has_birdseye(support_liveview_cams); }
+    void apply_ipcam_cameras(const GUI::BirdsEye::IpcamCameras& cams);
     enum LiveviewLocal {
         LVL_None,
         LVL_Disable,
@@ -1108,6 +1124,11 @@ public:
     // unsigned commands rejected), or "" when it can - over LAN or cloud alike. The error dialog asks
     // this to hide a button whose command would be dropped instead of showing one that does nothing.
     std::string print_command_blocker(const std::string& command) const;
+    // The same for a `camera` command ("change_liveview_cam_idx", "ipcam_record_set"): the whole
+    // camera namespace needs Bambu's signature on a secured printer, so the BirdsEye swap and the
+    // per-camera recording switches work only in LAN Only + Developer Mode (design D6).
+    std::string camera_command_blocker(const std::string& command) const;
+    std::string command_blocker(const std::string& ns, const std::string& command) const;
     void update_secured_mode_from_fun(const std::string& fun);
     // A reply to a command was the printer refusing it as unsigned (err_code 84033543..84033548 /
     // "mqtt message verify failed"). Shows the Developer Mode message once per printer per session.
@@ -1268,6 +1289,12 @@ public:
     int command_ipcam_record(bool on_off);
     int command_ipcam_timelapse(bool on_off);
     int command_ipcam_resolution_set(std::string resolution);
+    // Asks the printer to stream camera `camera_id` (4 Live View, 5 BirdsEye) on its one live-view
+    // stream. Every viewer of that stream (Device page, Stream tab, phone) sees the switch.
+    int command_switch_camera(int camera_id);
+    // Per-camera "record while printing" (ipcam_record_set with camera_id; Device page camera
+    // settings). Updates enable_record_cams at once and holds it for 3 s against older pushes.
+    int command_ipcam_record_cam(int camera_id, bool on);
     int command_xcam_control(std::string module_name, bool on_off, std::string lvl = "");
     int command_xcam_control_ai_monitoring(bool on_off, std::string lvl);
     int command_xcam_control_first_layer_inspector(bool on_off, bool print_halt);

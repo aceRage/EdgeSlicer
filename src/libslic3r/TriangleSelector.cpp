@@ -338,11 +338,14 @@ EnforcerBlockerType TriangleSelector::leaf_state_at(int facet_idx, const Vec3f &
 namespace {
 struct ResamplePlanner
 {
-    const std::function<TriangleSelector::SampledState(const Vec3f &)> &sampler;
-    float                                                               edge_limit_sqr;
-    std::vector<int16_t>                                               &plan;
+    const std::function<TriangleSelector::SampledState(const Vec3f &, int)> &sampler_facet;
+    int                                                                      facet;
+    float                                                                    edge_limit_sqr;
+    std::vector<int16_t>                                                    &plan;
 
     using S = TriangleSelector::SampledState;
+
+    S sampler(const Vec3f &pt) const { return sampler_facet(pt, facet); }
 
     void run(const Vec3f &a, const Vec3f &b, const Vec3f &c, const S &sa, const S &sb, const S &sc, int depth)
     {
@@ -384,8 +387,8 @@ struct ResamplePlanner
         plan.push_back(-1);
         if (depth < 6) {
             std::array<std::vector<int16_t>, 4> sub;
-            ResamplePlanner p0{ sampler, edge_limit_sqr, sub[0] }, p1{ sampler, edge_limit_sqr, sub[1] },
-                            p2{ sampler, edge_limit_sqr, sub[2] }, p3{ sampler, edge_limit_sqr, sub[3] };
+            ResamplePlanner p0{ sampler_facet, facet, edge_limit_sqr, sub[0] }, p1{ sampler_facet, facet, edge_limit_sqr, sub[1] },
+                            p2{ sampler_facet, facet, edge_limit_sqr, sub[2] }, p3{ sampler_facet, facet, edge_limit_sqr, sub[3] };
             tbb::parallel_invoke([&] { p0.run(a, mab, mca, sa, sab, sca, depth + 1); },
                                  [&] { p1.run(mab, b, mbc, sab, sb, sbc, depth + 1); },
                                  [&] { p2.run(mbc, c, mca, sbc, sc, sca, depth + 1); },
@@ -404,6 +407,12 @@ struct ResamplePlanner
 
 void TriangleSelector::resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit, const std::vector<bool> *skip)
 {
+    resample_facets([&sampler](const Vec3f &pt, int) { return sampler(pt); }, edge_limit, skip);
+}
+
+void TriangleSelector::resample_facets(const std::function<SampledState(const Vec3f &, int)> &sampler, float edge_limit,
+                                       const std::vector<bool> *skip)
+{
     reset();
     set_edge_limit(edge_limit);
 
@@ -416,8 +425,8 @@ void TriangleSelector::resample(const std::function<SampledState(const Vec3f &)>
             }
             const std::array<int, 3> &vi = m_triangles[facet_idx].verts_idxs;
             const Vec3f a = m_vertices[vi[0]].v, b = m_vertices[vi[1]].v, c = m_vertices[vi[2]].v;
-            ResamplePlanner planner{ sampler, m_edge_limit_sqr, plans[facet_idx] };
-            planner.run(a, b, c, sampler(a), sampler(b), sampler(c), 0);
+            ResamplePlanner planner{ sampler, facet_idx, m_edge_limit_sqr, plans[facet_idx] };
+            planner.run(a, b, c, planner.sampler(a), planner.sampler(b), planner.sampler(c), 0);
         }
     });
 
@@ -460,14 +469,16 @@ void TriangleSelector::select_patch(int facet_start, std::unique_ptr<Cursor> &&c
     // It is necessary to compare the internal radius in m_cursor! radius is in
     // world coords and does not change after scaling.
     if (m_old_cursor_radius_sqr != m_cursor->radius_sqr) {
+        // The caps are in millimetres, but edges are measured in mesh units, which are smaller than a millimetre on a scaled-down mesh.
+        const float cap_scale = m_cursor->uniform_scaling ? std::max(1.f / m_cursor->trafo.linear().col(0).norm(), 1.f) : 1.f;
         // BBS: improve details for large cursor radius
         TriangleSelector::HeightRange* hr_cursor = dynamic_cast<TriangleSelector::HeightRange*>(m_cursor.get());
         if (hr_cursor == nullptr) {
-            set_edge_limit(std::min(std::sqrt(m_cursor->radius_sqr) / 5.f, 0.05f));
+            set_edge_limit(std::min(std::sqrt(m_cursor->radius_sqr) / 5.f, 0.05f * cap_scale));
             m_old_cursor_radius_sqr = m_cursor->radius_sqr;
         }
         else {
-            set_edge_limit(0.1);
+            set_edge_limit(0.1f * cap_scale);
             m_old_cursor_radius_sqr = 0.1;
         }
     }
@@ -2625,7 +2636,7 @@ public:
     {}
     ~TriangleCursor() override = default;
 
-    static std::unique_ptr<Cursor> build_cursor(const TriangleSelector& source_selector, const TriangleSelector::Triangle& tri)
+    static std::unique_ptr<Cursor> build_cursor(const TriangleSelector& source_selector, const TriangleSelector::Triangle& tri, const Vec3f& norm)
     {
         const Vec3f& pv0 = source_selector.m_vertices[tri.verts_idxs[0]].v;
         const Vec3f& pv1 = source_selector.m_vertices[tri.verts_idxs[1]].v;
@@ -2633,9 +2644,6 @@ public:
 
         // Calculate the centroid of the triangle
         const Vec3f center = (pv0 + pv1 + pv2) / 3.f;
-
-        // Calculate the norm of the plane
-        const Vec3f& norm = source_selector.m_face_normals[tri.source_triangle];
 
         // Calculate the min distance from the centroid to every edges
         const float radius = std::max(std::min(std::min(point_to_line_dist(center, pv0, pv1), point_to_line_dist(center, pv0, pv2)),
@@ -2744,11 +2752,13 @@ TriangleSelector::TriangleSplittingData TriangleSelector::remap_painting(
     const TriangleSplittingData& source_painting,
     const indexed_triangle_set& target_its,
     const Transform3d& target_transform,
-    const std::optional<std::reference_wrapper<const TriangleSplittingData>>& existing_painting)
+    const std::optional<std::reference_wrapper<const TriangleSplittingData>>& existing_painting,
+    bool source_inside_out)
 {
     TriangleSelector::TriangleSplittingData result;
     if (source_painting.bitstream.empty())
         return result;
+    const float source_facing = source_inside_out ? -1.f : 1.f;
 
     // 1. Deserialize source painting
     TriangleMesh source_mesh(source_its);
@@ -2838,7 +2848,7 @@ TriangleSelector::TriangleSplittingData TriangleSelector::remap_painting(
             if (face_idx >= target_mesh.its.indices.size())
                 return true;
 
-            const Vec3f& norm_a = source_selector.m_face_normals[tri.source_triangle];
+            const Vec3f  norm_a = source_facing * source_selector.m_face_normals[tri.source_triangle];
             const Vec3f& norm_b = target_selector.m_face_normals[face_idx];
 
             const Vec3i32& face = target_mesh.its.indices[face_idx];
@@ -2848,7 +2858,7 @@ TriangleSelector::TriangleSplittingData TriangleSelector::remap_painting(
 
             if (TriangleCursor::check_normal(norm_b, -norm_a) && check_overlap(pv0, pv1, pv2, ta, tb, tc)) {
                 // Paint this face
-                target_selector.select_patch(face_idx, TriangleCursor::build_cursor(source_selector, tri), tri.get_state(),
+                target_selector.select_patch(face_idx, TriangleCursor::build_cursor(source_selector, tri, norm_a), tri.get_state(),
                                              Transform3d::Identity(), true, 0.f, true);
             }
             return true; // continue traversal
@@ -2893,6 +2903,14 @@ bool TriangleSelector::build_filament_remap_state_map(const std::vector<unsigned
         any_change = true;
     }
     return any_change;
+}
+
+void TriangleSelector::SavedPainting::transform(const Transform3d &trafo)
+{
+    // Flipping the facets of a mirrored mesh would swap the vertices the paint is split against.
+    mesh.transform(trafo);
+    if (trafo.matrix().block<3, 3>(0, 0).determinant() < 0.)
+        inside_out = !inside_out;
 }
 
 } // namespace Slic3r

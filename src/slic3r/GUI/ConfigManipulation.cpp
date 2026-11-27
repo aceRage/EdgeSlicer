@@ -1362,6 +1362,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_line(el, has_overhang_speed);
 
     toggle_line("slowdown_for_curled_perimeters", has_overhang_speed);
+
+    // Bambu Studio 02.09.01.70 ConfigManipulation.cpp:1121-1123, for the flow variant on show.
+    bool has_height_slowdown = false;
+    if (const auto *opt = config->option<ConfigOptionBools>("enable_height_slowdown"); opt != nullptr && !opt->values.empty())
+        has_height_slowdown = opt->get_at(std::min(flow_variant_index, opt->values.size() - 1)) != 0;
+    for (auto el : { "slowdown_start_height", "slowdown_start_speed", "slowdown_start_acc", "slowdown_end_height", "slowdown_end_speed", "slowdown_end_acc" })
+        toggle_line(el, has_height_slowdown);
     toggle_line("overhang_shadow_inner_wall", has_overhang_speed);
     const bool has_overhang_shadow = has_overhang_speed && config->opt_bool("overhang_shadow_inner_wall");
     toggle_line("overhang_shadow_speed_ratio", has_overhang_shadow);

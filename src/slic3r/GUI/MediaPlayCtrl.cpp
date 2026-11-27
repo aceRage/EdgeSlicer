@@ -9,6 +9,8 @@
 #include "PluginGuard.hpp"
 #include "RemoteHub.hpp"
 #include "BambuNetInfo.hpp"
+#include "BirdsEyeCamera.hpp"
+#include "DeviceManager.hpp"
 #include "slic3r/Utils/TeardownJoin.hpp"
 
 #include <nlohmann/json.hpp>
@@ -57,6 +59,17 @@ MediaPlayCtrl::MediaPlayCtrl(wxWindow *parent, wxMediaCtrl2 *media_ctrl, const w
 
     m_label_status = new Label(this, "");
     m_label_status->SetForegroundColour(wxColour("#323A3C"));
+
+    // BirdsEye: the current-camera badge and the swap button, hidden until the printer lists two or
+    // more live-view cameras. The button is never disabled (a disabled window shows no tooltip on
+    // Windows): when a swap cannot be sent it is drawn grey, says why in its tooltip and ignores clicks.
+    m_label_camera = new Label(this, Label::Body_12, "");
+    m_label_camera->SetForegroundColour(wxColour("#6B6B6B"));
+    m_label_camera->Hide();
+    m_button_camera_swap = new Button(this, "", "media_camera_swap_off", wxBORDER_NONE);
+    m_button_camera_swap->SetCanFocus(false);
+    m_button_camera_swap->Hide();
+    m_button_camera_swap->Bind(wxEVT_COMMAND_BUTTON_CLICKED, [this](auto &) { on_camera_swap(); });
 
     m_label_stat = new Label(this, "");
     m_label_stat->SetForegroundColour(wxColour("#323A3C"));
@@ -121,6 +134,8 @@ MediaPlayCtrl::MediaPlayCtrl(wxWindow *parent, wxMediaCtrl2 *media_ctrl, const w
     sizer->Add(m_label_stat, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(25));
     sizer->AddStretchSpacer(1);
     sizer->Add(m_label_status, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(25));
+    sizer->Add(m_label_camera, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    sizer->Add(m_button_camera_swap, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
     SetSizer(sizer);
 
     m_thread = boost::thread([this] {
@@ -219,6 +234,17 @@ void MediaPlayCtrl::SetMachineObject(MachineObject* obj)
         m_device_busy = false;
     }
     Enable(obj && obj->is_connected() && obj->m_push_count > 0);
+    // BirdsEye swap: refreshed on every tick, before the same-printer early return below.
+    if (machine != m_machine) {
+        m_switch_target = -1;
+        m_switch_failed = false;
+        m_swap_shown_state.clear();
+    }
+    m_cams          = obj ? obj->support_liveview_cams : std::vector<int>();
+    m_cam_current   = obj ? obj->liveview_current_camera : BirdsEye::CAMERA_UNKNOWN;
+    m_cam_connected = obj && obj->is_connected() && obj->m_push_count > 0;
+    m_cam_blocker   = obj && BirdsEye::has_birdseye(m_cams) ? obj->camera_command_blocker("change_liveview_cam_idx") : std::string();
+    update_camera_swap();
     if (machine == m_machine) {
         if (m_last_state == MEDIASTATE_IDLE && IsEnabled()) {
             // Ultra: no auto-play. The Bambu camera (WMP/DirectShow via the closed
@@ -627,8 +653,124 @@ void MediaPlayCtrl::ToggleStream()
     });
 }
 
-void MediaPlayCtrl::msw_rescale() { 
-    m_button_play->Rescale(); 
+void MediaPlayCtrl::msw_rescale() {
+    m_button_play->Rescale();
+    m_button_camera_swap->Rescale();
+}
+
+// ---- BirdsEye camera swap ----------------------------------------------------------------------
+// The printer has one live-view stream and picks which camera feeds it; change_liveview_cam_idx asks
+// it to use another one, and the push's current_liveview follows. The stream URL does not change, so
+// the player (own go2rtc view or Bambu's) is left alone: no reload (D9, until hand test H2 says a
+// player freezes). Every viewer of the printer's stream - this page, the Stream tab, the phone - sees
+// the switch.
+
+static wxString camera_name(int id)
+{
+    switch (BirdsEye::camera_kind(id)) {
+    case BirdsEye::CameraKind::Main: return _L("Live View");
+    case BirdsEye::CameraKind::BirdsEye: return _L("BirdsEye");
+    default: return wxString::Format(_L("Camera %d"), id);
+    }
+}
+
+void MediaPlayCtrl::update_camera_swap()
+{
+    const bool show = BirdsEye::has_birdseye(m_cams);
+    if (m_switch_target >= 0) {
+        if (m_cam_current == m_switch_target) {
+            BOOST_LOG_TRIVIAL(warning) << "BirdsEye: the printer now streams camera " << m_cam_current;
+            m_switch_target = -1;
+        } else if (!m_switch_deadline.IsValid() || wxDateTime::Now() > m_switch_deadline) {
+            BOOST_LOG_TRIVIAL(warning) << "BirdsEye: no switch to camera " << m_switch_target
+                                       << " within 10 s (current_liveview " << m_cam_current << ")";
+            m_switch_target     = -1;
+            m_switch_failed     = true;
+            m_switch_failed_cam = m_cam_current;
+        }
+    }
+    // "Did not switch" stays on the badge until the camera changes after all, or the next press.
+    if (m_switch_failed && m_cam_current != m_switch_failed_cam)
+        m_switch_failed = false;
+
+    const bool playing = m_last_state == wxMEDIASTATE_PLAYING || m_last_state == wxMEDIASTATE_PAUSED;
+    wxString   tip;
+    m_cam_clickable = false;
+    if (!m_cam_connected)
+        tip = _L("The printer is not connected.");
+    else if (m_cam_blocker == "secured")
+        tip = _L("Switching cameras needs LAN Only + Developer Mode on the printer. In any other mode the printer "
+                 "rejects camera commands that are not signed by Bambu, and EdgeSlicer does not sign.");
+    else if (m_cam_blocker == "status_only")
+        tip = _L("This printer is connected through Bambu Connect in status-only mode, so EdgeSlicer cannot switch its camera.");
+    else if (!m_cam_blocker.empty())
+        tip = _L("EdgeSlicer cannot send camera commands to this printer right now.");
+    else if (m_switch_target >= 0)
+        tip = _L("Switching camera...");
+    else if (!playing)
+        tip = _L("Start the live view to switch cameras.");
+    else {
+        m_cam_clickable = true;
+        const int next  = BirdsEye::next_camera(m_cams, m_cam_current);
+        switch (BirdsEye::camera_kind(next)) {
+        case BirdsEye::CameraKind::Main: tip = _L("Switch to Live View camera"); break;
+        case BirdsEye::CameraKind::BirdsEye: tip = _L("Switch to BirdsEye camera"); break;
+        default: tip = wxString::Format(_L("Switch to camera %d"), next); break;
+        }
+    }
+
+    wxString badge;
+    if (show) {
+        if (m_switch_target >= 0)
+            badge = wxString::Format(_L("Switching to %s..."), camera_name(m_switch_target));
+        else if (m_switch_failed)
+            badge = _L("The printer did not switch cameras");
+        else if (m_cam_current != BirdsEye::CAMERA_UNKNOWN)
+            badge = camera_name(m_cam_current);
+    }
+
+    const wxString state = wxString(show ? "1" : "0") + (m_cam_clickable ? "1" : "0") + "|" + badge + "|" + tip;
+    if (state == m_swap_shown_state)
+        return;
+    m_swap_shown_state = state;
+    m_button_camera_swap->SetIcon(m_cam_clickable ? "media_camera_swap" : "media_camera_swap_off");
+    m_button_camera_swap->SetToolTip(tip);
+    m_button_camera_swap->Show(show);
+    m_label_camera->SetLabel(badge);
+    m_label_camera->Show(show && !badge.IsEmpty());
+    Layout();
+}
+
+void MediaPlayCtrl::on_camera_swap()
+{
+    if (!m_cam_clickable) {
+        BOOST_LOG_TRIVIAL(info) << "BirdsEye: swap pressed while not available (" << (m_cam_blocker.empty() ? "not playing or busy" : m_cam_blocker) << ")";
+        return;
+    }
+    DeviceManager *dev = wxGetApp().getDeviceManager();
+    MachineObject *obj = dev ? dev->get_selected_machine() : nullptr;
+    if (!obj || obj->dev_id != m_machine || !obj->has_birdseye_camera())
+        return;
+    // Asked again, not trusted from the last tick: a printer that just went secured must not get the
+    // command (publish_json would refuse it anyway, with a pop-up).
+    m_cam_blocker = obj->camera_command_blocker("change_liveview_cam_idx");
+    if (!m_cam_blocker.empty()) {
+        update_camera_swap();
+        return;
+    }
+    const int next = BirdsEye::next_camera(obj->support_liveview_cams, obj->liveview_current_camera);
+    if (next == BirdsEye::CAMERA_UNKNOWN)
+        return;
+    const int rc = obj->command_switch_camera(next);
+    m_swap_shown_state.clear();
+    m_switch_failed = false;
+    if (rc == 0) {
+        m_switch_target   = next;
+        m_switch_deadline = wxDateTime::Now() + wxTimeSpan::Seconds(10);
+    } else {
+        m_switch_target = -1;
+    }
+    update_camera_swap();
 }
 
 void MediaPlayCtrl::jump_to_play()

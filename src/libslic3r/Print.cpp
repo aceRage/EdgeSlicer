@@ -596,6 +596,7 @@ void Print::clear()
     m_shrinkage_compensation = Vec3d::Ones();
     // Ultra (dual-nozzle): drop any stale grouping result so a re-sliced job recomputes it.
     m_nozzle_group_result.reset();
+    m_by_object_plan.clear();
     m_support_interface_temperatures = {};
 }
 
@@ -877,7 +878,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "max_volumetric_extrusion_rate_slope",
         "max_volumetric_extrusion_rate_slope_segment_length",
         "extrusion_rate_smoothing_external_perimeter_only",
-        "reduce_infill_retraction",
+        "reduce_infill_retraction_mode",
+        "filament_metal_stickiness",
         "filename_format",
         "retraction_minimum_travel",
         "retract_before_wipe",
@@ -1254,6 +1256,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             osteps.emplace_back(posSimplifySupportPath);
         } else if (
                opt_key == "initial_layer_line_width"
+            || opt_key == "initial_layer_infill_line_width" // BBS 02.09.01.70 Print.cpp:406
             || opt_key == "nozzle_initial_layer_line_width" // per-nozzle process P5
             || opt_key == "nozzle_line_width" // per-nozzle process P6
             || opt_key == "nozzle_layer_height" // H3C fix: a chosen process's layer height sizes the coarse nozzles' slabs
@@ -1429,6 +1432,8 @@ std::vector<unsigned int> Print::extruders(bool conside_custom_gcode) const
 
     if (conside_custom_gcode)
         this->append_tool_change_extruders(extruders);
+    // The supports list the object filaments again. Count each one once for the wipe tower filament.
+    sort_remove_duplicates(extruders);
     this->append_wipe_tower_extruder(extruders);
     sort_remove_duplicates(extruders);
     m_mixed_filament_mgr.expand_0based_extruder_ids(extruders, m_config.filament_diameter.size());
@@ -1590,8 +1595,11 @@ std::vector<size_t> Print::layers_sorted_for_object(float start, float end, std:
     return idx_of_object_sorted;
 };
 
-StringObjectException Print::sequential_print_clearance_valid(const Print &print, Polygons *polygons, std::vector<std::pair<Polygon, float>>* height_polygons)
+StringObjectException Print::sequential_print_clearance_valid(const Print &print, Polygons *polygons, std::vector<std::pair<Polygon, float>>* height_polygons,
+                                                              StringObjectException *rod_warning)
 {
+    if (rod_warning != nullptr)
+        *rod_warning = StringObjectException();
     StringObjectException single_object_exception;
     const auto& print_config = print.config();
     Polygons exclude_polys = get_bed_excluded_area(print_config);
@@ -1608,26 +1616,23 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
         // one PrintObject per distinct transformation, so print.objects() does not list them in order.
         std::pair<int, int>  model_position;
         double         arrange_score;
-        double               height; // top above the bed, raft included (object_top below)
+        double               height; // top above the bed, raft included (PrintObject::print_z_max)
         // Y extent (scaled) of the geometry that reaches above extruder_clearance_height_to_rod.
         // The X rod sits that far above the nozzle and spans the whole X axis, so this is the only
         // part of an already-printed instance it can collide with while a later instance prints.
         bool                 has_above_rod   = false;
         coord_t              above_rod_min_y = 0;
         coord_t              above_rod_max_y = 0;
+        // The instance's own footprint, not grown by the clearance (bounding_box above is).
+        BoundingBox          footprint;
     };
     // ORCA: Y extent of an instance's geometry above the rod height, in the same coordinates as the
     // bounding boxes below. Conservative: any triangle with a vertex above the rod contributes all
     // three of its vertices. Modifiers, blockers and negative volumes are not printed and are skipped.
     const double rod_height = print.config().extruder_clearance_height_to_rod.value;
-    // Top of an instance above the bed, scaled. object_print_z_max includes the raft and the Z shrinkage
-    // compensation, like the printable-height check in validate() (OrcaSlicer #17235).
-    auto object_top = [](const PrintInstance &instance) -> double {
-        return scale_(instance.print_object->slicing_parameters().object_print_z_max);
-    };
-    auto above_rod_y_range = [rod_height, &object_top](const PrintInstance &instance, coord_t &min_y, coord_t &max_y) -> bool {
+    auto above_rod_y_range = [rod_height](const PrintInstance &instance, coord_t &min_y, coord_t &max_y) -> bool {
         // Skip the mesh walk for the common case of an object whose top, raft included, doesn't reach the rod.
-        if (object_top(instance) <= scale_(rod_height))
+        if (instance.print_object->print_z_max() <= scale_(rod_height))
             return false;
         // Mesh Z this far below the rod prints above it once the raft lifts the object.
         const double rod_z = rod_height - instance.print_object->slicing_parameters().object_print_z_min;
@@ -1758,9 +1763,10 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                     }
                 }
                 struct print_instance_info print_info {&instance, convex_hull.bounding_box(), convex_hull};
-                print_info.height = object_top(instance);
+                print_info.height = instance.print_object->print_z_max();
                 print_info.model_position = model_position_of(print.model(), instance.model_instance);
                 print_info.has_above_rod = above_rod_y_range(instance, print_info.above_rod_min_y, print_info.above_rod_max_y);
+                print_info.footprint = convex_hull_no_offset.bounding_box();
                 print_instance_with_bounding_box.push_back(std::move(print_info));
                 convex_hulls_other.emplace_back(std::move(convex_hull));
             }
@@ -1999,6 +2005,41 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                     height_polygons->emplace_back(std::move(iter.second));
             }
         }
+
+        // EDGE: a warning, never a refusal, and it changes neither the order nor the G-code. Bambu Studio grows
+        // every footprint by half of extruder_clearance_dist_to_rod, so it refuses an instance that reaches above
+        // the rod when a later one is closer to it in Y than dist_to_rod (56.5 mm on the A1 / A2L). The test above
+        // reaches only half the clearance radius plus the skirt (36.4 mm there). Between the two, warn: the part
+        // above the rod (as above, shrunk by the same 0.1 mm) against the later instance's own footprint. Only on
+        // i3 printers, whose gantry spans the bed at the rod height.
+        if (rod_warning != nullptr && print.config().printer_structure.value == PrinterStructure::psI3) {
+            const coord_t rod_reach = scaled<coord_t>(print.config().extruder_clearance_dist_to_rod.value);
+            const coord_t tol       = scaled<coord_t>(0.1);
+            for (int k = 0; k + 1 < print_instance_count; k++) {
+                const auto &info_k = print_instance_with_bounding_box[k];
+                if (!info_k.has_above_rod || too_tall_instances.count(info_k.print_instance) > 0)
+                    continue;
+                const coord_t iy1   = info_k.above_rod_min_y + tol - rod_reach;
+                const coord_t iy2   = info_k.above_rod_max_y - tol + rod_reach;
+                bool          close = false;
+                for (int i = k + 1; i < print_instance_count && !close; i++) {
+                    const BoundingBox &later = print_instance_with_bounding_box[i].footprint;
+                    close = std::min(iy2, later.max.y()) - std::max(iy1, later.min.y()) > 0;
+                }
+                if (!close)
+                    continue;
+                const ModelObject *object = info_k.print_instance->model_instance->get_object();
+                const std::string  text   = (boost::format(L("%1% is tall and close to an object printed after it. The printer's gantry may hit it. "
+                                                               "Move them further apart, or print it last.")) % object->name).str();
+                if (rod_warning->string.empty()) {
+                    rod_warning->string = text;
+                    rod_warning->object = object;
+                } else {
+                    rod_warning->string += "\n" + text;
+                    rod_warning->object = nullptr;
+                }
+            }
+        }
     }
 
     return single_object_exception;
@@ -2187,7 +2228,8 @@ bool final_purge_drop_clearance_ok(const Print &print, double purge_z)
         return true;
 
     for (const PrintObject *object : print.objects()) {
-        const double object_top = unscaled<double>(object->max_z());
+        // Edge, with Orca #17445: the printed top, so a raft counts here as in the checks below.
+        const double object_top = unscaled<double>(object->print_z_max());
         // purge_z is machine-space (includes z_offset); object_top is object-space.
         const double rise       = object_top - (purge_z - print.config().z_offset.value);
         for (const PrintInstance &instance : object->instances()) {
@@ -2202,9 +2244,8 @@ bool final_purge_drop_clearance_ok(const Print &print, double purge_z)
     return true;
 }
 
-void Print::select_final_purge_variant()
+void Print::select_final_purge_variant(WipeTowerData &data)
 {
-    WipeTowerData &data = m_wipe_tower_data;
     if (!data.final_purge_on_tower && !data.final_purge_no_drop) {
         data.final_purge_drop = false;
         return;
@@ -2341,7 +2382,7 @@ StringObjectException Print::compacted_wipe_tower_clearance_valid(const Print &p
     Polygons              offenders;
     bool                  body_tier_used = false;
     for (const PrintObject *object : print.objects()) {
-        const double object_top = unscaled<double>(object->max_z());
+        const double object_top = unscaled<double>(object->print_z_max());
         for (const PrintInstance &instance : object->instances()) {
             const Polygon inst_hull = compacted_tower_print_instance_hull(*object, instance);
             if (inst_hull.points.empty())
@@ -2423,7 +2464,7 @@ void Print::validate_compacted_wipe_tower_clearance() const
         return;
 
     for (const PrintObject *object : m_objects) {
-        const double object_top = unscaled<double>(object->max_z());
+        const double object_top = unscaled<double>(object->print_z_max());
         for (const PrintInstance &instance : object->instances()) {
             const Polygon inst_hull = compacted_tower_print_instance_hull(*object, instance);
             if (inst_hull.points.empty())
@@ -2925,7 +2966,12 @@ static std::string extruder_reach_error(const Print &print, const ModelObject **
     const FilamentMapMode mode       = print.config().filament_map_mode.value;
     const bool            sequential = print.config().print_sequence == PrintSequence::ByObject && print.objects().size() > 1;
     const bool            binding    = mode == fmmManual || mode == fmmNozzleManual || sequential;
-    const std::vector<ReachViolation> violations = find_reach_violations(reaches, areas.count(), print.filament_map_input(), binding);
+    // R1 (rack pins): a by-object plate of an automatic map prints the map the pin rules move (rack_pin_filament_map, as
+    // Print::group_print_by_object writes it); check that one. The plate map itself everywhere else.
+    const std::vector<int> map = print.config().print_sequence == PrintSequence::ByObject ?
+                                     rack_pin_filament_map(print.config(), print.extruders(), print.filament_map_input()) :
+                                     print.filament_map_input();
+    const std::vector<ReachViolation> violations = find_reach_violations(reaches, areas.count(), map, binding);
     if (violations.empty())
         return {};
 
@@ -3302,11 +3348,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             return {L("Smooth mode of timelapse is not supported when \"by object\" sequence is enabled.")};
 
         //BBS: refine seq-print validation logic
-        auto ret = sequential_print_clearance_valid(*this, collison_polygons, height_polygons);
+        StringObjectException rod_warning;
+        auto ret = sequential_print_clearance_valid(*this, collison_polygons, height_polygons, &rod_warning);
         if (!ret.string.empty()) {
             ret.type = STRING_EXCEPT_OBJECT_COLLISION_IN_SEQ_PRINT;
             return ret;
         }
+        if (!rod_warning.string.empty())
+            add_warning(rod_warning);
         // A single object printed by object can still build a tower: test it against the object (warning only).
         if (StringObjectException tower_warning = by_object_tower_clearance_warning(*this); !tower_warning.string.empty())
             add_warning(tower_warning);
@@ -6425,6 +6474,174 @@ void Print::process_perimeters_only(PrintObject &object)
     object.make_perimeters();
 }
 
+// Moved here from GCode::_do_export unchanged (per-object prime towers, PR 1): the prime tower step needs the grouping.
+void Print::group_print_by_object()
+{
+    Print     &print           = *this;
+    const bool is_bbl_printers = print.is_BBL_printer();
+    // Bambu two-extruder printers, print by object: the filament -> nozzle grouping
+    // (ToolOrdering::reorder_extruders_for_minimum_flush_volume) never runs for such a plate - it is
+    // skipped for a sequential print, and Print::process builds no print-wide ToolOrdering for a
+    // by-object plate even with one object - so nothing told the printer which hotend each filament
+    // uses: the CONFIG_BLOCK kept the
+    // project's stale filament_nozzle_map (an H2D plate with filament_map 2,1,2,2,... went out as
+    // "1,0,0,0,..." - filament 5 on nozzle 0, the LEFT hotend, while its AMS feeds the right one),
+    // slice_info gave every filament group 0 with no <nozzle> table, and the start G-code's
+    // filament_map shim heated and selected the left hotend ("M104 T1 ; rise temp in advance",
+    // "G151 P1 M"). Bambu Studio groups print-by-object plates too; group this one from the plate's
+    // own map, before the header is written. A by-layer plate keeps the grouping ToolOrdering made.
+    // (A by-object plate with ONE object and a prime tower does get the print-wide ToolOrdering, and
+    // its grouping, from Print::_make_wipe_tower; keep that one.)
+    if (is_bbl_printers && print.config().print_sequence == PrintSequence::ByObject && print.config().nozzle_diameter.size() >= 2 &&
+        (print.objects().size() > 1 || !print.has_wipe_tower())) {
+        // R1 (rack pins, review of PR 1163): on an automatic map the pin rules can move a filament off the plate map's extruder
+        // (rack_pin_filament_map; the reach check and the grouping read the same). The moved map is the slice's map: write it
+        // where the header, the logical extruders, the temperatures and the start G-code read filament_map, as
+        // ToolOrdering::reorder_extruders_for_minimum_flush_volume does for a by-layer plate. Unchanged without pins.
+        if (const std::vector<int> moved = rack_pin_filament_map(print.config(), print.extruders(), print.filament_map_input());
+            moved != print.filament_map_input()) {
+            const_cast<PrintConfig &>(print.config()).filament_map.values = moved;
+            if (auto *opt = const_cast<DynamicPrintConfig &>(print.full_print_config()).option<ConfigOptionInts>("filament_map", true))
+                opt->values = moved;
+        }
+        std::vector<std::vector<unsigned int>> layer_filaments;
+        for (const PrintObject *object : print.objects()) {
+            ToolOrdering object_ordering(*object, (unsigned int) -1);
+            for (const LayerTools &lt : object_ordering.layer_tools())
+                if (!lt.extruders.empty())
+                    layer_filaments.push_back(lt.extruders);
+        }
+        std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> grouping;
+        if (!layer_filaments.empty()) {
+            try {
+                grouping = std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(ToolOrdering::group_by_plate_map(&print, layer_filaments));
+                if (grouping->get_used_filaments().empty())
+                    grouping.reset();
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(warning) << "print-by-object nozzle grouping failed: " << e.what();
+                grouping.reset();
+            }
+        }
+        // Always replace: a result from an earlier by-layer slice of this Print must not describe this one.
+        print.set_nozzle_group_result(grouping);
+    } else if (is_bbl_printers && print.config().print_sequence == PrintSequence::ByObject && print.config().nozzle_diameter.size() < 2 &&
+               hotend_as_extruder(print.config()) && (print.objects().size() > 1 || !print.has_wipe_tower())) {
+        // H3C (one extruder, its rack hotends handled as extruders): the shim above needs two extruders, so a
+        // by-object H3C plate had no hotend grouping at all - a one-entry filament_nozzle_map, no pre-heat /
+        // pre-cool of the rack hotends (M632 ... W / M104 I.. N0 W / M633, M104 I.. N0 C), every colour change
+        // written as a swap in one hotend, while the printer still put the colours in separate hotends (owner's
+        // H3C stopped at 97 % on such a plate, 2026-11-23). Group it as Bambu Studio's ByObjectPrintData::build
+        // does: the objects' layers in print order, the plate's own grouping mode (as the by-layer pass).
+        std::vector<std::vector<unsigned int>> layer_filaments;
+        const PrintObject                     *prev_object = nullptr;
+        for (const PrintInstance *instance : sort_object_instances_by_model_order(print)) {
+            if (instance->print_object == prev_object)
+                continue;
+            prev_object = instance->print_object;
+            ToolOrdering object_ordering(*instance->print_object, (unsigned int) -1);
+            for (const LayerTools &lt : object_ordering.layer_tools())
+                if (!lt.extruders.empty())
+                    layer_filaments.push_back(lt.extruders);
+        }
+        ToolOrdering::group_print_by_object_hotends(&print, layer_filaments);
+    }
+}
+
+// The chain GCode::_do_export prints a by-object plate with: the first copy that prints anything starts from
+// ToolOrdering(object, -1); every later copy is chained from the last filament of the block before it, and keeps the
+// previous ordering when it is a copy of the same object that starts with that filament. Built after the grouping
+// (and its filament_map write), as the export built it. The export reads these orderings (by_object_tool_ordering).
+void Print::plan_print_by_object()
+{
+    m_by_object_plan.clear();
+    m_by_object_plan_misses = 0;
+    if (m_config.print_sequence != PrintSequence::ByObject)
+        return;
+    ByObjectPlan &plan          = m_by_object_plan;
+    auto          ordering_index = [&plan](const PrintObject &object, unsigned int first_extruder) -> int {
+        for (size_t i = 0; i < plan.orderings.size(); ++i)
+            if (plan.orderings[i].object == &object && plan.orderings[i].first_extruder == first_extruder)
+                return int(i);
+        plan.orderings.push_back({ &object, first_extruder, ToolOrdering(object, first_extruder) });
+        return int(plan.orderings.size() - 1);
+    };
+
+    const std::vector<const PrintInstance *> instances = sort_object_instances_by_model_order(*this);
+    // The export's search for the first copy that prints anything (its tool ordering asked for no first filament).
+    size_t idx     = 0;
+    int    current = -1;
+    for (; idx < instances.size(); ++idx) {
+        current = ordering_index(*instances[idx]->print_object, (unsigned int) -1);
+        if (plan.orderings[size_t(current)].tool_ordering.first_extruder() != (unsigned int) -1)
+            break;
+    }
+    if (idx == instances.size())
+        return; // Nothing prints: the export refuses the plate.
+
+    // What every nozzle last held. A nozzle is the filament's in the grouping, else its extruder in filament_map on a
+    // printer with several, else the one nozzle.
+    const auto   group     = this->get_layered_nozzle_group_result();
+    const size_t extruders = m_config.nozzle_diameter.size();
+    MultiNozzleUtils::NozzleStatusRecorder status;
+    auto load = [&](unsigned int filament) {
+        int nozzle = -1, extruder = -1;
+        if (group) {
+            nozzle   = group->get_nozzle_id(int(filament), -1);
+            extruder = group->get_extruder_id(int(filament), -1);
+        }
+        if (nozzle < 0) {
+            const std::vector<int> &fm = m_config.filament_map.values;
+            extruder = extruders >= 2 ? (filament < fm.size() && fm[filament] >= 1 ? fm[filament] - 1 : -1) : 0;
+            nozzle   = extruder;
+        }
+        if (nozzle < 0)
+            return;
+        status.set_nozzle_status(nozzle, int(filament), extruder);
+        status.set_current_extruder_id(extruder);
+    };
+
+    unsigned int       final_extruder = plan.orderings[size_t(current)].tool_ordering.last_extruder();
+    const PrintObject *prev_object    = instances[idx]->print_object;
+    for (; idx < instances.size(); ++idx) {
+        const PrintObject &object = *instances[idx]->print_object;
+        ByObjectBlock      block;
+        block.instance             = instances[idx];
+        block.nozzle_status_before = status;
+        if (&object != prev_object || plan.orderings[size_t(current)].tool_ordering.first_extruder() != final_extruder) {
+            block.rebuilt      = true;
+            block.chained_from = final_extruder;
+            current            = ordering_index(object, final_extruder);
+            const ToolOrdering &rebuilt = plan.orderings[size_t(current)].tool_ordering;
+            if (rebuilt.first_extruder() == (unsigned int) -1) {
+                // The export skips this copy (and keeps the previous object as the one printed last).
+                plan.blocks.push_back(std::move(block));
+                continue;
+            }
+            final_extruder = rebuilt.last_extruder();
+        }
+        const ToolOrdering &ordering = plan.orderings[size_t(current)].tool_ordering;
+        block.ordering               = current;
+        block.first_extruder         = ordering.first_extruder();
+        block.last_extruder          = ordering.last_extruder();
+        for (const LayerTools &lt : ordering)
+            for (unsigned int filament : lt.extruders)
+                load(filament);
+        plan.blocks.push_back(std::move(block));
+        prev_object = &object;
+    }
+    plan.nozzle_status_after = status;
+}
+
+ToolOrdering Print::by_object_tool_ordering(const PrintObject &object, unsigned int first_extruder) const
+{
+    if (const ToolOrdering *stored = m_by_object_plan.find(&object, first_extruder))
+        return *stored;
+    ++m_by_object_plan_misses;
+    BOOST_LOG_TRIVIAL(warning) << "print by object: no planned tool ordering for object " << object.model_object()->name
+                               << " starting with filament " << int(first_extruder) << "; building it at export";
+    return ToolOrdering(object, first_extruder);
+}
+
 void Print::process(long long *time_cost_with_cache, bool use_cache)
 {
     long long start_time = 0, end_time = 0;
@@ -6443,6 +6660,8 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
     //compute the PrintObject with the same geometries
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": this=%1%, enter, use_cache=%2%, object size=%3%")%this%use_cache%m_objects.size();
+    // Print by object: the plan of an earlier run may name objects apply() has deleted since; rebuilt below.
+    m_by_object_plan.clear();
     if (m_objects.empty())
         return;
 
@@ -6790,6 +7009,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         this->set_geometric_unprintable_filaments(geometric_unprintables);
     }
 
+    // Print by object: group the filaments onto the nozzles and plan every copy's chained tool ordering before the
+    // prime tower step, which the per-object prime towers will plan from it. On every call, as GCode::_do_export
+    // grouped on every export: moving a copy changes the print order but leaves psWipeTower done.
+    this->group_print_by_object();
+    this->plan_print_by_object();
+
     if (this->set_started(psWipeTower)) {
         m_wipe_tower_data.clear();
         m_tool_ordering.clear();
@@ -6797,7 +7022,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         // slicing of the plate, nor uninitialized when the plate turns out to change no filament.
         m_fake_wipe_tower = FakeWipeTower();
         if (this->has_wipe_tower()) {
-            this->_make_wipe_tower();
+            this->_make_wipe_tower(m_wipe_tower_data, nullptr, this->plate_wipe_tower_position());
         } else if (this->config().print_sequence != PrintSequence::ByObject) {
         	// Initialize the tool ordering, so it could be used by the G-code preview slider for planning tool changes and filament switches.
         	m_tool_ordering = ToolOrdering(*this, -1, false);
@@ -7796,8 +8021,30 @@ static coordf_t last_active_wipe_tower_layer_height(ToolOrdering &tool_ordering)
     return tool_ordering.back().wipe_tower_layer_height;
 }
 
-void Print::_make_wipe_tower()
+Vec2d Print::plate_wipe_tower_position() const
 {
+    return Vec2d(m_config.wipe_tower_x.get_at(m_plate_index), m_config.wipe_tower_y.get_at(m_plate_index));
+}
+
+void Print::_make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, const Vec2d &pos)
+{
+    // The plate tower (inst == nullptr) keeps everything it did before this took its data and position as parameters;
+    // a per-object tower works on its own copy's object and leaves the plate's state alone.
+    const bool   plate_tower  = inst == nullptr;
+    PrintObject *tower_object = plate_tower ? (m_objects.empty() ? nullptr : m_objects.front()) : inst->print_object;
+    // The objects the tower prints beside: every object for the plate tower, the copy's own object for a copy's tower.
+    const PrintObjectPtrs tower_objects = plate_tower ? m_objects : PrintObjectPtrs{ tower_object };
+    // Their layers by print_z: the plate's (GCode::collect_layers_to_print(print)), or the copy's own with its tower-only
+    // layers merged in.
+    auto tower_layers_to_print = [&]() -> std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> {
+        if (plate_tower)
+            return GCode::collect_layers_to_print(*this);
+        std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> layers;
+        for (const GCode::LayerToPrint &layer : GCode::collect_layers_to_print(*tower_object, true, &data))
+            layers.emplace_back(layer.print_z(), std::vector<GCode::LayerToPrint>{ layer });
+        return layers;
+    };
+
     // Use the printer's G-code tag format so the processor can classify wipe tower filament usage.
     GCodeProcessor::s_IsBBLPrinter = is_BBL_printer();
     // EdgeSlicer: the tower heats each filament to its temperature; a support interface temperature
@@ -7805,7 +8052,7 @@ void Print::_make_wipe_tower()
     // tower reads it (m_config itself when none is set).
     PrintConfig tower_temperature_storage;
 
-    m_wipe_tower_data.clear();
+    data.clear();
 
     // Get wiping matrix to get number of extruders and convert vector<double> to vector<float>:
     std::vector<float> flush_matrix(cast<float>(m_config.flush_volumes_matrix.values));
@@ -7830,10 +8077,41 @@ void Print::_make_wipe_tower()
         }
     }
 
-    // Let the ToolOrdering class know there will be initial priming extrusions at the start of the print.
-    m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2);
+    if (plate_tower) {
+        // Let the ToolOrdering class know there will be initial priming extrusions at the start of the print.
+        data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2);
+    } else {
+        // A copy's tower plans from the ordering the copy prints with: its block's chained ordering in the by-object
+        // plan (the one the export prints it with), or the copy's own ordering when the plate has no plan.
+        const ByObjectBlock *block = nullptr;
+        for (const ByObjectBlock &b : m_by_object_plan.blocks)
+            if (b.instance == inst) {
+                block = &b;
+                break;
+            }
+        if (block != nullptr) {
+            if (block->ordering < 0)
+                // The copy prints nothing.
+                return;
+            data.tool_ordering = m_by_object_plan.orderings[size_t(block->ordering)].tool_ordering;
+        } else
+            data.tool_ordering = ToolOrdering(*tower_object, (unsigned int) -1, bUseWipeTower2);
+    }
 
-    if (!m_wipe_tower_data.tool_ordering.has_wipe_tower())
+    // A project with one flush matrix per nozzle (Bambu Studio's 2 x N x N on an H2D / H2C): a change flushes by the
+    // matrix of the nozzle the new filament prints from, by the filament_map the tool ordering above has just
+    // grouped, not by the one floor(sqrt) square read above. A single matrix keeps that square.
+    if (flush_matrix_layout(flush_matrix.size(), m_config.nozzle_diameter.size()).per_nozzle()) {
+        wipe_volumes = flush_matrix_for_changes(m_config.flush_volumes_matrix.values, m_config.nozzle_diameter.size(),
+                                                m_config.filament_map.values);
+        if ((!m_config.purge_in_prime_tower || !m_config.single_extruder_multi_material) && bUseWipeTower2)
+            for (std::vector<float> &row : wipe_volumes)
+                for (float &volume : row)
+                    if (volume > 0)
+                        volume = m_config.prime_volume;
+    }
+
+    if (!data.tool_ordering.has_wipe_tower())
         // Don't generate any wipe tower.
         return;
 
@@ -7849,32 +8127,44 @@ void Print::_make_wipe_tower()
     // see https://github.com/prusa3d/PrusaSlicer/issues/607
     {
         size_t idx_begin = size_t(-1);
-        size_t idx_end   = m_wipe_tower_data.tool_ordering.layer_tools().size();
+        size_t idx_end   = data.tool_ordering.layer_tools().size();
         // Find the first wipe tower layer, which does not have a counterpart in an object or a support layer.
         for (size_t i = 0; i < idx_end; ++ i) {
-            const LayerTools &lt = m_wipe_tower_data.tool_ordering.layer_tools()[i];
+            const LayerTools &lt = data.tool_ordering.layer_tools()[i];
             if (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support) {
                 idx_begin = i;
                 break;
             }
         }
-        if (idx_begin != size_t(-1)) {
+        if (idx_begin != size_t(-1) && plate_tower) {
             // Find the position in m_objects.first()->support_layers to insert these new support layers.
-            double wipe_tower_new_layer_print_z_first = m_wipe_tower_data.tool_ordering.layer_tools()[idx_begin].print_z;
-            auto it_layer = m_objects.front()->support_layers().begin();
-            auto it_end   = m_objects.front()->support_layers().end();
+            double wipe_tower_new_layer_print_z_first = data.tool_ordering.layer_tools()[idx_begin].print_z;
+            auto it_layer = tower_object->support_layers().begin();
+            auto it_end   = tower_object->support_layers().end();
             for (; it_layer != it_end && (*it_layer)->print_z - EPSILON < wipe_tower_new_layer_print_z_first; ++ it_layer);
             // Find the stopper of the sequence of wipe tower layers, which do not have a counterpart in an object or a support layer.
             for (size_t i = idx_begin; i < idx_end; ++ i) {
-                LayerTools &lt = const_cast<LayerTools&>(m_wipe_tower_data.tool_ordering.layer_tools()[i]);
+                LayerTools &lt = const_cast<LayerTools&>(data.tool_ordering.layer_tools()[i]);
                 if (! (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support))
                     break;
                 lt.has_support = true;
                 // Insert the new support layer.
-                double height    = lt.print_z - (i == 0 ? 0. : m_wipe_tower_data.tool_ordering.layer_tools()[i-1].print_z);
+                double height    = lt.print_z - (i == 0 ? 0. : data.tool_ordering.layer_tools()[i-1].print_z);
                 //FIXME the support layer ID is set to -1, as Vojtech hopes it is not being used anyway.
-                it_layer = m_objects.front()->insert_support_layer(it_layer, -1, 0, height, lt.print_z, lt.print_z - 0.5 * height);
+                it_layer = tower_object->insert_support_layer(it_layer, -1, 0, height, lt.print_z, lt.print_z - 0.5 * height);
                 ++ it_layer;
+            }
+        } else if (idx_begin != size_t(-1)) {
+            // A copy's tower keeps these layers to itself (data.virtual_support_layers): the object is shared by every
+            // copy of it, and the other copies print no tower there. Same layers, same order, as the plate tower adds.
+            for (size_t i = idx_begin; i < idx_end; ++ i) {
+                LayerTools &lt = const_cast<LayerTools&>(data.tool_ordering.layer_tools()[i]);
+                if (! (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support))
+                    break;
+                lt.has_support = true;
+                double height    = lt.print_z - (i == 0 ? 0. : data.tool_ordering.layer_tools()[i-1].print_z);
+                data.virtual_support_layers.push_back(
+                    tower_object->new_detached_support_layer(size_t(-1), 0, height, lt.print_z, lt.print_z - 0.5 * height));
             }
         }
     }
@@ -7882,8 +8172,8 @@ void Print::_make_wipe_tower()
 
     if (!bUseWipeTower2) {
         // in BBL machine, wipe tower is only use to prime extruder. So just use a global wipe volume.
-        WipeTower wipe_tower(m_config, m_plate_index, m_origin, m_config.prime_volume, m_wipe_tower_data.tool_ordering.first_extruder(),
-                             m_wipe_tower_data.tool_ordering.empty() ? 0.f : m_wipe_tower_data.tool_ordering.back().print_z);
+        WipeTower wipe_tower(m_config, pos, m_origin, m_config.prime_volume, data.tool_ordering.first_extruder(),
+                             data.tool_ordering.empty() ? 0.f : data.tool_ordering.back().print_z);
         // Edge: a Type1 tower on a non-Bambu printer (wipe_tower_type override) must tag its G-code
         // the way the export's GCodeProcessor reads it (";TYPE:" rather than "; FEATURE: "), or the
         // preview and the statistics lose the tower. Bambu Lab printers keep the Bambu tags.
@@ -7894,7 +8184,7 @@ void Print::_make_wipe_tower()
         // Bambu Studio 2.9.1 prime_tower_acceleration: travels inside the tower go back to the travel
         // acceleration (an object setting in this fork, read like the G-code writer does).
         wipe_tower.set_travel_acceleration(get_value_at(m_config, m_default_object_config.travel_acceleration, ConfigFlowDomain::Process,
-                                                        unsigned(m_wipe_tower_data.tool_ordering.first_extruder())));
+                                                        unsigned(data.tool_ordering.first_extruder())));
         // Bambu Studio 2.9.1 (Print.cpp:4220): the first tower layer purges at the process' initial_layer_flow_ratio,
         // which loads into bottom_solid_infill_flow_ratio here.
         wipe_tower.set_first_layer_flow_ratio(float(m_default_region_config.bottom_solid_infill_flow_ratio.value));
@@ -7907,11 +8197,11 @@ void Print::_make_wipe_tower()
         // per-nozzle tower widths are read there. A single-diameter plate is left exactly as before.
         // Review #1072 (e), lead decision: only on the single-extruder rack (handle_hotend_as_extruder, H3C), the printer Bambu
         // Studio has its multi-diameter mode for. An H2D / X2D / H2C with unequal nozzles keeps the tower main prints.
-        if (hotend_as_extruder(m_config) && this->uses_multiple_nozzle_diameters() && ! m_objects.empty()) {
+        if (hotend_as_extruder(m_config) && this->uses_multiple_nozzle_diameters() && tower_object != nullptr) {
             std::vector<unsigned int> used_filaments;
             this->used_printing_filaments(used_filaments);
             const double reference  = this->adaptive_merge_reference_nozzle();
-            const double base       = m_objects.front()->slicing_parameters().layer_height;
+            const double base       = tower_object->slicing_parameters().layer_height;
             std::vector<WipeTower::NozzleLadder> ladders(number_of_extruders);
             for (unsigned int filament = 0; filament < number_of_extruders; ++filament) {
                 const double nozzle = nozzle_diameter_for_filament(m_config, filament + 1);
@@ -7927,9 +8217,9 @@ void Print::_make_wipe_tower()
             }
             wipe_tower.set_multi_diameter_print(float(base), std::move(ladders));
             // Bambu Studio set_foundation_required(): the first tower layer also prints object or support.
-            wipe_tower.set_foundation_required(! m_wipe_tower_data.tool_ordering.empty() &&
-                                               (m_wipe_tower_data.tool_ordering.front().has_object ||
-                                                m_wipe_tower_data.tool_ordering.front().has_support));
+            wipe_tower.set_foundation_required(! data.tool_ordering.empty() &&
+                                               (data.tool_ordering.front().has_object ||
+                                                data.tool_ordering.front().has_support));
         }
 
         // wipe_tower.set_retract();
@@ -7941,14 +8231,14 @@ void Print::_make_wipe_tower()
             wipe_tower.set_extruder(i, tower_temperature_config);
 
         // BBS: remove priming logic
-        // m_wipe_tower_data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
-        //    wipe_tower.prime((float)this->skirt_first_layer_height(), m_wipe_tower_data.tool_ordering.all_extruders(), false));
+        // data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
+        //    wipe_tower.prime((float)this->skirt_first_layer_height(), data.tool_ordering.all_extruders(), false));
 
         // Lets go through the wipe tower layers and determine pairs of extruder changes for each
         // to pass to wipe_tower (so that it can use it for planning the layout of the tower)
         {
             // BBS: priming logic is removed, so get the initial extruder by first_extruder()
-            unsigned int current_extruder_id = m_wipe_tower_data.tool_ordering.first_extruder();
+            unsigned int current_extruder_id = data.tool_ordering.first_extruder();
             // Local-Z (Subdivide Mix Layer) and mixed color sublayer passes print first on their layer and change
             // filament directly on a Type1 tower (WipeTowerIntegration::tool_change, local_z_unplanned). The layer's
             // tower changes then start from the filament the last pass left loaded, as GCode::process_layer()
@@ -7957,13 +8247,13 @@ void Print::_make_wipe_tower()
             // Flushing into objects / infill / support turns the passes off at export (the writer's phase b is not
             // aware of wiping extrusions), so such a plate keeps planning from the layer's first filament.
             std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> local_z_layers_to_print;
-            if (std::any_of(m_objects.begin(), m_objects.end(),
+            if (std::any_of(tower_objects.begin(), tower_objects.end(),
                             [](const PrintObject *object) { return !object->local_z_sublayer_plan().empty(); }) &&
-                std::none_of(m_objects.begin(), m_objects.end(), [](const PrintObject *object) {
+                std::none_of(tower_objects.begin(), tower_objects.end(), [](const PrintObject *object) {
                     return object->config().flush_into_infill || object->config().flush_into_objects ||
                            (object->config().flush_into_support && object->has_support_material());
                 }))
-                local_z_layers_to_print = GCode::collect_layers_to_print(*this);
+                local_z_layers_to_print = tower_layers_to_print();
             size_t local_z_layers_to_print_idx = 0;
             // Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C, Print.cpp _make_wipe_tower): every rack hotend keeps
             // its own filament, so a change only flushes when the target hotend holds another filament. Without
@@ -7972,14 +8262,38 @@ void Print::_make_wipe_tower()
             MultiNozzleUtils::HotendFilamentTracker hotends(hotend_as_extruder(m_config), get_layered_nozzle_group_result());
             const auto nozzle_group = get_layered_nozzle_group_result();
             hotends.load(current_extruder_id, 0);
-            for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) { // for all layers
-                const int layer_idx = int(&layer_tools - &m_wipe_tower_data.tool_ordering.front());
+            // Bambu printers with two extruders (H2D / X2D / H2C; Bambu Studio's NozzleStatusRecorder, as in
+            // LayeredNozzleGroupResult::estimate_seq_flush_weight): a nozzle keeps the last filament it held, so a
+            // change onto another nozzle - the other extruder, or another nozzle of the H2C's rack - flushes from
+            // THAT filament, and nothing when the nozzle is empty or already holds the next one. A change on one
+            // nozzle keeps the flush from the outgoing filament. The nozzle is the grouping's (filament_nozzle_map),
+            // or the extruder (filament_map) when the plate has no grouping. GCode's append_tcr writes this purge
+            // (M620.10 L / flush_length) as it is.
+            const bool                  flush_by_held_nozzle = !hotends.active() && is_BBL_printer() && m_config.nozzle_diameter.size() >= 2;
+            std::map<int, int>          filament_in_nozzle;
+            auto nozzle_of = [&](unsigned int filament_id, int layer_idx) -> int {
+                if (nozzle_group)
+                    return nozzle_group->get_nozzle_id(int(filament_id), layer_idx);
+                const std::vector<int> &fm = m_config.filament_map.values;
+                return filament_id < fm.size() && fm[filament_id] >= 1 ? fm[filament_id] - 1 : -1;
+            };
+            auto load_nozzle = [&](unsigned int filament_id, int layer_idx) {
+                if (!flush_by_held_nozzle)
+                    return;
+                if (const int nozzle = nozzle_of(filament_id, layer_idx); nozzle >= 0)
+                    filament_in_nozzle[nozzle] = int(filament_id);
+            };
+            load_nozzle(current_extruder_id, 0);
+            for (auto &layer_tools : data.tool_ordering.layer_tools()) { // for all layers
+                const int layer_idx = int(&layer_tools - &data.tool_ordering.front());
                 if (!layer_tools.has_wipe_tower) {
-                    for (const unsigned int filament_id : layer_tools.extruders)
+                    for (const unsigned int filament_id : layer_tools.extruders) {
                         hotends.load(filament_id, layer_idx);
+                        load_nozzle(filament_id, layer_idx);
+                    }
                     continue;
                 }
-                bool first_layer = &layer_tools == &m_wipe_tower_data.tool_ordering.front();
+                bool first_layer = &layer_tools == &data.tool_ordering.front();
                 const unsigned int layer_start_extruder_id = current_extruder_id;
                 if (!local_z_layers_to_print.empty()) {
                     while (local_z_layers_to_print_idx + 1 < local_z_layers_to_print.size() &&
@@ -7990,8 +8304,10 @@ void Print::_make_wipe_tower()
                         const std::vector<LocalZWipeTowerToolchange> local_z_toolchanges =
                             collect_local_z_wipe_tower_toolchanges(*this, local_z_layers_to_print[local_z_layers_to_print_idx].second,
                                                                    int(current_extruder_id));
-                        for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges)
+                        for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges) {
                             hotends.load(toolchange.new_tool, layer_idx);
+                            load_nozzle(toolchange.new_tool, layer_idx);
+                        }
                         if (!local_z_toolchanges.empty())
                             current_extruder_id = local_z_toolchanges.back().new_tool;
                     }
@@ -8009,7 +8325,7 @@ void Print::_make_wipe_tower()
                 const std::vector<unsigned int> nominal_layer_extruders = layer_tools.nominal_extruder_order(int(current_extruder_id));
                 for (const auto extruder_id : nominal_layer_extruders) {
                     // BBS: priming logic is removed, so no need to do toolchange for first extruder
-                    if (/*(first_layer && extruder_id == m_wipe_tower_data.tool_ordering.all_extruders().back()) || */ extruder_id !=
+                    if (/*(first_layer && extruder_id == data.tool_ordering.all_extruders().back()) || */ extruder_id !=
                         current_extruder_id) {
                         float volume_to_purge = wipe_volumes[current_extruder_id][extruder_id];
                         if (hotends.active()) {
@@ -8019,6 +8335,17 @@ void Print::_make_wipe_tower()
                                                   0.f :
                                                   wipe_volumes[size_t(held)][extruder_id];
                             hotends.load(extruder_id, layer_idx);
+                        } else if (flush_by_held_nozzle) {
+                            const int old_nozzle = nozzle_of(current_extruder_id, layer_idx);
+                            const int new_nozzle = nozzle_of(extruder_id, layer_idx);
+                            if (old_nozzle >= 0 && new_nozzle >= 0 && old_nozzle != new_nozzle) {
+                                const auto it   = filament_in_nozzle.find(new_nozzle);
+                                const int  held = it == filament_in_nozzle.end() ? -1 : it->second;
+                                volume_to_purge = held < 0 || held == int(extruder_id) || size_t(held) >= wipe_volumes.size() ?
+                                                      0.f :
+                                                      wipe_volumes[size_t(held)][extruder_id];
+                            }
+                            load_nozzle(extruder_id, layer_idx);
                         }
                         volume_to_purge *= m_config.flush_multiplier;
 
@@ -8082,24 +8409,24 @@ void Print::_make_wipe_tower()
                     continue;
                 }
 
-                if (&layer_tools == &m_wipe_tower_data.tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
+                if (&layer_tools == &data.tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
                     break;
             }
         }
 
         // Generate the wipe tower layers.
-        m_wipe_tower_data.tool_changes.reserve(m_wipe_tower_data.tool_ordering.layer_tools().size());
-        wipe_tower.generate(m_wipe_tower_data.tool_changes);
+        data.tool_changes.reserve(data.tool_ordering.layer_tools().size());
+        wipe_tower.generate(data.tool_changes);
         // A rib tower is placed by the box around its first-layer wall (the generator shifts its
         // output by the rib offset so that box starts at the tower position), which is also the
         // square the pre-slice estimate reserves for it: report that box, not the body.
         const Vec2f wt_footprint     = wipe_tower.get_footprint_size();
-        m_wipe_tower_data.depth      = wt_footprint.y();
-        m_wipe_tower_data.width      = wt_footprint.x();
-        m_wipe_tower_data.brim_width = wipe_tower.get_brim_width();
+        data.depth      = wt_footprint.y();
+        data.width      = wt_footprint.x();
+        data.brim_width = wipe_tower.get_brim_width();
         // The Type1 (Bambu-style) tower ignores the cone wall option, exactly as the pre-slice
         // estimate (estimate_wipe_tower_first_layer_outline) does, so the two footprints agree.
-        m_wipe_tower_data.construct_mesh(wipe_tower.width(), wipe_tower.get_depth(), wipe_tower.get_height(), wipe_tower.get_brim_width(),
+        data.construct_mesh(wipe_tower.width(), wipe_tower.get_depth(), wipe_tower.get_height(), wipe_tower.get_brim_width(),
                                          wipe_tower.is_rib_wall(), wipe_tower.get_rib_width(), wipe_tower.get_rib_length(),
                                          m_config.wipe_tower_fillet_wall,
                                          0.f);
@@ -8111,45 +8438,47 @@ void Print::_make_wipe_tower()
                 if (! brimmed.empty())
                     bottom = brimmed.front();
             }
-            m_wipe_tower_data.wipe_tower_mesh_data->bottom = std::move(bottom);
+            data.wipe_tower_mesh_data->bottom = std::move(bottom);
         }
 
         // Unload the current filament over the purge tower.
         // BBL / Type1: Edge's WipeTowerIntegration::finalize() skips BBL printers, so this
         // final_purge never reaches G-code. Left on the pre-#15917 object-top path to keep
         // BBL G-code byte-identical to main. WipeTower2 (non-BBL) is the live path below.
-        coordf_t layer_height = m_objects.front()->config().layer_height.value;
-        if (m_wipe_tower_data.tool_ordering.back().wipe_tower_partitions > 0) {
+        coordf_t layer_height = tower_object->config().layer_height.value;
+        if (data.tool_ordering.back().wipe_tower_partitions > 0) {
             // The wipe tower goes up to the last layer of the print.
             if (wipe_tower.layer_finished()) {
                 // The wipe tower is printed to the top of the print and it has no space left for the final extruder purge.
                 // Lift Z to the next layer.
-                wipe_tower.set_layer(float(m_wipe_tower_data.tool_ordering.back().print_z + layer_height), float(layer_height), 0, false,
+                wipe_tower.set_layer(float(data.tool_ordering.back().print_z + layer_height), float(layer_height), 0, false,
                                      true);
             } else {
                 // There is yet enough space at this layer of the wipe tower for the final purge.
             }
         } else {
             // The wipe tower does not reach the last print layer, perform the pruge at the last print layer.
-            assert(m_wipe_tower_data.tool_ordering.back().wipe_tower_partitions == 0);
-            wipe_tower.set_layer(float(m_wipe_tower_data.tool_ordering.back().print_z), float(layer_height), 0, false, true);
+            assert(data.tool_ordering.back().wipe_tower_partitions == 0);
+            wipe_tower.set_layer(float(data.tool_ordering.back().print_z), float(layer_height), 0, false, true);
         }
-        m_wipe_tower_data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(wipe_tower.tool_change((unsigned int) (-1)));
+        data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(wipe_tower.tool_change((unsigned int) (-1)));
 
-        m_wipe_tower_data.used_filament         = wipe_tower.get_used_filament();
-        m_wipe_tower_data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
-        const Vec3d origin                      = this->get_plate_origin();
-        m_fake_wipe_tower.set_fake_extrusion_data(wipe_tower.position(), m_wipe_tower_data.width, wipe_tower.get_height(),
-                                                  wipe_tower.get_layer_height(), m_wipe_tower_data.depth, m_wipe_tower_data.brim_width,
-                                                  {scale_(origin.x()), scale_(origin.y())});
-        // The rib wall's real outline for the conflict checker and the object brim, as Bambu Studio
-        // hands over its outer walls; a rectangle tower keeps the box model.
-        m_fake_wipe_tower.outer_wall = wipe_tower.get_outer_wall();
+        data.used_filament         = wipe_tower.get_used_filament();
+        data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
+        if (plate_tower) {
+            const Vec3d origin                      = this->get_plate_origin();
+            m_fake_wipe_tower.set_fake_extrusion_data(wipe_tower.position(), data.width, wipe_tower.get_height(),
+                                                      wipe_tower.get_layer_height(), data.depth, data.brim_width,
+                                                      {scale_(origin.x()), scale_(origin.y())});
+            // The rib wall's real outline for the conflict checker and the object brim, as Bambu Studio
+            // hands over its outer walls; a rectangle tower keeps the box model.
+            m_fake_wipe_tower.outer_wall = wipe_tower.get_outer_wall();
+        }
     } else {
         // Initialize the wipe tower.
-        WipeTower2 wipe_tower(m_config, m_default_region_config, m_plate_index, m_origin, wipe_volumes,
-                              m_wipe_tower_data.tool_ordering.first_extruder());
-        const std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> layers_to_print = GCode::collect_layers_to_print(*this);
+        WipeTower2 wipe_tower(m_config, m_default_region_config, pos, m_origin, wipe_volumes,
+                              data.tool_ordering.first_extruder());
+        const std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> layers_to_print = tower_layers_to_print();
         size_t layers_to_print_idx = 0;
 
         // wipe_tower.set_retract();
@@ -8160,14 +8489,14 @@ void Print::_make_wipe_tower()
         for (size_t i = 0; i < number_of_extruders; ++i)
             wipe_tower.set_extruder(i, tower_temperature_config);
 
-        m_wipe_tower_data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
-            wipe_tower.prime((float)this->skirt_first_layer_height(), m_wipe_tower_data.tool_ordering.all_extruders(), false));
+        data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
+            wipe_tower.prime((float)this->skirt_first_layer_height(), data.tool_ordering.all_extruders(), false));
 
         // Lets go through the wipe tower layers and determine pairs of extruder changes for each
         // to pass to wipe_tower (so that it can use it for planning the layout of the tower)
         {
-            unsigned int current_extruder_id = m_wipe_tower_data.tool_ordering.all_extruders().back();
-            for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) { // for all layers
+            unsigned int current_extruder_id = data.tool_ordering.all_extruders().back();
+            for (auto &layer_tools : data.tool_ordering.layer_tools()) { // for all layers
                 if (!layer_tools.has_wipe_tower)
                     continue;
                 while (layers_to_print_idx + 1 < layers_to_print.size() &&
@@ -8181,7 +8510,7 @@ void Print::_make_wipe_tower()
                     layers_with_same_print_z = &layers_to_print[layers_to_print_idx].second;
                 }
 
-                bool first_layer = &layer_tools == &m_wipe_tower_data.tool_ordering.front();
+                bool first_layer = &layer_tools == &data.tool_ordering.front();
 
                 if (layers_with_same_print_z != nullptr) {
                     const std::vector<LocalZWipeTowerToolchange> local_z_toolchanges =
@@ -8224,7 +8553,7 @@ void Print::_make_wipe_tower()
                 wipe_tower.plan_toolchange((float) layer_tools.wipe_tower_print_z, (float) layer_tools.wipe_tower_layer_height, current_extruder_id,
                                            current_extruder_id, false);
                 for (const auto extruder_id : nominal_layer_extruders) {
-                    if ((first_layer && extruder_id == m_wipe_tower_data.tool_ordering.all_extruders().back()) || extruder_id !=
+                    if ((first_layer && extruder_id == data.tool_ordering.all_extruders().back()) || extruder_id !=
                         current_extruder_id) {
                         float volume_to_wipe = m_config.prime_volume;
                         if (m_config.purge_in_prime_tower && m_config.single_extruder_multi_material) {
@@ -8249,33 +8578,33 @@ void Print::_make_wipe_tower()
                 }
 
                 layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
-                if (&layer_tools == &m_wipe_tower_data.tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
+                if (&layer_tools == &data.tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
                     break;
             }
         }
 
         // Generate the wipe tower layers.
-        m_wipe_tower_data.tool_changes.reserve(m_wipe_tower_data.tool_ordering.layer_tools().size());
-        m_wipe_tower_data.local_z_tool_changes.reserve(m_wipe_tower_data.tool_ordering.layer_tools().size());
-        wipe_tower.generate(m_wipe_tower_data.tool_changes, m_wipe_tower_data.local_z_tool_changes);
+        data.tool_changes.reserve(data.tool_ordering.layer_tools().size());
+        data.local_z_tool_changes.reserve(data.tool_ordering.layer_tools().size());
+        wipe_tower.generate(data.tool_changes, data.local_z_tool_changes);
         BOOST_LOG_TRIVIAL(debug) << "Wipe tower generation completed"
-                                 << " nominal_layers=" << m_wipe_tower_data.tool_changes.size()
-                                 << " local_z_layers=" << m_wipe_tower_data.local_z_tool_changes.size();
+                                 << " nominal_layers=" << data.tool_changes.size()
+                                 << " local_z_layers=" << data.local_z_tool_changes.size();
         // Orca #15035: a rib tower is placed by the box around its first-layer wall (the generator
         // shifts its output by the rib offset so that box starts at the tower position), which is
         // also the square the pre-slice estimate reserves for it: report that box, not the body.
         // Any other wall reports the body, as before.
         const Vec2f wt_footprint            = wipe_tower.get_footprint_size();
-        m_wipe_tower_data.depth             = wt_footprint.y();
-        m_wipe_tower_data.width             = wt_footprint.x();
-        m_wipe_tower_data.z_and_depth_pairs = wipe_tower.get_z_and_depth_pairs();
-        m_wipe_tower_data.local_z_reserve_boxes = wipe_tower.get_local_z_reserve_boxes();
-        m_wipe_tower_data.brim_width        = wipe_tower.get_brim_width();
-        m_wipe_tower_data.height            = wipe_tower.get_wipe_tower_height();
+        data.depth             = wt_footprint.y();
+        data.width             = wt_footprint.x();
+        data.z_and_depth_pairs = wipe_tower.get_z_and_depth_pairs();
+        data.local_z_reserve_boxes = wipe_tower.get_local_z_reserve_boxes();
+        data.brim_width        = wipe_tower.get_brim_width();
+        data.height            = wipe_tower.get_wipe_tower_height();
         // Only a cone wall prints the stabilization cone, whatever cone angle the config holds.
         const float cone_angle = m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone ?
                                      float(m_config.wipe_tower_cone_angle) : 0.f;
-        m_wipe_tower_data.construct_mesh(wipe_tower.width(), wipe_tower.get_depth(), wipe_tower.get_wipe_tower_height(),
+        data.construct_mesh(wipe_tower.width(), wipe_tower.get_depth(), wipe_tower.get_wipe_tower_height(),
                                          wipe_tower.get_brim_width(), m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib,
                                          float(m_config.wipe_tower_rib_width), float(m_config.wipe_tower_extra_rib_length),
                                          m_config.wipe_tower_fillet_wall, cone_angle);
@@ -8289,7 +8618,7 @@ void Print::_make_wipe_tower()
                 if (! brimmed.empty())
                     bottom = brimmed.front();
             }
-            m_wipe_tower_data.wipe_tower_mesh_data->bottom = std::move(bottom);
+            data.wipe_tower_mesh_data->bottom = std::move(bottom);
         }
 
         // Unload the current filament over the purge tower when the printer is SEMM, or when the
@@ -8302,10 +8631,10 @@ void Print::_make_wipe_tower()
         const unsigned int current_tool = static_cast<unsigned int>(wipe_tower.current_tool());
         // Local-Z / realigned tool ordering can disagree with WipeTower2's current tool
         // in Debug; do not assert. The tower's own current tool is what ramming uses.
-        if (current_tool != m_wipe_tower_data.tool_ordering.last_extruder())
+        if (current_tool != data.tool_ordering.last_extruder())
             BOOST_LOG_TRIVIAL(warning) << "WipeTower2 current_tool=" << current_tool
                                        << " != tool_ordering.last_extruder="
-                                       << m_wipe_tower_data.tool_ordering.last_extruder();
+                                       << data.tool_ordering.last_extruder();
         const bool printer_rams     = m_config.enable_filament_ramming;
         const bool filament_rams    = m_config.filament_multitool_ramming.get_at(current_tool);
         const bool need_final_purge = m_config.single_extruder_multi_material || (printer_rams && filament_rams);
@@ -8313,8 +8642,8 @@ void Print::_make_wipe_tower()
         // flag, multi-tool rams from the filament bit. SEMM with ramming off deposits nothing,
         // so there is no reason to drop onto the tower.
         const bool will_ram         = (m_config.single_extruder_multi_material && printer_rams) || filament_rams;
-        m_wipe_tower_data.final_purge_drop     = false;
-        m_wipe_tower_data.final_purge_will_ram = will_ram;
+        data.final_purge_drop     = false;
+        data.final_purge_will_ram = will_ram;
         if (need_final_purge) {
             // Target the tower's own last active layer, not the object's top print_z, so the
             // extra layer sits on the real tower instead of mid-air. finish_layer() runs every
@@ -8328,49 +8657,52 @@ void Print::_make_wipe_tower()
             // The extra set_layer does NOT always trip the height guard: a one-layer tower
             // resets m_num_layer_changes (is_first_layer stays true), so the no-drop copy
             // uses set_suppress_ramming instead.
-            coordf_t     layer_height = last_active_wipe_tower_layer_height(m_wipe_tower_data.tool_ordering);
+            coordf_t     layer_height = last_active_wipe_tower_layer_height(data.tool_ordering);
             if (layer_height <= EPSILON)
-                layer_height = m_objects.front()->config().layer_height.value;
-            const coordf_t last_z = last_active_wipe_tower_layer_z(m_wipe_tower_data.tool_ordering);
-            m_wipe_tower_data.final_purge_last_z        = last_z;
-            m_wipe_tower_data.final_purge_layer_height  = layer_height;
+                layer_height = tower_object->config().layer_height.value;
+            const coordf_t last_z = last_active_wipe_tower_layer_z(data.tool_ordering);
+            data.final_purge_last_z        = last_z;
+            data.final_purge_layer_height  = layer_height;
             if (wipe_tower.layer_finished())
                 wipe_tower.set_layer(float(last_z + layer_height), float(layer_height), 0, false, true);
             WipeTower2 drop_tower = wipe_tower;
             WipeTower2 stay_tower = wipe_tower;
             drop_tower.set_final_purge_on_tower(true);
             stay_tower.set_suppress_ramming(true);
-            m_wipe_tower_data.final_purge_on_tower = Slic3r::make_unique<WipeTower::ToolChangeResult>(
+            data.final_purge_on_tower = Slic3r::make_unique<WipeTower::ToolChangeResult>(
                 drop_tower.tool_change((unsigned int) (-1)));
-            m_wipe_tower_data.final_purge_no_drop = Slic3r::make_unique<WipeTower::ToolChangeResult>(
+            data.final_purge_no_drop = Slic3r::make_unique<WipeTower::ToolChangeResult>(
                 stay_tower.tool_change((unsigned int) (-1)));
             // Filament stats from one variant only (the no-drop unload, matching base).
-            m_wipe_tower_data.used_filament         = stay_tower.get_used_filament();
-            m_wipe_tower_data.number_of_toolchanges = stay_tower.get_number_of_toolchanges();
-            m_wipe_tower_data.final_purge           = Slic3r::make_unique<WipeTower::ToolChangeResult>(
-                *m_wipe_tower_data.final_purge_no_drop);
-            this->select_final_purge_variant();
+            data.used_filament         = stay_tower.get_used_filament();
+            data.number_of_toolchanges = stay_tower.get_number_of_toolchanges();
+            data.final_purge           = Slic3r::make_unique<WipeTower::ToolChangeResult>(
+                *data.final_purge_no_drop);
+            // A copy's tower has no final purge to choose (per-object prime towers end with the copy's block).
+            if (plate_tower)
+                this->select_final_purge_variant(data);
         } else {
-            m_wipe_tower_data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(WipeTower::ToolChangeResult{});
-            m_wipe_tower_data.used_filament         = wipe_tower.get_used_filament();
-            m_wipe_tower_data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
+            data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(WipeTower::ToolChangeResult{});
+            data.used_filament         = wipe_tower.get_used_filament();
+            data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
         }
-        const Vec3d origin                      = Vec3d::Zero();
-        m_fake_wipe_tower.set_fake_extrusion_data(wipe_tower.position(), wipe_tower.width(), wipe_tower.get_wipe_tower_height(),
-                                                  config().initial_layer_print_height, m_wipe_tower_data.depth,
-                                                  m_wipe_tower_data.z_and_depth_pairs, m_wipe_tower_data.brim_width,
-                                                  config().wipe_tower_rotation_angle, cone_angle,
-                                                  {scale_(origin.x()), scale_(origin.y())});
-        m_fake_wipe_tower.outer_wall = wipe_tower.get_outer_wall();
+        if (plate_tower) {
+            const Vec3d origin                      = this->get_plate_origin();
+            m_fake_wipe_tower.set_fake_extrusion_data(wipe_tower.position(), wipe_tower.width(), wipe_tower.get_wipe_tower_height(),
+                                                      config().initial_layer_print_height, data.depth,
+                                                      data.z_and_depth_pairs, data.brim_width,
+                                                      config().wipe_tower_rotation_angle, cone_angle,
+                                                      {scale_(origin.x()), scale_(origin.y())});
+            m_fake_wipe_tower.outer_wall = wipe_tower.get_outer_wall();
+        }
     }
 
     // The clamps and checks above work from estimates; re-test the exact generated footprint
     // so an off-plate tower fails with a clear error instead of exporting unprintable G-code.
-    if (m_wipe_tower_data.wipe_tower_mesh_data) {
-        Polygon footprint = m_wipe_tower_data.wipe_tower_mesh_data->bottom; // includes brim
+    if (data.wipe_tower_mesh_data) {
+        Polygon footprint = data.wipe_tower_mesh_data->bottom; // includes brim
         footprint.rotate(Geometry::deg2rad(m_config.wipe_tower_rotation_angle.value));
-        footprint.translate(Point(scale_(m_config.wipe_tower_x.get_at(m_plate_index)),
-                                  scale_(m_config.wipe_tower_y.get_at(m_plate_index))));
+        footprint.translate(Point(scale_(pos.x()), scale_(pos.y())));
         Polygon printable_poly;
         printable_poly.points = get_bed_shape(m_config);
         const Polygons printable_polys{printable_poly};

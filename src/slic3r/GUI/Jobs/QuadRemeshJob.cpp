@@ -10,6 +10,7 @@
 #include "slic3r/GUI/format.hpp"
 
 #include "libslic3r/Model.hpp"
+#include "libslic3r/RepairPaint.hpp"
 
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
@@ -164,20 +165,21 @@ void QuadRemeshJob::finalize(bool canceled, std::exception_ptr &eptr)
 
         if (!snapshot)
             snapshot.emplace(m_plater, "Quad remesh");
-        if (std::find(touched_objects.begin(), touched_objects.end(), oidx) == touched_objects.end()) {
-            // Facet indices are meaningless after any remesh, so the painted data goes - this also
-            // fires the existing "custom supports removed" notification.
-            m_plater->clear_before_change_mesh(int(oidx));
+        // Facet indices are meaningless after any remesh, so the painting is not kept by index:
+        // it is resampled from the old surface onto the new facets (RepairPaint), and the other
+        // parts of the object keep theirs untouched.
+        if (std::find(touched_objects.begin(), touched_objects.end(), oidx) == touched_objects.end())
             touched_objects.push_back(oidx);
-        }
 
         total_before += t.report.triangles_before;
         total_after += t.report.triangles_after;
         total_quads += t.report.quads_after;
 
+        const RepairPaint::Saved saved(*mv);
         mv->set_mesh(std::move(t.result));
         mv->set_new_unique_id();
         mv->calculate_convex_hull();
+        RepairPaint::restore(saved, *mv);
         ++remeshed;
     }
 

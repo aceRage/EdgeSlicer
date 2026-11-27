@@ -90,6 +90,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/CameraPopup.hpp
     GUI/CameraUtils.cpp
     GUI/CameraUtils.hpp
+    GUI/ApplyTransformDialog.cpp
+    GUI/ApplyTransformDialog.hpp
     GUI/CloneDialog.cpp
     GUI/CloneDialog.hpp
     GUI/FillBedDialog.cpp
@@ -119,6 +121,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/SimpleShapeDialog.hpp
     GUI/ImageTraceDialog.cpp
     GUI/ImageTraceDialog.hpp
+    GUI/ImageToObjectDialog.cpp
+    GUI/ImageToObjectDialog.hpp
     GUI/SvgSplitDialog.cpp
     GUI/SvgSplitDialog.hpp
     GUI/ConfigManipulation.cpp
@@ -136,6 +140,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/DesktopIntegrationDialog.hpp
     GUI/DeviceManager.cpp
     GUI/DeviceManager.hpp
+    GUI/DiscordPresenceSnapshot.cpp
+    GUI/DiscordPresenceSnapshot.hpp
     GUI/Downloader.cpp
     GUI/DownloaderFileGet.cpp
     GUI/DownloaderFileGet.hpp
@@ -522,6 +528,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ParamsDialog.cpp
     GUI/ParamsDialog.hpp
     GUI/ParamsPanel.cpp
+    GUI/SettingsViewSelector.cpp
+    GUI/SettingsViewSelector.hpp
     GUI/ParamsPanel.hpp
     GUI/PartPlate.cpp
     GUI/PartPlate.hpp
@@ -635,9 +643,12 @@ set(SLIC3R_GUI_SOURCES
     GUI/DeviceModelCode.cpp
     GUI/NozzleInfo.hpp
     GUI/NozzleTempRows.hpp
+    GUI/ToolTempLayout.hpp
+    GUI/BambuRackTemps.hpp
     GUI/DeviceControls.hpp
     GUI/BambuFans.hpp
     GUI/ChamberLights.hpp
+    GUI/BirdsEyeCamera.hpp
     GUI/FilamentCommands.hpp
     GUI/SnapmakerLan.hpp
     GUI/RemoteHub.cpp
@@ -947,6 +958,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/TabCtrl.hpp
     GUI/Widgets/TempInput.cpp
     GUI/Widgets/TempInput.hpp
+    GUI/Widgets/ToolTempList.cpp
+    GUI/Widgets/ToolTempList.hpp
     GUI/Widgets/TextInput.cpp
     GUI/Widgets/TextInput.hpp
     GUI/Widgets/WebView.cpp
@@ -1061,6 +1074,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/Spoolman.cpp
     Utils/Spoolman.hpp
     Utils/Http.hpp
+    Utils/DiscordIPC.cpp
+    Utils/DiscordIPC.hpp
+    Utils/DiscordPresence.cpp
+    Utils/DiscordPresence.hpp
     Utils/InstanceID.cpp
     Utils/InstanceID.hpp
     Utils/LoginUserAgent.cpp
@@ -1077,6 +1094,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/DevicePageLoad.hpp
     Utils/HomeTabLogic.cpp
     Utils/HomeTabLogic.hpp
+    Utils/HomePluginsLogic.cpp
+    Utils/HomePluginsLogic.hpp
     Utils/ThemePack.cpp
     Utils/ThemePack.hpp
     Utils/LibraryIndex.cpp
@@ -1234,6 +1253,96 @@ if (UNIX AND NOT APPLE)
     )
 endif ()
 
+if (EDGE_PYTHON_PLUGINS)
+    list(APPEND SLIC3R_GUI_SOURCES
+        plugin/PythonInterpreter.cpp
+        plugin/PythonInterpreter.hpp
+        plugin/EdgePythonInclude.hpp
+        plugin/PythonPluginBridge.cpp
+        plugin/PythonPluginBridge.hpp
+        plugin/PythonPluginInterface.hpp
+        plugin/PyPluginPackage.hpp
+        plugin/CloudPluginService.cpp
+        plugin/CloudPluginService.hpp
+        plugin/PluginFsUtils.cpp
+        plugin/PluginFsUtils.hpp
+        plugin/PluginJsonPy.hpp
+        plugin/PluginConfig.cpp
+        plugin/PluginConfig.hpp
+        plugin/PluginLoader.cpp
+        plugin/PluginLoader.hpp
+        plugin/PluginDescriptor.hpp
+        plugin/PluginHooks.cpp
+        plugin/PluginHooks.hpp
+        plugin/PluginManager.cpp
+        plugin/PluginManager.hpp
+        plugin/PluginAuditManager.cpp
+        plugin/PluginAuditManager.hpp
+        plugin/PluginTrust.cpp
+        plugin/PluginTrust.hpp
+        plugin/PluginPreferences.cpp
+        plugin/PluginPreferences.hpp
+        GUI/PluginPermissionValidation.cpp
+        GUI/PluginPermissionValidation.hpp
+        GUI/PluginsInspectorLogic.cpp
+        GUI/PluginsInspectorLogic.hpp
+        GUI/PluginsInspectorDialog.cpp
+        GUI/PluginsInspectorDialog.hpp
+        plugin/PluginResolver.cpp
+        plugin/PluginResolver.hpp
+        plugin/PyPluginTrampoline.hpp
+        plugin/OrcaApiVersion.hpp
+        plugin/host/PluginHost.cpp
+        plugin/host/PluginHost.hpp
+        plugin/host/PluginHostBindings.hpp
+        plugin/host/PluginHostGeometry.cpp
+        plugin/host/PluginHostMesh.cpp
+        plugin/host/PluginHostMesh.hpp
+        plugin/host/PluginHostModel.cpp
+        plugin/host/PluginHostApp.cpp
+        plugin/host/PluginHostPresets.cpp
+        plugin/host/PluginHostUi.cpp
+        plugin/host/PluginHostUi.hpp
+        plugin/host/PluginHostUnavailable.cpp
+        plugin/host/PluginHostSlicing.cpp
+        plugin/pluginTypes/script/ScriptPluginCapability.hpp
+        plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.hpp
+        plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.cpp
+        plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapabilityTrampoline.hpp
+        GUI/PluginWarnings.cpp
+        GUI/PluginWarnings.hpp
+        GUI/PluginProgressDialog.cpp
+        GUI/PluginProgressDialog.hpp
+        GUI/PluginSource.hpp
+        GUI/PluginStatus.hpp
+        GUI/PluginSort.hpp
+        plugin/pluginTypes/script/ScriptPluginCapability.cpp
+        plugin/pluginTypes/script/ScriptPluginCapabilityTrampoline.hpp
+        plugin/ipc/PluginIpcProtocol.hpp
+        plugin/ipc/PluginIpcProtocol.cpp
+        plugin/ipc/PluginIpcChannel.hpp
+        plugin/ipc/PluginIpcChannel.cpp
+        plugin/ipc/PluginHostProcess.hpp
+        plugin/ipc/PluginHostProcess.cpp
+        plugin/ipc/PluginHostRpc.hpp
+        plugin/ipc/PluginHostRpc.cpp
+        plugin/ipc/PluginHostClient.hpp
+        plugin/ipc/PluginHostClient.cpp
+        plugin/ipc/PluginHostChild.hpp
+        plugin/ipc/PluginHostChild.cpp
+        plugin/ipc/PluginSandbox.hpp
+        plugin/ipc/PluginSandbox.cpp
+        plugin/ipc/PluginSandboxPriv.hpp
+        plugin/ipc/PluginSandboxLinux.cpp
+        plugin/ipc/PluginSandboxWin.cpp
+        plugin/ipc/PluginSandboxMac.cpp
+        plugin/ipc/PluginSandboxMacSeatbelt.hpp
+        Utils/BoostProcessCompat.hpp
+        GUI/HomePlugins.cpp
+        GUI/HomePlugins.hpp
+    )
+endif ()
+
 set(ORCA_UPDATER_SIG_KEY_B64 "${ORCA_UPDATER_SIG_KEY}")
 string(STRIP "${ORCA_UPDATER_SIG_KEY_B64}" ORCA_UPDATER_SIG_KEY_B64)
 string(REPLACE "\n" "" ORCA_UPDATER_SIG_KEY_B64 "${ORCA_UPDATER_SIG_KEY_B64}")
@@ -1244,6 +1353,13 @@ string(REPLACE " "  "" ORCA_UPDATER_SIG_KEY_B64 "${ORCA_UPDATER_SIG_KEY_B64}")
 set(ORCA_UPDATER_SIG_KEY_AVAILABLE 0)
 if(ORCA_UPDATER_SIG_KEY_B64)
     set(ORCA_UPDATER_SIG_KEY_AVAILABLE 1)
+endif()
+
+if(NOT DEFINED _bundled_python_root)
+    set(_bundled_python_root "")
+endif()
+if(NOT DEFINED ORCA_BUNDLED_UV_EXECUTABLE_CONFIG)
+    set(ORCA_BUNDLED_UV_EXECUTABLE_CONFIG "")
 endif()
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/GeneratedConfig.hpp.in
@@ -1271,10 +1387,48 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/CodeEmbossDialog.cpp                      # CFG_SECTION also in other dialogs
     GUI/SimpleShapeDialog.cpp                     # filament_label() also in CodeEmbossDialog.cpp
     GUI/ImageTraceDialog.cpp                      # file-local preview helpers with common names
+    GUI/ImageToObjectDialog.cpp                   # file-local preview helpers, as ImageTraceDialog.cpp
     GUI/Gizmos/GLGizmoSVG.cpp                     # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/GLCanvas3D.cpp                            # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/ImGuiWrapper.cpp                          # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/IMSlider.cpp                              # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
+    plugin/PythonInterpreter.cpp
+    plugin/PythonPluginBridge.cpp
+    plugin/CloudPluginService.cpp
+    plugin/PluginFsUtils.cpp
+    plugin/PluginConfig.cpp
+    plugin/PluginLoader.cpp
+    plugin/PluginHooks.cpp
+    plugin/PluginManager.cpp
+    plugin/PluginAuditManager.cpp
+    plugin/PluginTrust.cpp
+    GUI/PluginPermissionValidation.cpp
+    GUI/PluginsInspectorLogic.cpp
+    GUI/PluginsInspectorDialog.cpp
+    plugin/PluginResolver.cpp
+    plugin/host/PluginHost.cpp
+    plugin/host/PluginHostGeometry.cpp
+    plugin/host/PluginHostMesh.cpp
+    plugin/host/PluginHostModel.cpp
+    plugin/host/PluginHostApp.cpp
+    plugin/host/PluginHostPresets.cpp
+    plugin/host/PluginHostUi.cpp
+    plugin/host/PluginHostUnavailable.cpp
+    plugin/host/PluginHostSlicing.cpp
+    plugin/pluginTypes/script/ScriptPluginCapability.cpp
+    plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.cpp
+    plugin/ipc/PluginIpcProtocol.cpp
+    plugin/ipc/PluginIpcChannel.cpp
+    plugin/ipc/PluginHostProcess.cpp
+    plugin/ipc/PluginHostRpc.cpp
+    plugin/ipc/PluginHostClient.cpp
+    plugin/ipc/PluginHostChild.cpp
+    plugin/ipc/PluginSandbox.cpp
+    plugin/ipc/PluginSandboxLinux.cpp
+    plugin/ipc/PluginSandboxWin.cpp
+    plugin/ipc/PluginSandboxMac.cpp
+    GUI/PluginWarnings.cpp
+    GUI/PluginProgressDialog.cpp
     GUI/Jobs/SendJob.cpp                          # message strings also defined in PrintJob.cpp
     GUI/MsgDialog.cpp                             # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
     GUI/OptionsGroup.cpp                          # titleWidth clash
@@ -1304,6 +1458,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Search.cpp                                # defines FTS_FUZZY_MATCH_IMPLEMENTATION before its include
     GUI/DualNozzleSliceDialog.cpp                 # namespace-scope using namespace DualNozzleSync
     GUI/HomeVaults.cpp                            # lower/read_file/write_atomic/LIST_LIMIT also in HomeVendors.cpp
+    GUI/HomePlugins.cpp                           # namespace-scope using json / fs also in HomeVendors.cpp
     GUI/DualNozzleState.cpp                       # namespace-scope using namespace DualNozzleSync
     GUI/Gizmos/GLGizmoCut.cpp                     # namespace-scope using namespace Geometry
     GUI/Gizmos/GLGizmosCommon.cpp                 # namespace-scope using-directives for the gizmo data objects
@@ -1362,6 +1517,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Widgets/WebView.cpp                       # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
     GUI/AMSSetting.cpp                            # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/Calibration.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/ApplyTransformDialog.cpp                  # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/CloneDialog.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/FillBedDialog.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/HeightPatternDialog.cpp                   # ::CheckBox vs GUI::CheckBox (Field.hpp)
@@ -1402,6 +1558,9 @@ target_include_directories(libslic3r_gui PRIVATE ${PAHO_MQTT_C_PATH}/src)
 if (WIN32)
     target_include_directories(libslic3r_gui SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/WebView2/include)
     target_link_libraries(libslic3r_gui Advapi32)
+    if (EDGE_PYTHON_PLUGINS)
+        target_link_libraries(libslic3r_gui userenv)
+    endif ()
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SLIC3R_GUI_SOURCES})
@@ -1410,6 +1569,71 @@ encoding_check(libslic3r_gui)
 
 find_package(libnoise REQUIRED)
 target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo libvgcode glad OpenGL::GL hidapi mdns ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise)
+if (EDGE_PYTHON_PLUGINS)
+    target_link_libraries(libslic3r_gui pybind11::embed)
+    target_compile_definitions(libslic3r_gui PUBLIC EDGE_PYTHON_PLUGINS)
+
+    add_executable(edge-plugin-host plugin/ipc/PluginHostMain.cpp)
+    # libslic3r_gui pulls GUI_App, which calls crash-reporter and version wrappers that live
+    # in the app executable rather than the library. Match Snapmaker_Orca / slic3rutils_tests.
+    target_sources(edge-plugin-host PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../sentry_wrapper/SentryWrapper.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../sentry_wrapper/SentryScrub.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../bury_cfg/bury_point.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common_func/common_func.cpp)
+    target_include_directories(edge-plugin-host PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${wxWidgets_INCLUDE_DIRS})
+    target_compile_definitions(edge-plugin-host PRIVATE ${wxWidgets_DEFINITIONS} EDGE_PYTHON_PLUGINS)
+    target_link_libraries(edge-plugin-host libslic3r_gui libslic3r pybind11::embed)
+    if (APPLE)
+        target_link_options(edge-plugin-host PRIVATE "LINKER:-rpath,@executable_path/python/lib")
+        target_link_libraries(edge-plugin-host "-framework IOKit" "-framework CoreFoundation")
+    elseif (UNIX AND NOT WIN32)
+        # BUILD_RPATH: next to the binary in the build tree / AppImage.
+        # INSTALL_RPATH: FHS/Flatpak helper in bindir with libpython at $prefix/libpython,
+        # and the non-FHS layout that install() places at $prefix/python.
+        set_target_properties(edge-plugin-host PROPERTIES
+            BUILD_RPATH "$ORIGIN/python/lib;$ORIGIN/../lib/python/lib"
+            INSTALL_RPATH "$ORIGIN/../libpython/lib;$ORIGIN/../python/lib")
+        get_property(_edge_plugin_host_install_rpath TARGET edge-plugin-host PROPERTY INSTALL_RPATH)
+        if (NOT _edge_plugin_host_install_rpath MATCHES "libpython")
+            message(FATAL_ERROR "edge-plugin-host INSTALL_RPATH must include $ORIGIN/../libpython/lib")
+        endif ()
+    endif ()
+    if (WIN32)
+        target_sources(edge-plugin-host PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../dev-utils/BaseException.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/../dev-utils/StackWalker.cpp)
+        target_compile_definitions(edge-plugin-host PRIVATE BURY_EXPORTS)
+    endif ()
+    if (MSVC)
+        target_link_libraries(edge-plugin-host Setupapi.lib userenv.lib)
+    endif ()
+    # Copy next to the app whenever this helper rebuilds. POST_BUILD must live here;
+    # CMake rejects attaching it from src/CMakeLists.txt. Do not put
+    # $<TARGET_FILE_DIR:Snapmaker_Orca> in this custom command: that genex adds a
+    # target dependency and cycles with add_dependencies(Snapmaker_Orca edge-plugin-host).
+    # Evaluate the destination at generate time into a per-config script instead.
+    set(_copy_helper_script "${CMAKE_CURRENT_BINARY_DIR}/copy_edge_plugin_host-$<CONFIG>.cmake")
+    set(_copy_helper_content "
+execute_process(COMMAND \"${CMAKE_COMMAND}\" -E make_directory \"$<TARGET_FILE_DIR:Snapmaker_Orca>\")
+execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy_if_different
+  \"$<TARGET_FILE:edge-plugin-host>\"
+  \"$<TARGET_FILE_DIR:Snapmaker_Orca>/$<TARGET_FILE_NAME:edge-plugin-host>\")
+")
+    if (APPLE)
+        string(APPEND _copy_helper_content "
+execute_process(COMMAND sh -c \"codesign --force --sign - --entitlements '${CMAKE_SOURCE_DIR}/scripts/edge-plugin-host.entitlements' '$<TARGET_FILE_DIR:Snapmaker_Orca>/$<TARGET_FILE_NAME:edge-plugin-host>' 2>/dev/null || true\")
+")
+    endif ()
+    file(GENERATE OUTPUT "${_copy_helper_script}" CONTENT "${_copy_helper_content}")
+    add_custom_command(TARGET edge-plugin-host POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -P "${_copy_helper_script}"
+        COMMENT "Copying edge-plugin-host next to EdgeSlicer"
+        VERBATIM)
+endif ()
 
 if (MSVC)
     target_link_libraries(libslic3r_gui Setupapi.lib)
@@ -1442,8 +1666,16 @@ if (SPNAV_LIB)
     target_link_libraries(libslic3r_gui ${SPNAV_LIB})
 endif()
 
-if (SLIC3R_STATIC AND NOT SLIC3R_STATIC_EXCLUDE_CURL AND UNIX AND NOT APPLE)
-    target_compile_definitions(libslic3r_gui PRIVATE OPENSSL_CERT_OVERRIDE)
+if (SLIC3R_STATIC AND NOT SLIC3R_STATIC_EXCLUDE_CURL)
+    if (UNIX AND NOT APPLE)
+        # Linux historically: Http::tls_global_init() points the bundled OpenSSL at a
+        # distro CA bundle (the deps prefix has no cert.pem). Windows uses the system store.
+        target_compile_definitions(libslic3r_gui PRIVATE OPENSSL_CERT_OVERRIDE)
+    elseif (APPLE AND EDGE_PYTHON_PLUGINS)
+        # macOS only when the plugin runtime is on: the default-OFF Mac static build must
+        # compile Http.cpp exactly as before (no CurlGlobalInit CA override).
+        target_compile_definitions(libslic3r_gui PRIVATE OPENSSL_CERT_OVERRIDE)
+    endif ()
 endif ()
 
 if (SLIC3R_PCH AND NOT SLIC3R_SYNTAXONLY)
@@ -1517,6 +1749,11 @@ endif ()
 
 # Add a definition so that we can tell we are compiling slic3r.
 target_compile_definitions(libslic3r_gui PRIVATE SLIC3R_CURRENTLY_COMPILING_GUI_MODULE)
+
+# Discord Rich Presence application id override (empty keeps EdgeSlicer's own id).
+if (SLIC3R_DISCORD_APP_ID)
+    target_compile_definitions(libslic3r_gui PRIVATE SLIC3R_DISCORD_APP_ID="${SLIC3R_DISCORD_APP_ID}")
+endif ()
 
 # Sentry crash reporting integration
 if (SLIC3R_SENTRY)

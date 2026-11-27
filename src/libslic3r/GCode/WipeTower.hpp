@@ -296,6 +296,9 @@ public:
 	// wipe_area	-- space available for one toolchange in mm
 	// BBS: add partplate logic
 	WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origin, const float wipe_volume, size_t initial_tool, const float wipe_tower_height);
+	// The tower at wipe_tower_pos (its left front corner, in mm) instead of the plate's wipe_tower_x / wipe_tower_y. The
+	// constructor above passes the plate's position here.
+	WipeTower(const PrintConfig& config, const Vec2d &wipe_tower_pos, Vec3d plate_origin, const float wipe_volume, size_t initial_tool, const float wipe_tower_height);
 
 
 	// Set the extruder properties.
@@ -1094,6 +1097,7 @@ private:
     std::string        format_line_M104(int target_temp, size_t tool, const NozzleChangePlan &plan, bool is_heating, const std::string &comment) const;
 
     bool               m_handle_hotend_as_extruder = false;
+    // hotend_cooling_rate per logical extruder, its current variant's value (constructor).
     std::vector<float> m_hotend_cooling_rate;
 
     // Bambu Studio 2.9.1 (H3C): machine XY speed limit, mm/min (the H3C tower is capped by it, not by m_max_speed).

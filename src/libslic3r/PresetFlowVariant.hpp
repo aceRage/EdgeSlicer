@@ -32,6 +32,28 @@ inline FilamentVolumeType filament_volume_type_at(const ConfigBase &config, unsi
     return types->values[filament_id] == int(fvtHighFlow) ? fvtHighFlow : fvtStandard;
 }
 
+// Snapmaker #1173: whether any of the first `slot_count` flow-variant slots of `edited` differs from the same
+// slot of `base`. A list shorter than a slot reads its last value there. False when either is not a vector, is
+// empty, or `edited` holds fewer than `slot_count` values. Resetting one flow type of an object setting must
+// keep the object's override while another flow type still differs from the process.
+inline bool flow_variant_slots_differ(const ConfigOption *edited, const ConfigOption *base, size_t slot_count)
+{
+    const auto *edited_vec = dynamic_cast<const ConfigOptionVectorBase*>(edited);
+    const auto *base_vec   = dynamic_cast<const ConfigOptionVectorBase*>(base);
+    if (edited_vec == nullptr || base_vec == nullptr || edited_vec->empty() || base_vec->empty())
+        return false;
+    const std::vector<std::string> edited_vals = edited_vec->vserialize();
+    if (edited_vals.size() < slot_count)
+        return false;
+    const std::vector<std::string> base_vals = base_vec->vserialize();
+    if (base_vals.empty())
+        return false;
+    for (size_t i = 0; i < slot_count; ++ i)
+        if (edited_vals[i] != base_vals[i < base_vals.size() ? i : base_vals.size() - 1])
+            return true;
+    return false;
+}
+
 // Resolve an index inside a single preset's variant array. Unlike get_config_idx(), this helper
 // does not expect filament_flow_step_size or a composed multi-filament config.
 size_t get_preset_flow_variant_idx(const ConfigBase &preset_config, ConfigFlowDomain domain, FilamentVolumeType type);

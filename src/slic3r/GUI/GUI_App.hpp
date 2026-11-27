@@ -8,6 +8,7 @@
 #include "OpenGLManager.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/SettingsView.hpp"
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/UserNotification.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
@@ -80,6 +81,7 @@ class UserManager;
 class DeviceManager;
 class NetworkAgent;
 class TaskManager;
+class DiscordPresence;
 enum class PresetManagerKind; // libslic3r/PresetManagerModel.hpp
 
 namespace GUI{
@@ -323,6 +325,7 @@ private:
     std::unique_ptr<PrintHostJobQueue> m_printhost_job_queue;
 	std::unique_ptr <OtherInstanceMessageHandler> m_other_instance_message_handler;
     std::unique_ptr <wxSingleInstanceChecker> m_single_instance_checker;
+    std::unique_ptr<Slic3r::DiscordPresence> m_discord_presence;
     std::string m_instance_hash_string;
 	size_t m_instance_hash_int;
 
@@ -495,6 +498,10 @@ private:
     void show_message_box(std::string msg) { wxMessageBox(msg); }
     EAppMode get_app_mode() const { return m_app_mode; }
     Slic3r::DeviceManager* getDeviceManager() { return m_device_manager; }
+    // Discord Rich Presence. apply_* reads the preference and starts or stops
+    // the publisher; update_* pushes the current state and is driven from idle.
+    void                   apply_discord_presence_setting();
+    void                   update_discord_presence();
     Slic3r::TaskManager*   getTaskManager() { return m_task_manager; }
     HMSQuery* get_hms_query() { return hms_query; }
     NetworkAgent* getAgent() { return m_agent; }
@@ -511,6 +518,7 @@ private:
     void start_remote_access();
 private:
     static bool s_showcase_render_mode;
+    std::set<std::string> m_settings_view_revealed;
     // S5: runs the render job once the project is loaded, then ends the process with its code.
     void run_showcase_render_job();
 public:
@@ -614,6 +622,8 @@ public:
     const wxFont&   bold_font()             { return m_bold_font; }
     const wxFont&   normal_font()           { return m_normal_font; }
     const wxFont&   code_font()             { return m_code_font; }
+    // After a grant is persisted: redraw Home > Plugins when EDGE_PYTHON_PLUGINS is on.
+    void            notify_plugin_permissions_changed(const std::string& plugin_key);
     const wxFont&   link_font()             { return m_link_font; }
     int             em_unit() const         { return m_em_unit; }
     bool            tabs_as_menu() const;
@@ -854,10 +864,22 @@ public:
     Tab*            get_plate_tab();
     Tab*            get_model_tab(bool part = false);
     Tab*            get_layer_tab();
+    // The settings level: the chosen view plus Developer mode (see GUI_App.cpp).
     ConfigOptionMode get_mode();
+    // Preferences > Developer mode (AppConfig "developer_mode"; legacy user_mode "develop" counts too).
+    bool            developer_mode_on();
     std::string     get_mode_str();
     void            save_mode(const /*ConfigOptionMode*/int mode) ;
     void            update_mode();
+    // Settings views (Basic | Advanced | Bambu selector, libslic3r/SettingsView.hpp). The Bambu view is
+    // AppConfig "settings_view" = "bambu", next to user_mode; get_mode() keeps returning the level.
+    SettingsView    get_settings_view();
+    ViewChoice      get_view_choice();
+    // Writes user_mode + settings_view for a segment and refreshes every settings view (update_mode()).
+    void            save_view_choice(ViewChoice choice);
+    // Options the user jumped to from search (or a hint) while the Bambu view hid them: shown, with the
+    // "Not in Bambu Studio" chip, for the rest of the session or until the view changes.
+    std::set<std::string>& settings_view_revealed() { return m_settings_view_revealed; }
     // Curved tops P3: Developer mode on and the Developer setting lines shown (the developer-override gate).
     bool            curved_tops_developer_lines_shown();
     void            update_internal_development();

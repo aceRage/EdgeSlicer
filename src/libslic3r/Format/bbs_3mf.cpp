@@ -219,6 +219,8 @@ const std::string CUT_INFORMATION_FILE = "Metadata/cut_information.xml";
 const std::string CUT_RECIPE_FILE = "Metadata/cut_recipe.xml";
 // Height colour pattern records (HeightColourPattern.hpp). EdgeSlicer-only; written only when an object has one.
 const std::string HEIGHT_PATTERNS_FILE = "Metadata/edgeslicer_height_patterns.json";
+// "Image to object": settings and source image of the objects made from an image, EdgeSlicer only
+const std::string IMAGE_OBJECTS_FILE = "Metadata/edgeslicer_image_objects.json";
 const std::string CUT_RECIPE_MESH_DIR = "Metadata/cut_recipe/";
 
 const unsigned int AUXILIARY_STR_LEN = 12;
@@ -351,6 +353,7 @@ static constexpr const char* FIRST_LAYER_PRINT_SEQUENCE_ATTR = "first_layer_prin
 static constexpr const char* OTHER_LAYERS_PRINT_SEQUENCE_ATTR = "other_layers_print_sequence";
 static constexpr const char* OTHER_LAYERS_PRINT_SEQUENCE_NUMS_ATTR = "other_layers_print_sequence_nums";
 static constexpr const char* SPIRAL_VASE_MODE = "spiral_mode";
+static constexpr const char* SKIRT_START_ANGLE_ATTR = "skirt_start_angle";
 static constexpr const char* FILAMENT_MAP_MODE_ATTR = "filament_map_mode";
 static constexpr const char* FILAMENT_MAP_ATTR = "filament_maps";
 static constexpr const char* GCODE_FILE_ATTR = "gcode_file";
@@ -1409,6 +1412,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         IdToCutRecipeInfoMap       m_cut_recipe_infos;
         // 1 based model object index -> height colour pattern records
         std::map<int, std::vector<HeightColourPattern>> m_height_patterns;
+        // 1 based model object index -> "Image to object" recipe
+        std::map<int, ImageObjectRecipe> m_image_object_recipes;
         std::map<std::string, TriangleMesh> m_cut_recipe_meshes;
         IdToLayerHeightsProfileMap m_layer_heights_profiles;
         IdToLayerConfigRangesMap m_layer_config_ranges;
@@ -1494,6 +1499,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // pre-cut mesh blob per distinct mesh.
         void _extract_cut_recipe_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat);
         void _extract_height_patterns_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat);
+        void _extract_image_objects_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat);
         void _extract_cut_recipe_mesh_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat);
         void _extract_layer_heights_profile_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, ConfigSubstitutionContext& config_substitutions);
@@ -1712,6 +1718,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_layer_heights_profiles.clear();
         m_layer_config_ranges.clear();
         m_height_patterns.clear();
+        m_image_object_recipes.clear();
         m_brim_ear_points.clear();
         //m_sla_support_points.clear();
         m_curr_metadata_name.clear();
@@ -2283,6 +2290,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 else if (boost::algorithm::iequals(name, HEIGHT_PATTERNS_FILE)) {
                     _extract_height_patterns_from_archive(archive, stat);
                 }
+                else if (boost::algorithm::iequals(name, IMAGE_OBJECTS_FILE)) {
+                    _extract_image_objects_from_archive(archive, stat);
+                }
                 else if (boost::algorithm::istarts_with(name, CUT_RECIPE_MESH_DIR)) {
                     _extract_cut_recipe_mesh_from_archive(archive, stat);
                 }
@@ -2495,6 +2505,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             // the object any more is still kept: the state check reports it as modified.
             if (auto pat = m_height_patterns.find(object.second + 1); pat != m_height_patterns.end())
                 model_object->height_colour_patterns = std::move(pat->second);
+            if (auto recipe = m_image_object_recipes.find(object.second + 1); recipe != m_image_object_recipes.end())
+                model_object->image_object_recipe = std::move(recipe->second);
 
             IdToBrimPointsMap::iterator obj_brim_points = m_brim_ear_points.find(object.second + 1);
             if (obj_brim_points != m_brim_ear_points.end())
@@ -3610,6 +3622,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
         for (auto &entry : height_patterns_from_json(buffer))
             m_height_patterns.emplace(entry.first, std::move(entry.second));
+    }
+
+    // Metadata/edgeslicer_image_objects.json. Untrusted file content, as the height patterns: the
+    // parser drops what it cannot make sense of, and without the file the objects are plain meshes.
+    void _BBS_3MF_Importer::_extract_image_objects_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat)
+    {
+        if (stat.m_uncomp_size == 0 || stat.m_uncomp_size > 256ull * 1024ull * 1024ull)
+            return;
+        std::string buffer((size_t) stat.m_uncomp_size, 0);
+        if (mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, (void *) buffer.data(), (size_t) stat.m_uncomp_size, 0) == 0) {
+            add_error("Error while reading image object data to buffer");
+            return;
+        }
+        for (auto &entry : image_object_recipes_from_json(buffer))
+            m_image_object_recipes.emplace(entry.first, std::move(entry.second));
     }
 
     // RE-EDITABLE CUTS: one Metadata/cut_recipe/<sha256>.bin pre-cut mesh blob.
@@ -5619,6 +5646,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 std::istringstream(value) >> std::boolalpha >> spiral_mode;
                 m_curr_plater->config.set_key_value("spiral_mode", new ConfigOptionBool(spiral_mode));
             }
+            else if (key == SKIRT_START_ANGLE_ATTR) {
+                // Orca #17457: plate override of the skirt start point, ignored when it is not a valid angle
+                size_t parsed = 0;
+                const double skirt_start_angle = string_to_double_decimal_point(value, &parsed);
+                if (parsed > 0 && skirt_start_angle >= -180. && skirt_start_angle <= 180.)
+                    m_curr_plater->config.set_key_value("skirt_start_angle", new ConfigOptionFloat(skirt_start_angle));
+            }
             else if (key == GCODE_FILE_ATTR)
             {
                 m_curr_plater->gcode_file = value;
@@ -7306,6 +7340,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // "Metadata/edgeslicer_height_patterns.json": only when an object has a height colour
         // pattern, and never in "Export Bambu 3MF" (the plain ranges are what Bambu reads).
         bool _add_height_patterns_file_to_archive(mz_zip_archive &archive, Model &model);
+        // "Metadata/edgeslicer_image_objects.json": only when an object was made by "Image to object"
+        bool _add_image_objects_file_to_archive(mz_zip_archive &archive, Model &model);
         // Showcase tab: "Metadata/showcase/scenes.json" plus the images the scenes use.
         bool _add_showcase_to_archive(mz_zip_archive &archive, const Model &model);
         bool _add_slice_info_config_file_to_archive(mz_zip_archive &archive, const Model &model, PlateDataPtrs &plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config);
@@ -7961,6 +7997,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         if (!m_bambu_compat && !_add_height_patterns_file_to_archive(archive, model)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << ", _add_height_patterns_file_to_archive failed";
+            return false;
+        }
+
+        if (!m_bambu_compat && !_add_image_objects_file_to_archive(archive, model)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << ", _add_image_objects_file_to_archive failed";
             return false;
         }
 
@@ -9844,6 +9885,11 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 if (spiral_mode_opt)
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SPIRAL_VASE_MODE << "\" " << VALUE_ATTR << "=\"" << spiral_mode_opt->getBool() << "\"/>\n";
 
+                // Orca #17457: plate override of the skirt start point, written with a decimal point in every locale
+                auto* skirt_start_angle_opt = plate_data->config.option<ConfigOptionFloat>("skirt_start_angle");
+                if (skirt_start_angle_opt)
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SKIRT_START_ANGLE_ATTR << "\" " << VALUE_ATTR << "=\"" << float_to_string_decimal_point(skirt_start_angle_opt->value) << "\"/>\n";
+
                 // TODO: Orca: hack
                 //filament map related
                 // A plate grouped by hand (the pre-slice confirmation on a Bambu two-extruder printer)
@@ -10080,6 +10126,23 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
         const std::string out = height_patterns_to_json(per_object);
         if (!mz_zip_writer_add_mem(&archive, HEIGHT_PATTERNS_FILE.c_str(), (const void *) out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
             add_error("Unable to add height colour patterns file to archive");
+            return false;
+        }
+        return true;
+    }
+
+    bool _BBS_3MF_Exporter::_add_image_objects_file_to_archive(mz_zip_archive &archive, Model &model)
+    {
+        std::vector<const ImageObjectRecipe *> per_object;
+        per_object.reserve(model.objects.size());
+        for (const ModelObject *object : model.objects)
+            per_object.push_back(&object->image_object_recipe);
+        // Empty when no object has a recipe: write nothing, so other projects are unchanged.
+        const std::string out = image_object_recipes_to_json(per_object);
+        if (out.empty())
+            return true;
+        if (!mz_zip_writer_add_mem(&archive, IMAGE_OBJECTS_FILE.c_str(), (const void *) out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
+            add_error("Unable to add image objects file to archive");
             return false;
         }
         return true;

@@ -16296,3 +16296,111 @@ msgstr ""
 
 msgid "Incompatible filament types cannot be mixed. Please correct the selection."
 msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Click to collapse or expand this section"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Search all settings"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Expand all"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Collapse all"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "3D View"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Projects & Files"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Slicing & Presets"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Printers & Network"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Apps & Advanced"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "No settings match that search."
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Language and region"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Startup"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Updates"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Appearance"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Camera and mouse"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Selection and tool panels"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "G-code preview"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Rendering quality"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Opening projects"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Warnings when loading"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Project strip and recent files"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Saving and backup"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Folders"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Bambu Studio presets"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Accounts and devices"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "External apps"
+msgstr ""
+
+#: src/slic3r/GUI/Preferences.cpp
+msgid "Optional tabs"
+msgstr ""

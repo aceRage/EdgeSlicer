@@ -387,6 +387,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         static const std::vector<std::string> Reserved_Tags_compatible;
         static const std::string Flush_Start_Tag;
         static const std::string Flush_End_Tag;
+        // The flush a Bambu printer's firmware does by itself (change_filament_gcode of the H2D, H2C, X2D, H2S, P2S, A2L,
+        // H3C): "; VFLUSH_START", virtual moves ";VG1 E<mm> F<mm/min>" and waits "SYNC T<s>", "; VFLUSH_END".
+        static const std::string VFlush_Start_Tag;
+        static const std::string VFlush_End_Tag;
         static const std::string External_Purge_Tag;
     public:
         enum class ETags : unsigned char
@@ -443,6 +447,8 @@ inline bool is_bbl_special_tool_command(int tool_number)
         static constexpr size_t Output_Block_Size = 65536;
 
         static bool s_IsBBLPrinter;
+        // Tests only: false skips the Bambu firmware flush (VFLUSH) accounting, to compare the G-code with and without it.
+        static bool s_EstimateVirtualFlush;
 
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
         static const std::string Mm3_Per_Mm_Tag;
@@ -575,6 +581,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
                 unsigned int id;
                 unsigned int remaining_internal_g1_lines{ 0 };
                 float elapsed_time;
+                // elapsed_time without the estimate-only time (add_estimate_only_time): what the passes that place
+                // G-code lines by time read (the pre-cooling planner, the tool change preheat backtrace).
+                float planning_time;
             };
 
             // A point of the planner's speed profile (end of acceleration / start of deceleration) inside
@@ -623,6 +632,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
             std::vector<ActualSpeedMove> actual_speed_moves;
             //BBS: prepare stage time before print model, including start gcode time and mostly same with start gcode time
             float prepare_time;
+            // EDGE: `time` without the estimate-only time, summed exactly as `time` is without it.
+            double planning_time;
+            // EDGE: estimate-only time (a Bambu firmware flush) not yet put on a block; the next processed block carries it.
+            float estimate_only_pending{ 0.0f };
 
             // Orca (#14573): extra time (e.g. a filament-change delay) that can't be attributed to a
             // matching block on this pass is buffered here and retried on a later pass, so it
@@ -898,6 +911,8 @@ inline bool is_bbl_special_tool_command(int tool_number)
         CachedPosition m_cached_position;
         bool m_wiping;
         bool m_flushing;
+        // Between "; VFLUSH_START" and "; VFLUSH_END" (VFlush_Start_Tag).
+        bool m_virtual_flushing;
         bool m_wipe_tower;
         float m_remaining_volume;
         bool m_manual_filament_change{ false };
@@ -1077,6 +1092,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
         void finalize(bool post_process);
 
         float get_time(PrintEstimatedStatistics::ETimeMode mode) const;
+        // EDGE: the time without the estimate-only time (add_estimate_only_time, a Bambu firmware flush) and
+        // without the machine's prepare time: for what decides G-code, such as the layer cooling (Orca #17540).
+        float get_planning_time(PrintEstimatedStatistics::ETimeMode mode) const;
         float get_prepare_time(PrintEstimatedStatistics::ETimeMode mode) const;
         float get_first_layer_time(PrintEstimatedStatistics::ETimeMode mode) const;
         std::string get_time_dhm(PrintEstimatedStatistics::ETimeMode mode) const;
@@ -1244,6 +1262,19 @@ inline bool is_bbl_special_tool_command(int tool_number)
         // Orca #14663: Elegoo Centauri Carbon / Carbon 2 filament change (ElegooGCodeProcessorHelper.cpp).
         void process_M6211(const GCodeReader::GCodeLine& line);
         void process_elegoo_M6211(const GCodeReader::GCodeLine& line);
+
+        // The firmware flush of the Bambu printers that write "; VFLUSH_START" (VFlush_Start_Tag): a ";VG1 E<mm> F<mm/min>"
+        // comment is flushed filament and the time to extrude it, a "SYNC T<s>" line a wait of the flush. Outside the block
+        // both are ignored, as before.
+        void process_virtual_flush_move(const std::string_view comment);
+        void process_SYNC(const GCodeReader::GCodeLine& line);
+        // Time that counts in the estimate (totals, M73, layer and move times) but not in what places G-code lines by time:
+        // it goes on the next block each machine processes, outside the planner queue and the booked waits
+        // (m_booked_times), and outside G1LinesCacheItem::planning_time. The G-code itself stays as without it.
+        void add_estimate_only_time(float seconds);
+        // Books `volume` mm^3 flushed after a filament change: what is left of the previous filament in the nozzle first
+        // (m_remaining_volume, nozzle_volume after each change), the rest to the current filament.
+        void book_flush_volume(float volume);
 
         // Processes T line (Select Tool)
         void process_T(const GCodeReader::GCodeLine& line);

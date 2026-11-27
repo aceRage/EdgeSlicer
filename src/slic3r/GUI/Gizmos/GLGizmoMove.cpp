@@ -151,6 +151,8 @@ void GLGizmoMove3D::on_dragging(const UpdateData& data)
 void GLGizmoMove3D::on_render()
 {
     const Selection& selection = m_parent.get_selection();
+    if (selection.is_empty())
+        return;
 
     // Drawn against the scene depth, before it is cleared for the grabbers.
     if (m_snap_enabled)
