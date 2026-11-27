@@ -1100,6 +1100,23 @@ TEST_CASE("Object towers: arrange reserves no tower room where none prints", "[O
         ArrangePolygon ap = plain;
         CHECK_FALSE(reserve_object_prime_tower(ap, object, on));
     }
+    SECTION("a copy in one filament by its own extruder: that replaces the global feature filaments, as slicing does")
+    {
+        // The process prints walls in 1 and infill in 2 (two colours for an object without filament settings of its
+        // own); this object only sets its filament to 2, which then prints every feature: one filament, no tower.
+        DynamicPrintConfig two = on;
+        two.set_key_value("sparse_infill_filament", new ConfigOptionInt(2));
+        two.set_key_value("solid_infill_filament", new ConfigOptionInt(2));
+        for (const char *key : { "wall_filament", "sparse_infill_filament", "solid_infill_filament" })
+            object.config.erase(key);
+        object.config.set("extruder", 2);
+        ArrangePolygon ap = plain;
+        CHECK_FALSE(reserve_object_prime_tower(ap, object, two));
+        // The same object with no filament of its own follows the process: two colours, a tower.
+        object.config.erase("extruder");
+        ArrangePolygon ap2 = plain;
+        CHECK(reserve_object_prime_tower(ap2, object, two));
+    }
     SECTION("a dragged tower is reserved where it was dragged")
     {
         set_tower_offset(object, Vec2d(-60., 0.));

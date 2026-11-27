@@ -144,7 +144,12 @@ ArrangePolygon ArrangeJob::prepare_arrange_polygon(void* model_instance)
     // Per-object prime towers (design 2.5): printing by object with Prime tower per object on, a multi-colour copy and
     // its tower are arranged as one unit, the fixed (unselected) copies' included, so the arrange leaves room for every
     // tower. Before, each item was grown on all sides by its whole tower, and the copies were pushed onto new plates.
-    if (params.is_seq_print && instance != nullptr && instance->get_object() != nullptr)
+    // A lone copy prints the plate's own tower (by layer), so it reserves none, as in the CLI.
+    size_t copies = 0;
+    for (const ModelObject *object : m_plater->model().objects)
+        for (const ModelInstance *mi : object->instances)
+            copies += mi->printable ? 1 : 0;
+    if (params.is_seq_print && copies > 1 && instance != nullptr && instance->get_object() != nullptr)
         reserve_object_prime_tower(ap, *instance->get_object(), config, &wxGetApp().preset_bundle->mixed_filaments);
     return ap;
 }

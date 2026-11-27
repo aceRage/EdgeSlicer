@@ -4,6 +4,7 @@
 #include <libslic3r/Geometry/ConvexHull.hpp>
 #include <libslic3r/Print.hpp>
 #include <libslic3r/MixedFilament.hpp>
+#include <libslic3r/MixedFilamentCliGates.hpp>
 #include <libslic3r/GCode/WipeTowerEstimate.hpp>
 #include "MTUtils.hpp"
 
@@ -293,21 +294,11 @@ bool reserve_object_prime_tower(ArrangePolygon &ap, const ModelObject &object, c
     };
 
     // The filaments the copy prints with, from the model, as Print::plan_object_towers() takes them before slicing: the
-    // parts (painting included), the height ranges, the feature filaments and the support's (1-based here).
+    // regions built the way slicing builds them (an object or part "extruder" replaces the global feature filaments),
+    // painting, height ranges, modifiers and the support's: the plate tower estimate's set (PartPlate::get_extruders).
+    // 1-based here.
     std::vector<int> ids;
-    for (const ModelVolume *volume : object.volumes)
-        if (volume->is_model_part())
-            append(ids, volume->get_extruders());
-    for (const auto &range : object.layer_config_ranges)
-        if (const ConfigOption *opt = range.second.option("extruder"); opt != nullptr && opt->getInt() > 0)
-            ids.push_back(opt->getInt());
-    for (const char *key : { "wall_filament", "sparse_infill_filament", "solid_infill_filament" })
-        if (const ConfigOption *opt = value_of(key); opt != nullptr && opt->getInt() > 0)
-            ids.push_back(opt->getInt());
-    if (const ConfigOption *support = value_of("enable_support"); support != nullptr && support->getBool())
-        for (const char *key : { "support_filament", "support_interface_filament" })
-            if (const ConfigOption *opt = value_of(key); opt != nullptr && opt->getInt() > 0)
-                ids.push_back(opt->getInt());
+    append_object_plate_filament_ids(object, config, ids);
     if (mixed != nullptr)
         mixed->expand_virtual_extruder_ids(ids, num_physical);
     std::vector<unsigned int> filaments;
