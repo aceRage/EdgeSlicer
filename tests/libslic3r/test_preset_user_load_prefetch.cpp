@@ -4,6 +4,7 @@
 // folder that crosses several prefetch chunks and has the awkward cases: children sorting before their
 // detached parent (deferred to a later round), a parent in base/, an orphan, a file of another type,
 // a duplicate name and a file that does not parse (quarantined).
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/Preset.hpp"
@@ -28,7 +29,7 @@ struct ScopedTemporaryDir
     fs::path root;
     ScopedTemporaryDir()
     {
-        root = fs::temp_directory_path() / "snorca_tests" / fs::unique_path("user_load_prefetch_%%%%%%%%");
+        root = edge_test::snorca_tests_dir() / fs::unique_path("user_load_prefetch_%%%%%%%%");
         fs::create_directories(root);
     }
     ~ScopedTemporaryDir()

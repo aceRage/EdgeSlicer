@@ -1,6 +1,7 @@
 // User presets whose system parent was renamed (renamed_from) or had its printer list narrowed by a profile
 // update. OrcaSlicer #16367 (legacy_compatible_printers.json and the filament preset migration), adapted to
 // this tree, plus the Edge re-parenting of user and project presets onto a renamed parent.
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/Preset.hpp"
@@ -30,7 +31,7 @@ struct ScopedTemporaryDir
     fs::path root;
     ScopedTemporaryDir()
     {
-        root = fs::temp_directory_path() / "snorca_tests" / fs::unique_path("renamed_parent_%%%%%%%%");
+        root = edge_test::snorca_tests_dir() / fs::unique_path("renamed_parent_%%%%%%%%");
         fs::create_directories(root);
     }
     ~ScopedTemporaryDir()

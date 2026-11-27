@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/BRep/CadBody.hpp"
@@ -457,7 +458,7 @@ namespace {
 bool project_round_trip(Model &model, Model &loaded)
 {
     TempFile                 file(".3mf");
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();

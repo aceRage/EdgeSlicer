@@ -1,5 +1,7 @@
 #include <catch_main.hpp>
 
+#include <edge_test_scratch.hpp>
+
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/libslic3r.h"
 #define NANOSVG_IMPLEMENTATION
@@ -29,6 +31,7 @@ struct TemporaryDirListener : Catch::TestEventListenerBase
             ("edgeslicer_fff_print_tests_" + std::to_string(Slic3r::get_current_pid()));
         boost::filesystem::create_directories(m_dir);
         Slic3r::set_temporary_dir(m_dir.string());
+        edge_test::set_run_dir(m_dir);
     }
 
     void testRunEnded(Catch::TestRunStats const &stats) override

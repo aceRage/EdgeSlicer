@@ -3,6 +3,7 @@
 // the parent's extruder slots from a saved user preset. Edge's loader differs (a user preset saves every
 // option that differs from its parent in full and loads by applying it over the parent), so these pin that
 // every extruder's values survive save and reload, from a file and from the cloud map. Catch2 v2.
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/Preset.hpp"
@@ -24,7 +25,7 @@ struct ScopedTemporaryDir
     fs::path root;
     ScopedTemporaryDir()
     {
-        root = fs::temp_directory_path() / "snorca_tests" / fs::unique_path("extra_extruders_%%%%%%%%");
+        root = edge_test::snorca_tests_dir() / fs::unique_path("extra_extruders_%%%%%%%%");
         fs::create_directories(root);
     }
     ~ScopedTemporaryDir()
