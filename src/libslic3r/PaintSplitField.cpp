@@ -7,7 +7,7 @@
 //   S1  exact edge roots: a consistent tetrahedral split of every cell (Kuhn), each crossing found on the exact
 //       field by regula falsi. The result is a closed 2-manifold by construction.
 //   D23 near the skin (within a voxel, then half a voxel) the claim's edges are split and the new vertices put on the exact
-//       zero set, twice by default: a finer voxel where the cut meets the paint line.
+//       zero set, three times by default: a finer voxel where the cut meets the paint line.
 //   S2  pinned Taubin smoothing of the claim (the cutter, so both halves still mate). Triangles within 1.5
 //       voxels of the part's skin do not move, so the seam stays on the paint line.
 // The claim is also clipped a little outside the part (it is intersected with the part anyway), and when the
@@ -479,7 +479,9 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
     BoundingBoxf3 box(sb.min - Vec3d::Constant(reach + 1.), sb.max + Vec3d::Constant(reach + 1.));
     box.min = box.min.cwiseMax(mb.min - Vec3d::Constant(1.));
     box.max = box.max.cwiseMin(mb.max + Vec3d::Constant(1.));
-    const double h0 = params.voxel > 0. ? params.voxel : 0.2;
+    // 0.6 mm by default: on the owner's figure (455k facets) 0.4 mm halved the face's roughness again but doubled
+    // the booleans' time; the seam gets its fine voxel from the near-skin refinement instead (0.075 mm).
+    const double h0 = params.voxel > 0. ? params.voxel : 0.6;
 
     const AABBMesh      tree_s(S), tree_u(U);
     const PsOutside     outside(mesh, std::max(8. * h0, 1.) + 1.);

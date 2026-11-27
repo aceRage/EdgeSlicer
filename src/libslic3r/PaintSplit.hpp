@@ -225,12 +225,12 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
 struct PaintSplitSkinParams
 {
     double depth{ 0. };               // mm under the selected skin; 0 = unlimited (to where another skin is nearer)
-    double voxel{ 0. };               // mm; 0 = automatic (dense: from max_samples over the claim's box; sparse: 0.2 mm)
+    double voxel{ 0. };               // mm; 0 = automatic (dense: from max_samples over the claim's box; sparse: 0.6 mm)
     size_t max_samples{ 6000000 };    // dense: the voxel budget of the automatic size
     bool   dense{ false };            // the P2 engine (no smoothing, no near-skin refinement)
     double smoothing{ 0.5 };          // "Smooth cut face", 0..1: Taubin passes = 20 x this (D22)
     size_t max_cells{ 600000 };       // sparse: the fine-cell budget; past it the voxel doubles
-    int    skin_refine{ 2 };          // sparse: near-skin refinements, each halving the voxel within 2 voxels of the skin
+    int    skin_refine{ 3 };          // sparse: near-skin refinements, each halving the voxel next to the skin (not below 0.05 mm)
     int    root_iterations{ 4 };      // sparse: regula falsi steps per edge root (0 = linear roots)
     bool   allow_complement{ true };  // sparse: mesh the complement when the selected skin is the larger side
     double simplify{ 0.02 };          // sparse: mm; Manifold collapses the claim's edges that move it less (0 = off)

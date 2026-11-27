@@ -1788,7 +1788,7 @@ TEST_CASE("Paint split R1: the sparse field matches the dense one on a sphere's 
                   << " samples, " << cs.stats.queries << " queries, " << cs.stats.cells << " cells, " << cs.mesh.indices.size()
                   << " triangles, near the skin " << cs.stats.near_skin_voxel << " mm");
     CHECK(cs.stats.samples * 2 < cd.stats.samples);
-    CHECK_THAT(cs.stats.near_skin_voxel, WithinAbs(0.1, 1e-9));
+    CHECK_THAT(cs.stats.near_skin_voxel, WithinAbs(0.05, 1e-9)); // 0.4 mm halved three times
 
     // The cut face inside the part lies on the equator: exact roots put it there, linear roots on a clamped field less so.
     auto deviation = [&](const indexed_triangle_set& claim) {
