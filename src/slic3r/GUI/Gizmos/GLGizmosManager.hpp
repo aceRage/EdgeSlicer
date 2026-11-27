@@ -102,6 +102,9 @@ public:
         // Split to Fit (GLGizmoSplitToFit): cut an object into parts that each fit the printer.
         // Appended after CadFillet so the EType values before it are unchanged.
         SplitToFit,
+        // Paint Split (GLGizmoPaintSplit): split off a painted or picked region. Appended after
+        // SplitToFit so the EType values before it are unchanged; its button sits after Split to Fit's.
+        PaintSplit,
         //SlaSupports,
         // BBS
         //FaceRecognition,
@@ -313,6 +316,10 @@ public:
     }
 
     bool is_paint_gizmo();
+    // Whether an open `type` holds per-facet state of the selected object's meshes (its paint, or Paint
+    // Split's selection), so an action that replaces those meshes must wait for it to close.
+    static bool owns_mesh_annotations(EType type);
+    bool is_serializing() const { return m_serializing; }
     bool is_allow_select_all();
     ClippingPlane get_clipping_plane() const;
     ClippingPlane get_assemble_view_clipping_plane() const;

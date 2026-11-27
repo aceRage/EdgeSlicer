@@ -30345,8 +30345,7 @@ void Plater::split_by_color()
     // A painting gizmo owns the very paint this action is about to consume - and its own undo stack.
     if (const GLCanvas3D *canvas = canvas3D()) {
         const GLGizmosManager::EType gizmo = canvas->get_gizmos_manager().get_current_type();
-        if (gizmo == GLGizmosManager::FdmSupports || gizmo == GLGizmosManager::Seam ||
-            gizmo == GLGizmosManager::FuzzySkin || gizmo == GLGizmosManager::MmSegmentation) {
+        if (GLGizmosManager::owns_mesh_annotations(gizmo)) {
             get_notification_manager()->push_plater_warning_notification(_u8L("Close the painting tool before splitting by colour."));
             return;
         }

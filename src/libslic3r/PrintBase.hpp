@@ -168,7 +168,11 @@ public:
         // (extruder_clearance_dist_to_rod) of an object printed after it. The same text as the validation warning,
         // raised again during export_gcode so the preview (which hides validation notices) and the CLI's result.json
         // show it. Appended, own id.
-        SlicingByObjectGantryReach
+        SlicingByObjectGantryReach,
+        // Per-object prime towers: a copy printed without its tower (over the cap of 2, no room beside it, or a feature
+        // that does not combine with them), or the printer does not build per-object towers yet. Raised in psWipeTower,
+        // so the preview and the CLI's result.json show it. Appended, own id.
+        SlicingObjectPrimeTower
     };
 
     typedef size_t TimeStamp;

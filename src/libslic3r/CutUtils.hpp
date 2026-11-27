@@ -6,6 +6,7 @@
 #include "Model.hpp"
 #include "CurvedCut.hpp"
 #include "DrawCut.hpp"
+#include "PaintSplit.hpp"
 #include "TriangleSelector.hpp"
 
 #include <map>
@@ -354,6 +355,24 @@ public:
     // reason: the joint's two segments are separated by its own gap between two
     // flat faces, so a flexi cut cannot also be a drawn one.
     const ModelObjectPtrs& perform_with_draw_stroke(const DrawCutStroke& stroke, const DrawCutParams& params);
+    // Paint Split (tests/design_paint_split.md 4.4): cut the object with an arbitrary closed `cutter`
+    // solid, in the cut frame (the cut matrix's inverse times the instance without its offset; with an
+    // Identity cut matrix that is the instance frame the gizmo works in). The piece is mesh AND cutter
+    // (piece_inside) or mesh \ cutter, reduced by the keep-connected rule to the components that carry
+    // component `keep.component` of the mask region; it is the UPPER result, the body the LOWER one.
+    // Other model parts are not cut: each goes whole to the side holding most of its volume (D19 a), or
+    // to the body with keep.cut_only_painted_part (D19 c). Modifiers are copied to the halves they
+    // overlap. Connectors come in P5 and are not handled here. On a refusal no objects are returned and
+    // `report->error` says why.
+    const ModelObjectPtrs& perform_with_cutter_solid(const indexed_triangle_set& cutter, bool piece_inside,
+                                                     const PaintSplitKeep& keep, PaintSplitReport* report = nullptr);
+    // The gizmo's Apply: keep.planes holds one plane per loop of the region component. One loop is the
+    // half-space cut above; several loops (a band, a trim with holes; owner 2026-11-25) cut once per loop
+    // (paint_split_assign_loops), and the rest of the part comes back as the body plus `_looseN` parts
+    // (in the lower object too, by that suffix, so the caller can make them objects of their own).
+    // With keep.planes.size() > 1, perform_with_cutter_solid() ignores its `cutter` and does the same.
+    // keep.cutters (Follow paint, one closed cutter per loop) win over keep.planes: paint_split_assign_cutters().
+    const ModelObjectPtrs& perform_with_paint_split_planes(const PaintSplitKeep& keep, PaintSplitReport* report = nullptr);
     // Flexi joint cut: one object, two watertight model parts, a real Manifold boolean.
     // perform_with_plane() dispatches here automatically when a flexi connector is present.
     const ModelObjectPtrs& perform_with_flexi_joints();

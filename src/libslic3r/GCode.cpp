@@ -279,9 +279,22 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
 
     // step 1: get the x-range intervals of all objects
     std::vector<std::pair<double, double>> object_intervals;
-    for (PrintObject* print_object : print.objects()) {
-        const PrintInstances& print_instances = print_object->instances();
-        BoundingBoxf3         bounding_box    = print_instances[0].model_instance->get_object()->bounding_box_exact();
+    // The boxes the path must keep clear of: every object, then (per-object prime towers) every tower.
+    std::vector<BoundingBoxf3> obstacles;
+    for (PrintObject* print_object : print.objects())
+        obstacles.push_back(print_object->instances()[0].model_instance->get_object()->bounding_box_exact());
+    if (print.has_object_wipe_towers()) {
+        // Towers are never taller than their copy, so only their X range matters; plate position plus the plate
+        // origin, as the objects' boxes are on the bed.
+        const Vec3d origin = print.get_plate_origin();
+        for (const std::unique_ptr<ObjectWipeTower> &tower : print.object_wipe_towers()) {
+            const double brim = std::max(0., double(tower->data->brim_width));
+            obstacles.emplace_back(Vec3d(origin.x() + tower->pos.x() - brim, origin.y() + tower->pos.y() - brim, 0.),
+                                   Vec3d(origin.x() + tower->pos.x() + tower->data->width + brim,
+                                         origin.y() + tower->pos.y() + tower->data->depth + brim, 1.));
+        }
+    }
+    for (const BoundingBoxf3 &bounding_box : obstacles) {
 
         if (bounding_box.min.x() < start_x_position && bounding_box.min.y() < cutter_area_y)
             can_travel_form_left = false;
@@ -1078,23 +1091,29 @@ static BoundingBoxf bambu_shared_printable_bbx(const Print &print)
 // in the frame the writer emits, rib offset included, so only the tower position (and the rotation, 0 on
 // Bambu printers) is added. Edge records outer walls only for rib towers, so they are not used here. Without
 // an outline the box is the tower's width x depth.
-static BoundingBoxf bambu_wipe_tower_plate_bbx(const Print &print)
+static BoundingBoxf bambu_wipe_tower_plate_bbx(const Print &print, const WipeTowerData &data, const Vec2d &pos)
 {
-    const auto  &mesh = print.wipe_tower_data().wipe_tower_mesh_data;
+    const auto  &mesh = data.wipe_tower_mesh_data;
     BoundingBoxf local;
     if (mesh.has_value() && !mesh->bottom.empty()) {
         const BoundingBox b = get_extents(mesh->bottom);
         local               = BoundingBoxf(unscaled<double>(b.min), unscaled<double>(b.max));
     } else
-        local = BoundingBoxf(Vec2d::Zero(), Vec2d(print.wipe_tower_data().width, print.wipe_tower_data().depth));
-    const int          plate = print.get_plate_index();
-    const Vec2d        pos(print.config().wipe_tower_x.get_at(plate), print.config().wipe_tower_y.get_at(plate));
+        local = BoundingBoxf(Vec2d::Zero(), Vec2d(data.width, data.depth));
     const double       alpha = print.config().wipe_tower_rotation_angle.value / 180. * M_PI;
     const Eigen::Rotation2Dd rot(alpha);
     BoundingBoxf       out;
     for (const Vec2d &c : { local.min, Vec2d(local.max.x(), local.min.y()), local.max, Vec2d(local.min.x(), local.max.y()) })
         out.merge(Vec2d(rot * c + pos));
     return out;
+}
+
+// The plate tower's box (wipe_tower_x / wipe_tower_y of this plate).
+static BoundingBoxf bambu_wipe_tower_plate_bbx(const Print &print)
+{
+    const int plate = print.get_plate_index();
+    return bambu_wipe_tower_plate_bbx(print, print.wipe_tower_data(),
+                                      Vec2d(print.config().wipe_tower_x.get_at(plate), print.config().wipe_tower_y.get_at(plate)));
 }
 
 // Bambu Studio GCode.cpp (print start, "point of nozzle heating"): 2 mm beside the tower, on the side that
@@ -1960,13 +1979,13 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     // The change runs at the layer's height, its tower entry travels over to the tower, and the
     // "Force restore layer Z" below takes the nozzle down once it is there.
     const bool changes_in_place = !travel_to_tower_now && !tcr.priming && new_extruder_id >= 0 && needs_toolchange &&
-                                  gcodegen.config().enable_prime_tower;
+                                  gcodegen.prime_tower_takes_changes();
     // Edge: a tool change with no ram lays nothing at the tower before the change: the unload is only
     // a planner sync, and "Restore layer Z before toolchange" below would lift the nozzle straight
     // back up for the change. Stay at the layer's height; "Force restore layer Z" takes the nozzle
     // down to the tower after the change, as for an in-place change.
     const bool no_ram_before_change = !tcr.priming && new_extruder_id >= 0 && needs_toolchange && !is_ramming &&
-                                      gcodegen.config().enable_prime_tower;
+                                      gcodegen.prime_tower_takes_changes();
     const bool goes_down_before_change = will_go_down && !changes_in_place && !no_ram_before_change;
     if (goes_down_before_change) {
         gcode += gcodegen.writer().retract();
@@ -2010,7 +2029,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         // docking a tool, etc.), so restore Z to the real layer height before running it,
         // otherwise that travel can collide with already-printed parts taller than the tower.
         // deretraction_str (below) brings Z back down to resume printing the wipe tower.
-        if (goes_down_before_change && gcodegen.config().enable_prime_tower) {
+        if (goes_down_before_change && gcodegen.prime_tower_takes_changes()) {
             restore_layer_z_str += gcodegen.writer().retract();
             restore_layer_z_str += gcodegen.writer().travel_to_z(current_z,
                 "Restore layer Z before toolchange to avoid collision with printed parts");
@@ -2058,7 +2077,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
                 gcodegen.set_last_pos(start_wipe_pos);
             }
         }
-        if (gcodegen.config().enable_prime_tower) {
+        if (gcodegen.prime_tower_takes_changes()) {
             deretraction_str += gcodegen.writer().travel_to_z(z, "Force restore layer Z", true);
             // Snapmaker #993 (Edge): the tower G-code after this may travel without an F word (U1: "G1 Y..."
             // after the start position); keep the feedrate it inherited before the Z speed cap.
@@ -4300,6 +4319,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     bool                                              has_wipe_tower    = false;
     std::vector<const PrintInstance*>                 print_object_instances_ordering;
     std::vector<const PrintInstance*>::const_iterator print_object_instance_sequential_active;
+    m_object_tower_plate = print.object_towers_requested();
     if (print.config().print_sequence == PrintSequence::ByObject) {
         // Order object instances for sequential print.
         print_object_instances_ordering = sort_object_instances_by_model_order(print);
@@ -4562,7 +4582,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     this->placeholder_parser().set("has_single_extruder_multi_material_priming",
                                    wipe_tower_type2 && has_wipe_tower && print.config().single_extruder_multi_material_priming);
     // Wipe-tower count when a tower exists, else the tool changes of the tool ordering (OrcaSlicer #13895).
-    this->placeholder_parser().set("total_toolchanges", DoExport::resolve_total_toolchanges(print.wipe_tower_data(), print.tool_ordering()));
+    this->placeholder_parser().set("total_toolchanges", DoExport::resolve_total_toolchanges(
+                                                            print.has_object_wipe_towers() ? print.object_tower_statistics() : print.wipe_tower_data(),
+                                                            print.tool_ordering()));
+    // Per-object prime towers (design D10): the start G-code sees the plate as it did when the tower was off for it;
+    // each block printing beside a tower sets these again (and back) for its own G-code.
+    if (m_object_tower_plate)
+        this->placeholder_parser().set("enable_prime_tower", false);
     this->placeholder_parser().set("num_extruders", int(print.config().nozzle_diameter.values.size()));
     this->placeholder_parser().set("retract_length", new ConfigOptionFloats(print.config().retraction_length));
 
@@ -5480,9 +5506,27 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         if (print.config().print_sequence == PrintSequence::ByObject && !has_wipe_tower) {
             size_t&            finished_objects = sequential_instances_printed;
             const PrintObject* prev_object      = (*print_object_instance_sequential_active)->print_object;
+            // Per-object prime towers: what the change_filament / printing_by_object templates see in a block printing
+            // beside its own tower (design 2.8), set before the block-entry change; and put back for a block without.
+            auto set_object_tower_placeholders = [this, &print](const ObjectWipeTower *tower) {
+                this->placeholder_parser().set("has_wipe_tower", tower != nullptr);
+                this->placeholder_parser().set("enable_prime_tower", tower != nullptr);
+                if (this->placeholder_parser().config().has("wipe_tower_center_pos_valid")) {
+                    Vec2d stop_pos(-1., -1.);
+                    if (tower != nullptr)
+                        stop_pos = bambu_heating_stop_at_print_start(bambu_wipe_tower_plate_bbx(print, *tower->data, tower->pos),
+                                                                     BoundingBoxf(print.config().printable_area.values),
+                                                                     bambu_shared_printable_bbx(print));
+                    this->placeholder_parser().set("wipe_tower_center_pos_valid", new ConfigOptionBool(tower != nullptr));
+                    this->placeholder_parser().set("wipe_tower_center_pos_x", new ConfigOptionFloat(stop_pos.x()));
+                    this->placeholder_parser().set("wipe_tower_center_pos_y", new ConfigOptionFloat(stop_pos.y()));
+                }
+            };
             for (; print_object_instance_sequential_active != print_object_instances_ordering.end();
                  ++print_object_instance_sequential_active) {
                 const PrintObject& object = *(*print_object_instance_sequential_active)->print_object;
+                // This copy's own prime tower, if it has one (per-object prime towers).
+                const ObjectWipeTower *object_tower = print.object_wipe_tower(*print_object_instance_sequential_active);
                 if (&object != prev_object || tool_ordering.first_extruder() != final_extruder_id) {
                     tool_ordering                = print.by_object_tool_ordering(object, final_extruder_id);
                     unsigned int new_extruder_id = tool_ordering.first_extruder();
@@ -5495,6 +5539,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                 }
                 print.throw_if_canceled();
                 this->set_origin(unscale((*print_object_instance_sequential_active)->shift));
+                if (m_object_tower_plate)
+                    set_object_tower_placeholders(object_tower);
 
                 // BBS: prime extruder if extruder change happens before this object instance
                 bool prime_extruder = false;
@@ -5543,8 +5589,26 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                 // BambuStudio: the timelapse picker keeps clear of the objects printed so far.
                 if (m_printed_objects.empty() || m_printed_objects.back() != &object)
                     m_printed_objects.emplace_back(&object);
-                this->process_layers(print, tool_ordering, collect_layers_to_print(object),
+                if (object_tower != nullptr) {
+                    // The copy's tower takes this block's tool changes (not the block-entry change above, design D8). It
+                    // prints with the tool ordering it was planned from, the block's chained one.
+                    static const std::vector<WipeTower::ToolChangeResult> no_priming;
+                    const WipeTowerData &data = *object_tower->data;
+                    m_wipe_tower.reset(new WipeTowerIntegration(print.config(), print.get_plate_index(), print.get_plate_origin(),
+                                                                data.priming ? *data.priming : no_priming, data.tool_changes,
+                                                                data.local_z_tool_changes, data.local_z_reserve_boxes, *data.final_purge,
+                                                                false, &object_tower->pos));
+                    m_wipe_tower->set_heating_stop_area(bambu_wipe_tower_plate_bbx(print, data, object_tower->pos),
+                                                        bambu_shared_printable_bbx(print));
+                }
+                this->process_layers(print, object_tower != nullptr ? *object_tower->tool_ordering : tool_ordering,
+                                     collect_layers_to_print(object, true, object_tower != nullptr ? object_tower->data.get() : nullptr),
                                      *print_object_instance_sequential_active - object.instances().data(), file, prime_extruder);
+                if (m_wipe_tower) {
+                    // The tower ends with its block: nothing to purge (no final purge on a Type 1 tower).
+                    file.write(m_wipe_tower->finalize(*this));
+                    m_wipe_tower.reset();
+                }
                 // Orca #11582 / #11616: turn power loss recovery off again if this print turned it on
                 // (Bambu Lab printers do by default).
                 if (m_second_layer_things_done && print.config().enable_power_loss_recovery.value == PowerLossRecoveryMode::Enable)
@@ -5555,6 +5619,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                 m_second_layer_things_done = false;
                 prev_object                = &object;
             }
+            // The end G-code sees the plate as the start G-code did.
+            if (m_object_tower_plate)
+                set_object_tower_placeholders(nullptr);
         } else {
             // Sort layers by Z.
             // All extrusion moves with the same top layer height are extruded uninterrupted.
@@ -5744,7 +5811,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // Get filament stats.
     file.write(DoExport::update_print_stats_and_format_filament_stats(
         // Const inputs
-        has_wipe_tower, print.wipe_tower_data(), m_writer.extruders(),
+        has_wipe_tower || print.has_object_wipe_towers(),
+        print.has_object_wipe_towers() ? print.object_tower_statistics() : print.wipe_tower_data(), m_writer.extruders(),
         // Modifies
         print.m_print_statistics, print.gcode_filament_prices(),
         // Const input (tool-change fallback for non-wipe-tower prints)
@@ -6355,8 +6423,17 @@ void GCode::process_layers(const Print&              print,
                                                 check_placeholder_parser_failed();
                                                 print.throw_if_canceled();
                                                 m_extrusion_quality_estimator.set_precomputed_layers(std::move(precomputed.overhang_layers));
+                                                const LayerTools &layer_tools = tool_ordering.tools_for_layer(layer.print_z());
+                                                // Per-object prime towers: a copy's tower steps through its layers as the
+                                                // plate tower does by layer. No tower here otherwise.
+                                                if (m_wipe_tower && layer_tools.has_wipe_tower) {
+                                                    if (layer_tools.joins_wipe_tower_layer_below())
+                                                        m_wipe_tower->join_layer();
+                                                    else
+                                                        m_wipe_tower->next_layer();
+                                                }
                                                 return this->process_layer(print, {std::move(layer)},
-                                                                           tool_ordering.tools_for_layer(layer.print_z()),
+                                                                           layer_tools,
                                                                            &layer == &layers_to_print.back(), nullptr,
                                                                            single_object_idx, prime_extruder);
                                             });
@@ -8269,8 +8346,11 @@ LayerResult GCode::process_layer(const Print& print,
         // the mass the previous layer added, and the Y acceleration limit that mass allows.
         {
             PrintStatistics curr_print_statistics;
-            DoExport::update_print_stats_and_format_filament_stats(has_wipe_tower, print.wipe_tower_data(), m_writer.extruders(),
-                                                                   curr_print_statistics);
+            DoExport::update_print_stats_and_format_filament_stats(has_wipe_tower,
+                                                                   m_object_tower_plate && print.has_object_wipe_towers() ?
+                                                                       print.object_tower_statistics() :
+                                                                       print.wipe_tower_data(),
+                                                                   m_writer.extruders(), curr_print_statistics);
             double curr_y_acceleration_limit = -1., curr_accumulated_mass = -1.;
             DoExport::mass_load_limited_machine_acceleration(curr_print_statistics, print, curr_y_acceleration_limit, curr_accumulated_mass);
             double curr_layer_mass = curr_print_statistics.total_weight - m_last_layer_accumulated_mass;
@@ -10562,7 +10642,7 @@ LayerResult GCode::process_layer(const Print& print,
 
         // BBS: ordering instances by extruder
         std::vector<InstanceToPrint> instances_to_print;
-        bool                         has_prime_tower = print.config().enable_prime_tower && print.extruders().size() > 1 &&
+        bool                         has_prime_tower = this->prime_tower_takes_changes() && print.extruders().size() > 1 &&
                                ((print.config().print_sequence == PrintSequence::ByLayer &&
                                  print.config().print_order == PrintOrder::Default) ||
                                 (print.config().print_sequence == PrintSequence::ByObject && print.objects().size() == 1));
@@ -14492,7 +14572,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     note_filament_loaded(int(extruder_id));
 
     // Set the temperature if the wipe tower didn't (not needed for non-single extruder MM)
-    if (m_config.single_extruder_multi_material && !m_config.enable_prime_tower) {
+    if (m_config.single_extruder_multi_material && !this->prime_tower_takes_changes()) {
         int temp = (m_layer_index <= 0 ? get_value_at(m_config, m_config.nozzle_temperature_initial_layer, ConfigFlowDomain::Filament, extruder_id) :
                                          get_value_at(m_config, m_config.nozzle_temperature, ConfigFlowDomain::Filament, extruder_id));
 

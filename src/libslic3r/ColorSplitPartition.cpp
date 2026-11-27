@@ -1,6 +1,7 @@
 // Split by painted colour, stage 3: the Manifold side - mesh conversion and the sequential-Split partition.
 // Spec: docs/superpowers/specs/2026-09-01-color-split-design.md, 3.8.
 #include "ColorSplit.hpp"
+#include "ColorSplitInternal.hpp"
 #include "TriangleMesh.hpp"
 #include <manifold/manifold.h>
 #include <cmath>
@@ -12,7 +13,8 @@
 #include <vector>
 
 namespace Slic3r {
-namespace {
+// Shared with PaintSplit.cpp through ColorSplitInternal.hpp (one definition: the build is unity).
+namespace ColorSplitDetail {
 
 // ---- Manifold conversion and the sequential-Split partition (spec 3.8) -----------------------------------
 
@@ -94,7 +96,9 @@ std::map<uint32_t, size_t> faces_by_original_id(const manifold::MeshGL64 &gl)
     return faces;
 }
 
-} // namespace
+} // namespace ColorSplitDetail
+
+using namespace ColorSplitDetail;
 
 ColorSplitResult partition_by_shells(const indexed_triangle_set &mesh, const std::vector<ColorShell> &shells, bool absorb_islands, const ColorSplitProgress &progress)
 {

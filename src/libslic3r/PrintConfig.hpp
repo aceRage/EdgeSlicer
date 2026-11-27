@@ -1405,6 +1405,10 @@ public:
     void                normalize_fdm_1();
     //return the changed param set
     t_config_option_keys normalize_fdm_2(int num_objects, int used_filaments = 0);
+    // Per-object prime towers: normalize_fdm_2 keeps enable_prime_tower on a plate printed by object with more than one
+    // copy (num_copies) and more than one filament when prime_tower_per_object is on, the printer builds a Type 1
+    // (Bambu-style) tower and the print is not a spiral vase. Print::object_towers_requested() reads the same rule.
+    static bool         keeps_object_prime_towers(const ConfigBase &config, int num_copies, int used_filaments);
 
     void                set_num_extruders(unsigned int num_extruders);
 
@@ -2820,6 +2824,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,               enable_prime_tower))
     // H2 preload: pre-change every plate filament on layer 1 through the prime tower.
     ((ConfigOptionBool,               preload_all_filaments))
+    // Per-object prime towers: keep a tower per multi-colour copy when printing by object.
+    ((ConfigOptionBool,               prime_tower_per_object))
     // BBS: change wipe_tower_x and wipe_tower_y data type to floats to add partplate logic
     ((ConfigOptionFloats,             wipe_tower_x))
     ((ConfigOptionFloats,             wipe_tower_y))

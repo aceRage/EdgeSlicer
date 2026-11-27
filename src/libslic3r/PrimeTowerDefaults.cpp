@@ -64,6 +64,8 @@ const std::vector<std::string>& excluded_tower_keys()
         "prime_tower_brim_chamfer_max_width",
         "wipe_tower_filament",
         "local_z_wipe_tower_purge_lines",
+        // Per-object prime towers: a choice about the plate, not a Bambu default.
+        "prime_tower_per_object",
     };
     return keys;
 }
