@@ -1253,6 +1253,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     // Per-object prime towers only matter when printing by object (the plate's own sequence can differ from the
     // process', so the line stays visible with the tower on).
     toggle_line("prime_tower_per_object", have_prime_tower);
+    // Per-object prime towers, D13: an object's own opt-out belongs to the object settings only.
+    toggle_line("object_prime_tower", !is_global_config && have_prime_tower &&
+                                          (!config->has("prime_tower_per_object") || config->opt_bool("prime_tower_per_object")));
 
     // H2 preload (preload_all_filaments): dual-extruder Bambu machines (H2D/H2C/X2D) only - the same
     // DynamicPrintConfig::support_different_extruders() gate ToolOrdering uses - and only meaningful

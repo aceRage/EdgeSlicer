@@ -2118,6 +2118,15 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "dithering_local_z_infill") {
             invalidated |= m_print->invalidate_step(psWipeTower);
             invalidated |= m_print->invalidate_step(psGCodeExport);
+        } else if (
+               opt_key == "object_prime_tower"
+            || opt_key == "prime_tower_offset_x"
+            || opt_key == "prime_tower_offset_y") {
+            // Per-object prime towers (PR 5): which copies get a tower and where it stands, read by
+            // Print::plan_object_towers() only. Nothing sliced depends on them; the skirt and the brims are laid
+            // around the towers' outlines, as for prime_tower_per_object itself.
+            invalidated |= m_print->invalidate_steps({ psWipeTower, psSkirtBrim });
+            invalidated |= m_print->invalidate_step(psGCodeExport);
         } else {
             // for legacy, if we can't handle this option let's invalidate all steps
             this->invalidate_all_steps();

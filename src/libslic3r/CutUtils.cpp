@@ -22,7 +22,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <numeric>
 #include <limits>
 #include <string>
 
@@ -542,25 +544,70 @@ static bool exact_cut_paint(const ModelVolume& volume, const Transform3d& instan
 // (the cut instance without its offset). `maps` (one per piece) say which facets of the piece are
 // facets of `src` the plane did not cross: their painting is copied bit for bit. The cap is marked
 // FACET_UNPAINTED; only the facets the plane split are resampled from the source.
-static void carry_cut_painting(const ModelVolume& src, const Transform3d& src_to_world, const std::array<ModelVolume*, 2>& pieces,
-                               const std::array<const std::vector<int>*, 2>& maps)
+static void carry_cut_painting(const ModelVolume& src, const Transform3d& src_to_world,
+                               const std::vector<std::pair<ModelVolume*, const std::vector<int>*>>& pieces)
 {
     PaintTransfer::Source source;
     source.volume   = &src;
     source.to_world = src_to_world;
     source.filament = PaintTransfer::effective_filament(src);
     PaintTransfer::Transfer transfer(std::vector<PaintTransfer::Source>{ source });
-    for (size_t i = 0; i < pieces.size(); ++i) {
-        ModelVolume* piece = pieces[i];
+    for (const auto& [piece, map_in] : pieces) {
         if (piece == nullptr)
             continue;
-        const std::vector<int>* map = maps[i] != nullptr && !maps[i]->empty() ? maps[i] : nullptr;
+        const std::vector<int>* map = map_in != nullptr && !map_in->empty() ? map_in : nullptr;
         // The piece's own filament: the same config as the source, so the map is always honoured.
         const PaintTransfer::Stats stats = transfer.to(*piece, piece->get_matrix(), PaintTransfer::effective_filament(*piece), map);
         BOOST_LOG_TRIVIAL(debug) << "Cut paint (exact): " << piece->name << " facets " << piece->mesh().its.indices.size()
                                  << " samples " << stats.samples << " load " << stats.load_ms << " ms, resample "
                                  << stats.resample_ms << " ms, store " << stats.store_ms << " ms";
     }
+}
+
+static void carry_cut_painting(const ModelVolume& src, const Transform3d& src_to_world, const std::array<ModelVolume*, 2>& pieces,
+                               const std::array<const std::vector<int>*, 2>& maps)
+{
+    carry_cut_painting(src, src_to_world, { { pieces[0], maps[0] }, { pieces[1], maps[1] } });
+}
+
+// Paint Split E10: which facets of a boolean piece are facets of `source` (the part in the cut frame). Manifold
+// keeps an untouched triangle's corners but may start it at another corner, so the unmatched facets are tried
+// rotated too (and rotated in `piece` when that matches). What is still unmatched is either skin the seam crossed
+// (`from_source`, resampled) or the cut face (left unpainted).
+static std::vector<int> paint_split_facet_map(const PaintTransfer::FacetMatcher& matcher, indexed_triangle_set& piece,
+                                              const std::vector<uint8_t>& from_source, PaintSplitReport& rep)
+{
+    std::vector<int> map = matcher.match(piece);
+    for (int r = 1; r <= 2; ++r) {
+        std::vector<size_t>  which;
+        indexed_triangle_set rot;
+        for (size_t i = 0; i < map.size(); ++i)
+            if (map[i] < 0) {
+                const Vec3i32& t = piece.indices[i];
+                which.push_back(i);
+                rot.indices.emplace_back(t[r], t[(r + 1) % 3], t[(r + 2) % 3]);
+            }
+        if (which.empty())
+            break;
+        rot.vertices = piece.vertices;
+        const std::vector<int> m2 = matcher.match(rot);
+        for (size_t k = 0; k < which.size(); ++k)
+            if (m2[k] >= 0) {
+                map[which[k]]          = m2[k];
+                piece.indices[which[k]] = rot.indices[k];
+            }
+    }
+    for (size_t i = 0; i < map.size(); ++i) {
+        if (map[i] >= 0)
+            ++rep.paint_copied;
+        else if (i < from_source.size() && from_source[i] != 0)
+            ++rep.paint_resampled;
+        else {
+            map[i] = PaintTransfer::FACET_UNPAINTED;
+            ++rep.paint_unpainted;
+        }
+    }
+    return map;
 }
 
 // PHASE 3: `thickness` is the kerf. A flat cut with a kerf is TWO half-space
@@ -2260,6 +2307,7 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
     PaintSplitReport local_report;
     PaintSplitReport& rep = report != nullptr ? *report : local_report;
     rep = PaintSplitReport();
+    const auto t_start = std::chrono::steady_clock::now();
     auto refuse = [this, &rep](PaintSplitError err) -> const ModelObjectPtrs& {
         BOOST_LOG_TRIVIAL(error) << "Cut::perform_with_cutter_solid - refused: " << paint_split_error_message(err);
         rep.error = err;
@@ -2329,9 +2377,37 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
     rep.loose_parts         = int(pieces.loose.size());
     rep.rejoin              = pieces.rejoin;
     rep.warnings            = pieces.warnings;
+    rep.times               = pieces.times;
+    rep.claim               = pieces.claim;
+    rep.piece_volume        = pieces.piece_volume;
+    rep.body_volume         = pieces.body_volume;
+    rep.loose_volume        = pieces.loose_volume;
+
+    // E10 / D30: the parts painted by provenance (the mask part's pieces by facet map, the uncut parts verbatim)
+    // stay out of the spatial remap in finalize().
+    double                          paint_s = 0.;
+    std::vector<const ModelVolume*> exact_parts;
+    if (nearest && keep.exact_paint)
+        for (const ModelVolume* v : mo->volumes)
+            if (exact_cut_paint(*v, instance_matrix, m_attributes))
+                exact_parts.push_back(v);
+    auto is_exact = [&exact_parts](const ModelVolume* v) { return std::find(exact_parts.begin(), exact_parts.end(), v) != exact_parts.end(); };
+    std::vector<int>              piece_map, body_map;
+    std::vector<std::vector<int>> loose_maps;
+    if (is_exact(mask_volume)) {
+        const auto                        t0 = std::chrono::steady_clock::now();
+        const PaintTransfer::FacetMatcher matcher(mask_mesh.its);
+        piece_map = paint_split_facet_map(matcher, pieces.piece, pieces.piece_from_source, rep);
+        body_map  = paint_split_facet_map(matcher, pieces.body, pieces.body_from_source, rep);
+        for (size_t k = 0; k < pieces.loose.size(); ++k)
+            loose_maps.push_back(paint_split_facet_map(matcher, pieces.loose[k],
+                                                       k < pieces.loose_from_source.size() ? pieces.loose_from_source[k] : std::vector<uint8_t>(), rep));
+        rep.exact_paint = true;
+        paint_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
 
     // Before the loop below resets every part's painting.
-    const SavedPaintings saved_paintings = save_paintings(mo);
+    const SavedPaintings saved_paintings = save_paintings(mo, exact_parts);
 
     ModelObject* upper{ nullptr };
     if (m_attributes.has(ModelObjectCutAttribute::KeepUpper) || m_attributes.has(ModelObjectCutAttribute::KeepAsParts))
@@ -2347,16 +2423,27 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
         const Transform3d pre = cut_pre_transform(m_cut_matrix, instance_matrix, src);
         ModelObject*      dst = as_parts ? upper : (to_piece ? upper : lower);
         if (dst == nullptr)
-            return;
+            return (ModelVolume*) nullptr;
         ModelVolume* vol = add_cut_volume(mesh, dst, src, m_cut_matrix, (as_parts || always_suffix) ? suffix : std::string(),
                                           ModelVolumeType::MODEL_PART, &pre);
         if (vol != nullptr && as_parts && !to_piece)
             vol->cut_info.is_from_upper = false;
+        return vol;
+    };
+    // Paints `targets` from `volume` by their facet maps, then drops `volume`'s own painting as the loop does.
+    auto carry_exact = [&](ModelVolume* volume, const std::vector<std::pair<ModelVolume*, const std::vector<int>*>>& targets) {
+        const auto t0 = std::chrono::steady_clock::now();
+        carry_cut_painting(*volume, instance_matrix * volume->get_matrix(), targets);
+        volume->reset_extra_facets();
+        paint_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     };
 
     for (size_t vi = 0; vi < mo->volumes.size(); ++vi) {
         ModelVolume* volume = mo->volumes[vi];
-        volume->reset_extra_facets();
+        // A part painted by provenance keeps its painting until its pieces have it (mo is this Cut's own copy).
+        const bool exact = is_exact(volume);
+        if (!exact)
+            volume->reset_extra_facets();
 
         if (!volume->is_model_part()) {
             // Modifiers, negative volumes and earlier cuts' connectors are not cut: they go to the halves they
@@ -2373,12 +2460,16 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
 
         if (int(vi) == keep.mask_volume_idx) {
             TriangleMesh piece(pieces.piece), body(pieces.body);
-            add_side(piece, volume, true, "_A");
-            add_side(body, volume, false, "_B");
+            std::vector<std::pair<ModelVolume*, const std::vector<int>*>> targets;
+            targets.emplace_back(add_side(piece, volume, true, "_A"), &piece_map);
+            targets.emplace_back(add_side(body, volume, false, "_B"), &body_map);
             for (size_t k = 0; k < pieces.loose.size(); ++k) {
                 TriangleMesh loose(pieces.loose[k]);
-                add_side(loose, volume, false, "_loose" + std::to_string(k + 1), true);
+                targets.emplace_back(add_side(loose, volume, false, "_loose" + std::to_string(k + 1), true),
+                                     k < loose_maps.size() ? &loose_maps[k] : nullptr);
             }
+            if (exact)
+                carry_exact(volume, targets);
             continue;
         }
 
@@ -2392,7 +2483,14 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
         }
         (to_piece ? rep.other_parts_to_piece : rep.other_parts_to_body)++;
         // Not cut, so not renamed: a part keeps its name through any number of paint splits.
-        add_side(whole, volume, to_piece, std::string());
+        const size_t nf  = whole.its.indices.size();
+        ModelVolume* vol = add_side(whole, volume, to_piece, std::string());
+        if (exact) {
+            // The same facets in the same order: the painting is copied verbatim.
+            std::vector<int> identity(nf);
+            std::iota(identity.begin(), identity.end(), 0);
+            carry_exact(volume, { { vol, &identity } });
+        }
     }
 
     ModelObjectPtrs cut_object_ptrs;
@@ -2423,7 +2521,17 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_cutter_solid - end";
 
+    const auto t_fin = std::chrono::steady_clock::now();
     finalize(cut_object_ptrs, saved_paintings);
+    paint_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_fin).count();
+    rep.times.paint   = paint_s;
+    rep.times.total   = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
+    rep.times.wrapper = std::max(0., rep.times.total - rep.times.engine() - rep.times.paint);
+    BOOST_LOG_TRIVIAL(info) << "Paint split cut: engine " << rep.times.engine() << " s (repair " << rep.times.repair << ", field "
+                            << rep.times.field << ", mesh " << rep.times.mesh << ", smooth " << rep.times.smooth << ", cut "
+                            << rep.times.cut << "), wrapper " << rep.times.wrapper << " s, paint " << rep.times.paint << " s ("
+                            << (rep.exact_paint ? "exact" : "remap") << ": " << rep.paint_copied << " facets copied, "
+                            << rep.paint_resampled << " resampled, " << rep.paint_unpainted << " on the cut face)";
     return m_model.objects;
 }
 
