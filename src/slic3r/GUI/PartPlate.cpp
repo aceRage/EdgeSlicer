@@ -1838,6 +1838,43 @@ std::vector<int> PartPlate::get_used_extruders()
 	return std::vector(used_extruders_set.begin(), used_extruders_set.end());
 }
 
+bool PartPlate::update_object_tower_previews()
+{
+    std::vector<ObjectTowerPreview> previews;
+    if (m_print != nullptr && m_model != nullptr && printer_technology == ptFFF && m_print->object_tower_mode()) {
+        const ObjectTowerPlan plan = m_print->plan_object_towers();
+        for (const ObjectTowerPlacement &t : plan.towers) {
+            if (t.instance == nullptr || t.instance->model_instance == nullptr)
+                continue;
+            ObjectTowerPreview p;
+            p.instance_id = t.instance->model_instance->id();
+            // The plater's instance of that copy (the Print's model is a copy of it, ids kept).
+            const ModelInstance *instance = nullptr;
+            for (const ModelObject *object : m_model->objects)
+                for (const ModelInstance *mi : object->instances)
+                    if (mi->id() == p.instance_id)
+                        instance = mi;
+            if (instance == nullptr)
+                continue;
+            p.instance_offset = instance->get_offset();
+            p.pos             = t.pos;
+            p.copy_center     = t.copy_center;
+            p.placed          = t.placed;
+            p.rejected        = t.offset_rejected;
+            p.requested_pos   = t.requested_pos;
+            p.width           = t.width;
+            p.depth           = t.depth;
+            p.height          = t.height;
+            p.brim_width      = t.brim_width;
+            previews.push_back(p);
+        }
+    }
+    if (previews == m_object_tower_previews)
+        return false;
+    m_object_tower_previews = std::move(previews);
+    return true;
+}
+
 WipeTowerFootprint PartPlate::estimate_wipe_tower_footprint(const DynamicPrintConfig &config, int plate_extruder_size, bool use_global_objects) const
 {
     // The CLI calls this too, so the plate's filaments are derived from the passed config:

@@ -77,6 +77,24 @@ SupportOverhangRule support_overhang_rule_for(const ModelObject *mo);
 // Return appropriate color based on the ModelVolume.
 extern ColorRGBA color_from_model_volume(const ModelVolume& model_volume);
 
+// Prime tower previews carry synthetic object ids with no ModelObject behind them: 1000 + plate for a plate's tower, and
+// 2000 + plate * 64 + slot for the per-object towers of a plate printed by object (slot: the tower's index in that
+// plate's ObjectTowerPlan; tests/design_per_object_prime_towers.md 2.11).
+constexpr int PLATE_TOWER_VOLUME_ID  = 1000;
+constexpr int OBJECT_TOWER_VOLUME_ID = 2000;
+constexpr int OBJECT_TOWER_SLOTS     = 64;
+inline int  object_tower_volume_id(int plate, int slot) { return OBJECT_TOWER_VOLUME_ID + plate * OBJECT_TOWER_SLOTS + slot; }
+inline bool is_object_tower_volume_id(int id) { return id >= OBJECT_TOWER_VOLUME_ID; }
+inline int  object_tower_slot(int id) { return (id - OBJECT_TOWER_VOLUME_ID) % OBJECT_TOWER_SLOTS; }
+// Either kind of tower preview.
+inline bool is_tower_volume_id(int id) { return id >= PLATE_TOWER_VOLUME_ID; }
+// The plate a tower preview stands on, either kind; -1 for a model object's id.
+inline int  tower_volume_plate(int id)
+{
+    return id >= OBJECT_TOWER_VOLUME_ID ? (id - OBJECT_TOWER_VOLUME_ID) / OBJECT_TOWER_SLOTS :
+           id >= PLATE_TOWER_VOLUME_ID  ? id - PLATE_TOWER_VOLUME_ID : -1;
+}
+
 class GLVolume {
 public:
     std::string name;
@@ -518,8 +536,11 @@ public:
         // Timestamp of the last change of the milestone
         size_t                          timestamp);
 
+    // obj_idx: 1000 + plate for the plate's tower, object_tower_volume_id() for a per-object tower. invalid: drawn red (a
+    // per-object tower dragged where it is not clear).
     int load_wipe_tower_preview(
-        int obj_idx, float pos_x, float pos_y, float width, float depth, float height, float rotation_angle, bool size_unknown, float brim_width);
+        int obj_idx, float pos_x, float pos_y, float width, float depth, float height, float rotation_angle, bool size_unknown, float brim_width,
+        bool invalid = false);
 
     GLVolume* new_toolpath_volume(const ColorRGBA& rgba);
     GLVolume* new_nontoolpath_volume(const ColorRGBA& rgba);

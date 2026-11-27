@@ -1428,6 +1428,16 @@ struct ObjectTowerPlacement
     double               width      = 0.;
     double               depth      = 0.;
     double               brim_width = 0.;
+    // PR 5 (GUI): the estimated height (the copy's), and the centre of the copy's bounding box in plate coordinates,
+    // which the object's prime_tower_offset_x/y are measured from.
+    double               height     = 0.;
+    Vec2d                copy_center { 0., 0. };
+    // The tower stands where the user dragged it (the object's prime_tower_offset_x/y).
+    bool                 from_offset = false;
+    // The object asks for a dragged position that is not clear (requested_pos, plate coordinates): the tower is placed
+    // automatically instead, with a warning, and the GUI draws the dragged one red.
+    bool                 offset_rejected = false;
+    Vec2d                requested_pos { 0., 0. };
 };
 
 struct ObjectTowerPlan
@@ -1435,7 +1445,8 @@ struct ObjectTowerPlan
     static constexpr size_t max_object_towers = 2;
     // The candidates within the cap, in model list order, placed or not.
     std::vector<ObjectTowerPlacement> towers;
-    // One line per copy printed without a tower the user asked for (over the cap, no room).
+    // One line per copy printed without a tower the user asked for (over the cap, no room), or whose dragged tower is
+    // not clear where it was put.
     std::vector<std::string>          warnings;
 
     const ObjectTowerPlacement *find(const PrintInstance *instance) const

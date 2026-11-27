@@ -16739,6 +16739,13 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     Print::ApplyStatus invalidated = background_process.apply(this->model, wxGetApp().preset_bundle->full_config());
     notify_filament_compatibility_after_apply();
 
+    // Per-object prime towers (PR 5): re-plan the current plate's towers for the 3D view while nothing slices (the plan
+    // reads the Print's objects, which slicing writes to), and redraw the scene when they changed.
+    if (printer_technology == ptFFF && !background_process.running()) {
+        if (PartPlate *plate = this->partplate_list.get_curr_plate(); plate != nullptr && plate->update_object_tower_previews())
+            return_state |= UPDATE_BACKGROUND_PROCESS_REFRESH_SCENE;
+    }
+
     if ((invalidated == Print::APPLY_STATUS_CHANGED) || (invalidated == Print::APPLY_STATUS_INVALIDATED))
         // BBS: add only gcode mode
         q->set_only_gcode(false);

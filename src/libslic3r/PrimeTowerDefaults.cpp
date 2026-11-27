@@ -66,6 +66,8 @@ const std::vector<std::string>& excluded_tower_keys()
         "local_z_wipe_tower_purge_lines",
         // Per-object prime towers: a choice about the plate, not a Bambu default.
         "prime_tower_per_object",
+        // ... and its per-object opt-out (an object setting).
+        "object_prime_tower",
     };
     return keys;
 }
