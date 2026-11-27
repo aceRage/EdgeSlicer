@@ -49,6 +49,7 @@ add_executable(${_TEST_NAME}_tests
 	test_h2c_tower_wait_pos.cpp
 	test_flush_by_nozzle_held.cpp
 	test_wipe_tower_data.cpp
+	test_object_prime_towers.cpp
 	test_nozzle_process_gcode.cpp
 	test_tool_slots_gcode.cpp
 	test_nozzle_widths_gcode.cpp

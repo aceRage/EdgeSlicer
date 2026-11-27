@@ -1,5 +1,6 @@
 // Split to Fit, phases 1 to 3 and 5: the planner, the apply, the automatic dowels, plane adjustment,
 // loose parts and matching cut-face labels (tests/design_split_to_build_volume.md).
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <libslic3r/ClipperUtils.hpp>
@@ -1169,7 +1170,7 @@ TEST_CASE("Split to Fit P2: a split with dowels survives a project round trip", 
     for (ModelObject *o : res.model->objects)
         o->ensure_on_bed();
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string  test_file    = (tmp_root / "split_to_fit_dowels.3mf").string();

@@ -2,6 +2,7 @@
 // "inherits"); a child that inherits it sits in the same folder, so the loader has to resolve the
 // parent among the presets of its own pass, whatever the directory order. Overwriting a preset with
 // "detach" moves its file into base/, where standalone user presets belong.
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/Preset.hpp"
@@ -22,7 +23,7 @@ struct ScopedTemporaryDir
     fs::path root;
     ScopedTemporaryDir()
     {
-        root = fs::temp_directory_path() / "snorca_tests" / fs::unique_path("detached_children_%%%%%%%%");
+        root = edge_test::snorca_tests_dir() / fs::unique_path("detached_children_%%%%%%%%");
         fs::create_directories(root);
     }
     ~ScopedTemporaryDir()

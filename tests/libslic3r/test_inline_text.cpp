@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 // Inline shapes and symbol fallback wired into the text of the Emboss tool (part 2): the text layout
@@ -122,7 +123,7 @@ double area_of(const ExPolygons &shape)
 
 std::string temp_3mf(const std::string &name)
 {
-    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path dir = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(dir);
     Slic3r::set_temporary_dir(dir.string());
     return (dir / (std::to_string(get_current_pid()) + "_" + name)).string();
@@ -532,7 +533,7 @@ TEST_CASE("Inline text: inserting at the caret keeps whole characters", "[Inline
 // ---------------------------------------------------------------------------------------------
 TEST_CASE("Inline text: user SVG files are checked before they become shapes", "[InlineText]")
 {
-    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path dir = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(dir);
     const std::string prefix = (dir / (std::to_string(get_current_pid()) + "_inline_")).string();
     auto write = [](const std::string &path, const std::string &data) {

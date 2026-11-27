@@ -14,6 +14,7 @@
 // backward-only parent search got a second pass. (b) still legitimately fires for a modifier that
 // overlaps no part at all, which is what the last case here pins.
 
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <algorithm>
@@ -589,7 +590,7 @@ TEST_CASE("override paint: the flag survives a 3MF round trip on the modifier", 
     set_override_paint(*modifier);
     object->add_instance();
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string  file   = (tmp_root / "override_paint_roundtrip.3mf").string();

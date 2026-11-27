@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 // Curved (arc) text for the Emboss/Text tool: the pure 2D bend, its projection onto curved
@@ -420,7 +421,7 @@ namespace {
 
 std::string bend_temp_3mf(const std::string &name)
 {
-    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path dir = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(dir);
     Slic3r::set_temporary_dir(dir.string());
     return (dir / name).string();
