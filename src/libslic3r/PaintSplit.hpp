@@ -11,6 +11,7 @@
 #include "TriangleSelector.hpp"
 #include <admesh/stl.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -218,14 +219,42 @@ PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, con
 // the region's neighbourhood and its zero level set (the "claim") is cut out of the exact mesh.
 // ---------------------------------------------------------------------------------------------------------
 
+// R1 (design 8.2 E1, 8.3 S1/S2, D22, D23 a; PaintSplitField.cpp): the same field, sampled coarse to fine only
+// near its zero set, meshed by marching tetrahedra with exact roots, refined near the skin and smoothed with the
+// seam pinned. `dense` keeps the P2 evaluation (a dense grid meshed by OpenVDB) for comparison.
 struct PaintSplitSkinParams
 {
     double depth{ 0. };               // mm under the selected skin; 0 = unlimited (to where another skin is nearer)
-    double voxel{ 0. };               // mm; 0 = automatic, from max_samples over the claim's box
-    size_t max_samples{ 6000000 };    // the voxel budget of the automatic size
+    double voxel{ 0. };               // mm; 0 = automatic (dense: from max_samples over the claim's box; sparse: 0.2 mm)
+    size_t max_samples{ 6000000 };    // dense: the voxel budget of the automatic size
+    bool   dense{ false };            // the P2 engine (no smoothing, no near-skin refinement)
+    double smoothing{ 0.5 };          // "Smooth cut face", 0..1: Taubin passes = 20 x this (D22)
+    size_t max_cells{ 2000000 };      // sparse: the fine-cell budget; past it the voxel doubles
+    int    skin_refine{ 2 };          // sparse: near-skin refinements, each halving the voxel within 2 voxels of the skin
+    int    root_iterations{ 4 };      // sparse: regula falsi steps per edge root (0 = linear roots)
+    bool   allow_complement{ true };  // sparse: mesh the complement when the selected skin is the larger side
 };
 
-// The claim of component `comp` as a closed mesh (same frame as the region), empty on failure. `voxel_used`
+// What evaluating one claim cost and gave (the stage timers, design 8.1 step 0).
+struct PaintSplitClaimStats
+{
+    double voxel{ 0. }, near_skin_voxel{ 0. };
+    bool   complement{ false };
+    size_t cells{ 0 }, samples{ 0 }, queries{ 0 }, triangles{ 0 };
+    double setup_s{ 0. }, field_s{ 0. }, mesh_s{ 0. }, smooth_s{ 0. };
+};
+
+struct PaintSplitClaim
+{
+    indexed_triangle_set mesh;                // closed, outward
+    bool                 complement{ false }; // the mesh is the claim's complement near the part: piece = part - mesh
+    PaintSplitClaimStats stats;
+};
+
+// The cutter of component `comp` (same frame as the region), empty on failure.
+PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                           const PaintSplitSkinParams& params);
+// The claim of component `comp` as a closed mesh (never the complement), empty on failure. `voxel_used`
 // receives the voxel size.
 indexed_triangle_set paint_split_nearest_claim(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
                                                const PaintSplitSkinParams& params, double* voxel_used = nullptr);
@@ -274,6 +303,14 @@ struct PaintSplitRejoin
     bool   fallback_used{ false };     // body = source - piece instead
 };
 
+// Seconds per stage of one region's split (design 8.1 step 0). The engine fills repair .. cut; the Cut wrapper
+// adds paint (exact carry plus finalize()) and wrapper (the rest of perform_with_cutter_solid), and total.
+struct PaintSplitTimes
+{
+    double repair{ 0. }, field{ 0. }, mesh{ 0. }, smooth{ 0. }, cut{ 0. }, wrapper{ 0. }, paint{ 0. }, total{ 0. };
+    double engine() const { return repair + field + mesh + smooth + cut; }
+};
+
 struct PaintSplitPieces
 {
     PaintSplitError                   error{ PaintSplitError::None };
@@ -287,6 +324,12 @@ struct PaintSplitPieces
     std::vector<PaintSplitWarning>    warnings;
     int                               bad_loop{ -1 }; // CutCrossesRegion / EmptyPiece: the loop (0-based) whose cut failed
     int                               flipped_loops{ 0 }; // paint_split_assign_loops: cuts taken the other way round (the skin was unclear)
+    // paint_split_assign_nearest: per facet of piece / body / each loose part, 1 when it comes from the source mesh
+    // (an untouched or seam-crossed skin facet), 0 on the cut face. Exact paint carry (E10) reads it.
+    std::vector<uint8_t>              piece_from_source, body_from_source;
+    std::vector<std::vector<uint8_t>> loose_from_source;
+    PaintSplitTimes                   times;
+    PaintSplitClaimStats              claim;
 
     bool ok() const { return error == PaintSplitError::None; }
 };
@@ -331,6 +374,10 @@ struct PaintSplitKeep
     PaintSplitSkinParams    skin;
     PaintSplitAssignParams  assign;                   // kerf_solid, if any, also in the cut frame
     bool                    cut_only_painted_part{ false }; // D19 (c): other parts stay whole on the body
+    // E10 / D30 (nearest skin only): paint the pieces by facet provenance (an untouched facet's painting copied bit
+    // for bit, a seam-crossed one resampled, the cut face unpainted) and copy uncut parts' painting verbatim,
+    // instead of the spatial remap in Cut::finalize(). Mirrored or airbrushed parts keep the remap.
+    bool                    exact_paint{ true };
 };
 
 // What the cut did, for the panel's Output Log.
@@ -345,6 +392,12 @@ struct PaintSplitReport
     int                            bad_loop{ -1 };     // see PaintSplitPieces::bad_loop
     PaintSplitRejoin               rejoin;
     std::vector<PaintSplitWarning> warnings;
+    // Stage timers and what the paint carry did (design 8.1 step 0).
+    PaintSplitTimes                times;
+    PaintSplitClaimStats           claim;
+    double                         piece_volume{ 0. }, body_volume{ 0. }, loose_volume{ 0. };
+    bool                           exact_paint{ false };   // the mask part was painted by provenance
+    size_t                         paint_copied{ 0 }, paint_resampled{ 0 }, paint_unpainted{ 0 }; // facets
 };
 
 // D19 (a): the share of `mesh`'s volume inside the closed `cutter` (0..1; -1 when the boolean fails). A part

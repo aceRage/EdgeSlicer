@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -1736,74 +1737,6 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
 
 // -------------------------------------------------------------------------------------------- nearest skin
 
-indexed_triangle_set paint_split_nearest_claim(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
-                                               const PaintSplitSkinParams& params, double* voxel_used)
-{
-    if (voxel_used != nullptr)
-        *voxel_used = 0.;
-    if (region.error != PaintSplitError::None || comp < 0 || size_t(comp) >= region.num_components() || mesh.indices.empty())
-        return {};
-    // The skin split in two: this component's selected facets, and every other facet of the part.
-    indexed_triangle_set S, U;
-    S.vertices = region.surface.vertices;
-    U.vertices = region.surface.vertices;
-    for (size_t f = 0; f < region.surface.indices.size(); ++f)
-        (region.facet_comp[f] == comp ? S : U).indices.push_back(region.surface.indices[f]);
-    if (S.indices.empty() || U.indices.empty())
-        return {};
-    BoundingBoxf3 sb, mb;
-    for (const Vec3i32& t : S.indices)
-        for (int k = 0; k < 3; ++k)
-            sb.merge(S.vertices[t[k]].cast<double>());
-    for (const Vec3f& v : mesh.vertices)
-        mb.merge(v.cast<double>());
-    const double depth = std::max(0., params.depth);
-    // How far the claim can reach from the selected skin: Depth, or (unlimited) about half the region's size,
-    // which is as deep as the nearest other skin can be for any sensible piece.
-    const double reach = depth > 0. ? depth : std::min(0.5 * sb.size().norm() + 5., 0.5 * mb.size().norm());
-    BoundingBoxf3 box(sb.min - Vec3d::Constant(reach + 1.), sb.max + Vec3d::Constant(reach + 1.));
-    box.min = box.min.cwiseMax(mb.min - Vec3d::Constant(1.));
-    box.max = box.max.cwiseMin(mb.max + Vec3d::Constant(1.));
-    const Vec3d  size = box.size();
-    double       h    = params.voxel;
-    if (h <= 0.)
-        h = std::max(0.15, std::cbrt(size.x() * size.y() * size.z() / double(std::max<size_t>(1000, params.max_samples))));
-    if (voxel_used != nullptr)
-        *voxel_used = h;
-    // One voxel of positive padding all round, so the surface closes inside the grid.
-    const int    nx = int(std::ceil(size.x() / h)) + 3, ny = int(std::ceil(size.y() / h)) + 3, nz = int(std::ceil(size.z() / h)) + 3;
-    const Vec3d  origin = box.min - Vec3d::Constant(h);
-    const AABBMesh tree_s(S), tree_u(U);
-    const float  out_v = float(2. * h);
-    std::vector<float> phi(size_t(nx) * size_t(ny) * size_t(nz), out_v);
-    tbb::parallel_for(tbb::blocked_range<int>(1, nz - 1), [&](const tbb::blocked_range<int>& range) {
-        for (int k = range.begin(); k < range.end(); ++k)
-            for (int j = 1; j < ny - 1; ++j)
-                for (int i = 1; i < nx - 1; ++i) {
-                    const Vec3d  p  = origin + h * Vec3d(i, j, k);
-                    const double ds = std::sqrt(tree_s.squared_distance(p));
-                    float        v;
-                    if (ds > reach + h)
-                        v = out_v;
-                    else if (depth > 0. && ds > depth)
-                        v = float(std::min(ds - depth, 2. * h));
-                    else {
-                        const double du = std::sqrt(tree_u.squared_distance(p));
-                        double       f  = ds - du;
-                        if (depth > 0.)
-                            f = std::max(f, ds - depth);
-                        v = float(std::clamp(f, -2. * h, 2. * h));
-                    }
-                    phi[(size_t(k) * size_t(ny) + size_t(j)) * size_t(nx) + size_t(i)] = v;
-                }
-    });
-    indexed_triangle_set claim = mesh_dense_field(phi, nx, ny, nz, origin, h);
-    // Outward, whichever way the mesher winds.
-    if (its_volume(claim) < 0.)
-        its_flip_triangles(claim);
-    return claim;
-}
-
 indexed_triangle_set paint_split_claim_cut_surface(const indexed_triangle_set& mesh, const indexed_triangle_set& claim)
 {
     indexed_triangle_set out;
@@ -1824,6 +1757,27 @@ indexed_triangle_set paint_split_claim_cut_surface(const indexed_triangle_set& m
     return out;
 }
 
+namespace {
+
+// One export of `m`, with a flag per facet: 1 when it comes from the input stamped `src_id` (the part's skin).
+indexed_triangle_set ps_export_tagged(const Manifold& m, uint32_t src_id, std::vector<uint8_t>& from_src)
+{
+    const manifold::MeshGL64   gl  = m.GetMeshGL64();
+    const indexed_triangle_set its = ColorSplitDetail::from_meshgl64(gl);
+    from_src.assign(its.indices.size(), 0);
+    if (gl.runIndex.size() == gl.runOriginalID.size() + 1)
+        for (size_t run = 0; run < gl.runOriginalID.size(); ++run)
+            if (gl.runOriginalID[run] == src_id)
+                for (size_t f = size_t(gl.runIndex[run]) / 3; f < size_t(gl.runIndex[run + 1]) / 3 && f < from_src.size(); ++f)
+                    from_src[f] = 1;
+    return its;
+}
+
+using PsClock2 = std::chrono::steady_clock;
+double ps_secs2(PsClock2::time_point t0) { return std::chrono::duration<double>(PsClock2::now() - t0).count(); }
+
+} // namespace
+
 PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
                                             const PaintSplitSkinParams& skin, const PaintSplitAssignParams& params)
 {
@@ -1842,6 +1796,7 @@ PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, co
             sel.emplace_back(ps_tri_centroid(region.surface, f), ps_tri_area(region.surface, f));
     const double sel_area = region.area[size_t(comp)];
 
+    auto                  t_stage = PsClock2::now();
     indexed_triangle_set  fixed;
     PaintSplitRepairStats repair;
     if (!paint_split_repair(mesh, fixed, nullptr, repair)) {
@@ -1851,13 +1806,19 @@ PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, co
     if (repair.needed)
         out.warnings.push_back(PaintSplitWarning::Repaired);
     const indexed_triangle_set& src = repair.needed ? fixed : mesh;
+    out.times.repair                = ps_secs2(t_stage);
 
-    const indexed_triangle_set claim = paint_split_nearest_claim(src, region, comp, skin);
-    if (claim.indices.empty()) {
+    const PaintSplitClaim claim = paint_split_nearest_cutter(src, region, comp, skin);
+    out.claim                   = claim.stats;
+    out.times.field             = claim.stats.setup_s + claim.stats.field_s;
+    out.times.mesh              = claim.stats.mesh_s;
+    out.times.smooth            = claim.stats.smooth_s;
+    if (claim.mesh.indices.empty()) {
         out.error = PaintSplitError::VoxelFailed;
         return out;
     }
 
+    t_stage = PsClock2::now();
     manifold::ExecutionContext ctx;
     Manifold                   M;
     try {
@@ -1870,11 +1831,12 @@ PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, co
         out.error = PaintSplitError::NonManifold;
         return out;
     }
+    const uint32_t src_id = uint32_t(M.OriginalID());
     try {
         out.source_volume = M.Volume();
         Manifold C;
         try {
-            C = ColorSplitDetail::to_manifold64(claim, ctx);
+            C = ColorSplitDetail::to_manifold64(claim.mesh, ctx);
         } catch (...) {
             out.error = PaintSplitError::VoxelFailed;
             return out;
@@ -1885,7 +1847,7 @@ PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, co
         }
         // The claim's parts of the part that carry the selection are the piece (a stray voxel bubble is not).
         std::vector<Manifold> kept;
-        for (Manifold& pc : (M ^ C).Decompose()) {
+        for (Manifold& pc : (claim.complement ? M - C : M ^ C).Decompose()) {
             const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
             const AABBMesh             aabb(its);
             double                     a = 0.;
@@ -1934,14 +1896,15 @@ PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, co
                     body_idx = j;
         }
         out.piece_volume = cand.Volume();
-        out.piece        = ColorSplitDetail::from_manifold(cand);
+        out.piece        = ps_export_tagged(cand, src_id, out.piece_from_source);
         for (size_t j = 0; j < parts.size(); ++j) {
             if (j == body_idx) {
                 out.body_volume = parts[j].Volume();
-                out.body        = ColorSplitDetail::from_manifold(parts[j]);
+                out.body        = ps_export_tagged(parts[j], src_id, out.body_from_source);
             } else {
                 out.loose_volume += parts[j].Volume();
-                out.loose.push_back(ColorSplitDetail::from_manifold(parts[j]));
+                out.loose_from_source.emplace_back();
+                out.loose.push_back(ps_export_tagged(parts[j], src_id, out.loose_from_source.back()));
             }
         }
         if (!out.loose.empty())
@@ -1956,6 +1919,11 @@ PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, co
         BOOST_LOG_TRIVIAL(error) << "Paint split: " << e.what();
         out.error = PaintSplitError::BooleanFailed;
     }
+    out.times.cut = ps_secs2(t_stage);
+    BOOST_LOG_TRIVIAL(info) << "Paint split (nearest skin): repair " << out.times.repair << " s, field " << out.times.field << " s, mesh "
+                            << out.times.mesh << " s, smooth " << out.times.smooth << " s, cut " << out.times.cut << " s; claim "
+                            << out.claim.triangles << " triangles at " << out.claim.voxel << " mm"
+                            << (skin.dense ? " (dense)" : "");
     return out;
 }
 
