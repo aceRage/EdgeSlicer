@@ -163,12 +163,14 @@ bool make_plan(const Print &print, Plan &plan)
     p.filament_nozzle_temps.resize(filaments, 0);
     p.filament_pre_cooling_temps.resize(filaments, 0);
     p.filament_preheat_temperature_delta.resize(filaments, 0.);
+    p.filament_min_temperature_when_ec.resize(filaments, 0.f);
     for (size_t f = 0; f < filaments; ++f) {
         p.filament_nozzle_temps[f] = get_value_at(full, cfg.nozzle_temperature, ConfigFlowDomain::Filament, (unsigned int) f);
         if (!cfg.filament_pre_cooling_temperature.values.empty())
             p.filament_pre_cooling_temps[f] = cfg.filament_pre_cooling_temperature.get_at(f);
         if (!cfg.filament_preheat_temperature_delta.values.empty())
             p.filament_preheat_temperature_delta[f] = cfg.filament_preheat_temperature_delta.get_at(f);
+        p.filament_min_temperature_when_ec[f] = float(min_temperature_when_ec_at(full, (unsigned int) f));
     }
     // EdgeSlicer: a support interface temperature is the filament's temperature (Print::support_interface_temperatures),
     // so the idle nozzle is pre-heated to it, as its tool change heats to it.
@@ -940,8 +942,14 @@ void PreCoolingInjector::inject_hotend_cooling_heating_command(
         inserted_lines[gcode_id].emplace_back("M106 S255 ;" + comment + "\n");
     };
 
-    // Bambu Studio's idle floor on these printers is 0 (min_temperature_when_ec, not carried by this tree's presets).
-    constexpr float min_temperature = 0.f;
+    // Bambu Studio's idle floor (min_temperature_when_ec). Missing or negative still reads as 0,
+    // so H2D / H3C G-code stays as it was; the P3C filament template sets 80.
+    auto idle_floor_of = [&p](int idx) -> float {
+        if (idx < 0 || size_t(idx) >= p.filament_min_temperature_when_ec.size())
+            return 0.f;
+        return p.filament_min_temperature_when_ec[size_t(idx)];
+    };
+    const float min_temperature = idle_floor_of(block.last_filament_id);
 
     if (apply_cooling_when_partial_free) {
         float cooling_budget = get_partial_free_cooling_thres(block.last_filament_id);

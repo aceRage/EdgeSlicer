@@ -662,7 +662,7 @@ void AMSControl::UpdateDual(MachineObject *obj)
         u.ref.ams_id      = kv.first;
         u.ref.type        = ams->type;
         u.ref.extruder_id = ams->nozzle;
-        // AMS HT has one slot, a rack AMS (the H3C's AMS 3H) as many as it reports (nine), the others four.
+        // AMS HT has one slot, a rack AMS as many as it reports (nine on the AMS 3H, seven on the AMS 3P), the others four.
         u.ref.slot_count  = ams->type == AMSModel::N3S_AMS ? 1 : ams->is_rack() ? std::max<int>(1, int(info.cans.size())) : 4;
         // Its slots are shown only: editing, Load / Unload and the RFID re-read are not supported there yet.
         const bool actions = !obj->slot_actions_blocked(kv.first);

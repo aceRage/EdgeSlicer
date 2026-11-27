@@ -916,6 +916,12 @@ inline double filament_flow_ratio_at(const ConfigBase &config, unsigned int fila
 // both read this, so a toolchange that cools always heats back.
 double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra);
 
+// BBS 2.9.2: idle-nozzle floor in C (min_temperature_when_ec). One value per filament, not a
+// packed flow-variant slot (the key is not in filament_flow_variant_options). Negative, missing,
+// or past the end of the vector reads as 0 (no floor), matching BambuStudio's filament-id index.
+// Do not use get_at: an out-of-range id would fall back to filament 0.
+double min_temperature_when_ec_at(const ConfigBase &config, unsigned int filament_id);
+
 // Packed flow-variant vectors are segmented by filament_flow_step_size. Filament / tool id
 // count is filament_diameter, not the packed length.
 inline size_t flow_variant_filament_count(const ConfigBase &config)
@@ -2626,10 +2632,20 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnumsGeneric,       filament_metal_stickiness))
 )
 
+// BBS 2.9.2 P3C idle-nozzle floor, a class of its own: GCodeConfig and PrintConfig are at
+// MSVC's limit of macro nesting (fatal error C1009 with one option more). Same split as
+// PrintTowerConfig above.
+PRINT_CONFIG_CLASS_DEFINE(
+    PrintIdleFloorConfig,
+
+    // BBS 2.9.2 P3C: idle-nozzle floor in C during pre-cooling (negative = no extra floor).
+    ((ConfigOptionFloats,              min_temperature_when_ec))
+)
+
 // This object is mapped to Perl as Slic3r::Config::Print.
 PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     PrintConfig,
-    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig),
+    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintIdleFloorConfig),
 
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))
