@@ -7334,7 +7334,7 @@ void TabFilament::toggle_options()
             const bool  adaptive_on = adaptive != nullptr && !adaptive->values.empty() && !adaptive->is_nil(size_t(variant_index)) &&
                                       adaptive->get_at(size_t(variant_index));
             toggle_option("filament_adaptive_volumetric_speed",
-                adaptive_on || parse_volumetric_speed_coefficients(m_config->opt_string("volumetric_speed_coefficients", variant_index)).valid);
+                adaptive_on || parse_volumetric_speed_coefficients(m_config->opt_string("volumetric_speed_coefficients", (unsigned int) variant_index)).valid);
         }
 
         // BBS: 控制床温选项的显示
