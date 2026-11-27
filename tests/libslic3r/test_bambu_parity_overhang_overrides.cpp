@@ -3,6 +3,7 @@
 // and filament_bridge_speed (BS PrintConfig.cpp:101-108, 7548-7581; Tab.cpp:4663-4673; GCode.cpp:6603-6640,
 // 7176-7196, 7726-7777). Until this PR the keys were dropped on load (PrintConfig.cpp handle_legacy, "not in
 // print_config_def").
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -39,7 +40,7 @@ const std::vector<std::string> &override_keys()
 
 DynamicPrintConfig load_json_text(const std::string &name, const std::string &body)
 {
-    const fs::path path = fs::temp_directory_path() / fs::unique_path("bbparity3_%%%%%%%%_" + name);
+    const fs::path path = edge_test::snorca_tests_dir() / fs::unique_path("bbparity3_%%%%%%%%_" + name);
     {
         boost::nowide::ofstream out(path.string());
         out << body;
@@ -297,8 +298,7 @@ TEST_CASE("A project 3MF keeps the filament overhang overrides", "[BambuParity][
                                           { "filament_overhang_totally_speed", "9" },
                                           { "filament_bridge_speed", "21" } });
 
-    const fs::path tmp_root = fs::temp_directory_path() / ("snorca_tests_bbparity3_" + std::to_string(get_current_pid()));
-    fs::create_directories(tmp_root);
+    const fs::path tmp_root = edge_test::snorca_tests_dir();
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "overhang_overrides.3mf").string();
 
