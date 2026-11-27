@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <libslic3r/CutRecipe.hpp>
@@ -83,7 +84,7 @@ void rewrite_metadata(const std::string&                file,
 
 void round_trip(Model& source, Model& result, const std::string& name, const std::function<void(const std::string&)>& patch = {})
 {
-    const boost::filesystem::path root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(root);
     Slic3r::set_temporary_dir(root.string());
     const std::string  file   = (root / ("edgeslicer_tac_" + name + ".3mf")).string();

@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <libslic3r/CutRecipe.hpp>
@@ -130,7 +131,7 @@ bool same_box(const BoundingBoxf3& a, const BoundingBoxf3& b, double eps = 1e-3)
 
 std::string tmp_file(const std::string& name)
 {
-    const boost::filesystem::path root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(root);
     Slic3r::set_temporary_dir(root.string());
     return (root / name).string();

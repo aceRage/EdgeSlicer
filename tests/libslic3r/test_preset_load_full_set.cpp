@@ -16,6 +16,7 @@
 //    N runs each (ORCA_BENCH_RUNS, default 5), and prints median / min. Run it explicitly:
 //      libslic3r_tests "[PresetLoadBenchmark]"
 
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <algorithm>
@@ -82,7 +83,7 @@ struct ScratchDataDir
 
     ScratchDataDir()
     {
-        root = fs::temp_directory_path() / "snorca_tests" / fs::unique_path("full_preset_set_%%%%%%%%");
+        root = edge_test::snorca_tests_dir() / fs::unique_path("full_preset_set_%%%%%%%%");
         fs::create_directories(root);
     }
     ~ScratchDataDir()
