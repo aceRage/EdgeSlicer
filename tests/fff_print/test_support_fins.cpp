@@ -500,6 +500,18 @@ TEST_CASE("Support fins: tines land exactly on object layers", "[SupportFins]")
         CHECK(r.duplicate_z == 0);
         if (expect_all)
             CHECK(r.found == r.candidates);
+        // No zero-length beads on the support layers the fins inserted (a wall speck thinner than a line).
+        size_t specks = 0;
+        for (const SupportLayer *sl : po.support_layers()) {
+            if (sl->support_type != stInnerTree)
+                continue;
+            std::vector<const ExtrusionEntity *> ls;
+            leaves(sl->support_fills, ls);
+            for (const ExtrusionEntity *e : ls)
+                if (e->length() < scaled<double>(0.05))
+                    ++specks;
+        }
+        CHECK(specks == 0);
     };
     SECTION("supports off")
     {
