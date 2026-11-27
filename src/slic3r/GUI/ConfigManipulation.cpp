@@ -505,6 +505,7 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
            ! config->opt_bool("overhang_reverse") &&
            // Side stabilizers are support-role layers a vase cannot carry (Print::validate rejects them).
            (! config->has("stabilizer_supports") || config->opt_enum<StabilizerMode>("stabilizer_supports") == smOff) &&
+           (! config->has("support_fins") || config->opt_enum<SupportFinsMode>("support_fins") == sfmOff) &&
             config->opt_enum<WallDirection>("wall_direction") == WallDirection::Auto &&
             config->opt_enum<TimelapseType>("timelapse_type") == TimelapseType::tlTraditional))
     {
@@ -523,6 +524,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
             new_conf.set_key_value("overhang_reverse", new ConfigOptionBool(false));
             if (new_conf.has("stabilizer_supports"))
                 new_conf.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
+            if (new_conf.has("support_fins"))
+                new_conf.set_key_value("support_fins", new ConfigOptionEnum<SupportFinsMode>(sfmOff));
             new_conf.set_key_value("wall_direction", new ConfigOptionEnum<WallDirection>(WallDirection::Auto));
             new_conf.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
             sparse_infill_density = 0;
@@ -1104,6 +1107,18 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         for (auto el : {"stabilizer_infill_density", "stabilizer_infill_pattern"})
             toggle_line(el, walls);
     }
+    // Support fins: their own switch, supports on or off; the rest shows while they are on. Lean side only is
+    // an Auto setting (painted fins stand where painted).
+    {
+        const SupportFinsMode fins_mode = config->has("support_fins") ? config->opt_enum<SupportFinsMode>("support_fins") : sfmOff;
+        const bool            fins_on   = fins_mode != sfmOff;
+        toggle_field("support_fins", true);
+        for (auto el : {"support_fin_thickness", "support_fin_depth", "support_fin_height", "support_fin_spacing", "support_fin_gap",
+                        "support_fin_tine_spacing", "support_fin_tine_depth", "support_fin_tine_base_rows", "support_fin_lean_side_only"})
+            toggle_line(el, fins_on);
+        for (auto el : {"support_fin_spacing", "support_fin_lean_side_only"})
+            toggle_field(el, fins_mode == sfmAuto);
+    }
     toggle_field("support_threshold_angle", have_support_material && is_auto(support_type));
     toggle_field("support_threshold_overlap", config->opt_int("support_threshold_angle") == 0 && have_support_material && is_auto(support_type));
     //toggle_field("support_closing_radius", have_support_material && support_style == smsSnug);
@@ -1647,7 +1662,7 @@ void ConfigManipulation::toggle_print_sla_options(DynamicPrintConfig* config)
 int ConfigManipulation::show_spiral_mode_settings_dialog(bool is_object_config)
 {
     wxString msg_text = _(L("Spiral mode only works when wall loops is 1, support is disabled, top shell layers is 0, sparse infill density is 0 and timelapse type is traditional."));
-    msg_text += " " + _(L("Side stabilizers must be off too."));
+    msg_text += " " + _(L("Side stabilizers and support fins must be off too."));
     auto printer_structure_opt = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure");
     if (printer_structure_opt && printer_structure_opt->value == PrinterStructure::psI3) {
         msg_text += _(L(" But machines with I3 structure will not generate timelapse videos."));

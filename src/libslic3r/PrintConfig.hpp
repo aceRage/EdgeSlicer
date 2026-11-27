@@ -487,6 +487,12 @@ enum StabilizerMode {
     smOff, smAuto, smManual
 };
 
+// Support fins (Support/Fins.hpp): off, automatic placement (the side the part leans to, or both
+// sides of a balanced one) plus any painted fin spots, or the painted spots only.
+enum SupportFinsMode {
+    sfmOff, sfmAuto, sfmPainted
+};
+
 // Cross-section of the side stabilizer pillars: round, a filleted rectangle like a prime tower (stiffer),
 // or round with rounded-rectangle columns where a pillar is tall and left unbraced.
 enum StabilizerColumnShape {
@@ -1169,6 +1175,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InputShaperType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DraftShield)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CurvedTopsPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportFinsMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ReduceInfillRetractionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentMetalStickiness)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerColumnShape)
@@ -1916,6 +1923,17 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                stabilizer_wall_loops))
     ((ConfigOptionPercent,            stabilizer_infill_density))
     ((ConfigOptionEnum<InfillPattern>, stabilizer_infill_pattern))
+    // Support fins (Support/Fins.hpp)
+    ((ConfigOptionEnum<SupportFinsMode>, support_fins))
+    ((ConfigOptionFloat,              support_fin_thickness))
+    ((ConfigOptionFloat,              support_fin_depth))
+    ((ConfigOptionFloat,              support_fin_height))
+    ((ConfigOptionFloat,              support_fin_spacing))
+    ((ConfigOptionFloat,              support_fin_gap))
+    ((ConfigOptionFloat,              support_fin_tine_spacing))
+    ((ConfigOptionFloat,              support_fin_tine_depth))
+    ((ConfigOptionBool,               support_fin_tine_base_rows))
+    ((ConfigOptionBool,               support_fin_lean_side_only))
     ((ConfigOptionBool,               detect_narrow_internal_solid_infill))
     // ((ConfigOptionBool,               adaptive_layer_height))
     ((ConfigOptionFloat,              support_bottom_interface_spacing))

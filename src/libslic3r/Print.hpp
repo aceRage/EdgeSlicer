@@ -643,6 +643,9 @@ public:
     static bool                 has_raft(const PrintObjectConfig &config)             { return config.raft_layers > 0; }
     static bool                 has_support_material(const PrintObjectConfig &config) { return has_support(config) || has_raft(config); }
     static bool                 has_stabilizers(const PrintObjectConfig &config)      { return config.stabilizer_supports.value != smOff; }
+    static bool                 has_fins(const PrintObjectConfig &config)             { return config.support_fins.value != sfmOff; }
+    // Support-role additions that print without Enable supports: side stabilizers and support fins.
+    static bool                 has_support_addons(const PrintObjectConfig &config)   { return has_stabilizers(config) || has_fins(config); }
     bool                        has_support()           const { return has_support(m_config); }
     bool                        has_raft()              const { return has_raft(m_config); }
     bool                        has_support_material()  const { return has_support_material(m_config); }
@@ -650,9 +653,15 @@ public:
     // Enable supports: they print as support-role extrusions of their own, so with supports off the
     // support step runs in a stabilizers-only mode (no support, interface or raft is made).
     bool                        has_stabilizers()       const { return has_stabilizers(m_config); }
-    // Something prints with the support filament: supports, a raft or stabilizers. The support
+    // Support fins (Support/Fins.hpp) are configured for this object. Like the stabilizers they print as
+    // support-role extrusions of their own, with or without Enable supports.
+    bool                        has_fins()              const { return has_fins(m_config); }
+    // Stabilizers or fins: support-role extrusions with the support filament (never the interface
+    // filament) whether or not supports are on.
+    bool                        has_support_addons()    const { return has_support_addons(m_config); }
+    // Something prints with the support filament: supports, a raft, stabilizers or fins. The support
     // INTERFACE filament is used only when has_support_material().
-    bool                        uses_support_filament() const { return this->has_support_material() || this->has_stabilizers(); }
+    bool                        uses_support_filament() const { return this->has_support_material() || this->has_support_addons(); }
     // Checks if the model object is painted using the multi-material painting gizmo.
     bool                        is_mm_painted()         const { return this->model_object()->is_mm_painted(); }
     // Checks if the model object is painted using the fuzzy skin painting gizmo.

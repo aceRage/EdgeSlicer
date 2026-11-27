@@ -48,6 +48,7 @@ namespace Slic3r {
 class ModelObject;
 class PrintObject;
 class PrintObjectConfig;
+enum class EnforcerBlockerType : int16_t;
 
 namespace stabilizers {
 
@@ -156,6 +157,10 @@ struct PaintedSpot
 // connected painted patch; a patch taller than `ring_spacing` gives one spot per ring spacing of
 // its height, so painting a strip up the part asks for a strut every ring.
 std::vector<PaintedSpot> painted_spots(const ModelObject &object, const Transform3d &trafo, double ring_spacing);
+// The same for any paint state of the paint-on supports channel (the support fins read theirs, SUPPORT_FIN);
+// `split_height` 0 = one spot per patch.
+std::vector<PaintedSpot> painted_spots(const ModelObject &object, const Transform3d &trafo, double split_height,
+                                       EnforcerBlockerType state);
 // The same for a PrintObject (its model object, through trafo_centered()).
 std::vector<PaintedSpot> painted_spots(const PrintObject &object);
 
