@@ -7,6 +7,7 @@
 // fell back to "Generic PLA" and the slot vanished from the dropdown. These tests pin the rules
 // (FilamentSyncMatch::match_preset) and the user preset a third-party spool now gets
 // (PresetCollection::create_inherited_user_preset), with no printer and no slicer GUI.
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/FilamentSyncMatch.hpp"
@@ -154,7 +155,7 @@ struct ScopedTemporaryDir
     fs::path root;
     ScopedTemporaryDir()
     {
-        root = fs::temp_directory_path() / "snorca_tests" / fs::unique_path("u1_tag_%%%%%%%%");
+        root = edge_test::snorca_tests_dir() / fs::unique_path("u1_tag_%%%%%%%%");
         fs::create_directories(root);
     }
     ~ScopedTemporaryDir()

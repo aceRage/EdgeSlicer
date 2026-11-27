@@ -2,6 +2,7 @@
 // (PresetCollection::rename_user_preset), the shared name rules (validate_preset_name, also used by the
 // Save preset dialog), the rename plan of a filament family (plan_preset_rename) and what a rename or
 // delete touches in the project (PresetBundle::preset_usage / repoint_preset_references).
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/NozzleProcess.hpp"
@@ -26,7 +27,7 @@ struct ScopedTemporaryDir
     fs::path root;
     ScopedTemporaryDir()
     {
-        root = fs::temp_directory_path() / "snorca_tests" / fs::unique_path("preset_rename_%%%%%%%%");
+        root = edge_test::snorca_tests_dir() / fs::unique_path("preset_rename_%%%%%%%%");
         fs::create_directories(root);
     }
     ~ScopedTemporaryDir()

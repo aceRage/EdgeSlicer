@@ -8,6 +8,7 @@
 //  * Pressure advance stays OFF in the Snapmaker-brand U1 filaments added with it. A filament with its own
 //    pressure advance stops the U1's dynamic flow calibration from taking effect (owner rule).
 
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <boost/filesystem.hpp>
@@ -45,7 +46,7 @@ struct SnapmakerTree
     {
         saved_data_dir = data_dir();
         // Keep anything the loader writes (preset caches) out of the user's data directory.
-        scratch = fs::temp_directory_path() / "snorca_tests" / fs::unique_path("u1_profiles_%%%%%%%%");
+        scratch = edge_test::snorca_tests_dir() / fs::unique_path("u1_profiles_%%%%%%%%");
         fs::create_directories(scratch);
         set_data_dir(scratch.string());
         const std::string profiles = (fs::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles").string();

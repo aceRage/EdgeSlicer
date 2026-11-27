@@ -3,6 +3,7 @@
 //      support_interface_bottom_layers keeps "Same as top" (-1) with a 0-10 list and a 20 maximum.
 //      Counts above the old 3 have to survive a project 3MF and an ini round trip.
 
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/Config.hpp"
@@ -111,7 +112,7 @@ TEST_CASE("Interface layer counts above the old maximum survive a project 3MF ro
     src_object->config.set_key_value("support_interface_top_layers", new ConfigOptionInt(5));
     src_object->config.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(9));
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "support_interface_layers_project.3mf").string();

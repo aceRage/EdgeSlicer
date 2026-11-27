@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <libslic3r/CurvedCut.hpp>
@@ -2952,7 +2953,7 @@ TEST_CASE("Curved cut: a curved-cut connector survives a 3MF round trip", "[Curv
     model.add_default_instances();
     const Transform3d matrix_in = plug->get_matrix();
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string test_file = (tmp_root / "edgeslicer_curved_connector.3mf").string();

@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/GCode/PostProcessor.hpp"
@@ -285,8 +286,8 @@ std::map<std::string, std::string> read_zip_entries(const std::string &zip_path)
 // Packs one sliced plate into a .gcode.3mf exactly like Plater::export_3mf does for Export plate sliced file.
 void pack_gcode_3mf(const std::string &out_path, const std::string &gcode_file)
 {
-    boost::filesystem::create_directories(boost::filesystem::temp_directory_path() / "snorca_tests");
-    Slic3r::set_temporary_dir((boost::filesystem::temp_directory_path() / "snorca_tests").string());
+    boost::filesystem::create_directories(edge_test::snorca_tests_dir());
+    Slic3r::set_temporary_dir((edge_test::snorca_tests_dir()).string());
 
     Model        model;
     ModelObject *object = model.add_object();
