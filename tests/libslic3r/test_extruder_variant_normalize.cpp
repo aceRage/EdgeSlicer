@@ -521,3 +521,16 @@ TEST_CASE("Machines without mixed drives keep their retraction vectors", "[FlowV
     CHECK(floats(tools, "retraction_length") == std::vector<double>{ 1.0, 2.0, 3.0, 4.0, 5.0 });
 }
 
+TEST_CASE("A filament switcher on mixed drives cools 10 more before the tower", "[FlowVariants]")
+{
+    // Bambu's g_filament_switcher_extra_cooling_before_tower, now that the X2D's drives are known (owner decision D4).
+    DynamicPrintConfig x2d = mixed_drive_config({ 1, 2 });
+    CHECK(filament_cooling_before_tower_at(x2d, 0, true) == 0.);
+    x2d.set_key_value("has_filament_switcher", new ConfigOptionBool(true));
+    CHECK(filament_cooling_before_tower_at(x2d, 0, true) == 10.);
+    CHECK(filament_cooling_before_tower_at(x2d, 1, false) == 0.);
+    DynamicPrintConfig dual = toolchanger_config(2, { "Direct Drive Standard", "Direct Drive High Flow" });
+    dual.set_key_value("has_filament_switcher", new ConfigOptionBool(true));
+    CHECK(filament_cooling_before_tower_at(dual, 0, true) == 0.);
+}
+

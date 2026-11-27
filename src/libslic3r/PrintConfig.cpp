@@ -12486,10 +12486,10 @@ double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int f
             cooling = opt->values[idx];
     }
     if (with_switcher_extra) {
+        // Flow variants PR 1 (owner decision D4): extruders of different types as resolved_extruder_types derives
+        // them; extruder_type itself is dropped on load, so the X2D never got the extra 10.
         const auto *switcher = dynamic_cast<const ConfigOptionBool *>(config.option("has_filament_switcher"));
-        const auto *types    = dynamic_cast<const ConfigOptionEnumsGeneric *>(config.option("extruder_type"));
-        if (switcher != nullptr && switcher->value && types != nullptr && types->values.size() > 1 &&
-            std::adjacent_find(types->values.begin(), types->values.end(), [](int lhs, int rhs) { return lhs != rhs; }) != types->values.end())
+        if (switcher != nullptr && switcher->value && has_mixed_extruder_types(config))
             cooling += 10.;
     }
     return cooling;
