@@ -1125,3 +1125,74 @@ TEST_CASE("Object towers: arrange reserves no tower room where none prints", "[O
         CHECK(get_extents(ap.poly.contour).min.x() < get_extents(plain.poly.contour).min.x() - scaled(30.));
     }
 }
+
+// Owner hand test 2026-11-27 (objtowers3_error.3mf, plate 1): three tall two-part copies on the U1, each a pair of 33 mm
+// cubes in filaments 2 and 1, with dragged towers. The middle copy's dragged tower was too close to another copy, so it
+// was placed automatically, behind the copy. Every unit was clear in X/Y, but the copies reach above the rod (26 mm)
+// and the tower widened that copy's Y band onto both neighbours' clearance: each then had to print before the other,
+// and validate refused the plate ("Assembly is too tall, and collisions will be caused"). The planner now keeps a tall
+// copy's tower off such spots (another side, here its left side slid back), and real conflicts stay flagged.
+namespace {
+
+ModelObject *add_assembly(Model &model, const std::string &name, const Vec2d &pos, const Vec2d &tower_offset)
+{
+    ModelObject *object = model.add_object();
+    object->name        = name;
+    for (int side : { 1, -1 }) {
+        TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
+        cube.scale(1.65f); // 33 mm
+        cube.translate(-cube.bounding_box().center().cast<float>());
+        ModelVolume *volume = object->add_volume(cube);
+        volume->set_offset(Vec3d(17. * side, 0., 0.));
+        volume->config.set("extruder", side > 0 ? 2 : 1);
+    }
+    object->config.set("extruder", 2);
+    if (tower_offset != Vec2d::Zero())
+        set_tower_offset(*object, tower_offset);
+    place(object, pos);
+    return object;
+}
+
+DynamicPrintConfig owner_u1_config()
+{
+    DynamicPrintConfig cfg = machine_config(U1, true);
+    // The owner's purge volumes (filament 1 -> 2: 203, 2 -> 1: 654 mm3, multiplier 1): the towers' size.
+    cfg.set_deserialize_strict({ { "flush_volumes_matrix", "0,203,654,0" }, { "flush_multiplier", "1" } });
+    return cfg;
+}
+
+} // namespace
+
+TEST_CASE("Object towers: a tall copy's tower does not break the rod order (owner's three U1 copies)", "[ObjectTowers]")
+{
+    const DynamicPrintConfig cfg = owner_u1_config();
+    REQUIRE(cfg.opt_float("extruder_clearance_height_to_rod") < 33.);
+
+    SECTION("the owner's layout slices, with every tower placed")
+    {
+        Model model;
+        add_assembly(model, "AssemblyA", { 90.1315, 25.0968 }, { -78.9164, -10.8642 });
+        add_assembly(model, "AssemblyB", { 225.4107, 133.9143 }, { -77.9489, -18.4743 });
+        add_assembly(model, "AssemblyC", { 45.5402, 241.5359 }, { 50.5761, -12.7808 });
+        Print                              print;
+        std::vector<StringObjectException> warnings;
+        const StringObjectException        error = apply_validate(print, model, cfg, U1, &warnings);
+        INFO(error.string);
+        CHECK(error.string.empty());
+        const ObjectTowerPlan plan = print.plan_object_towers();
+        REQUIRE(plan.towers.size() == 3);
+        for (const ObjectTowerPlacement &t : plan.towers) {
+            INFO(t.instance->model_instance->get_object()->name);
+            CHECK(t.placed);
+        }
+    }
+    SECTION("copies that really collide are still refused")
+    {
+        Model model;
+        add_assembly(model, "AssemblyA", { 90., 40. }, Vec2d::Zero());
+        add_assembly(model, "AssemblyB", { 150., 80. }, Vec2d::Zero());
+        Print                       print;
+        const StringObjectException error = apply_validate(print, model, cfg, U1);
+        CHECK_FALSE(error.string.empty());
+    }
+}

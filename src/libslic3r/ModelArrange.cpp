@@ -344,7 +344,11 @@ bool reserve_object_prime_tower(ArrangePolygon &ap, const ModelObject &object, c
         anchors.push_back(cb.center() + Point::new_scale(drag.x(), drag.y()));
     else {
         anchors.emplace_back(cb.max.x() + gap - tb.min.x(), cb.center().y() - tb.center().y());
-        anchors.emplace_back(cb.center().x() - tb.center().x(), cb.max.y() + gap - tb.min.y());
+        // A copy reaching above the rod keeps its tower beside it in X: a tower behind it widens the Y band the rod rule
+        // of the by-object check tests against the other copies (Print::plan_object_towers() avoids such spots too).
+        const double rod = config.has("extruder_clearance_height_to_rod") ? config.opt_float("extruder_clearance_height_to_rod") : 0.;
+        if (rod <= 0. || ap.height <= rod)
+            anchors.emplace_back(cb.center().x() - tb.center().x(), cb.max.y() + gap - tb.min.y());
     }
     Polygon best;
     double  best_area = std::numeric_limits<double>::max();
