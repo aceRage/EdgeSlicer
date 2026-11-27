@@ -239,7 +239,7 @@ struct AlignmentResult
     size_t found       = 0;  // of those, printed as a 2-point path somewhere
     size_t misplaced   = 0;  // printed on a support layer that is not their object layer, or with another height
     size_t off_grid    = 0;  // support layers not at any object layer's height (the independent heights at work)
-    size_t overlap     = 0;  // fin areas printed where another support layer overlapping in Z prints too
+    size_t overlap     = 0;  // tines printed where another support layer overlapping in Z prints too
     size_t duplicate_z = 0;  // two support layers at one print_z
 };
 
@@ -268,6 +268,7 @@ AlignmentResult check_alignment(const PrintObject &po)
     auto same = [](const Point &a, const Point &b) { return (a - b).cast<double>().norm() < 10.; };
     for (size_t i = 0; i < slices.size(); ++i) {
         const Layer &layer = *po.layers()[i];
+        std::vector<std::pair<const SupportLayer *, ExPolygons>> printed_tines;
         for (const Polyline &t : slices[i].tines) {
             ++r.candidates;
             for (const SupportLayer *sl : sls) {
@@ -283,30 +284,22 @@ AlignmentResult check_alignment(const PrintObject &po)
                     ++r.found;
                     if (std::abs(sl->print_z - layer.print_z) > EPSILON || std::abs(double(path->height) - layer.height) > 1e-4)
                         ++r.misplaced;
+                    printed_tines.emplace_back(sl, union_ex(offset(path->polyline, scaled<float>(0.5 * path->width))));
                 }
             }
         }
-        // What of the fin footprint this layer's own support layer printed, against every other support layer
-        // whose Z range overlaps the object layer's.
-        ExPolygons footprint = slices[i].body;
-        expolygons_append(footprint, slices[i].tine_areas);
-        if (footprint.empty())
-            continue;
-        const SupportLayer *own = nullptr;
-        for (const SupportLayer *sl : sls)
-            if (std::abs(sl->print_z - layer.print_z) < EPSILON)
-                own = sl;
-        if (own == nullptr)
-            continue;
-        const ExPolygons printed = intersection_ex(own->support_islands, footprint);
-        for (const SupportLayer *sl : sls) {
-            if (sl == own)
-                continue;
-            const double bottom = sl->print_z - std::max({ double(sl->height), sl->base_slab_height, sl->interface_slab_height });
-            if (sl->print_z <= layer.print_z - layer.height + EPSILON || bottom >= layer.print_z - EPSILON)
-                continue;
-            if (area_mm2(intersection_ex(printed, coverage(*sl))) > 0.01)
-                ++r.overlap;
+        // A tine printed on its layer never shares its place with another support layer overlapping that layer's
+        // Z range (the fin walls are checked against obstacles in the planner tests).
+        for (const auto &[own, tine] : printed_tines) {
+            for (const SupportLayer *sl : sls) {
+                if (sl == own)
+                    continue;
+                const double bottom = sl->print_z - std::max({ double(sl->height), sl->base_slab_height, sl->interface_slab_height });
+                if (sl->print_z <= layer.print_z - layer.height + EPSILON || bottom >= layer.print_z - EPSILON)
+                    continue;
+                if (area_mm2(intersection_ex(tine, coverage(*sl))) > 0.01)
+                    ++r.overlap;
+            }
         }
     }
     return r;
