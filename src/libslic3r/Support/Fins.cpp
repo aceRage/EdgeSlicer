@@ -772,12 +772,7 @@ size_t displace_supports_for_fins(PrintObject &object, const std::function<void(
         for (auto &[extruder, coll] : sl->interface_by_extruder)
             fin_cut_entities(coll.entities, mask, mask_bb, min_len, cut);
         fin_cut_areas(sl->support_islands, mask, mask_bb);
-        fin_cut_areas(sl->base_areas, mask, mask_bb);
-        fin_cut_areas(sl->roof_areas, mask, mask_bb);
-        fin_cut_areas(sl->roof_1st_layer, mask, mask_bb);
-        fin_cut_areas(sl->floor_areas, mask, mask_bb);
-        for (auto &part : sl->interlock_roof)
-            fin_cut_areas(part.areas, mask, mask_bb);
+        sl->for_each_tree_support_areas([&mask, &mask_bb](ExPolygons &areas) { fin_cut_areas(areas, mask, mask_bb); });
         // A tree layer's outlines, with their boxes when they were kept in step.
         const bool boxed = ! sl->lslices.empty() && sl->lslices_bboxes.size() == sl->lslices.size();
         fin_cut_areas(sl->lslices, mask, mask_bb);
