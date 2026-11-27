@@ -1759,7 +1759,7 @@ std::map<int, std::vector<bool>> ps_facet_bits(const TriangleSelector::TriangleS
 
 } // namespace
 
-TEST_CASE("Paint split R1: the sparse field matches the dense one on a sphere's halves", "[PaintSplit]")
+TEST_CASE("Paint split R1: the sparse field matches the dense one on a sphere's halves", "[PaintSplit][slow]")
 {
     // The upper hemisphere is selected: the true cut is the equator plane z = 0.
     const double               R      = 20.;
@@ -1877,14 +1877,15 @@ TEST_CASE("Paint split R1: smoothing the cut face leaves the seam on the paint l
         sum += d;
     }
     WARN("seam: " << seam1.size() << " vertices, off the paint line by " << sum / double(seam1.size()) << " mm mean, " << off << " mm worst");
-    // On average far inside a tenth of a millimetre; the worst point is one corner of the faceted paint line
-    // (0.07 mm at a 0.4 mm voxel, 0.17 mm at the 0.6 mm default). Snapping the seam (D23 b) would remove it.
+    // On average far inside a tenth of a millimetre. The worst point is one corner of the faceted paint line: 0.07 mm
+    // with a 0.2 mm base voxel, 0.17 mm at the 0.6 mm default, whatever the near-skin refinement does. That misses the
+    // design's 0.1 mm; snapping the seam to the paint line (D23 b) would remove it.
     CHECK(sum / double(seam1.size()) < 0.03);
     CHECK(off < 0.2);
     CHECK_THAT(p1.piece_volume, WithinRel(p0.piece_volume, 0.02));
 }
 
-TEST_CASE("Paint split R1: the pieces' painting is copied facet for facet", "[PaintSplit]")
+TEST_CASE("Paint split R1: the pieces' painting is copied facet for facet", "[PaintSplit][slow]")
 {
     Model        model;
     ModelObject* mo = model.add_object();
@@ -2082,11 +2083,12 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
         PaintSplitSkinParams skin;
         skin.dense = dense;
         if (!dense) {
-            skin.voxel           = env_d("PAINT_SPLIT_VOXEL", 0.);
-            skin.smoothing       = env_d("PAINT_SPLIT_SMOOTH", 0.5);
-            skin.skin_refine     = int(env_d("PAINT_SPLIT_REFINE", 2.));
-            skin.root_iterations = int(env_d("PAINT_SPLIT_ROOTS", 4.));
-            skin.max_cells       = size_t(env_d("PAINT_SPLIT_MAXCELLS", 2000000.));
+            // Unset knobs keep the shipped defaults.
+            skin.voxel           = env_d("PAINT_SPLIT_VOXEL", skin.voxel);
+            skin.smoothing       = env_d("PAINT_SPLIT_SMOOTH", skin.smoothing);
+            skin.skin_refine     = int(env_d("PAINT_SPLIT_REFINE", double(skin.skin_refine)));
+            skin.root_iterations = int(env_d("PAINT_SPLIT_ROOTS", double(skin.root_iterations)));
+            skin.max_cells       = size_t(env_d("PAINT_SPLIT_MAXCELLS", double(skin.max_cells)));
         }
         const char* engine = dense ? "BEFORE (dense field, spatial paint remap)" : "AFTER (sparse field, exact paint)";
 

@@ -211,6 +211,12 @@ void PaintSplitJob::finalize(bool canceled, std::exception_ptr &eptr)
         return;
     }
     if (m_error != PaintSplitError::None || m_results.empty()) {
+        // The regions cut before the refusal still say where their time went (step 0).
+        std::vector<std::string> &log = last_log_lines();
+        log                           = m_log;
+        if (m_error != PaintSplitError::None)
+            log.insert(log.begin(), GUI::format(_u8L("Paint Split stopped at %1%: %2%"), m_bad_label.empty() ? std::string("?") : m_bad_label,
+                                                _u8L(paint_split_error_message(m_error))));
         notes->push_plater_warning_notification(
             format(_u8L("Paint Split did not split \"%1%\": %2%"), m_name,
                    m_error == PaintSplitError::None ? _u8L("nothing to split.") :

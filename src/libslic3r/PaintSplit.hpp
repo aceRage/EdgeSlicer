@@ -229,7 +229,7 @@ struct PaintSplitSkinParams
     size_t max_samples{ 6000000 };    // dense: the voxel budget of the automatic size
     bool   dense{ false };            // the P2 engine (no smoothing, no near-skin refinement)
     double smoothing{ 0.5 };          // "Smooth cut face", 0..1: Taubin passes = 20 x this (D22)
-    size_t max_cells{ 600000 };       // sparse: the fine-cell budget; past it the voxel doubles
+    size_t max_cells{ 1000000 };      // sparse: the fine-cell budget; past it the voxel doubles (the owner's figure: 0.27-0.63M)
     int    skin_refine{ 3 };          // sparse: near-skin refinements, each halving the voxel next to the skin (not below 0.05 mm)
     int    root_iterations{ 4 };      // sparse: regula falsi steps per edge root (0 = linear roots)
     bool   allow_complement{ true };  // sparse: mesh the complement when the selected skin is the larger side

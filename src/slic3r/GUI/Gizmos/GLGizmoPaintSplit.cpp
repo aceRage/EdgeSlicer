@@ -548,12 +548,17 @@ void GLGizmoPaintSplit::compute_cut_preview()
     m_show_log.clear();
     auto       one   = [](double v, const char *fmt) { return wxString::Format(fmt, v).ToStdString(); };
     const auto t_all = std::chrono::steady_clock::now();
+    // On the part as Apply repairs it: the cutter's outside test needs a closed skin.
+    indexed_triangle_set        fixed;
+    PaintSplitRepairStats       repair;
+    const bool                  repaired = paint_split_repair(m_cut_mesh.its, fixed, nullptr, repair);
+    const indexed_triangle_set &part     = repaired && repair.needed ? fixed : m_cut_mesh.its;
     for (size_t c = 0; c < m_region.num_components(); ++c)
         if (m_region.component_ok(int(c))) {
             const auto            t0    = std::chrono::steady_clock::now();
-            const PaintSplitClaim claim = paint_split_nearest_cutter(m_cut_mesh.its, m_region, int(c), sp);
+            const PaintSplitClaim claim = paint_split_nearest_cutter(part, m_region, int(c), sp);
             const double field = claim.stats.setup_s + claim.stats.field_s + claim.stats.mesh_s + claim.stats.smooth_s;
-            m_claim_cut.push_back(paint_split_claim_cut_surface(m_cut_mesh.its, claim.mesh));
+            m_claim_cut.push_back(paint_split_claim_cut_surface(part, claim.mesh));
             const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             m_show_log.push_back(GUI::format(_u8L("Region %1%: field %2% s, surface %3% s (voxel %4% mm, %5% mm at the skin)"), c + 1,
                                              one(field, "%.1f"), one(secs - field, "%.1f"), one(claim.stats.voxel, "%.2f"),
