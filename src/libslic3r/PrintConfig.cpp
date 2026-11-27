@@ -2357,6 +2357,47 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionInts{80});
 
+    // Bambu Studio 02.09.01.70 (PrintConfig.cpp:2483-2551): the auxiliary fan's own early layers and ramp.
+    def = this->add("close_additional_fan_first_x_layers", coInts);
+    def->label = L("For the first");
+    def->tooltip = L("Set special auxiliary cooling fan for the first certain layers. "
+                     "-1 uses the part cooling fan's \"No cooling for the first\" layers.");
+    def->sidetext = L("layers");
+    def->min = -1;
+    def->max = 100000;
+    def->mode = comSimple;
+    // EDGE: Bambu's default is 1; -1 keeps presets that do not set it as they printed before the port.
+    def->set_default_value(new ConfigOptionInts { -1 });
+
+    def = this->add("additional_fan_full_speed_layer", coInts);
+    def->label = L("Full fan speed at layer");
+    def->tooltip = L("Auxiliary fan speed will be ramped up linearly from layer \"For the first\" to maximum at layer \"Full fan speed at layer\". \"Full fan speed at layer\" will be ignored if lower than \"For the first\", in which case the fan will be running at maximum allowed speed at layer \"For the first\" + 1.");
+    def->min = 0;
+    def->max = 100000;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionInts { 0 });
+
+    def = this->add("first_x_layer_fan_speed", coFloats);
+    def->label = L("Fan speed");
+    def->tooltip = L("Special auxiliary cooling fan speed, effective only for the first x layers");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloats { 0 });
+
+    // Bambu Studio 02.09.01.70 (PrintConfig.cpp:1959): EDGE applies it only when the printer's fan_speedup_time is 0.
+    def = this->add("pre_start_fan_time", coFloats);
+    def->label = L("Pre start fan time");
+    def->tooltip = L("Force fan start early(0-5 second) when encountering overhangs. "
+                     "This is because the fan needs time to physically increase its speed. "
+                     "Not used when the printer's own fan speed-up time is set.");
+    def->sidetext = L("s");
+    def->min = 0.;
+    def->max = 5.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0. });
+
     def = this->add("close_fan_the_first_x_layers", coInts);
     def->label = L("No cooling for the first");
     def->tooltip = L("Turn off all cooling fans for the first few layers. "

@@ -5025,19 +5025,22 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             this->placeholder_parser().set("first_non_support_hotend",    new ConfigOptionInts(std::vector<int>(num_nozzles, -1)));
 
             // X2D templates additionally reference newer BBS fan/chamber vars the fork lacks. Shim:
-            // initial_filament_id = the initial extruder; no first-layer aux-fan ramp (close=0, full from
-            // layer 1, first-x speed 0 so it collapses to additional_cooling_fan_speed); chamber
-            // autocooling max = full (U max_additional_fan/100). current/next_filament_id set globally
-            // as a fallback for layer_change; the change_filament scopes override them per-toolchange.
-            const size_t nf = (num_filaments > 0) ? num_filaments : size_t(1);
+            // initial_filament_id = the initial extruder; chamber autocooling max = full (U max_additional_fan/100).
+            // current/next_filament_id set globally as a fallback for layer_change; the change_filament scopes
+            // override them per-toolchange. The aux-fan early-layer keys (first_x_layer_fan_speed,
+            // additional_fan_full_speed_layer, ...) are real filament settings now (Bambu parity PR 4) and reach
+            // the templates from the config; only our -1 "as the part fan" count is resolved here.
             this->placeholder_parser().set("initial_filament_id",                new ConfigOptionInt(int(initial_extruder_id)));
             this->placeholder_parser().set("current_filament_id",                new ConfigOptionInt(0));
             this->placeholder_parser().set("next_filament_id",                   new ConfigOptionInt(0));
             this->placeholder_parser().set("hold_chamber_temp_for_flat_print",   new ConfigOptionBool(false));
             this->placeholder_parser().set("max_additional_fan",                 new ConfigOptionInt(100));
-            this->placeholder_parser().set("close_additional_fan_first_x_layers",new ConfigOptionInts(std::vector<int>(nf, 0)));
-            this->placeholder_parser().set("additional_fan_full_speed_layer",    new ConfigOptionInts(std::vector<int>(nf, 1)));
-            this->placeholder_parser().set("first_x_layer_fan_speed",            new ConfigOptionFloats(std::vector<double>(nf, 0.)));
+            {
+                std::vector<int> aux_initial_layers = print.config().close_additional_fan_first_x_layers.values;
+                for (size_t f = 0; f < aux_initial_layers.size(); ++f)
+                    aux_initial_layers[f] = aux_fan_initial_layers(aux_initial_layers[f], print.config().close_fan_the_first_x_layers.get_at(f));
+                this->placeholder_parser().set("close_additional_fan_first_x_layers", new ConfigOptionInts(aux_initial_layers));
+            }
             // BBS (Bambu Studio GCode.cpp, print start): the H2C start and change_filament templates send the
             // "point of nozzle heating" as M620.14 X[wipe_tower_center_pos_x] Y[wipe_tower_center_pos_y], 2 mm
             // beside the prime tower; without a tower they fall back to their fixed M620.14 X95.5 Y336.

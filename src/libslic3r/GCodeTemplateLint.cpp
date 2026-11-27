@@ -24,10 +24,10 @@ const std::array<const char *, 28> s_keywords = {
 // that are not config keys and not in the editor dialog's placeholder groups. Collected 2026-11-12;
 // a name missing here only produces a warning in the editor, never a blocked save.
 const char *const s_runtime_names[] = {
-    "adaptive_bed_mesh_max", "adaptive_bed_mesh_min", "additional_fan_full_speed_layer", "bed_mesh_algo",
+    "adaptive_bed_mesh_max", "adaptive_bed_mesh_min", "bed_mesh_algo",
     "bed_mesh_probe_count", "bed_temperature", "bed_temperature_initial_layer", "bed_temperature_initial_layer_single",
     "bed_temperature_initial_layer_vector", "chamber_cooling_mode", "chamber_minimal_temperature", "chamber_temperature",
-    "clear_to_x0", "close_additional_fan_first_x_layers", "color_change_extruder", "cooling_filter_enabled",
+    "clear_to_x0", "color_change_extruder", "cooling_filter_enabled",
     "curr_accumulated_mass", "curr_layer_mass", "curr_physical_extruder_id", "current_extruder", "current_filament_id",
     "current_hotend", "current_nozzle_id", "current_object_idx", "day", "deretraction_from_wipe_tower_generator",
     "during_print_exhaust_fan_speed_num", "e_position", "e_restart_extra", "e_retracted", "extruded_volume",
@@ -39,7 +39,7 @@ const char *const s_runtime_names[] = {
     "first_layer_bed_temperature", "first_layer_center_no_wipe_tower", "first_layer_height",
     "first_layer_print_convex_hull", "first_layer_print_max", "first_layer_print_min", "first_layer_print_size",
     "first_layer_temperature", "first_non_support_filaments", "first_non_support_hotend", "first_object_name",
-    "first_x_layer_fan_speed", "flush_length", "flush_temperatures", "flush_volumetric_speeds",
+    "flush_length", "flush_temperatures", "flush_volumetric_speeds",
     "has_single_extruder_multi_material_priming", "has_timelapse_safe_pos", "has_tpu_in_first_layer", "has_wipe_tower",
     "hold_chamber_temp_for_flat_print", "hour", "in_head_wrap_detect_zone", "initial_extruder", "initial_filament_id",
     "initial_hotend", "initial_layer_travel_acceleration", "initial_no_support_extruder",

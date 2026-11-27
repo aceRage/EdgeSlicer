@@ -481,6 +481,28 @@ inline bool reduce_infill_retraction_applies(ReduceInfillRetractionMode mode, in
     return false;
 }
 
+// Bambu Studio 02.09.01.70 (GCodeEditor.cpp:363-376): one auxiliary fan's speed in percent on a layer.
+// Below initial_layers the fan runs at initial_layer_speed; between that and full_speed_layer it ramps
+// linearly; from there on it runs at target_speed.
+inline int calc_aux_fan_speed(size_t layer_id, int target_speed, int initial_layer_speed, int initial_layers, int full_speed_layer)
+{
+    if (int(layer_id) < initial_layers)
+        return initial_layer_speed;
+    if (int(layer_id) + 1 < full_speed_layer && full_speed_layer > initial_layers) {
+        const float factor = float(int(layer_id + 1) - initial_layers) / float(full_speed_layer - initial_layers);
+        return std::clamp(int(float(initial_layer_speed) * (1.0f - factor) + float(target_speed) * factor + 0.5f), 0, 100);
+    }
+    return target_speed;
+}
+
+// EdgeSlicer: close_additional_fan_first_x_layers = -1 (its default, for presets that do not set it) keeps the
+// standard auxiliary fan off for as many layers as the part cooling fan (close_fan_the_first_x_layers), which
+// is how the auxiliary fan behaved before the Bambu keys were ported. Bambu's own presets all set a count.
+inline int aux_fan_initial_layers(int close_additional_fan_first_x_layers, int close_fan_the_first_x_layers)
+{
+    return close_additional_fan_first_x_layers < 0 ? std::max(0, close_fan_the_first_x_layers) : close_additional_fan_first_x_layers;
+}
+
 // Side stabilizers (Support/Stabilizers.hpp): off, the automatic rings plus any painted points, or the
 // painted points only. Replaced a bool; PrintConfigDef::handle_legacy maps 1 to auto and 0 to off.
 enum StabilizerMode {
@@ -2633,6 +2655,12 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
 
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))
+    // Bambu Studio 02.09.01.70: the auxiliary fan's own early layers and ramp, and the early start of the part
+    // fan before overhangs.
+    ((ConfigOptionInts,               close_additional_fan_first_x_layers))
+    ((ConfigOptionFloats,             first_x_layer_fan_speed))
+    ((ConfigOptionInts,               additional_fan_full_speed_layer))
+    ((ConfigOptionFloats,             pre_start_fan_time))
     ((ConfigOptionBool,               reduce_crossing_wall))
     ((ConfigOptionFloatOrPercent,     max_travel_detour_distance))
     ((ConfigOptionPoints,             printable_area))

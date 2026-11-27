@@ -1378,6 +1378,9 @@ static std::vector<std::string> s_Preset_filament_options {
     //SoftFever
     "enable_pressure_advance", "pressure_advance","adaptive_pressure_advance","adaptive_pressure_advance_model","adaptive_pressure_advance_overhangs", "adaptive_pressure_advance_bridges","chamber_temperature", "chamber_minimal_temperature", "filament_shrink","filament_shrinkage_compensation_z", "support_material_interface_fan_speed","internal_bridge_fan_speed", "filament_notes" /*,"filament_seam_gap"*/,
     "ironing_fan_speed",
+    // Bambu Studio 02.09.01.70: auxiliary fan early layers, pre-start fan time
+    "close_additional_fan_first_x_layers", "first_x_layer_fan_speed", "additional_fan_full_speed_layer",
+    "pre_start_fan_time",
     // Orca #11194: filament ironing overrides
     "filament_ironing_flow", "filament_ironing_spacing", "filament_ironing_inset", "filament_ironing_speed",
     "filament_loading_speed", "filament_loading_speed_start",

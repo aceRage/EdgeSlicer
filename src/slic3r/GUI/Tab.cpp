@@ -6689,12 +6689,38 @@ void TabFilament::build()
         optgroup->append_single_option_line("enable_overhang_bridge_fan");
         optgroup->append_single_option_line("overhang_fan_threshold");
         optgroup->append_single_option_line("overhang_fan_speed");
+        optgroup->append_single_option_line("pre_start_fan_time"); // Bambu Studio 02.09.01.70
         optgroup->append_single_option_line("internal_bridge_fan_speed"); // ORCA: Add support for separate internal bridge fan speed control
         optgroup->append_single_option_line("support_material_interface_fan_speed");
         optgroup->append_single_option_line("ironing_fan_speed"); // ORCA: Add support for ironing fan speed control
 
-        optgroup = page->new_optgroup(L("Auxiliary part cooling fan"), L"param_cooling_aux_fan");
-        optgroup->append_single_option_line("additional_cooling_fan_speed", "auxiliary-fan");
+        // Bambu Studio 02.09.01.70 (Tab.cpp): the auxiliary part cooling fan's group, with its own early layers and ramp.
+        auto build_aux_fan_group = [page](const wxString &group_title, const std::string &initial_layers_key,
+                                          const std::string &initial_speed_key, const std::string &full_speed_layer_key,
+                                          const std::string &speed_key) {
+            auto aux_optgroup = page->new_optgroup(group_title, L"param_cooling_aux_fan");
+            Line aux_line = { L("Initial layer fan"), L("Set the auxiliary fan speed for the first few layers") };
+            aux_line.label_path = "auxiliary-fan";
+            aux_line.append_option(aux_optgroup->get_option(initial_layers_key));
+            aux_line.append_option(aux_optgroup->get_option(initial_speed_key));
+            aux_optgroup->append_line(aux_line);
+            aux_line = { L("Linear ramp up"), L("Auxiliary fan speed will linearly increase from the initial layer speed "
+                                                "to the target speed over the specified number of layers") };
+            aux_line.label_path = "auxiliary-fan";
+            {
+                auto opt_layer         = aux_optgroup->get_option(full_speed_layer_key);
+                opt_layer.opt.label    = L("At layer");
+                opt_layer.opt.sidetext = L("layers");
+                aux_line.append_option(opt_layer);
+                auto opt_speed      = aux_optgroup->get_option(speed_key);
+                opt_speed.opt.label = L("ramp up to");
+                aux_line.append_option(opt_speed);
+            }
+            aux_optgroup->append_line(aux_line);
+            return aux_optgroup;
+        };
+        build_aux_fan_group(L("Auxiliary part cooling fan"), "close_additional_fan_first_x_layers", "first_x_layer_fan_speed",
+                            "additional_fan_full_speed_layer", "additional_cooling_fan_speed");
 
         optgroup = page->new_optgroup(L("Exhaust fan"),L"param_cooling_exhaust");
 
@@ -7283,7 +7309,15 @@ void TabFilament::toggle_options()
       for (auto el : {"overhang_fan_speed", "overhang_fan_threshold", "internal_bridge_fan_speed"}) // ORCA: Add support for separate internal bridge fan speed control
             toggle_option(el, has_enable_overhang_bridge_fan);
 
-      toggle_option("additional_cooling_fan_speed", cfg.opt_bool("auxiliary_fan"));
+      // Bambu Studio 02.09.01.70: the pre-start time works with the overhang fan; EDGE: and only while the printer's own
+      // fan speed-up time (FanMover) is 0, which then moves the overhang fan commands instead.
+      const auto *fan_speedup_time = cfg.option<ConfigOptionFloat>("fan_speedup_time");
+      toggle_option("pre_start_fan_time", has_enable_overhang_bridge_fan && (fan_speedup_time == nullptr || fan_speedup_time->value == 0.));
+
+      const bool has_aux_fan = cfg.opt_bool("auxiliary_fan");
+      for (auto el : { "additional_cooling_fan_speed", "close_additional_fan_first_x_layers", "first_x_layer_fan_speed",
+                       "additional_fan_full_speed_layer" })
+          toggle_option(el, has_aux_fan);
 
       // Orca #13228: the exhaust fan speeds apply only where their override is on.
       bool activate_air_filtration = m_config->opt_bool("activate_air_filtration", 0);
