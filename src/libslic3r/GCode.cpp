@@ -5563,6 +5563,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     // copy just finished.
                     file.write(m_writer.travel_to_z(m_max_layer_z + m_config.z_offset.value));
                     file.write(this->travel_to(Point(0, 0), erNone, "move to origin position for next object"));
+                    if (object_tower != nullptr && wipe_tower_type2)
+                        // Per-object prime towers, Type 2: that travel took the pending z-hop, so the writer counts the
+                        // head as lifted. The first layer's change_layer() keeps that lift, and the tower's first tool
+                        // change (append_tcr2) "unlifts" it below the new layer, under the bed on the first one
+                        // (U1: G1 Z-.15). The head is high above every copy here: make that height the nominal one
+                        // (no move is written).
+                        file.write(m_writer.travel_to_z(m_writer.get_position().z()));
                     m_enable_cooling_markers = true;
                     // Disable motion planner when traveling to first object point.
                     m_avoid_crossing_perimeters.disable_once();
@@ -5598,14 +5605,24 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                                                 data.priming ? *data.priming : no_priming, data.tool_changes,
                                                                 data.local_z_tool_changes, data.local_z_reserve_boxes, *data.final_purge,
                                                                 false, &object_tower->pos));
-                    m_wipe_tower->set_heating_stop_area(bambu_wipe_tower_plate_bbx(print, data, object_tower->pos),
-                                                        bambu_shared_printable_bbx(print));
+                    if (wipe_tower_type2) {
+                        // Orca #15035, per tower (PR 4): this tower's own first-layer envelope (brim, ribs and cone
+                        // included), tower-local, for the skip-point entry routing in append_tcr2.
+                        if (data.wipe_tower_mesh_data.has_value() && !data.wipe_tower_mesh_data->bottom.empty()) {
+                            const BoundingBox envelope = get_extents(data.wipe_tower_mesh_data->bottom);
+                            m_wipe_tower->set_wipe_tower_bbx(BoundingBoxf(unscale(envelope.min), unscale(envelope.max)));
+                        }
+                    } else {
+                        // BBS: the H2C per-toolchange M620.14 heating stop point (Bambu-style tower only, as by layer).
+                        m_wipe_tower->set_heating_stop_area(bambu_wipe_tower_plate_bbx(print, data, object_tower->pos),
+                                                            bambu_shared_printable_bbx(print));
+                    }
                 }
                 this->process_layers(print, object_tower != nullptr ? *object_tower->tool_ordering : tool_ordering,
                                      collect_layers_to_print(object, true, object_tower != nullptr ? object_tower->data.get() : nullptr),
                                      *print_object_instance_sequential_active - object.instances().data(), file, prime_extruder);
                 if (m_wipe_tower) {
-                    // The tower ends with its block: nothing to purge (no final purge on a Type 1 tower).
+                    // The tower ends with its block: nothing to purge (a copy's tower has no final purge, either type).
                     file.write(m_wipe_tower->finalize(*this));
                     m_wipe_tower.reset();
                 }
