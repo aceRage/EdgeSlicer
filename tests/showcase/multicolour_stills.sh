@@ -66,6 +66,8 @@ while [ $# -gt 0 ]; do
     *) ARGS="$ARGS $1"; shift ;;
     esac
 done
+# ARGS is a word list (word splitting intended).
+# shellcheck disable=SC2086
 set -- $ARGS
 if [ $# -ne 3 ]; then
     echo "usage: multicolour_stills.sh <install dir> <template.3mf> <out dir> [--size px] [--angle deg]" >&2
@@ -94,6 +96,8 @@ if [ -n "$MESH" ]; then
     LABEL=P4
 fi
 "$PY" -I "$HERE/make_multicolour_fixtures.py" "$TEMPLATE" "$OUT/fixtures" [ -n "$GRADIENT" ] && LABEL=P6
+# the optional flags are meant to split into words (word splitting intended).
+# shellcheck disable=SC2086
 "$PY" -I "$HERE/make_multicolour_fixtures.py" "$TEMPLATE" "$OUT/fixtures" --angle "$ANGLE" --source "$SOURCE" --dwell "$DWELL" --transition "$TRANSITION" $GRADIENT $DARK $FIXARGS > "$OUT/fixtures.txt" || exit 2
 
 STATUS=0
