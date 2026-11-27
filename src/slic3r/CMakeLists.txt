@@ -111,6 +111,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/SliceBakeDialog.hpp
     GUI/StabilizerBakeDialog.cpp
     GUI/StabilizerBakeDialog.hpp
+    GUI/FinBakeDialog.cpp
+    GUI/FinBakeDialog.hpp
     GUI/ColorSplitDialog.cpp
     GUI/ColorSplitDialog.hpp
     GUI/ImageFillDialog.cpp
@@ -393,6 +395,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/SliceBakeJob.hpp
     GUI/Jobs/StabilizerBakeJob.cpp
     GUI/Jobs/StabilizerBakeJob.hpp
+    GUI/Jobs/FinBakeJob.cpp
+    GUI/Jobs/FinBakeJob.hpp
     GUI/Jobs/SplitToFitJob.cpp
     GUI/Jobs/SplitToFitJob.hpp
     GUI/Jobs/PaintSplitJob.cpp

@@ -749,6 +749,10 @@ set(lisbslic3r_sources
     Support/SupportLayerAt.hpp
     Support/Fins.cpp
     Support/Fins.hpp
+    Support/FinBake.cpp
+    Support/FinBake.hpp
+    Support/FinMesh.cpp
+    Support/FinMesh.hpp
     Support/StabilizerMesh.cpp
     Support/StabilizerMesh.hpp
     Support/StabilizerBake.cpp
