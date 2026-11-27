@@ -366,6 +366,13 @@ public:
     // `report->error` says why.
     const ModelObjectPtrs& perform_with_cutter_solid(const indexed_triangle_set& cutter, bool piece_inside,
                                                      const PaintSplitKeep& keep, PaintSplitReport* report = nullptr);
+    // The gizmo's Apply: keep.planes holds one plane per loop of the region component. One loop is the
+    // half-space cut above; several loops (a band, a trim with holes; owner 2026-11-25) cut once per loop
+    // (paint_split_assign_loops), and the rest of the part comes back as the body plus `_looseN` parts
+    // (in the lower object too, by that suffix, so the caller can make them objects of their own).
+    // With keep.planes.size() > 1, perform_with_cutter_solid() ignores its `cutter` and does the same.
+    // keep.cutters (Follow paint, one closed cutter per loop) win over keep.planes: paint_split_assign_cutters().
+    const ModelObjectPtrs& perform_with_paint_split_planes(const PaintSplitKeep& keep, PaintSplitReport* report = nullptr);
     // Flexi joint cut: one object, two watertight model parts, a real Manifold boolean.
     // perform_with_plane() dispatches here automatically when a flexi connector is present.
     const ModelObjectPtrs& perform_with_flexi_joints();

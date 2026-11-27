@@ -23,13 +23,17 @@ enum class PaintSplitError {
     NonManifold,   // closed, but Manifold does not accept it (self-touching, non-manifold edges)
     EmptyMask,     // nothing selected
     NoBoundary,    // a component covers a whole closed shell: there is no boundary to cut along
-    Band,          // two boundary loops that are both large: a painted ring (design D7: "split it as two cuts")
-    MultiLoop,     // more than two boundary loops left after the hole fill
+    Band,          // no longer returned: a band is cut as one cut per edge (owner 2026-11-25, D7 reversed)
+    MultiLoop,     // no longer returned: a region with several edges is cut once per edge
     BadComponent,  // the component index is out of range
     BooleanFailed, // Manifold failed during the split
     EmptyPiece,    // no cut component carries the selection (the cutter misses the region)
     EmptyBody,     // the piece would take the whole part
     RepairFailed,  // the part has holes or slivers that the automatic repair could not close
+    CutCrossesRegion, // one edge's cut would take most of the selected region away (PaintSplitPieces::bad_loop)
+    CutterFailed,     // one edge's follow-paint cut surface could not be built (folds, crosses itself, too short)
+    EdgeNotSeparated, // one edge's cut sheet does not part the region from what lies across that edge
+    VoxelFailed,      // the nearest-skin field could not be meshed (no OpenVDB in this build, or a broken claim)
 };
 const char* paint_split_error_message(PaintSplitError err);
 
@@ -82,6 +86,12 @@ struct PaintSplitLoop
     std::vector<DrawCutSample> pts;   // closed: the last sample connects back to the first
     double                     length{ 0. };
     bool                       is_outer{ false };
+    // From the unselected skin just across this edge to the selected skin just inside it (a few facet rings
+    // on each side). It says which side of this edge's cut the piece is on, locally, which the whole region
+    // cannot say for a band or a hole.
+    Vec3d                      inward{ Vec3d::Zero() };
+    // Centroids of the unselected facets just across the edge: the cut must part them from the piece.
+    std::vector<Vec3d>         across;
 };
 
 struct PaintSplitRegionParams
@@ -101,7 +111,7 @@ struct PaintSplitRegion
     std::vector<std::vector<PaintSplitLoop>> loops; // per component, after the hole fill; [0] is the outer one
     std::vector<double>   area;          // per component, selected area after the hole fill
     std::vector<int>      holes_filled;  // per component
-    std::vector<PaintSplitError> comp_error; // per component: None, NoBoundary, Band or MultiLoop
+    std::vector<PaintSplitError> comp_error; // per component: None or NoBoundary (bands and several edges are cut, one cut per edge)
     // The part was open: the region was taken on paint_split_repair()'s output, and the split repairs too.
     bool                  repaired{ false };
     PaintSplitRepairStats repair;
@@ -147,10 +157,80 @@ struct PaintSplitPlane
 // Fits the plane of component `comp`'s outer loop (PCA of the length-weighted samples), points it at the
 // selection and applies Offset / Tilt / Snap.
 PaintSplitPlane paint_split_fit_plane(const PaintSplitRegion& region, int comp, const PaintSplitPlaneParams& params = {});
+// The same for any one of the component's loops. With one loop the normal points at the side holding most of
+// the selected area (as above); with several it points across that loop, from the unselected skin to the
+// selected skin next to it (PaintSplitLoop::inward), so each cut of a band or around a hole faces the right way.
+PaintSplitPlane paint_split_fit_loop_plane(const PaintSplitRegion& region, int comp, int loop, const PaintSplitPlaneParams& params = {});
+// Every loop's plane of component `comp`, in loop order.
+std::vector<PaintSplitPlane> paint_split_fit_planes(const PaintSplitRegion& region, int comp, const PaintSplitPlaneParams& params = {});
+// The cut face a plane makes for one loop (the preview of the cut surface): the cross-section of the closed
+// `mesh` (same frame as the region) by the plane, keeping only the islands the loop runs round. Triangles
+// facing along the plane's normal; empty when the plane misses the part.
+indexed_triangle_set paint_split_cap(const indexed_triangle_set& mesh, const PaintSplitPlane& plane, const PaintSplitLoop& loop);
 // The closed half-space box on the normal's side of the plane, big enough to contain `bbox` (inflated 1 mm).
 indexed_triangle_set paint_split_half_space(const PaintSplitPlane& plane, const BoundingBoxf3& bbox);
 // The closed slab |distance| <= kerf / 2 around the plane, over the same extent.
 indexed_triangle_set paint_split_slab(const PaintSplitPlane& plane, const BoundingBoxf3& bbox, double kerf);
+
+// ---------------------------------------------------------------------------------------------------------
+// Follow paint (design 3.3a / 4.3a; the default since the owner's hand test 2026-11-26): each boundary loop
+// becomes a closed draw-cut stroke, and the draw cut's band + flat core is the cut surface. The skin line is the
+// paint line; inside, the band runs Depth mm at Lip angle onto a flat core inside the loop's own footprint, and
+// only that surface is cut with (as a thin sheet), so the cut never reaches past the loop. Under a flat patch the
+// cut is a plug Depth deep instead.
+// ---------------------------------------------------------------------------------------------------------
+
+// The thickness of a follow-paint cut sheet, mm. The sheet's material goes to the rest of the part (the rest is
+// the part less the piece), so the piece's cut face sits this much short of the rest's: invisible in print.
+constexpr double PaintSplitSheetThickness = 0.02;
+
+struct PaintSplitFollowParams
+{
+    double depth{ 3. };        // mm the band travels in before the flat core (capped so it cannot fold)
+    double angle_deg{ 0. };    // the lip angle, -90..90 (0 = a flat shelf; see DrawCutParams::angle_deg)
+    double extension{ 2. };    // mm the skirt reaches out past the skin line
+    double smoothing{ 0.3 };   // 0..1 of the paint line before it becomes the stroke
+    bool   square_to_bed{ false }; // the core forced level (DrawCutDirection::AxisZ)
+};
+
+struct PaintSplitFollowCut
+{
+    PaintSplitError      error{ PaintSplitError::None };
+    indexed_triangle_set preview;  // band + skirt + core only: what the gizmo draws
+    indexed_triangle_set sheet;    // that surface as a closed sheet PaintSplitSheetThickness thick: what Apply cuts with
+    double               depth{ 0. };  // the depth actually used (lowered when the asked one folds)
+    bool                 separates{ false }; // the cut parts the part across the loop (false: a plug under a flat patch)
+    bool                 ignored{ false };   // a speck of an edge (under 3 mm round): no cut, no error
+    int                  stage{ 0 };          // where a failure happened (0 ok, 1 stroke, 2 self-crossing, 3 folds, 4 cutter): diagnostics
+};
+
+// `mesh` is the part in the region's frame (closed); `bbox` its bounding box. A wavy edge whose stroke crosses
+// itself is retried smoother and coarser. Plugs (a flat patch) go straight in by Depth, with Lip angle as their
+// wall's draft; elsewhere Lip angle is the band's slope.
+PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, const PaintSplitLoop& loop,
+                                           const PaintSplitFollowParams& params, const BoundingBoxf3& bbox);
+
+// ---------------------------------------------------------------------------------------------------------
+// Nearest skin (the owner's choice, 2026-11-26): the piece is the material nearer to the region's selected skin
+// than to any other skin of the part, optionally no deeper than Depth. On the skin the cut meets the paint line
+// itself (to about a voxel); inside it runs where the two skins are equally near, so it stays local, and bands,
+// holes and fused contacts (legs against a sack) need nothing special. The field is sampled on a voxel grid over
+// the region's neighbourhood and its zero level set (the "claim") is cut out of the exact mesh.
+// ---------------------------------------------------------------------------------------------------------
+
+struct PaintSplitSkinParams
+{
+    double depth{ 0. };               // mm under the selected skin; 0 = unlimited (to where another skin is nearer)
+    double voxel{ 0. };               // mm; 0 = automatic, from max_samples over the claim's box
+    size_t max_samples{ 6000000 };    // the voxel budget of the automatic size
+};
+
+// The claim of component `comp` as a closed mesh (same frame as the region), empty on failure. `voxel_used`
+// receives the voxel size.
+indexed_triangle_set paint_split_nearest_claim(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                               const PaintSplitSkinParams& params, double* voxel_used = nullptr);
+// The part of the claim's surface that lies inside the part: the cut surface, for the preview.
+indexed_triangle_set paint_split_claim_cut_surface(const indexed_triangle_set& mesh, const indexed_triangle_set& claim);
 
 // ---------------------------------------------------------------------------------------------------------
 // The keep-connected rule (design 4.2)
@@ -171,6 +251,10 @@ struct PaintSplitAssignParams
     // the carrying piece, so a returned component never gets a slot through it (design 4.2 C). May be null.
     const indexed_triangle_set* kerf_solid{ nullptr };
     double                      kerf{ 0. };
+    // Several loops: the rest of the part falls into pieces. The one that becomes the body (the part the next
+    // region is cut from) is the one holding most of these points (the other regions' selected skin), then the
+    // biggest. Points on the source surface, same frame.
+    std::vector<Vec3d>          body_hints;
 };
 
 // The re-union measurement (design 4.2 A3, the P1 open question). The cut faces are the faces whose
@@ -201,6 +285,8 @@ struct PaintSplitPieces
     double                            piece_volume{ 0. }, body_volume{ 0. }, loose_volume{ 0. }, source_volume{ 0. };
     PaintSplitRejoin                  rejoin;
     std::vector<PaintSplitWarning>    warnings;
+    int                               bad_loop{ -1 }; // CutCrossesRegion / EmptyPiece: the loop (0-based) whose cut failed
+    int                               flipped_loops{ 0 }; // paint_split_assign_loops: cuts taken the other way round (the skin was unclear)
 
     bool ok() const { return error == PaintSplitError::None; }
 };
@@ -212,12 +298,37 @@ PaintSplitPieces paint_split_assign(const indexed_triangle_set& mesh, const Pain
                                     const indexed_triangle_set& cutter, bool piece_inside,
                                     const PaintSplitAssignParams& params = {});
 
+// A region with several loops (a band, a trim with holes; owner 2026-11-25): one cut per loop, `planes[i]`
+// for loop i (each pointing at the piece, paint_split_fit_planes). Cut by cut, the piece keeps the parts on
+// the region's side that carry the selection and the parts across other loops' cuts; it loses what lies across
+// this loop's own edge. The rest of the part (mesh less the piece) falls into connected pieces: the body is the
+// one body_hints picks, the others come back in `loose`. Refused with CutCrossesRegion (and bad_loop) when one
+// cut would take most of the selection away. No kerf, no attach rule: everything not in the piece is the rest.
+PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                          const std::vector<PaintSplitPlane>& planes, const PaintSplitAssignParams& params = {});
+
+// Follow paint: one closed thin sheet per loop (PaintSplitFollowCut::sheet; an empty one is skipped). Each sheet
+// is cut out of the piece; the parts that still carry the selection stay. A sheet that leaves the skin across its
+// edge on the piece is refused (EdgeNotSeparated). Works for one loop too. The rest of the part (mesh less the
+// piece, sheets included) falls into connected pieces as above.
+PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                            const std::vector<indexed_triangle_set>& cutters, const PaintSplitAssignParams& params = {});
+
+// The nearest-skin split: piece = the part AND the claim (paint_split_nearest_claim), reduced to the components that
+// carry the selection; the rest of the part falls into connected pieces as above.
+PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                            const PaintSplitSkinParams& skin, const PaintSplitAssignParams& params = {});
+
 // What Cut::perform_with_cutter_solid() needs besides the cutter (design 4.4).
 struct PaintSplitKeep
 {
     int                     mask_volume_idx{ -1 };    // the model part of the source object the mask is on
     const PaintSplitRegion* region{ nullptr };        // the mask's region, ALREADY in the cut frame
     int                     component{ 0 };           // which region component becomes the piece
+    std::vector<PaintSplitPlane> planes;              // per loop of `component`, cut frame (Cut::perform_with_paint_split_planes)
+    std::vector<indexed_triangle_set> cutters;        // or Follow paint's closed cutters per loop (these win when set)
+    bool                    nearest_skin{ false };    // the nearest-skin split (wins over both)
+    PaintSplitSkinParams    skin;
     PaintSplitAssignParams  assign;                   // kerf_solid, if any, also in the cut frame
     bool                    cut_only_painted_part{ false }; // D19 (c): other parts stay whole on the body
 };
@@ -231,6 +342,7 @@ struct PaintSplitReport
     int                            loose_parts{ 0 };
     int                            other_parts_to_piece{ 0 };
     int                            other_parts_to_body{ 0 };
+    int                            bad_loop{ -1 };     // see PaintSplitPieces::bad_loop
     PaintSplitRejoin               rejoin;
     std::vector<PaintSplitWarning> warnings;
 };
@@ -238,6 +350,8 @@ struct PaintSplitReport
 // D19 (a): the share of `mesh`'s volume inside the closed `cutter` (0..1; -1 when the boolean fails). A part
 // the mask is not on is not cut; it goes whole to the side holding most of its volume.
 double paint_split_inside_fraction(const indexed_triangle_set& mesh, const indexed_triangle_set& cutter);
+// ... inside all of `cutters` at once (a band's piece is the part between its cuts).
+double paint_split_inside_fraction(const indexed_triangle_set& mesh, const std::vector<indexed_triangle_set>& cutters);
 
 // ---------------------------------------------------------------------------------------------------------
 // Helpers for the gizmo's selection tools
@@ -245,10 +359,28 @@ double paint_split_inside_fraction(const indexed_triangle_set& mesh, const index
 
 // Pick colour: every facet (and sub-facet) of `state` in `paint` becomes selected in the returned mask.
 // Pick segment: with `seed_facet` >= 0 only the region of that state connected (across edges) to the seed.
-// The mask is a one-state TriangleSplittingData against the same mesh.
+// The mask is a one-state TriangleSplittingData against the same mesh. `hit` (mesh coordinates, on the seed
+// facet) picks the sub-facet the user clicked; without it the first sub-facet of `state` on the seed is used.
 TriangleSelector::TriangleSplittingData paint_split_mask_from_paint(const TriangleMesh& mesh,
                                                                     const TriangleSelector::TriangleSplittingData& paint,
-                                                                    EnforcerBlockerType state, int seed_facet = -1);
+                                                                    EnforcerBlockerType state, int seed_facet = -1,
+                                                                    const Vec3f* hit = nullptr);
+// The painted state under `hit` (mesh coordinates) on `facet`: NONE where the facet is unpainted there.
+EnforcerBlockerType paint_split_state_at(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& paint,
+                                         int facet, const Vec3f& hit);
+// Two one-state masks on the same mesh combined (Ctrl+click in the pick modes): Union adds `b` to `a`,
+// Subtract takes `b` out of `a`. The result is resampled from both, so a brushed mask and a picked patch mix.
+enum class PaintSplitMaskOp { Union, Subtract };
+TriangleSelector::TriangleSplittingData paint_split_mask_combine(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& a,
+                                                                 const TriangleSelector::TriangleSplittingData& b, PaintSplitMaskOp op);
+
+// One click of Pick colour / Pick segment (owner 2026-11-25): the connected patch of the painted state under
+// `hit` on `facet`. Without `add` it replaces `mask`; with `add` (Ctrl) it is added to `mask`, or taken out of
+// it when the click lands on surface `mask` already selects. `picked` gets the state under the click.
+TriangleSelector::TriangleSplittingData paint_split_pick(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& paint,
+                                                         const TriangleSelector::TriangleSplittingData& mask, int facet,
+                                                         const Vec3f& hit, bool add, EnforcerBlockerType* picked = nullptr);
+
 // The selected area of a one-state mask on `mesh` (mesh units squared).
 double paint_split_mask_area(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& mask);
 

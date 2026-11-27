@@ -2295,12 +2295,35 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
         return mesh;
     };
 
+    // A region with several loops (a band, a trim with holes) is cut once per loop (keep.planes); the
+    // cutters below are then those planes' half-spaces, for placing the other parts (D19).
+    const bool                        nearest = keep.nearest_skin;
+    const bool                        follow  = nearest || !keep.cutters.empty(); // the piece decides other parts
+    const bool                        multi   = follow || keep.planes.size() > 1;
+    std::vector<indexed_triangle_set> cutters;
+    if (!keep.cutters.empty())
+        cutters = keep.cutters; // (unused by the nearest-skin split, which places other parts by its piece)
+    else if (multi && !nearest) {
+        BoundingBoxf3 bbox;
+        for (const ModelVolume* v : mo->volumes)
+            if (v->is_model_part() && !v->mesh().empty())
+                bbox.merge(mesh_in_cut_frame(v).bounding_box());
+        for (const PaintSplitPlane& pl : keep.planes)
+            cutters.push_back(paint_split_half_space(pl, bbox));
+    } else if (!nearest)
+        cutters.push_back(cutter);
+
     // The masked part first: a refusal must leave nothing cloned.
     const ModelVolume* mask_volume = mo->volumes[size_t(keep.mask_volume_idx)];
-    PaintSplitPieces   pieces      = paint_split_assign(mesh_in_cut_frame(mask_volume).its, *keep.region, keep.component, cutter,
-                                                        piece_inside, keep.assign);
-    if (!pieces.ok())
+    const TriangleMesh mask_mesh   = mesh_in_cut_frame(mask_volume);
+    PaintSplitPieces   pieces      = nearest ? paint_split_assign_nearest(mask_mesh.its, *keep.region, keep.component, keep.skin, keep.assign) :
+                                     follow ? paint_split_assign_cutters(mask_mesh.its, *keep.region, keep.component, keep.cutters, keep.assign) :
+                                     multi  ? paint_split_assign_loops(mask_mesh.its, *keep.region, keep.component, keep.planes, keep.assign) :
+                                              paint_split_assign(mask_mesh.its, *keep.region, keep.component, cutter, piece_inside, keep.assign);
+    if (!pieces.ok()) {
+        rep.bad_loop = pieces.bad_loop;
         return refuse(pieces.error);
+    }
     rep.returned_components = pieces.returned_components;
     rep.attached_components = pieces.attached_components;
     rep.loose_parts         = int(pieces.loose.size());
@@ -2319,12 +2342,14 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
     const bool as_parts = m_attributes.has(ModelObjectCutAttribute::KeepAsParts);
 
     // Where a mesh of the cut frame goes: as_parts puts both sides into `upper`, the body marked as from lower.
-    auto add_side = [&](TriangleMesh& mesh, const ModelVolume* src, bool to_piece, const std::string& suffix) {
+    // `always_suffix`: the loose pieces keep their suffix in the lower object too, so the caller can find them.
+    auto add_side = [&](TriangleMesh& mesh, const ModelVolume* src, bool to_piece, const std::string& suffix, bool always_suffix = false) {
         const Transform3d pre = cut_pre_transform(m_cut_matrix, instance_matrix, src);
         ModelObject*      dst = as_parts ? upper : (to_piece ? upper : lower);
         if (dst == nullptr)
             return;
-        ModelVolume* vol = add_cut_volume(mesh, dst, src, m_cut_matrix, as_parts ? suffix : std::string(), ModelVolumeType::MODEL_PART, &pre);
+        ModelVolume* vol = add_cut_volume(mesh, dst, src, m_cut_matrix, (as_parts || always_suffix) ? suffix : std::string(),
+                                          ModelVolumeType::MODEL_PART, &pre);
         if (vol != nullptr && as_parts && !to_piece)
             vol->cut_info.is_from_upper = false;
     };
@@ -2352,7 +2377,7 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
             add_side(body, volume, false, "_B");
             for (size_t k = 0; k < pieces.loose.size(); ++k) {
                 TriangleMesh loose(pieces.loose[k]);
-                add_side(loose, volume, false, "_loose" + std::to_string(k + 1));
+                add_side(loose, volume, false, "_loose" + std::to_string(k + 1), true);
             }
             continue;
         }
@@ -2361,11 +2386,13 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
         TriangleMesh whole = mesh_in_cut_frame(volume);
         bool         to_piece = false;
         if (!keep.cut_only_painted_part) {
-            const double inside = paint_split_inside_fraction(whole.its, cutter);
-            to_piece            = inside >= 0. && (piece_inside ? inside : 1. - inside) > 0.5;
+            // Follow paint's cutters may hold either side; the piece itself says where the part belongs.
+            const double inside = follow ? paint_split_inside_fraction(whole.its, pieces.piece) : paint_split_inside_fraction(whole.its, cutters);
+            to_piece            = inside >= 0. && (follow || piece_inside ? inside : 1. - inside) > 0.5;
         }
         (to_piece ? rep.other_parts_to_piece : rep.other_parts_to_body)++;
-        add_side(whole, volume, to_piece, to_piece ? "_A" : "_B");
+        // Not cut, so not renamed: a part keeps its name through any number of paint splits.
+        add_side(whole, volume, to_piece, std::string());
     }
 
     ModelObjectPtrs cut_object_ptrs;
@@ -2398,6 +2425,32 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
 
     finalize(cut_object_ptrs, saved_paintings);
     return m_model.objects;
+}
+
+const ModelObjectPtrs& Cut::perform_with_paint_split_planes(const PaintSplitKeep& keep, PaintSplitReport* report)
+{
+    if ((keep.nearest_skin || !keep.cutters.empty()) && !m_model.objects.empty())
+        return perform_with_cutter_solid(indexed_triangle_set(), true, keep, report);
+    if (keep.planes.empty() || m_model.objects.empty()) {
+        if (report != nullptr) {
+            *report       = PaintSplitReport();
+            report->error = PaintSplitError::BadComponent;
+        }
+        m_model.clear_objects();
+        return m_model.objects;
+    }
+    if (keep.planes.size() > 1)
+        return perform_with_cutter_solid(indexed_triangle_set(), true, keep, report);
+    // One loop: the plane's half-space over every model part, as the gizmo always did.
+    ModelObject*      mo              = m_model.objects.front();
+    const Transform3d instance_matrix = mo->instances[m_instance]->get_transformation().get_matrix_no_offset();
+    const Transformation cut_transformation = Transformation(m_cut_matrix);
+    const Transform3d inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
+    BoundingBoxf3 bbox;
+    for (const ModelVolume* v : mo->volumes)
+        if (v->is_model_part() && !v->mesh().empty())
+            bbox.merge(v->mesh().transformed_bounding_box(inverse_cut_matrix * instance_matrix * v->get_matrix()));
+    return perform_with_cutter_solid(paint_split_half_space(keep.planes.front(), bbox), true, keep, report);
 }
 
 const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOffset offset)

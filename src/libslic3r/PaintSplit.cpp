@@ -5,7 +5,14 @@
 #include "AABBMesh.hpp"
 #include "ColorSplit.hpp"
 #include "ColorSplitInternal.hpp"
+#include "ExPolygon.hpp"
+#include "Tesselate.hpp"
 #include "TriangleMesh.hpp"
+#include "TriangleMeshSlicer.hpp"
+#include "MeshRepair.hpp"
+
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
 
 #include <Eigen/Eigenvalues>
 #include <boost/log/trivial.hpp>
@@ -42,6 +49,10 @@ const char* paint_split_error_message(PaintSplitError err)
     case PaintSplitError::BooleanFailed: return L("The split failed in the boolean operation.");
     case PaintSplitError::EmptyPiece: return L("The cut does not reach the selected region.");
     case PaintSplitError::EmptyBody: return L("The piece would take the whole part.");
+    case PaintSplitError::CutCrossesRegion: return L("This edge's cut passes through the selected region. Fill the region's holes or select a simpler region.");
+    case PaintSplitError::EdgeNotSeparated: return L("The cut along this edge does not go all the way round: the part stays joined past it. Raise Depth or Smoothing.");
+    case PaintSplitError::VoxelFailed: return L("The cut could not be computed (the region may be too large, or this build has no voxel support).");
+    case PaintSplitError::CutterFailed: return L("This edge's cut surface could not be built (the edge folds or crosses itself). Raise Smoothing or lower Depth.");
     }
     return "";
 }
@@ -165,6 +176,7 @@ std::vector<PaintSplitLoop> ps_loops(const indexed_triangle_set& its, const std:
             smp.facet  = size_t(he.face);
             loop.pts.push_back(smp);
             loop.length += (its.vertices[he.b] - its.vertices[he.a]).cast<double>().norm();
+
             if (he.b == start)
                 break;
             size_t next = size_t(-1);
@@ -175,6 +187,98 @@ std::vector<PaintSplitLoop> ps_loops(const indexed_triangle_set& its, const std:
             cur = next;
         }
         loops.push_back(std::move(loop));
+    }
+    // Each loop's skin across its edge, 1.5 to 4 mm away from it: a cut along the (smoothed) paint line must part
+    // these from the piece. Flooded over the unselected facets from the ones on the edge, each carrying the edge
+    // point it started from.
+    for (PaintSplitLoop& loop : loops) {
+        std::unordered_map<int, Vec3d> origin;
+        std::vector<int>               front;
+        for (const DrawCutSample& smp : loop.pts) {
+            const int f = int(smp.facet);
+            for (int i = 0; i < 3; ++i) {
+                const auto it = edges.find(ps_edge_key(its.indices[f][i], its.indices[f][(i + 1) % 3]));
+                if (it == edges.end())
+                    continue;
+                for (int g : it->second)
+                    if (facet_comp[g] != comp && origin.emplace(g, smp.pos).second)
+                        front.push_back(g);
+            }
+        }
+        for (int ring = 0; ring < 200 && !front.empty() && loop.across.size() < 400; ++ring) {
+            std::vector<int> next;
+            for (int f : front) {
+                const Vec3d  o = origin[f];
+                const double d = (ps_tri_centroid(its, size_t(f)) - o).norm();
+                if (d >= 1.5 && d <= 4.)
+                    loop.across.push_back(ps_tri_centroid(its, size_t(f)));
+                if (d > 4.)
+                    continue;
+                for (int i = 0; i < 3; ++i) {
+                    const auto it = edges.find(ps_edge_key(its.indices[f][i], its.indices[f][(i + 1) % 3]));
+                    if (it == edges.end())
+                        continue;
+                    for (int g : it->second)
+                        if (facet_comp[g] != comp && origin.emplace(g, o).second)
+                            next.push_back(g);
+                }
+            }
+            front = std::move(next);
+        }
+    }
+    // Each loop's local inward direction: a few facet rings on each side of its edges, the selected side
+    // flooded within the component, the other side outside it.
+    {
+        auto neighbours = [&](int f, std::vector<int>& out) {
+            out.clear();
+            for (int i = 0; i < 3; ++i) {
+                const auto it = edges.find(ps_edge_key(its.indices[f][i], its.indices[f][(i + 1) % 3]));
+                if (it != edges.end())
+                    for (int g : it->second)
+                        if (g != f)
+                            out.push_back(g);
+            }
+        };
+        std::vector<int> nb;
+        for (PaintSplitLoop& loop : loops) {
+            // Three rings each side: deeper floods reach round the next bend of a figure and can point the wrong
+            // way (owner's figure, 2026-11-25); paint_split_assign_loops tries the other side when this one fails.
+            const int RINGS = 3;
+            std::unordered_map<int, int> seen_in, seen_out; // face -> ring
+            std::vector<int>             front_in, front_out;
+            for (const DrawCutSample& s : loop.pts) {
+                const int f = int(s.facet);
+                if (seen_in.emplace(f, 0).second)
+                    front_in.push_back(f);
+                neighbours(f, nb);
+                for (int g : nb)
+                    if (facet_comp[g] != comp && seen_out.emplace(g, 0).second)
+                        front_out.push_back(g);
+            }
+            auto flood = [&](std::vector<int> front, std::unordered_map<int, int>& seen, bool inside) {
+                for (int ring = 1; ring < RINGS && !front.empty(); ++ring) {
+                    std::vector<int> next;
+                    for (int f : front) {
+                        neighbours(f, nb);
+                        for (int g : nb)
+                            if ((facet_comp[g] == comp) == inside && seen.emplace(g, ring).second)
+                                next.push_back(g);
+                    }
+                    front = std::move(next);
+                }
+                Vec3d  c = Vec3d::Zero();
+                double a = 0.;
+                for (const auto& [f, ring] : seen) {
+                    const double fa = ps_tri_area(its, size_t(f));
+                    c += fa * ps_tri_centroid(its, size_t(f));
+                    a += fa;
+                }
+                return a > 0. ? Vec3d(c / a) : Vec3d(Vec3d::Zero());
+            };
+            const Vec3d cin = flood(front_in, seen_in, true);
+            if (!seen_out.empty())
+                loop.inward = cin - flood(front_out, seen_out, false);
+        }
     }
     std::sort(loops.begin(), loops.end(), [](const PaintSplitLoop& l, const PaintSplitLoop& r) { return l.length > r.length; });
     if (!loops.empty())
@@ -467,12 +571,9 @@ PaintSplitRegion paint_split_region(const indexed_triangle_set& mesh, const Tria
     r.comp_error.assign(ncomp, PaintSplitError::None);
     for (int c = 0; c < ncomp; ++c) {
         r.loops[c] = ps_loops(r.surface, edges, r.facet_comp, c);
+        // Bands and regions with several edges are cut once per edge (owner 2026-11-25, D7 reversed).
         if (r.loops[c].empty())
             r.comp_error[c] = PaintSplitError::NoBoundary;
-        else if (r.loops[c].size() == 2)
-            r.comp_error[c] = PaintSplitError::Band;
-        else if (r.loops[c].size() > 2)
-            r.comp_error[c] = PaintSplitError::MultiLoop;
     }
     return r;
 }
@@ -492,6 +593,9 @@ void paint_split_transform(PaintSplitRegion& region, const Transform3d& trafo)
                 loop.pts[i].pos    = trafo * loop.pts[i].pos;
                 loop.pts[i].normal = (nm * loop.pts[i].normal).normalized();
             }
+            loop.inward = trafo.matrix().block<3, 3>(0, 0) * loop.inward;
+            for (Vec3d& q : loop.across)
+                q = trafo * q;
             for (size_t i = 0; i < loop.pts.size(); ++i)
                 loop.length += (loop.pts[(i + 1) % loop.pts.size()].pos - loop.pts[i].pos).norm();
         }
@@ -516,10 +620,26 @@ static void ps_basis(const Vec3d& n, Vec3d& u, Vec3d& v)
 
 PaintSplitPlane paint_split_fit_plane(const PaintSplitRegion& region, int comp, const PaintSplitPlaneParams& params)
 {
+    return paint_split_fit_loop_plane(region, comp, 0, params);
+}
+
+std::vector<PaintSplitPlane> paint_split_fit_planes(const PaintSplitRegion& region, int comp, const PaintSplitPlaneParams& params)
+{
+    std::vector<PaintSplitPlane> out;
+    if (comp >= 0 && size_t(comp) < region.loops.size())
+        for (size_t l = 0; l < region.loops[size_t(comp)].size(); ++l)
+            out.push_back(paint_split_fit_loop_plane(region, comp, int(l), params));
+    return out;
+}
+
+PaintSplitPlane paint_split_fit_loop_plane(const PaintSplitRegion& region, int comp, int loop, const PaintSplitPlaneParams& params)
+{
     PaintSplitPlane pl;
-    if (region.error != PaintSplitError::None || comp < 0 || size_t(comp) >= region.loops.size() || region.loops[comp].empty())
+    if (region.error != PaintSplitError::None || comp < 0 || size_t(comp) >= region.loops.size() || loop < 0 ||
+        size_t(loop) >= region.loops[comp].size())
         return pl;
-    const std::vector<DrawCutSample>& pts = region.loops[comp].front().pts;
+    const PaintSplitLoop&             the_loop = region.loops[comp][size_t(loop)];
+    const std::vector<DrawCutSample>& pts      = the_loop.pts;
     const size_t n = pts.size();
     if (n < 3)
         return pl;
@@ -560,6 +680,9 @@ PaintSplitPlane paint_split_fit_plane(const PaintSplitRegion& region, int comp, 
         }
     if (std::abs(side) <= 1e-6 * std::max(1e-9, region.area[comp] * size))
         side = skin.dot(normal);
+    // Several loops: the whole region lies on both sides of a band's edge, so each loop looks across itself.
+    if (region.loops[comp].size() > 1 && std::abs(normal.dot(the_loop.inward)) > 1e-9)
+        side = normal.dot(the_loop.inward);
     if (side < 0.)
         normal = -normal;
 
@@ -602,6 +725,20 @@ static indexed_triangle_set ps_plane_box(const PaintSplitPlane& plane, const Bou
     return box;
 }
 
+// The box on the far side of `plane` (against its normal) round `centre`'s foot on the plane: half-width `half` in
+// the plane, reaching past `bbox`.
+static indexed_triangle_set ps_loop_far_box(const PaintSplitPlane& plane, const Vec3d& centre, double half, const BoundingBoxf3& bbox)
+{
+    const double reach = bbox.size().norm() + 2. + std::abs(plane.normal.dot(bbox.center() - plane.point));
+    const Vec3d  o     = centre - plane.normal * plane.normal.dot(centre - plane.point);
+    indexed_triangle_set box = its_make_cube(2. * half, 2. * half, reach);
+    for (Vec3f& p : box.vertices) {
+        const Vec3d q = o + plane.u * (double(p.x()) - half) + plane.v * (double(p.y()) - half) + plane.normal * (double(p.z()) - reach);
+        p             = q.cast<float>();
+    }
+    return box;
+}
+
 indexed_triangle_set paint_split_half_space(const PaintSplitPlane& plane, const BoundingBoxf3& bbox)
 {
     const Vec3d  centre = bbox.center();
@@ -613,6 +750,84 @@ indexed_triangle_set paint_split_slab(const PaintSplitPlane& plane, const Boundi
 {
     const double h = 0.5 * std::max(kerf, 1e-3);
     return ps_plane_box(plane, bbox, -h, h);
+}
+
+indexed_triangle_set paint_split_cap(const indexed_triangle_set& mesh, const PaintSplitPlane& plane, const PaintSplitLoop& loop)
+{
+    indexed_triangle_set out;
+    if (!plane.valid || mesh.indices.empty() || loop.pts.size() < 3)
+        return out;
+    // The plane's frame: x = u, y = v, z = normal, origin at plane.point. Only the facets the plane crosses are
+    // sliced; they keep the whole vertex array, so their edges still chain into closed contours.
+    indexed_triangle_set local;
+    local.vertices.reserve(mesh.vertices.size());
+    std::vector<double> dist(mesh.vertices.size());
+    for (size_t i = 0; i < mesh.vertices.size(); ++i) {
+        const Vec3d d = mesh.vertices[i].cast<double>() - plane.point;
+        dist[i]       = plane.normal.dot(d);
+        local.vertices.emplace_back(Vec3f(float(plane.u.dot(d)), float(plane.v.dot(d)), float(dist[i])));
+    }
+    for (const Vec3i32& t : mesh.indices) {
+        const double lo = std::min({ dist[t[0]], dist[t[1]], dist[t[2]] }), hi = std::max({ dist[t[0]], dist[t[1]], dist[t[2]] });
+        if (lo <= 0. && hi >= 0.)
+            local.indices.push_back(t);
+    }
+    if (local.indices.empty())
+        return out;
+    const std::vector<ExPolygons> layers = slice_mesh_ex(local, std::vector<float>{ 0.f });
+    if (layers.empty() || layers.front().empty())
+        return out;
+    const ExPolygons& islands = layers.front();
+
+    // Keep the islands the loop runs round: most of its samples, projected on the plane, lie in or near them.
+    double r  = 0.;
+    Vec3d  lc = Vec3d::Zero();
+    for (const DrawCutSample& s : loop.pts)
+        lc += s.pos;
+    lc /= double(loop.pts.size());
+    for (const DrawCutSample& s : loop.pts)
+        r = std::max(r, (s.pos - lc).norm());
+    const double tol = 0.25 * r + std::abs(plane.normal.dot(lc - plane.point)) + 1.;
+    std::vector<double> score(islands.size(), 0.);
+    const size_t        step = std::max<size_t>(1, loop.pts.size() / 64);
+    size_t              used = 0;
+    for (size_t si = 0; si < loop.pts.size(); si += step) {
+        ++used;
+        const Vec3d d = loop.pts[si].pos - plane.point;
+        const Point p = Point::new_scale(plane.u.dot(d), plane.v.dot(d));
+        for (size_t k = 0; k < islands.size(); ++k) {
+            double dd = 0.;
+            if (!islands[k].contains(p)) {
+                dd = std::numeric_limits<double>::max();
+                for (const Line& ln : islands[k].lines())
+                    dd = std::min(dd, ln.distance_to(p));
+                dd = unscale<double>(dd);
+            }
+            if (dd <= tol)
+                score[k] += 1.;
+        }
+    }
+    const double best = *std::max_element(score.begin(), score.end());
+    if (best <= 0.)
+        return out;
+    ExPolygons keep;
+    for (size_t k = 0; k < islands.size(); ++k)
+        if (score[k] >= 0.5 * double(used) || score[k] == best)
+            keep.push_back(islands[k]);
+    const std::vector<Vec3d> tris = triangulate_expolygons_3d(keep, 0., true);
+    for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+        const int b = int(out.vertices.size());
+        for (int k = 0; k < 3; ++k) {
+            const Vec3d& q = tris[i + size_t(k)];
+            out.vertices.emplace_back((plane.point + q.x() * plane.u + q.y() * plane.v + q.z() * plane.normal).cast<float>());
+        }
+        out.indices.emplace_back(b, b + 1, b + 2);
+    }
+    // Facing along the normal, whatever the tessellator's winding.
+    for (size_t f = 0; f < out.indices.size(); ++f)
+        if (its_face_normal(out, int(f)).cast<double>().dot(plane.normal) < 0.)
+            std::swap(out.indices[f][1], out.indices[f][2]);
+    return out;
 }
 
 // -------------------------------------------------------------------------------------------- assign
@@ -879,6 +1094,900 @@ PaintSplitPieces paint_split_assign(const indexed_triangle_set& mesh, const Pain
     return out;
 }
 
+PaintSplitPieces paint_split_assign_loops(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                          const std::vector<PaintSplitPlane>& planes, const PaintSplitAssignParams& params)
+{
+    PaintSplitPieces out;
+    if (region.error != PaintSplitError::None) {
+        out.error = region.error;
+        return out;
+    }
+    if (comp < 0 || size_t(comp) >= region.num_components() || planes.size() != region.loops[size_t(comp)].size() || planes.empty()) {
+        out.error = PaintSplitError::BadComponent;
+        return out;
+    }
+    for (size_t i = 0; i < planes.size(); ++i)
+        if (!planes[i].valid) {
+            out.error    = PaintSplitError::BadComponent;
+            out.bad_loop = int(i);
+            return out;
+        }
+
+    std::vector<std::pair<Vec3d, double>> sel;
+    for (size_t f = 0; f < region.surface.indices.size(); ++f)
+        if (region.facet_comp[f] == comp)
+            sel.emplace_back(ps_tri_centroid(region.surface, f), ps_tri_area(region.surface, f));
+    const double sel_area = region.area[size_t(comp)];
+
+    indexed_triangle_set  fixed;
+    PaintSplitRepairStats repair;
+    if (!paint_split_repair(mesh, fixed, nullptr, repair)) {
+        out.error = PaintSplitError::RepairFailed;
+        return out;
+    }
+    if (repair.needed)
+        out.warnings.push_back(PaintSplitWarning::Repaired);
+    const indexed_triangle_set& src = repair.needed ? fixed : mesh;
+    BoundingBoxf3               bbox;
+    for (const Vec3f& v : src.vertices)
+        bbox.merge(v.cast<double>());
+
+    manifold::ExecutionContext ctx;
+    Manifold                   M;
+    try {
+        M = ColorSplitDetail::to_manifold64(src, ctx);
+    } catch (...) {
+        out.error = PaintSplitError::NonManifold;
+        return out;
+    }
+    if (M.Status() != Manifold::Error::NoError || M.IsEmpty()) {
+        out.error = PaintSplitError::NonManifold;
+        return out;
+    }
+
+    try {
+        out.source_volume = M.Volume();
+        auto carried_by   = [&](const AABBMesh& aabb) {
+            double a = 0.;
+            for (const auto& [g, ga] : sel)
+                if (aabb.squared_distance(g) <= 1e-6)
+                    a += ga;
+            return a;
+        };
+
+        Manifold cand = M;
+        for (size_t i = 0; i < planes.size(); ++i) {
+            const PaintSplitLoop& loop = region.loops[size_t(comp)][i];
+            // How far a piece across the cut may lie from this loop and still be "across this edge".
+            Vec3d lc = Vec3d::Zero();
+            for (const DrawCutSample& s : loop.pts)
+                lc += s.pos;
+            lc /= double(std::max<size_t>(1, loop.pts.size()));
+            double r = 0., maxd = 0., rin = 0.;
+            for (const DrawCutSample& s : loop.pts) {
+                const Vec3d d = s.pos - lc;
+                r    = std::max(r, d.norm());
+                rin  = std::max(rin, (d - planes[i].normal * planes[i].normal.dot(d)).norm());
+                maxd = std::max(maxd, std::abs(planes[i].normal.dot(s.pos - planes[i].point)));
+            }
+            const double tol = std::max(1., 0.1 * 2. * r) + maxd;
+
+            // What this loop's cut takes away: the far side of its plane, but only within a box round the loop
+            // (1.5 times its radius, plus 2 mm). An unbounded half-space through a small hole of a curved
+            // region would slice the region itself far from the hole (owner's figure, 2026-11-25).
+            auto cut_once = [&](const PaintSplitPlane& plane, bool bounded, std::vector<Manifold>& kept, int& dropped) {
+                kept.clear();
+                dropped        = 0;
+                double carried = 0.;
+                PaintSplitPlane far_side = plane; // the unbounded far side: the half-space of the flipped plane
+                far_side.normal          = -plane.normal;
+                std::swap(far_side.u, far_side.v);
+                const Manifold C = ColorSplitDetail::to_manifold64(
+                    bounded ? ps_loop_far_box(plane, lc, 1.5 * rin + 2., bbox) : paint_split_half_space(far_side, bbox), ctx);
+                ColorSplitDetail::require_ok(C, "cutter");
+                auto [outside, inside] = cand.Split(C);
+                ColorSplitDetail::require_ok(inside, "split inside");
+                ColorSplitDetail::require_ok(outside, "split outside");
+                for (Manifold& pc : inside.Decompose()) {
+                    const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
+                    const AABBMesh             aabb(its);
+                    const double               a = carried_by(aabb);
+                    if (a >= params.carry_frac * sel_area) {
+                        kept.push_back(pc);
+                        carried += a;
+                    } else
+                        ++dropped; // material on the region's side without selection (an arm crossing the cut)
+                }
+                for (Manifold& pc : outside.Decompose()) {
+                    const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
+                    const AABBMesh             aabb(its);
+                    std::vector<double>        d;
+                    d.reserve(loop.pts.size());
+                    for (const DrawCutSample& s : loop.pts)
+                        d.push_back(std::sqrt(aabb.squared_distance(s.pos)));
+                    if (ps_median(std::move(d)) <= tol)
+                        continue; // across this loop's own edge: the rest
+                    // Cut off by this plane, but far from this edge (beyond another loop's cut): still the piece's.
+                    carried += carried_by(aabb);
+                    kept.push_back(pc);
+                }
+                return carried;
+            };
+            // A flat cut through a wavy edge leaves some of the region's skin across it (that skin keeps its colour,
+            // on the rest); a cut that keeps less than a third of the selection goes through the region.
+            const double keep_min = 1. / 3.;
+            // Up to four ways to cut this edge. First the plane facing the way the skin says, with its far side
+            // taken whole (the clean cut: nothing across the edge stays on the piece) or, when that takes away
+            // noticeably more of the selection (a plane through a small hole of a curved region), only near
+            // the edge. When neither keeps a third of the selection, the same with the plane facing the other way.
+            PaintSplitPlane flipped = planes[i];
+            // Offset is towards the piece, so it flips with the side: mirror the plane about the loop's centre.
+            flipped.point  = flipped.point - 2. * flipped.normal * flipped.normal.dot(flipped.point - lc);
+            flipped.normal = -flipped.normal;
+            std::swap(flipped.u, flipped.v);
+            std::vector<Manifold> kept;
+            int                   dropped = 0;
+            double                carried = -1.;
+            bool                  was_flipped = false;
+            for (int side = 0; side < 2 && carried < keep_min * sel_area; ++side) {
+                const PaintSplitPlane& pl = side == 0 ? planes[i] : flipped;
+                std::vector<Manifold>  whole_kept, near_kept;
+                int                    whole_dropped = 0, near_dropped = 0;
+                const double           whole = cut_once(pl, false, whole_kept, whole_dropped);
+                const double           local  = cut_once(pl, true, near_kept, near_dropped);
+                double vw = 0., vn = 0.;
+                for (const Manifold& m : whole_kept)
+                    vw += m.Volume();
+                for (const Manifold& m : near_kept)
+                    vn += m.Volume();
+                BOOST_LOG_TRIVIAL(debug) << "Paint split loop " << i << " side " << side << ": whole keeps " << whole / sel_area
+                                         << " of the selection (" << vw << " mm3), local " << local / sel_area << " (" << vn << " mm3)";
+                // The near-only cut leaves whatever lies across the edge beyond its box on the piece: on a figure that
+                // can be half the body (owner's figure: 74 cm3 instead of 6). It is taken only when the whole cut
+                // fails, or keeps clearly less of the selection for about the same piece.
+                const bool whole_ok  = !whole_kept.empty() && whole >= keep_min * sel_area;
+                const bool use_whole = whole_ok ? (near_kept.empty() || whole >= local - 0.1 * sel_area || vn > 1.5 * vw) :
+                                                  (near_kept.empty() || whole >= local);
+                const double best = use_whole ? whole : (near_kept.empty() ? -1. : local);
+                if (best > carried) {
+                    kept        = use_whole ? std::move(whole_kept) : std::move(near_kept);
+                    dropped     = use_whole ? whole_dropped : near_dropped;
+                    carried     = best;
+                    was_flipped = side == 1;
+                }
+            }
+            if (was_flipped)
+                ++out.flipped_loops;
+            out.returned_components += dropped;
+            if (kept.empty()) {
+                out.error    = PaintSplitError::EmptyPiece;
+                out.bad_loop = int(i);
+                return out;
+            }
+            if (carried < keep_min * sel_area) {
+                out.error    = PaintSplitError::CutCrossesRegion;
+                out.bad_loop = int(i);
+                return out;
+            }
+            cand = ps_union(kept);
+            ColorSplitDetail::require_ok(cand, "piece");
+        }
+
+        // The rest: the part less the piece, seam-free, in connected pieces.
+        const Manifold rest = M - cand;
+        ColorSplitDetail::require_ok(rest, "rest");
+        std::vector<Manifold> parts;
+        for (Manifold& m : rest.Decompose())
+            if (m.Volume() > 1e-9 * std::max(1., out.source_volume))
+                parts.push_back(m);
+        if (parts.empty()) {
+            out.error = PaintSplitError::EmptyBody;
+            return out;
+        }
+        size_t body_idx = 0;
+        if (parts.size() > 1) {
+            std::vector<int>    hits(parts.size(), 0);
+            std::vector<double> vol(parts.size());
+            for (size_t j = 0; j < parts.size(); ++j) {
+                vol[j] = parts[j].Volume();
+                if (!params.body_hints.empty()) {
+                    const indexed_triangle_set its = ColorSplitDetail::from_manifold(parts[j]);
+                    const AABBMesh             aabb(its);
+                    for (const Vec3d& h : params.body_hints)
+                        if (aabb.squared_distance(h) <= 1e-6)
+                            ++hits[j];
+                }
+            }
+            for (size_t j = 1; j < parts.size(); ++j)
+                if (hits[j] > hits[body_idx] || (hits[j] == hits[body_idx] && vol[j] > vol[body_idx]))
+                    body_idx = j;
+        }
+
+        out.piece_volume = cand.Volume();
+        out.piece        = ColorSplitDetail::from_manifold(cand);
+        for (size_t j = 0; j < parts.size(); ++j) {
+            if (j == body_idx) {
+                out.body_volume = parts[j].Volume();
+                out.body        = ColorSplitDetail::from_manifold(parts[j]);
+            } else {
+                out.loose_volume += parts[j].Volume();
+                out.loose.push_back(ColorSplitDetail::from_manifold(parts[j]));
+            }
+        }
+        if (!out.loose.empty())
+            out.warnings.push_back(PaintSplitWarning::LoosePieces);
+        const double total = out.piece_volume + out.body_volume + out.loose_volume;
+        if (std::abs(total - out.source_volume) > 1e-6 * std::abs(out.source_volume) + 1e-9)
+            out.warnings.push_back(PaintSplitWarning::VolumeMismatch);
+    } catch (const ColorSplitError& e) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: " << e.what();
+        out.error = PaintSplitError::BooleanFailed;
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: " << e.what();
+        out.error = PaintSplitError::BooleanFailed;
+    }
+    return out;
+}
+
+// -------------------------------------------------------------------------------------------- follow paint
+
+// A closed sheet of thickness `t` round an open surface: the surface offset by +-t/2 along its vertex normals,
+// the two copies joined along the boundary. Empty when the surface is not a clean manifold patch.
+static indexed_triangle_set ps_thicken(indexed_triangle_set surf, double t)
+{
+    indexed_triangle_set out;
+    its_merge_vertices(surf);
+    its_remove_degenerate_faces(surf);
+    its_compactify_vertices(surf);
+    const size_t nv = surf.vertices.size();
+    if (nv == 0 || surf.indices.empty())
+        return out;
+    std::vector<Vec3d> vn(nv, Vec3d::Zero());
+    for (const Vec3i32& f : surf.indices) {
+        const Vec3d a = surf.vertices[f[0]].cast<double>(), b = surf.vertices[f[1]].cast<double>(), c = surf.vertices[f[2]].cast<double>();
+        const Vec3d n = (b - a).cross(c - a); // area weighted
+        for (int k = 0; k < 3; ++k)
+            vn[f[k]] += n;
+    }
+    for (Vec3d& n : vn) {
+        if (n.norm() < 1e-12)
+            return out;
+        n.normalize();
+    }
+    std::map<std::pair<int, int>, int> directed;
+    for (const Vec3i32& f : surf.indices)
+        for (int k = 0; k < 3; ++k) {
+            const std::pair<int, int> e{ f[k], f[(k + 1) % 3] };
+            if (++directed[e] > 1)
+                return out; // inconsistent orientation or a non-manifold edge
+        }
+    out.vertices.reserve(2 * nv);
+    for (size_t v = 0; v < nv; ++v)
+        out.vertices.emplace_back((surf.vertices[v].cast<double>() + 0.5 * t * vn[v]).cast<float>());
+    for (size_t v = 0; v < nv; ++v)
+        out.vertices.emplace_back((surf.vertices[v].cast<double>() - 0.5 * t * vn[v]).cast<float>());
+    const int off = int(nv);
+    for (const Vec3i32& f : surf.indices) {
+        out.indices.emplace_back(f[0], f[1], f[2]);
+        out.indices.emplace_back(f[0] + off, f[2] + off, f[1] + off);
+    }
+    // Boundary: directed edges whose reverse is not there; the wall faces outward.
+    for (const auto& [e, n] : directed)
+        if (directed.find({ e.second, e.first }) == directed.end()) {
+            const int a = e.first, b = e.second;
+            out.indices.emplace_back(b, a, a + off);
+            out.indices.emplace_back(b, a + off, b + off);
+        }
+    // Outward whichever way the surface was wound.
+    double vol = 0.;
+    for (const Vec3i32& f : out.indices)
+        vol += out.vertices[f[0]].cast<double>().dot(out.vertices[f[1]].cast<double>().cross(out.vertices[f[2]].cast<double>()));
+    if (vol < 0.)
+        for (Vec3i32& f : out.indices)
+            std::swap(f[1], f[2]);
+    return out;
+}
+
+PaintSplitFollowCut paint_split_follow_cut(const indexed_triangle_set& mesh, const PaintSplitLoop& loop,
+                                           const PaintSplitFollowParams& params, const BoundingBoxf3& bbox)
+{
+    PaintSplitFollowCut out;
+    out.error = PaintSplitError::CutterFailed;
+    if (mesh.indices.empty())
+        return out;
+    // A speck of an edge (a stray unpainted facet the hole fill did not take): nothing to cut along.
+    if (loop.length < 3. || loop.pts.size() < 3) {
+        out.error   = PaintSplitError::None;
+        out.ignored = true;
+        return out;
+    }
+
+    // The paint line as a closed stroke: resampled (about 1 mm, finer on a small hole) and smoothed, then put
+    // back on the skin, since smoothing pulls a curved line off it. A wavy line whose projection crosses itself
+    // is retried smoother, then coarser.
+    DrawCutStroke stroke;
+    for (const DrawCutSample& s : loop.pts)
+        stroke.append(s.pos, s.normal, s.facet);
+    const double spacing = std::clamp(loop.length / 24., 0.05, DrawCutStroke::DefaultSpacing);
+    const double smooth  = std::clamp(params.smoothing, 0., 1.);
+    const std::array<std::pair<double, double>, 4> tries{ { { spacing, smooth }, { spacing, std::max(smooth, 0.6) },
+                                                            { 2. * spacing, 1. }, { 4. * spacing, 1. } } };
+    out.stage = 1;
+    bool finished = false;
+    for (const auto& [sp, sm] : tries)
+        if (stroke.finish(sp, sm, /*force_closed=*/true) == DrawCutError::None && stroke.is_closed()) {
+            finished = true;
+            break;
+        }
+    if (!finished)
+        return out;
+    {
+        const AABBMesh             aabb(mesh);
+        std::vector<DrawCutSample> path = stroke.path();
+        for (DrawCutSample& s : path) {
+            int   f = -1;
+            Vec3d c;
+            aabb.squared_distance(s.pos, f, c);
+            if (f >= 0) {
+                s.pos    = c;
+                s.normal = its_face_normal(mesh, f).cast<double>();
+                s.facet  = size_t(f);
+            }
+        }
+        stroke.set_path(path);
+    }
+    if (!stroke.valid())
+        return out;
+    out.stage = 2;
+    if (draw_cut_self_crossing(stroke))
+        return out;
+
+    DrawCutParams dp;
+    dp.direction  = params.square_to_bed ? DrawCutDirection::AxisZ : DrawCutDirection::SurfaceNormal;
+    dp.extension  = std::max(0., params.extension);
+    dp.through_all = false;
+    // The cut spans the loop: the band from the paint line onto a flat core in the loop's own plane, inside the
+    // loop's footprint, and nothing else (not the draw cut's closure). That parts a loop round the part (a waist,
+    // a hat's rim) across its section, and takes a cap under a curved patch (an eye on a head). When the skin
+    // inside the loop lies within Depth of that plane (a patch on a flat face) the cap would be a sliver: the cut
+    // is a plug instead, its wall straight in by Depth (Lip angle drafts it).
+    Vec3d n = Vec3d::UnitZ(), c = Vec3d::Zero();
+    if (!draw_cut_core_plane(stroke, dp, n, c))
+        return out;
+    double r = 0.;
+    for (const DrawCutSample& smp : stroke.path())
+        r = std::max(r, (smp.pos - c).norm());
+    const AABBMesh aabb_part(mesh);
+    const double   centre_depth = std::sqrt(aabb_part.squared_distance(c));
+    const bool   plug         = centre_depth < std::max(1., params.depth);
+    out.separates             = !plug;
+    // The skirt must leave the skin even where the paint line sits in a crease (fur trim over a face).
+    dp.extension = std::max(dp.extension, plug ? 2. : 0.3 * r + 1.);
+    if (!plug)
+        dp.angle_deg = std::clamp(params.angle_deg, -90., 90.);
+    else {
+        // + leans along -n (the core normal, whose sign follows the winding): into the part only when the skin's
+        // outward side is +n.
+        const double sign = draw_cut_outward_side(stroke, n, &mesh).dot(n) >= 0. ? 1. : -1.;
+        dp.angle_deg      = sign * std::clamp(90. - std::abs(params.angle_deg), 0., 90.);
+    }
+    // Inside the part: the closest skin faces away from the point.
+    auto inside = [&](const Vec3d& q) {
+        int   f = -1;
+        Vec3d cp;
+        aabb_part.squared_distance(q, f, cp);
+        return f >= 0 && (q - cp).dot(its_face_normal(mesh, f).cast<double>()) < 0.;
+    };
+    // The rim of a surface: vertices on edges used once (after welding).
+    auto rim_of = [](indexed_triangle_set& surf) {
+        its_merge_vertices(surf);
+        std::map<std::pair<int, int>, int> use;
+        for (const Vec3i32& t : surf.indices)
+            for (int k = 0; k < 3; ++k) {
+                int x = t[k], y = t[(k + 1) % 3];
+                if (x > y)
+                    std::swap(x, y);
+                ++use[{ x, y }];
+            }
+        std::set<int> rim;
+        for (const auto& [e, cnt] : use)
+            if (cnt == 1) {
+                rim.insert(e.first);
+                rim.insert(e.second);
+            }
+        return rim;
+    };
+    // Depth, lowered until the band's inset no longer folds the core (a small hole cannot take 3 mm).
+    double depth = std::max(0.05, params.depth);
+    for (int k = 0; k < 8; ++k) {
+        dp.depth = depth;
+        if (!draw_cut_band_folds(stroke, dp))
+            break;
+        depth *= 0.5;
+    }
+    dp.depth  = depth;
+    out.stage = 3;
+    if (draw_cut_band_folds(stroke, dp))
+        return out;
+    out.stage = 4;
+    out.depth     = depth;
+    out.preview = draw_cut_preview_surface(stroke, dp, bbox, 0., nullptr);
+    std::set<int> rim = rim_of(out.preview);
+    auto rim_inside = [&]() {
+        int k = 0;
+        for (int v : rim)
+            k += inside(out.preview.vertices[size_t(v)].cast<double>());
+        return k;
+    };
+    // A plug whose skirt went into the part has its wall the wrong way round: build it the other way.
+    if (plug && rim_inside() * 2 > int(rim.size())) {
+        dp.angle_deg = -dp.angle_deg;
+        out.preview  = draw_cut_preview_surface(stroke, dp, bbox, 0., nullptr);
+        rim          = rim_of(out.preview);
+    }
+    // The rim must lie outside the part, or the sheet leaves the piece joined round it: push a rim vertex still
+    // inside (a paint line in a crease, under a fur trim) on along its skirt until it is out.
+    {
+        const std::vector<DrawCutSample>& path = stroke.path();
+        for (int v : rim) {
+            Vec3d q = out.preview.vertices[size_t(v)].cast<double>();
+            if (!inside(q))
+                continue;
+            size_t best = 0;
+            for (size_t i = 1; i < path.size(); ++i)
+                if ((path[i].pos - q).squaredNorm() < (path[best].pos - q).squaredNorm())
+                    best = i;
+            Vec3d d = q - path[best].pos;
+            if (d.norm() < 1e-6)
+                continue;
+            d.normalize();
+            for (int step = 0; step < 60 && inside(q); ++step)
+                q += 0.5 * d;
+            q += 0.5 * d;
+            out.preview.vertices[size_t(v)] = q.cast<float>();
+        }
+    }
+    // The cut itself is the band + core sheet only (not the closure the draw cut adds to make a solid, which
+    // reaches far past the edge): a thin sheet the region is separated along.
+    out.stage = 5;
+    out.sheet = ps_thicken(out.preview, PaintSplitSheetThickness);
+    if (out.sheet.indices.empty())
+        return out;
+    out.error   = PaintSplitError::None;
+    out.stage   = 0;
+    return out;
+}
+
+PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                            const std::vector<indexed_triangle_set>& cutters, const PaintSplitAssignParams& params)
+{
+    PaintSplitPieces out;
+    if (region.error != PaintSplitError::None) {
+        out.error = region.error;
+        return out;
+    }
+    if (comp < 0 || size_t(comp) >= region.num_components() || cutters.size() != region.loops[size_t(comp)].size() || cutters.empty()) {
+        out.error = PaintSplitError::BadComponent;
+        return out;
+    }
+    if (std::all_of(cutters.begin(), cutters.end(), [](const indexed_triangle_set& c) { return c.indices.empty(); })) {
+        out.error = PaintSplitError::CutterFailed;
+        return out;
+    }
+
+    std::vector<std::pair<Vec3d, double>> sel;
+    for (size_t f = 0; f < region.surface.indices.size(); ++f)
+        if (region.facet_comp[f] == comp)
+            sel.emplace_back(ps_tri_centroid(region.surface, f), ps_tri_area(region.surface, f));
+    const double sel_area = region.area[size_t(comp)];
+
+    indexed_triangle_set  fixed;
+    PaintSplitRepairStats repair;
+    if (!paint_split_repair(mesh, fixed, nullptr, repair)) {
+        out.error = PaintSplitError::RepairFailed;
+        return out;
+    }
+    if (repair.needed)
+        out.warnings.push_back(PaintSplitWarning::Repaired);
+    const indexed_triangle_set& src = repair.needed ? fixed : mesh;
+
+    manifold::ExecutionContext ctx;
+    Manifold                   M;
+    try {
+        M = ColorSplitDetail::to_manifold64(src, ctx);
+    } catch (...) {
+        out.error = PaintSplitError::NonManifold;
+        return out;
+    }
+    if (M.Status() != Manifold::Error::NoError || M.IsEmpty()) {
+        out.error = PaintSplitError::NonManifold;
+        return out;
+    }
+
+    try {
+        out.source_volume = M.Volume();
+        // A cut keeping less than a third of the selection goes through the region.
+        const double keep_min = 1. / 3.;
+        // All the sheets at once: the region may hang on through another edge until that one is cut too (a leg,
+        // a foot in the sack, an arm back to the torso).
+        std::vector<Manifold> sheets;
+        std::vector<size_t>   sheet_loop;
+        for (size_t i = 0; i < cutters.size(); ++i)
+            if (!cutters[i].indices.empty()) { // an empty one is an ignored speck of an edge
+                sheets.push_back(ColorSplitDetail::to_manifold64(cutters[i], ctx));
+                ColorSplitDetail::require_ok(sheets.back(), "sheet");
+                sheet_loop.push_back(i);
+            }
+        const Manifold cut = M - ps_union(sheets);
+        ColorSplitDetail::require_ok(cut, "cut");
+        // The parts of the cut: each one's share of the selection and of each edge's skin across it. A part holding
+        // most of one edge's across skin is that edge's other side, even with a little selected skin on it (the
+        // smoothed line runs a facet or two off the painted one); the parts carrying the selection are the piece.
+        const std::vector<PaintSplitLoop>& loops = region.loops[size_t(comp)];
+        struct CutPart { Manifold m; double carried{ 0. }; std::vector<double> across; };
+        std::vector<CutPart> cparts;
+        for (Manifold& pc : cut.Decompose()) {
+            const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
+            const AABBMesh             aabb(its);
+            CutPart                    cp;
+            cp.m = pc;
+            cp.across.assign(loops.size(), 0.);
+            for (const auto& [g, ga] : sel)
+                if (aabb.squared_distance(g) <= 1e-6)
+                    cp.carried += ga;
+            for (size_t i : sheet_loop)
+                for (const Vec3d& q : loops[i].across)
+                    if (aabb.squared_distance(q) <= 1e-6)
+                        cp.across[i] += 1.;
+            cparts.push_back(std::move(cp));
+        }
+        int carrying = 0;
+        for (const CutPart& cp : cparts)
+            carrying += cp.carried >= params.carry_frac * sel_area;
+        std::vector<Manifold> kept;
+        std::vector<double>   across_on(loops.size(), 0.);
+        double                carried = 0.;
+        for (const CutPart& cp : cparts) {
+            bool other_side = false;
+            for (size_t i : sheet_loop)
+                other_side = other_side || (!loops[i].across.empty() && cp.across[i] > 0.5 * double(loops[i].across.size()));
+            if (cp.carried < params.carry_frac * sel_area || (other_side && carrying > 1)) {
+                ++out.returned_components;
+                continue;
+            }
+            kept.push_back(cp.m);
+            carried += cp.carried;
+            for (size_t i : sheet_loop)
+                across_on[i] += cp.across[i];
+        }
+        BOOST_LOG_TRIVIAL(debug) << "Paint split: the sheets leave " << cparts.size() << " part(s), " << kept.size() << " kept";
+        if (kept.empty()) {
+            out.error = PaintSplitError::EmptyPiece;
+            return out;
+        }
+        // An edge whose across skin is still on the piece: its sheet did not go all the way round.
+        for (size_t i : sheet_loop)
+            if (!loops[i].across.empty() && across_on[i] > 0.5 * double(loops[i].across.size())) {
+                out.error    = PaintSplitError::EdgeNotSeparated;
+                out.bad_loop = int(i);
+                return out;
+            }
+        if (carried < keep_min * sel_area) {
+            out.error = PaintSplitError::CutCrossesRegion;
+            return out;
+        }
+        const Manifold cand = ps_union(kept);
+        ColorSplitDetail::require_ok(cand, "piece");
+
+        // The rest: the part less the piece, seam-free, in connected pieces.
+        const Manifold rest = M - cand;
+        ColorSplitDetail::require_ok(rest, "rest");
+        std::vector<Manifold> parts;
+        for (Manifold& m : rest.Decompose())
+            if (m.Volume() > 1e-9 * std::max(1., out.source_volume))
+                parts.push_back(m);
+        if (parts.empty()) {
+            out.error = PaintSplitError::EmptyBody;
+            return out;
+        }
+        size_t body_idx = 0;
+        if (parts.size() > 1) {
+            std::vector<int>    hits(parts.size(), 0);
+            std::vector<double> vol(parts.size());
+            for (size_t j = 0; j < parts.size(); ++j) {
+                vol[j] = parts[j].Volume();
+                if (!params.body_hints.empty()) {
+                    const indexed_triangle_set its = ColorSplitDetail::from_manifold(parts[j]);
+                    const AABBMesh             aabb(its);
+                    for (const Vec3d& h : params.body_hints)
+                        if (aabb.squared_distance(h) <= 1e-6)
+                            ++hits[j];
+                }
+            }
+            for (size_t j = 1; j < parts.size(); ++j)
+                if (hits[j] > hits[body_idx] || (hits[j] == hits[body_idx] && vol[j] > vol[body_idx]))
+                    body_idx = j;
+        }
+        out.piece_volume = cand.Volume();
+        out.piece        = ColorSplitDetail::from_manifold(cand);
+        for (size_t j = 0; j < parts.size(); ++j) {
+            if (j == body_idx) {
+                out.body_volume = parts[j].Volume();
+                out.body        = ColorSplitDetail::from_manifold(parts[j]);
+            } else {
+                out.loose_volume += parts[j].Volume();
+                out.loose.push_back(ColorSplitDetail::from_manifold(parts[j]));
+            }
+        }
+        if (!out.loose.empty())
+            out.warnings.push_back(PaintSplitWarning::LoosePieces);
+        const double total = out.piece_volume + out.body_volume + out.loose_volume;
+        if (std::abs(total - out.source_volume) > 1e-6 * std::abs(out.source_volume) + 1e-9)
+            out.warnings.push_back(PaintSplitWarning::VolumeMismatch);
+    } catch (const ColorSplitError& e) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: " << e.what();
+        out.error = PaintSplitError::BooleanFailed;
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: " << e.what();
+        out.error = PaintSplitError::BooleanFailed;
+    }
+    return out;
+}
+
+// -------------------------------------------------------------------------------------------- nearest skin
+
+indexed_triangle_set paint_split_nearest_claim(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                               const PaintSplitSkinParams& params, double* voxel_used)
+{
+    if (voxel_used != nullptr)
+        *voxel_used = 0.;
+    if (region.error != PaintSplitError::None || comp < 0 || size_t(comp) >= region.num_components() || mesh.indices.empty())
+        return {};
+    // The skin split in two: this component's selected facets, and every other facet of the part.
+    indexed_triangle_set S, U;
+    S.vertices = region.surface.vertices;
+    U.vertices = region.surface.vertices;
+    for (size_t f = 0; f < region.surface.indices.size(); ++f)
+        (region.facet_comp[f] == comp ? S : U).indices.push_back(region.surface.indices[f]);
+    if (S.indices.empty() || U.indices.empty())
+        return {};
+    BoundingBoxf3 sb, mb;
+    for (const Vec3i32& t : S.indices)
+        for (int k = 0; k < 3; ++k)
+            sb.merge(S.vertices[t[k]].cast<double>());
+    for (const Vec3f& v : mesh.vertices)
+        mb.merge(v.cast<double>());
+    const double depth = std::max(0., params.depth);
+    // How far the claim can reach from the selected skin: Depth, or (unlimited) about half the region's size,
+    // which is as deep as the nearest other skin can be for any sensible piece.
+    const double reach = depth > 0. ? depth : std::min(0.5 * sb.size().norm() + 5., 0.5 * mb.size().norm());
+    BoundingBoxf3 box(sb.min - Vec3d::Constant(reach + 1.), sb.max + Vec3d::Constant(reach + 1.));
+    box.min = box.min.cwiseMax(mb.min - Vec3d::Constant(1.));
+    box.max = box.max.cwiseMin(mb.max + Vec3d::Constant(1.));
+    const Vec3d  size = box.size();
+    double       h    = params.voxel;
+    if (h <= 0.)
+        h = std::max(0.15, std::cbrt(size.x() * size.y() * size.z() / double(std::max<size_t>(1000, params.max_samples))));
+    if (voxel_used != nullptr)
+        *voxel_used = h;
+    // One voxel of positive padding all round, so the surface closes inside the grid.
+    const int    nx = int(std::ceil(size.x() / h)) + 3, ny = int(std::ceil(size.y() / h)) + 3, nz = int(std::ceil(size.z() / h)) + 3;
+    const Vec3d  origin = box.min - Vec3d::Constant(h);
+    const AABBMesh tree_s(S), tree_u(U);
+    const float  out_v = float(2. * h);
+    std::vector<float> phi(size_t(nx) * size_t(ny) * size_t(nz), out_v);
+    tbb::parallel_for(tbb::blocked_range<int>(1, nz - 1), [&](const tbb::blocked_range<int>& range) {
+        for (int k = range.begin(); k < range.end(); ++k)
+            for (int j = 1; j < ny - 1; ++j)
+                for (int i = 1; i < nx - 1; ++i) {
+                    const Vec3d  p  = origin + h * Vec3d(i, j, k);
+                    const double ds = std::sqrt(tree_s.squared_distance(p));
+                    float        v;
+                    if (ds > reach + h)
+                        v = out_v;
+                    else if (depth > 0. && ds > depth)
+                        v = float(std::min(ds - depth, 2. * h));
+                    else {
+                        const double du = std::sqrt(tree_u.squared_distance(p));
+                        double       f  = ds - du;
+                        if (depth > 0.)
+                            f = std::max(f, ds - depth);
+                        v = float(std::clamp(f, -2. * h, 2. * h));
+                    }
+                    phi[(size_t(k) * size_t(ny) + size_t(j)) * size_t(nx) + size_t(i)] = v;
+                }
+    });
+    indexed_triangle_set claim = mesh_dense_field(phi, nx, ny, nz, origin, h);
+    // Outward, whichever way the mesher winds.
+    if (its_volume(claim) < 0.)
+        its_flip_triangles(claim);
+    return claim;
+}
+
+indexed_triangle_set paint_split_claim_cut_surface(const indexed_triangle_set& mesh, const indexed_triangle_set& claim)
+{
+    indexed_triangle_set out;
+    if (mesh.indices.empty() || claim.indices.empty())
+        return out;
+    const AABBMesh aabb(mesh);
+    out.vertices = claim.vertices;
+    for (const Vec3i32& t : claim.indices) {
+        const Vec3d g = (claim.vertices[t[0]] + claim.vertices[t[1]] + claim.vertices[t[2]]).cast<double>() / 3.;
+        int         f = -1;
+        Vec3d       c;
+        const double d2 = aabb.squared_distance(g, f, c);
+        // Inside, and not lying on the skin itself (where the claim follows the selected skin outside it).
+        if (f >= 0 && d2 > 1e-4 && (g - c).dot(its_face_normal(mesh, f).cast<double>()) < 0.)
+            out.indices.push_back(t);
+    }
+    its_compactify_vertices(out);
+    return out;
+}
+
+PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                            const PaintSplitSkinParams& skin, const PaintSplitAssignParams& params)
+{
+    PaintSplitPieces out;
+    if (region.error != PaintSplitError::None) {
+        out.error = region.error;
+        return out;
+    }
+    if (comp < 0 || size_t(comp) >= region.num_components()) {
+        out.error = PaintSplitError::BadComponent;
+        return out;
+    }
+    std::vector<std::pair<Vec3d, double>> sel;
+    for (size_t f = 0; f < region.surface.indices.size(); ++f)
+        if (region.facet_comp[f] == comp)
+            sel.emplace_back(ps_tri_centroid(region.surface, f), ps_tri_area(region.surface, f));
+    const double sel_area = region.area[size_t(comp)];
+
+    indexed_triangle_set  fixed;
+    PaintSplitRepairStats repair;
+    if (!paint_split_repair(mesh, fixed, nullptr, repair)) {
+        out.error = PaintSplitError::RepairFailed;
+        return out;
+    }
+    if (repair.needed)
+        out.warnings.push_back(PaintSplitWarning::Repaired);
+    const indexed_triangle_set& src = repair.needed ? fixed : mesh;
+
+    const indexed_triangle_set claim = paint_split_nearest_claim(src, region, comp, skin);
+    if (claim.indices.empty()) {
+        out.error = PaintSplitError::VoxelFailed;
+        return out;
+    }
+
+    manifold::ExecutionContext ctx;
+    Manifold                   M;
+    try {
+        M = ColorSplitDetail::to_manifold64(src, ctx);
+    } catch (...) {
+        out.error = PaintSplitError::NonManifold;
+        return out;
+    }
+    if (M.Status() != Manifold::Error::NoError || M.IsEmpty()) {
+        out.error = PaintSplitError::NonManifold;
+        return out;
+    }
+    try {
+        out.source_volume = M.Volume();
+        Manifold C;
+        try {
+            C = ColorSplitDetail::to_manifold64(claim, ctx);
+        } catch (...) {
+            out.error = PaintSplitError::VoxelFailed;
+            return out;
+        }
+        if (C.Status() != Manifold::Error::NoError || C.IsEmpty()) {
+            out.error = PaintSplitError::VoxelFailed;
+            return out;
+        }
+        // The claim's parts of the part that carry the selection are the piece (a stray voxel bubble is not).
+        std::vector<Manifold> kept;
+        for (Manifold& pc : (M ^ C).Decompose()) {
+            const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
+            const AABBMesh             aabb(its);
+            double                     a = 0.;
+            for (const auto& [g, ga] : sel)
+                if (aabb.squared_distance(g) <= 1e-6)
+                    a += ga;
+            if (a >= params.carry_frac * sel_area)
+                kept.push_back(pc);
+            else
+                ++out.returned_components;
+        }
+        if (kept.empty()) {
+            out.error = PaintSplitError::EmptyPiece;
+            return out;
+        }
+        const Manifold cand = ps_union(kept);
+        ColorSplitDetail::require_ok(cand, "piece");
+
+        // The rest: the part less the piece, seam-free, in connected pieces.
+        const Manifold rest = M - cand;
+        ColorSplitDetail::require_ok(rest, "rest");
+        std::vector<Manifold> parts;
+        for (Manifold& m : rest.Decompose())
+            if (m.Volume() > 1e-9 * std::max(1., out.source_volume))
+                parts.push_back(m);
+        if (parts.empty()) {
+            out.error = PaintSplitError::EmptyBody;
+            return out;
+        }
+        size_t body_idx = 0;
+        if (parts.size() > 1) {
+            std::vector<int>    hits(parts.size(), 0);
+            std::vector<double> vol(parts.size());
+            for (size_t j = 0; j < parts.size(); ++j) {
+                vol[j] = parts[j].Volume();
+                if (!params.body_hints.empty()) {
+                    const indexed_triangle_set its = ColorSplitDetail::from_manifold(parts[j]);
+                    const AABBMesh             aabb(its);
+                    for (const Vec3d& hnt : params.body_hints)
+                        if (aabb.squared_distance(hnt) <= 1e-6)
+                            ++hits[j];
+                }
+            }
+            for (size_t j = 1; j < parts.size(); ++j)
+                if (hits[j] > hits[body_idx] || (hits[j] == hits[body_idx] && vol[j] > vol[body_idx]))
+                    body_idx = j;
+        }
+        out.piece_volume = cand.Volume();
+        out.piece        = ColorSplitDetail::from_manifold(cand);
+        for (size_t j = 0; j < parts.size(); ++j) {
+            if (j == body_idx) {
+                out.body_volume = parts[j].Volume();
+                out.body        = ColorSplitDetail::from_manifold(parts[j]);
+            } else {
+                out.loose_volume += parts[j].Volume();
+                out.loose.push_back(ColorSplitDetail::from_manifold(parts[j]));
+            }
+        }
+        if (!out.loose.empty())
+            out.warnings.push_back(PaintSplitWarning::LoosePieces);
+        const double total = out.piece_volume + out.body_volume + out.loose_volume;
+        if (std::abs(total - out.source_volume) > 1e-6 * std::abs(out.source_volume) + 1e-9)
+            out.warnings.push_back(PaintSplitWarning::VolumeMismatch);
+    } catch (const ColorSplitError& e) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: " << e.what();
+        out.error = PaintSplitError::BooleanFailed;
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: " << e.what();
+        out.error = PaintSplitError::BooleanFailed;
+    }
+    return out;
+}
+
+double paint_split_inside_fraction(const indexed_triangle_set& mesh, const std::vector<indexed_triangle_set>& cutters)
+{
+    if (cutters.size() == 1)
+        return paint_split_inside_fraction(mesh, cutters.front());
+    try {
+        indexed_triangle_set  fixed;
+        PaintSplitRepairStats repair;
+        if (cutters.empty() || !paint_split_repair(mesh, fixed, nullptr, repair))
+            return -1.;
+        manifold::ExecutionContext ctx;
+        const Manifold             M = ColorSplitDetail::to_manifold64(repair.needed ? fixed : mesh, ctx);
+        if (M.Status() != Manifold::Error::NoError)
+            return -1.;
+        const double v = M.Volume();
+        if (v <= 0.)
+            return -1.;
+        Manifold in = M;
+        for (const indexed_triangle_set& c : cutters) {
+            const Manifold C = ColorSplitDetail::to_manifold64(c, ctx);
+            if (C.Status() != Manifold::Error::NoError)
+                return -1.;
+            in = in ^ C;
+        }
+        return std::clamp(in.Volume() / v, 0., 1.);
+    } catch (...) {
+        return -1.;
+    }
+}
+
 double paint_split_inside_fraction(const indexed_triangle_set& mesh, const indexed_triangle_set& cutter)
 {
     try {
@@ -905,7 +2014,7 @@ double paint_split_inside_fraction(const indexed_triangle_set& mesh, const index
 
 TriangleSelector::TriangleSplittingData paint_split_mask_from_paint(const TriangleMesh& mesh,
                                                                     const TriangleSelector::TriangleSplittingData& paint,
-                                                                    EnforcerBlockerType state, int seed_facet)
+                                                                    EnforcerBlockerType state, int seed_facet, const Vec3f* hit_in)
 {
     TriangleSelector sel(mesh);
     sel.deserialize(paint, /*needs_reset=*/true);
@@ -915,8 +2024,8 @@ TriangleSelector::TriangleSplittingData paint_split_mask_from_paint(const Triang
         // over that state (no crease stops), recoloured to a scratch state.
         std::vector<int>           src;
         const indexed_triangle_set leaves = sel.get_facets_strict(state, &src);
-        Vec3f                      hit    = Vec3f::Zero();
-        bool                       found  = false;
+        Vec3f                      hit    = hit_in != nullptr ? *hit_in : Vec3f::Zero();
+        bool                       found  = hit_in != nullptr;
         for (size_t i = 0; i < leaves.indices.size() && !found; ++i)
             if (src.size() > i && src[i] == seed_facet) {
                 const Vec3i32& t = leaves.indices[i];
@@ -940,6 +2049,44 @@ TriangleSelector::TriangleSplittingData paint_split_mask_from_paint(const Triang
     return sel.serialize();
 }
 
+EnforcerBlockerType paint_split_state_at(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& paint,
+                                         int facet, const Vec3f& hit)
+{
+    if (facet < 0 || size_t(facet) >= mesh.its.indices.size())
+        return EnforcerBlockerType::NONE;
+    TriangleSelector sel(mesh);
+    sel.deserialize(paint, true);
+    // Every state's leaves on this facet; the one whose triangle holds the hit (closest when none does exactly).
+    EnforcerBlockerType best_state = EnforcerBlockerType::NONE;
+    double              best       = std::numeric_limits<double>::max();
+    const Vec3d         p          = hit.cast<double>();
+    for (size_t s = 0; s < paint.used_states.size() || s == 0; ++s) {
+        if (s > 0 && !paint.used_states[s])
+            continue;
+        std::vector<int>           src;
+        const indexed_triangle_set leaves = sel.get_facets_strict(EnforcerBlockerType(s), &src);
+        for (size_t i = 0; i < leaves.indices.size(); ++i) {
+            if (i >= src.size() || src[i] != facet)
+                continue;
+            const Vec3i32& t = leaves.indices[i];
+            const Vec3d    a = leaves.vertices[t[0]].cast<double>(), b = leaves.vertices[t[1]].cast<double>(),
+                        c = leaves.vertices[t[2]].cast<double>();
+            // Distance from p to the triangle, measured in its plane (p lies on the facet).
+            const Vec3d n  = (b - a).cross(c - a);
+            const double nn = n.squaredNorm();
+            if (nn <= 0.)
+                continue;
+            const double w0 = (b - p).cross(c - p).dot(n) / nn, w1 = (c - p).cross(a - p).dot(n) / nn, w2 = 1. - w0 - w1;
+            const double out = std::max({ 0., -w0, -w1, -w2 });
+            if (out < best) {
+                best       = out;
+                best_state = EnforcerBlockerType(s);
+            }
+        }
+    }
+    return best_state;
+}
+
 double paint_split_mask_area(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& mask)
 {
     TriangleSelector sel(mesh);
@@ -949,6 +2096,54 @@ double paint_split_mask_area(const TriangleMesh& mesh, const TriangleSelector::T
     for (size_t f = 0; f < its.indices.size(); ++f)
         a += ps_tri_area(its, f);
     return a;
+}
+
+TriangleSelector::TriangleSplittingData paint_split_mask_combine(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& a,
+                                                                 const TriangleSelector::TriangleSplittingData& b, PaintSplitMaskOp op)
+{
+    TriangleSelector sa(mesh), sb(mesh);
+    sa.deserialize(a, true);
+    sb.deserialize(b, true);
+    const size_t      n = mesh.its.indices.size();
+    std::vector<bool> skip(n, true); // facets neither mask touches stay unselected
+    for (const TriangleSelector::TriangleBitStreamMapping& m : a.triangles_to_split)
+        if (m.triangle_idx >= 0 && size_t(m.triangle_idx) < n)
+            skip[size_t(m.triangle_idx)] = false;
+    for (const TriangleSelector::TriangleBitStreamMapping& m : b.triangles_to_split)
+        if (m.triangle_idx >= 0 && size_t(m.triangle_idx) < n)
+            skip[size_t(m.triangle_idx)] = false;
+    TriangleSelector out(mesh);
+    out.resample_facets(
+        [&](const Vec3f& p, int facet) {
+            TriangleSelector::SampledState s;
+            float      la = 0.f, lb = 0.f;
+            int        ia = -1, ib = -1;
+            const bool ina = sa.leaf_state_at(facet, p, &la, &ia) == EnforcerBlockerType::ENFORCER;
+            const bool inb = sb.leaf_state_at(facet, p, &lb, &ib) == EnforcerBlockerType::ENFORCER;
+            const bool r   = op == PaintSplitMaskOp::Union ? (ina || inb) : (ina && !inb);
+            s.state        = r ? EnforcerBlockerType::ENFORCER : EnforcerBlockerType::NONE;
+            s.leaf_area    = (la > 0.f && lb > 0.f) ? std::min(la, lb) : std::max(la, lb);
+            s.leaf         = (int64_t(ia + 1) << 32) | int64_t(uint32_t(ib + 1));
+            return s;
+        },
+        0.005f, &skip);
+    out.garbage_collect();
+    return out.serialize();
+}
+
+TriangleSelector::TriangleSplittingData paint_split_pick(const TriangleMesh& mesh, const TriangleSelector::TriangleSplittingData& paint,
+                                                         const TriangleSelector::TriangleSplittingData& mask, int facet,
+                                                         const Vec3f& hit, bool add, EnforcerBlockerType* picked)
+{
+    const EnforcerBlockerType state = paint_split_state_at(mesh, paint, facet, hit);
+    if (picked != nullptr)
+        *picked = state;
+    // The connected patch of that colour under the click (a flood over the facets of the same state).
+    const TriangleSelector::TriangleSplittingData patch = paint_split_mask_from_paint(mesh, paint, state, facet, &hit);
+    if (!add)
+        return patch;
+    const bool on_mask = paint_split_state_at(mesh, mask, facet, hit) == EnforcerBlockerType::ENFORCER;
+    return paint_split_mask_combine(mesh, mask, patch, on_mask ? PaintSplitMaskOp::Subtract : PaintSplitMaskOp::Union);
 }
 
 } // namespace Slic3r
