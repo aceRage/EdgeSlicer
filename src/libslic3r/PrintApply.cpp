@@ -1744,9 +1744,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     const bool requested_enable_prime_tower =
         new_full_config.option<ConfigOptionBool>("enable_prime_tower") != nullptr &&
         new_full_config.option<ConfigOptionBool>("enable_prime_tower")->value;
-    // Per-object prime towers: whether the user asked for a tower at all, for the notice on a printer that does not
-    // build per-object towers yet (normalize_fdm_2 below turns the tower off there, as before).
-    m_requested_enable_prime_tower = requested_enable_prime_tower;
 
     //new_full_config.normalize_fdm(used_filaments);
     new_full_config.normalize_fdm_1();
