@@ -195,6 +195,64 @@ TEST_CASE("P3C TPU 2.85 mm presets keep the Direct Drive TPU285 path", "[BblP3C]
     REQUIRE(tpu != nullptr);
 }
 
+// The P3C presets inherit the H3C scoped bases plus P3C-scoped copies of Bambu 2.9.2 bases
+// ("@base P3C", fdm_filament_*_p3c), so they resolve to Bambu Studio 2.9.2's values and not
+// to Edge's older shared bases. Expected values are Bambu v02.09.02.62 resolved.
+TEST_CASE("P3C presets resolve to Bambu Studio 2.9.2 values", "[BblP3C]")
+{
+    PresetBundle &b = p3c_bundle();
+
+    SECTION("process: tree supports, grid infill, arc fitting off")
+    {
+        const Preset *process = b.prints.find_preset("0.20mm Standard @BBL P3C", false);
+        REQUIRE(process != nullptr);
+        CHECK(process->config.opt_serialize("support_type") == "tree(auto)");
+        CHECK(process->config.opt_serialize("sparse_infill_pattern") == "grid");
+        CHECK(process->config.opt_serialize("enable_arc_fitting") == "0");
+    }
+
+    SECTION("filament: fins extrude safe temperature (M650.11 E1 in the templates)")
+    {
+        const std::vector<std::pair<const char *, const char *>> expected {
+            {"Bambu PLA Basic @BBL P3C", "57"},
+            {"Bambu ABS @BBL P3C", "87"},
+            {"Bambu PC @BBL P3C", "117"},
+            {"Generic PLA @BBL P3C", "57"},
+        };
+        for (const auto &[name, temp] : expected) {
+            INFO(name);
+            const Preset *f = b.filaments.find_preset(name, false);
+            REQUIRE(f != nullptr);
+            CHECK(f->config.opt_serialize("fins_extrude_safe_temp") == temp);
+        }
+    }
+
+    SECTION("filament: Engineering plate 55 C, PC density, no Edge-only end G-code")
+    {
+        for (const char *name : {"Bambu PLA Basic @BBL P3C", "Generic PLA @BBL P3C"}) {
+            INFO(name);
+            const Preset *f = b.filaments.find_preset(name, false);
+            REQUIRE(f != nullptr);
+            CHECK(f->config.opt_serialize("eng_plate_temp") == "55");
+            CHECK(f->config.opt_serialize("eng_plate_temp_initial_layer") == "55");
+        }
+        const Preset *pc = b.filaments.find_preset("Bambu PC @BBL P3C", false);
+        REQUIRE(pc != nullptr);
+        CHECK(pc->config.opt_serialize("filament_density") == "1.185");
+
+        const Preset *abs = b.filaments.find_preset("Generic ABS @BBL P3C 0.4 nozzle", false);
+        REQUIRE(abs != nullptr);
+        CHECK(abs->config.opt_serialize("filament_end_gcode").find("M106 P3 S0") == std::string::npos);
+        CHECK(abs->config.opt_serialize("temperature_vitrification") == "100");
+    }
+
+    SECTION("the P3C-scoped copy of the instantiated Bambu \"Generic TPU\" is a base only")
+    {
+        CHECK(b.filaments.find_preset("Generic TPU P3C", false) == nullptr);
+        CHECK(b.filaments.find_preset("Generic TPU @BBL P3C", false) != nullptr);
+    }
+}
+
 TEST_CASE("min_temperature_when_ec is dumped only when a used filament sets a real idle floor", "[BblP3C][GCode]")
 {
     SECTION("H2D and H3C floors are <= 0, so the key stays out of the config block")
