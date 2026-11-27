@@ -2772,7 +2772,7 @@ bool WipingExtrusions::is_support_overriddable(const ExtrusionRole role, const P
 
     // Side stabilizers without supports: the support layers are the stabilizers' alone. They stay in
     // their own filament; purging into them is a support feature and supports are off.
-    if (object.has_stabilizers() && !object.has_support_material())
+    if (object.has_support_addons() && !object.has_support_material())
         return false;
 
     // v2.5a (spec item 1, "residual pin", root cause A of the khaki-in-white/teal-

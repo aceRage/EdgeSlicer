@@ -8,6 +8,7 @@
 #include "../Model.hpp"
 #include "../Print.hpp"
 #include "../TriangleSelector.hpp"
+#include "SupportLayerAt.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -171,12 +172,18 @@ std::vector<LayerOutline> outlines_of(const PrintObject &object)
 
 std::vector<PaintedSpot> painted_spots(const ModelObject &object, const Transform3d &trafo, double ring_spacing)
 {
+    return painted_spots(object, trafo, ring_spacing, EnforcerBlockerType::STABILIZER);
+}
+
+std::vector<PaintedSpot> painted_spots(const ModelObject &object, const Transform3d &trafo, double ring_spacing,
+                                       EnforcerBlockerType state)
+{
     std::vector<PaintedSpot> out;
     for (const ModelVolume *mv : object.volumes) {
         if (! mv->is_model_part() || mv->supported_facets.empty() ||
-            ! mv->supported_facets.has_facets(*mv, EnforcerBlockerType::STABILIZER))
+            ! mv->supported_facets.has_facets(*mv, state))
             continue;
-        indexed_triangle_set its = mv->supported_facets.get_facets_strict(*mv, EnforcerBlockerType::STABILIZER);
+        indexed_triangle_set its = mv->supported_facets.get_facets_strict(*mv, state);
         if (its.indices.empty())
             continue;
         its_transform(its, trafo * mv->get_matrix(), true);
@@ -1095,28 +1102,9 @@ std::vector<ExPolygons> sparse_infill_areas(const std::vector<ExPolygons> &slice
     return out;
 }
 
-// The support layer at `layer`'s print_z, or null when the support generators made none.
-static SupportLayer *support_layer_find(PrintObject &object, const Layer &layer)
-{
-    SupportLayerPtrs &sls = object.support_layers();
-    auto it = std::lower_bound(sls.begin(), sls.end(), layer.print_z - EPSILON,
-                               [](const SupportLayer *l, double z) { return l->print_z < z; });
-    return it != sls.end() && std::abs((*it)->print_z - layer.print_z) < EPSILON ? *it : nullptr;
-}
-
-// The support layer at `layer`'s print_z, inserting one when the support generators made none.
-static SupportLayer *support_layer_at(PrintObject &object, const Layer &layer, bool &inserted)
-{
-    if (SupportLayer *sl = support_layer_find(object, layer))
-        return sl;
-    SupportLayerPtrs &sls = object.support_layers();
-    auto it = std::lower_bound(sls.begin(), sls.end(), layer.print_z - EPSILON,
-                               [](const SupportLayer *l, double z) { return l->print_z < z; });
-    it = object.insert_support_layer(it, 0, 0, layer.height, layer.print_z, layer.slice_z);
-    (*it)->support_type = stInnerTree;
-    inserted = true;
-    return *it;
-}
+// The support layer lookup and insertion live in SupportLayerAt.hpp, shared with the support fins.
+using support_layer_util::support_layer_find;
+using support_layer_util::support_layer_at;
 
 } // namespace stabilizers
 
@@ -1247,15 +1235,8 @@ stabilizers::PlanReport generate_stabilizer_supports(PrintObject &object, const 
             expolygons_append(sl->lslices, printed);
     }
 
-    if (inserted) {
-        // Keep ids equal to positions and the neighbour links intact after the insertions.
-        SupportLayerPtrs &sls = object.support_layers();
-        for (size_t i = 0; i < sls.size(); ++i) {
-            sls[i]->set_id(i);
-            sls[i]->lower_layer = i > 0 ? sls[i - 1] : nullptr;
-            sls[i]->upper_layer = i + 1 < sls.size() ? sls[i + 1] : nullptr;
-        }
-    }
+    if (inserted)
+        support_layer_util::relink_support_layers(object);
     return report;
 }
 

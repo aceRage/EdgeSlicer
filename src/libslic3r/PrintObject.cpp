@@ -27,6 +27,7 @@
 #include "CurvedTops.hpp"
 #include "SLA/IndexedMesh.hpp"
 #include "Support/Stabilizers.hpp"
+#include "Support/Fins.hpp"
 #include "ExtruderAreas.hpp"
 #include "Fill/FillAdaptive.hpp"
 #include "Fill/Fill.hpp"
@@ -1120,6 +1121,44 @@ void PrintObject::generate_support_material()
                                    this->model_object()->name),
                     PrintStateBase::SlicingStabilizerManualUnpainted);
         }
+        // Support fins (Support/Fins.hpp): after the supports and the stabilizers, which they keep out of.
+        if (this->has_fins() && !m_shared_object) {
+            m_print->set_status(50, L("Generating support fins"));
+            const fins::FinReport fr = generate_fin_supports(*this, [this]() { this->throw_if_canceled(); });
+            const std::string &name = this->model_object()->name;
+            if (fr.refused_raft)
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(_u8L("Object %1%: support fins can't stand on a raft, so none were generated. "
+                                        "Set the raft layers to 0, or turn the fins off."), name),
+                    PrintStateBase::SlicingFinsRefused);
+            if (! fr.unreachable.empty()) {
+                const Vec3d &p = fr.unreachable.front();
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(_u8L("Object %1%: %2% painted fin spot(s) cannot get a fin standing on the build plate beside them "
+                                        "(the first at a height of %3% mm). Paint them on a side of the part, lower down, or with more "
+                                        "room around them."),
+                                   name, fr.unreachable.size(), std::round(p.z() * 10.) / 10.),
+                    PrintStateBase::SlicingFinsPaintUnreachable);
+            }
+            if (fr.painted_without_paint)
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(_u8L("Object %1%: support fins are set to Painted but no fin spots are painted, so none were generated. "
+                                        "Paint them with the support painting tool, or set the fins to Auto."), name),
+                    PrintStateBase::SlicingFinsPaintedUnpainted);
+            if (fr.fins_lost > 0 || fr.tines_lost > 0)
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(_u8L("Object %1%: other support prints where its support fins would stand, so %2% fin(s) and %3% tine(s) "
+                                        "were left out (fins never print over other support, and tines stay on the part's own layers). "
+                                        "Turn supports off on that side, or block them there with the support painting tool."),
+                                   name, fr.fins_lost, fr.tines_lost),
+                    PrintStateBase::SlicingFinsTinesSkipped);
+            if (m_print->config().print_sequence == PrintSequence::ByObject && fr.beyond_footprint > EPSILON)
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(_u8L("Object %1%: its support fins reach up to %2% mm beyond the object. Arrange and the print-by-object "
+                                        "clearance do not see them, so leave that much more room around it."),
+                                   name, std::round(fr.beyond_footprint * 10.) / 10.),
+                    PrintStateBase::SlicingFinsByObjectFootprint);
+        }
         // Ultra (support groups, plan 2026-09-02 3.7): both this feature and support filament
         // matching (Chameleon) write SupportLayer::interface_by_extruder, so running both would
         // make the result depend on which ran last. The group wins and Chameleon stands down for
@@ -1785,7 +1824,17 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "stabilizer_column_min_height"
             || opt_key == "stabilizer_wall_loops"
             || opt_key == "stabilizer_infill_density"
-            || opt_key == "stabilizer_infill_pattern") {
+            || opt_key == "stabilizer_infill_pattern"
+            || opt_key == "support_fins"
+            || opt_key == "support_fin_thickness"
+            || opt_key == "support_fin_depth"
+            || opt_key == "support_fin_height"
+            || opt_key == "support_fin_spacing"
+            || opt_key == "support_fin_gap"
+            || opt_key == "support_fin_tine_spacing"
+            || opt_key == "support_fin_tine_depth"
+            || opt_key == "support_fin_tine_base_rows"
+            || opt_key == "support_fin_lean_side_only") {
             steps.emplace_back(posSupportMaterial);
         } else if (
                opt_key == "hollow_interior"

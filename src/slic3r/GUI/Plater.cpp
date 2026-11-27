@@ -253,6 +253,7 @@
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Support/StabilizerBake.hpp"
+#include "libslic3r/Support/Fins.hpp"
 #include "nlohmann/json.hpp"
 
 #include "PhysicalPrinterDialog.hpp"
@@ -26081,6 +26082,22 @@ static void warn_live_stabilizers_dropped(NotificationManager *notifications, co
                list));
 }
 
+// Support fins are EdgeSlicer-only settings too: say which objects lose them in a Bambu Studio export.
+static void warn_live_fins_dropped(NotificationManager *notifications, const Model &model)
+{
+    const std::vector<std::string> names =
+        fins::objects_with_live_fins(model, wxGetApp().preset_bundle->prints.get_edited_preset().config);
+    if (names.empty() || notifications == nullptr)
+        return;
+    std::string list;
+    for (size_t i = 0; i < names.size() && i < 3; ++i)
+        list += (i == 0 ? "\"" : ", \"") + names[i] + "\"";
+    if (names.size() > 3)
+        list += " " + format(_u8L("and %1% more"), names.size() - 3);
+    notifications->push_plater_warning_notification(
+        format(_u8L("The support fins of %1% are EdgeSlicer settings and were left out, so Bambu Studio will not print them."), list));
+}
+
 void Plater::export_bambu_3mf()
 {
     wxString path = p->get_export_file(FT_3MF);
@@ -26098,6 +26115,7 @@ void Plater::export_bambu_3mf()
     p->notification_manager->push_notification(NotificationType::CustomNotification,
                                                NotificationManager::NotificationLevel::RegularNotificationLevel, into_u8(msg));
     warn_live_stabilizers_dropped(p->notification_manager.get(), p->model);
+    warn_live_fins_dropped(p->notification_manager.get(), p->model);
 }
 
 // "Bambu Connect is not installed" (or could not be opened): a link to Bambu's own page, nothing else.
@@ -26203,6 +26221,7 @@ void Plater::export_and_open_in_bambu_studio()
     p->notification_manager->push_notification(NotificationType::CustomNotification,
                                                NotificationManager::NotificationLevel::RegularNotificationLevel, into_u8(msg));
     warn_live_stabilizers_dropped(p->notification_manager.get(), p->model);
+    warn_live_fins_dropped(p->notification_manager.get(), p->model);
 
     // The export succeeded regardless of what happens below - never turn a launch problem into
     // an export failure.

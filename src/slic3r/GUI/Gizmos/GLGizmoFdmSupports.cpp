@@ -34,6 +34,8 @@ namespace Slic3r::GUI {
 
 // The colour of painted stabilizer points (EnforcerBlockerType::STABILIZER) in this gizmo.
 static const ColorRGBA STABILIZER_POINT_COLOR = { 0.62f, 0.36f, 0.90f, 1.f };
+// The colour of painted support fin spots (EnforcerBlockerType::SUPPORT_FIN).
+static const ColorRGBA SUPPORT_FIN_SPOT_COLOR = { 0.10f, 0.70f, 0.66f, 1.f };
 // "By layer": red where the support holds the face up, a clear yellow where it does not. Both are
 // see-through over the painted mesh; the yellow stays apart from the red on light and dark filament.
 static const ColorRGBA LAYER_PREVIEW_SUPPORTED_COLOR   = { 0.92f, 0.10f, 0.10f, 0.60f };
@@ -135,6 +137,9 @@ bool GLGizmoFdmSupports::on_init()
     m_desc["stabilizer_points"]     = _L("Paint stabilizer points");
     m_desc["stabilizer_caption"]    = _L("Left mouse button");
     m_desc["stabilizer"]            = _L("Paint stabilizer points");
+    m_desc["fin_spots"]             = _L("Paint fin spots");
+    m_desc["fin_caption"]           = _L("Left mouse button");
+    m_desc["fin"]                   = _L("Paint fin spots");
     m_desc["unpaint_caption"]       = _L("Right mouse button");
     m_desc["unpaint"]               = _L("Erase");
     m_desc["highlight_like_auto"]   = _L("Simulate Auto Supports");
@@ -330,12 +335,25 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
         m_imgui->tooltip(format_wxstr(_L("Allows painting only on facets selected by: \"%1%\""), m_desc["highlight_by_angle"]), max_tooltip_width);
     // Side stabilizers (Support/Stabilizers.hpp): the same brushes paint the spots where a stabilizer
     // strut must always touch the part. Left paints them, right erases.
+    const bool was_stabilizers = m_paint_stabilizers;
     m_imgui->bbl_checkbox(m_desc["stabilizer_points"], m_paint_stabilizers);
     if (ImGui::IsItemHovered())
         m_imgui->tooltip(_L("Paint spots where a side stabilizer must touch the part. Left mouse button paints, right mouse "
                             "button erases. Used when the object's side stabilizers are Auto (on top of the rings) or "
                             "Manual (only these)."),
                          max_tooltip_width);
+    if (m_paint_stabilizers && ! was_stabilizers)
+        m_paint_fins = false;
+    // Support fins (Support/Fins.hpp): spots where a fin must stand beside the part.
+    const bool was_fins = m_paint_fins;
+    m_imgui->bbl_checkbox(m_desc["fin_spots"], m_paint_fins);
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_L("Paint spots on a side of the part where a support fin must stand. Left mouse button paints, right "
+                            "mouse button erases. Used when the object's support fins are Auto (on top of the automatic ones) "
+                            "or Painted (only these)."),
+                         max_tooltip_width);
+    if (m_paint_fins && ! was_fins)
+        m_paint_stabilizers = false;
     ImGui::Separator();
 
     if (m_current_tool != old_tool)
@@ -693,13 +711,15 @@ void GLGizmoFdmSupports::show_tooltip_information(float caption_max, float x, fl
         std::vector<std::string> tip_items;
         switch (m_tool_type) {
             case ToolType::BRUSH:
-                tip_items = m_paint_stabilizers ? std::vector<std::string>{"stabilizer", "unpaint", "remove", "cursor_size", "clipping_of_view"} :
+                tip_items = m_paint_fins ? std::vector<std::string>{"fin", "unpaint", "remove", "cursor_size", "clipping_of_view"} :
+                            m_paint_stabilizers ? std::vector<std::string>{"stabilizer", "unpaint", "remove", "cursor_size", "clipping_of_view"} :
                                                   std::vector<std::string>{"enforce", "block", "remove", "cursor_size", "clipping_of_view"};
                 break;
             case ToolType::BUCKET_FILL:
                 break;
             case ToolType::SMART_FILL:
-                tip_items = m_paint_stabilizers ? std::vector<std::string>{"stabilizer", "unpaint", "remove", "smart_fill_angle", "clipping_of_view"} :
+                tip_items = m_paint_fins ? std::vector<std::string>{"fin", "unpaint", "remove", "smart_fill_angle", "clipping_of_view"} :
+                            m_paint_stabilizers ? std::vector<std::string>{"stabilizer", "unpaint", "remove", "smart_fill_angle", "clipping_of_view"} :
                                                   std::vector<std::string>{"enforce", "block", "remove", "smart_fill_angle", "clipping_of_view"};
                 break;
             case ToolType::GAP_FILL:
@@ -1295,6 +1315,7 @@ void GLGizmoFdmSupports::update_from_model_object(bool first_update)
     ebt_colors.push_back(TriangleSelectorGUI::enforcers_color);
     ebt_colors.push_back(TriangleSelectorGUI::blockers_color);
     ebt_colors.push_back(STABILIZER_POINT_COLOR);
+    ebt_colors.push_back(SUPPORT_FIN_SPOT_COLOR);
     for (const ModelVolume* mv : mo->volumes) {
         if (! mv->is_model_part())
             continue;
@@ -1305,9 +1326,9 @@ void GLGizmoFdmSupports::update_from_model_object(bool first_update)
         const TriangleMesh* mesh = &mv->mesh();
         m_triangle_selectors.emplace_back(std::make_unique<TriangleSelectorPatch>(*mesh, ebt_colors));
         // Reset of TriangleSelector is done inside TriangleSelectorGUI's constructor, so we don't need it to perform it again in deserialize().
-        // The colour table has NONE/ENFORCER/BLOCKER and the Edge STABILIZER point state only: a higher
-        // state in the file is reset to NONE instead of indexing past ebt_colors.
-        m_triangle_selectors.back()->deserialize(mv->supported_facets.get_data(), false, EnforcerBlockerType::STABILIZER);
+        // The colour table has NONE/ENFORCER/BLOCKER and the Edge STABILIZER and SUPPORT_FIN states only: a
+        // higher state in the file is reset to NONE instead of indexing past ebt_colors.
+        m_triangle_selectors.back()->deserialize(mv->supported_facets.get_data(), false, EnforcerBlockerType::SUPPORT_FIN);
         m_triangle_selectors.back()->request_update_render_data();
 
         //BBS: add timestamp logic
@@ -1331,7 +1352,9 @@ wxString GLGizmoFdmSupports::handle_snapshot_action_name(bool shift_down, GLGizm
     if (shift_down)
         action_name = _L("Remove selection");
     else {
-        if (m_paint_stabilizers)
+        if (m_paint_fins)
+            action_name = button_down == Button::Left ? _L("Paint fin spots") : _L("Erase painting");
+        else if (m_paint_stabilizers)
             action_name = button_down == Button::Left ? _L("Paint stabilizer points") : _L("Erase painting");
         else if (button_down == Button::Left)
             action_name = _L("Enforce supports");

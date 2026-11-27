@@ -4422,11 +4422,14 @@ void ModelInstance::get_arrange_polygon(void *ap, const Slic3r::DynamicPrintConf
         // id==0 means follow previous material, so need not be recorded
         if (op1 && (extruder_id = op1->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
         if (op2 && (extruder_id = op2->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
-    } else if (const ConfigOption *stab = object->config.has("stabilizer_supports") ? object->config.option("stabilizer_supports") :
-                                                                                     config_global.option("stabilizer_supports");
-               // Base option + virtual getInt(): a typed ConfigOptionEnum downcast of a generic enum is UB.
-               stab && stab->type() == coEnum && static_cast<StabilizerMode>(stab->getInt()) != smOff) {
-        // Side stabilizers print with the support filament even with supports off.
+    } else if (auto addon_on = [this, &config_global](const char *key) {
+                   const ConfigOption *opt = object->config.has(key) ? object->config.option(key) : config_global.option(key);
+                   // Base option + virtual getInt(): a typed ConfigOptionEnum downcast of a generic enum is UB. Both
+                   // switches are enums whose 0 is Off.
+                   return opt && opt->type() == coEnum && opt->getInt() != 0;
+               };
+               addon_on("stabilizer_supports") || addon_on("support_fins")) {
+        // Side stabilizers and support fins print with the support filament even with supports off.
         auto op1 = object->get_config_value<ConfigOptionInt>(config_global, "support_filament");
         int extruder_id;
         if (op1 && (extruder_id = op1->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);

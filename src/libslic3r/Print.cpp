@@ -1384,9 +1384,9 @@ std::vector<unsigned int> Print::support_material_extruders() const
     for (PrintObject *object : m_objects) {
         if (object->has_support_material() && append_support_extruders(object->config(), num_extruders, extruders))
             support_uses_current_extruder = true;
-        else if (object->has_stabilizers()) {
-            // Side stabilizers without supports: they print with the support filament, never the
-            // interface filament.
+        else if (object->has_support_addons()) {
+            // Side stabilizers or support fins without supports: they print with the support filament,
+            // never the interface filament.
             if (object->config().support_filament == 0)
                 support_uses_current_extruder = true;
             else {
@@ -3445,6 +3445,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         for (const PrintObject* object : m_objects)
             if (object->has_stabilizers())
                 return {L("Spiral vase mode can't be used with side stabilizers. Turn the stabilizers off or spiral vase mode off."), object, "stabilizer_supports"};
+        for (const PrintObject* object : m_objects)
+            if (object->has_fins())
+                return {L("Spiral vase mode can't be used with support fins. Turn the fins off or spiral vase mode off."), object, "support_fins"};
         // Orca #17143: the vase is refused for the filaments it prints, not for regions that merely differ.
         // A height range or modifier that only changes a speed or a wall setting splits the object into
         // regions that are not perimeter compatible, yet still prints one filament. object_extruders()
@@ -3890,8 +3893,8 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 if (sup == 0 || supi == 0)
                     // "use whatever filament is current": any filament of the print may print it.
                     append(object_filaments, extruders);
-            } else if (object->has_stabilizers()) {
-                // Side stabilizers without supports print with the support filament only.
+            } else if (object->has_support_addons()) {
+                // Side stabilizers or support fins without supports print with the support filament only.
                 const int sup = object->config().support_filament.value;
                 if (sup > 0)
                     object_filaments.emplace_back(unsigned(sup - 1));
@@ -3946,7 +3949,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             if (!validate_extrusion_width(object->config().get_abs_value("line_width", object_min_nozzle_diameter),
                                           object_min_nozzle_diameter, layer_height, err_msg))
                 return {err_msg, object, "line_width"};
-            if (object->has_support() || object->has_raft() || object->has_stabilizers()) {
+            if (object->has_support() || object->has_raft() || object->has_support_addons()) {
                 const int sup  = object->config().support_filament.value;
                 // Side stabilizers alone print with the support filament only, so the interface
                 // filament does not enter into the width check then.
