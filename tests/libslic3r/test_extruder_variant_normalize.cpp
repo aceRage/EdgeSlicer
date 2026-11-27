@@ -534,3 +534,21 @@ TEST_CASE("A filament switcher on mixed drives cools 10 more before the tower", 
     CHECK(filament_cooling_before_tower_at(dual, 0, true) == 0.);
 }
 
+TEST_CASE("The toolchange restore runs at the new filament's deretraction speed on mixed drives", "[FlowVariants]")
+{
+    // Hand test 2026-11-27: the restore after a tower toolchange is written before the writer switches filaments, so
+    // switching to the X2D's Bowden extruder unretracted at the Direct Drive 30 mm/s instead of its 20 mm/s.
+    DynamicPrintConfig x2d = mixed_drive_config({ 1, 2 });
+    x2d.set_key_value("deretraction_speed", new ConfigOptionFloats({ 30, 31, 32, 20, 21, 22 }));
+    resolve_printer_extruder_variants(x2d);
+    CHECK(toolchange_deretract_speed(x2d, 1) == 20.);
+    CHECK(toolchange_deretract_speed(x2d, 0) == 30.);
+    CHECK(toolchange_deretract_speed(x2d, -1) == 0.);
+    // A deretraction speed of 0 means the retraction speed, as in Extruder::deretract_speed.
+    x2d.set_key_value("deretraction_speed", new ConfigOptionFloats({ 30, 0 }));
+    CHECK(toolchange_deretract_speed(x2d, 1) == 20.);
+    // Every other machine keeps the writer's speed (byte-identical G-code).
+    DynamicPrintConfig dual = toolchanger_config(2, { "Direct Drive Standard", "Direct Drive High Flow" });
+    CHECK(toolchange_deretract_speed(dual, 1) == 0.);
+}
+

@@ -12108,6 +12108,19 @@ bool has_mixed_extruder_types(const ConfigBase &config)
     return std::adjacent_find(types.begin(), types.end(), std::not_equal_to<>()) != types.end();
 }
 
+double toolchange_deretract_speed(const ConfigBase &config, int new_filament_id)
+{
+    if (new_filament_id < 0 || !has_mixed_extruder_types(config))
+        return 0.;
+    const auto *deretract = config.option<ConfigOptionFloats>("deretraction_speed");
+    const auto *retract   = config.option<ConfigOptionFloats>("retraction_speed");
+    // Extruder::deretract_speed: rounded to whole mm/s, the retraction speed when 0.
+    double speed = deretract != nullptr && !deretract->values.empty() ? std::floor(deretract->get_at(size_t(new_filament_id)) + 0.5) : 0.;
+    if (!(speed > 0.) && retract != nullptr && !retract->values.empty())
+        speed = std::floor(retract->get_at(size_t(new_filament_id)) + 0.5);
+    return speed > 0. ? speed : 0.;
+}
+
 std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count)
 {
     if (extruder_count == 0) {

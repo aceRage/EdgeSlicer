@@ -16,7 +16,10 @@
 #include <boost/filesystem.hpp>
 
 #include <array>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <sstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1173,6 +1176,104 @@ SCENARIO("H2D retraction vectors are untouched by the drive fix", "[FlowVariants
     print.apply(model, cfg);
     CHECK(print.full_print_config().option<ConfigOptionFloats>("retraction_length")->values == std::vector<double>{ all[0], all[1] });
     CHECK_FALSE(print.realign_printer_variants_to_filament_map({ 1, 2 }));
+}
+
+namespace {
+// The owner's hand test (2026-11-27): Bambu PLA Basic (its own 0.4 mm retraction) on the left extruder, Generic PLA
+// (no retraction of its own) on the right, Bowden one, with a prime tower.
+DynamicPrintConfig x2d_mixed_filaments_config()
+{
+    PresetBundle     &b     = bbl_bundle();
+    const std::string basic = "Bambu PLA Basic @BBL X2D 0.4 nozzle";
+    const std::string plain = "Generic PLA @BBL X2D 0.4 nozzle";
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab X2D 0.4 nozzle", true));
+    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL X2D", true));
+    REQUIRE(b.filaments.select_preset_by_name(basic, true));
+    b.filament_presets = { basic };
+    b.set_num_filaments(2, std::vector<std::string>{ "#E01919", "#1943E0" });
+    b.filament_presets = { basic, plain };
+    DynamicPrintConfig cfg = b.full_config_secure();
+    cfg.set_deserialize_strict({
+        { "print_sequence", "by layer" },
+        { "filament_map_mode", "Manual" },
+        { "filament_map", "1,2" },
+        { "enable_prime_tower", "1" },
+        { "wipe_tower_x", 150. },
+        { "wipe_tower_y", 200. },
+        { "wipe_tower_rotation_angle", 0 },
+        { "gcode_comments", 0 },
+    });
+    return cfg;
+}
+} // namespace
+
+SCENARIO("A filament without its own retraction keeps its Bowden extruder's value next to one that has it", "[FlowVariants][X2D]")
+{
+    // Hand test 2026-11-27: one filament with a retraction override (PLA Basic, 0.4 mm) made apply_override fill every
+    // nil filament with filament 1's printer value, so Generic PLA on the Bowden extruder retracted 0.8 mm, not 2 mm.
+    const DynamicPrintConfig cfg = x2d_mixed_filaments_config();
+    Model model;
+    add_x2d_cube(model, 60., 1);
+    add_x2d_cube(model, 200., 2);
+    Print print;
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    CHECK(print.config().retraction_length.values == std::vector<double>{ 0.4, 2. });
+    CHECK(print.config().deretraction_speed.values == std::vector<double>{ 30., 20. });
+
+    WHEN("the same settings are applied again, as the GUI does before every slice")
+    {
+        const Print::ApplyStatus status = print.apply(model, cfg);
+        THEN("nothing changes")
+        {
+            CHECK(status == Print::APPLY_STATUS_UNCHANGED);
+            CHECK(print.config().retraction_length.values == std::vector<double>{ 0.4, 2. });
+            CHECK(print.full_print_config().option<ConfigOptionFloats>("retraction_length")->values == std::vector<double>{ 0.8, 2. });
+        }
+    }
+    WHEN("the plate is sliced")
+    {
+        const std::string gcode = Test::gcode(print);
+        REQUIRE_FALSE(gcode.empty());
+        THEN("the unretract after each tower toolchange runs at the new filament's deretraction speed")
+        {
+            // The restore follows "; custom gcode end" and comes before "; filament start gcode". It used to run at the
+            // previous filament's speed: F1800 (30 mm/s) when switching to the Bowden extruder instead of its F1200.
+            std::istringstream in(gcode);
+            std::string        line;
+            int                tool = -1, last_f = 0, restores_t0 = 0, restores_t1 = 0, wrong = 0;
+            bool               after_change = false;
+            while (std::getline(in, line)) {
+                if (line.size() > 1 && line[0] == 'T' && std::isdigit((unsigned char) line[1])) {
+                    const int t = std::atoi(line.c_str() + 1);
+                    if (t == 0 || t == 1)
+                        tool = t;
+                }
+                if (line.rfind("; custom gcode end", 0) == 0)
+                    after_change = true;
+                if (line.rfind("; filament start gcode", 0) == 0)
+                    after_change = false;
+                if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0)
+                    continue;
+                const size_t f_pos = line.find(" F");
+                if (f_pos != std::string::npos)
+                    last_f = std::atoi(line.c_str() + f_pos + 2);
+                if (after_change && line.size() > 4 && line.rfind("G1 E", 0) == 0 && line[4] != '-') {
+                    after_change = false;
+                    if (tool == 1) {
+                        ++restores_t1;
+                        wrong += last_f != 1200;
+                    } else if (tool == 0) {
+                        ++restores_t0;
+                        wrong += last_f != 1800;
+                    }
+                }
+            }
+            CHECK(restores_t1 > 0);
+            CHECK(restores_t0 > 0);
+            CHECK(wrong == 0);
+        }
+    }
 }
 
 // Review #1056 S1: with the side scrape on (H3C presets; a user may turn it on on the H2D), the nozzle travels up to

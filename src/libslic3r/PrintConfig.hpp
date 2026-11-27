@@ -845,6 +845,11 @@ std::vector<int> resolved_extruder_types(const ConfigBase &config, size_t extrud
 std::vector<int> resolved_extruder_types(const ConfigBase &config);
 // Whether resolved_extruder_types names more than one drive (the X2D).
 bool has_mixed_extruder_types(const ConfigBase &config);
+// The speed (mm/s) of the unretract that restores a tower toolchange's retraction. GCode writes it before the writer
+// switches to the new filament, so it used to run at the old filament's deretraction speed. Bambu unretracts after
+// the switch; on a mixed-drive machine (X2D) that is the new filament's deretraction_speed (its retraction_speed when
+// 0). 0 (keep the writer's) on every other machine and for no new filament.
+double toolchange_deretract_speed(const ConfigBase &config, int new_filament_id);
 
 // extruder_type per extruder as the 3MF slice_info reports it: resolved_extruder_types, or the option's own
 // values for a count of 0.

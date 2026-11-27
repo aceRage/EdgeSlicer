@@ -284,6 +284,25 @@ static ConfigOption *unpack_filament_flow_override(const ConfigOption *filament_
     return unpacked;
 }
 
+// A filament's retraction override over the printer's value. ConfigOptionVector::apply_override writes values[0] into
+// every nil entry, which is right while the printer's vector holds one value for every filament. On a mixed-drive
+// grouping machine (X2D) it holds each filament's own extruder value, so a nil filament keeps its own entry: the right
+// extruder's Bowden 2 mm, not filament 1's Direct Drive 0.8 mm (flow variants PR 1, owner hand test 2026-11-27).
+static void apply_filament_retract_override(ConfigOption *machine, const ConfigOption *filament, bool keep_machine_for_nil)
+{
+    auto       *values    = dynamic_cast<ConfigOptionVectorBase *>(machine);
+    const auto *overrides = dynamic_cast<const ConfigOptionVectorBase *>(filament);
+    if (!keep_machine_for_nil || values == nullptr || overrides == nullptr || !filament->nullable() || machine->nullable() ||
+        machine->type() != filament->type()) {
+        machine->apply_override(filament);
+        return;
+    }
+    // Both hold one value per filament here; a longer override's extra entries have no filament to go to.
+    for (size_t i = 0; i < overrides->size() && i < values->size(); ++i)
+        if (!overrides->is_nil(i))
+            values->set_at(filament, i, i);
+}
+
 // Flow variants PR 1: the keys resolve_printer_extruder_variants reads on a mixed-drive grouping machine (X2D).
 static const std::vector<std::string> &printer_variant_layout_keys()
 {
@@ -355,7 +374,7 @@ bool Print::realign_printer_variants_to_filament_map(const std::vector<int> &fil
                     filament = unpacked.get();
                 }
                 if (!filament->is_nil())
-                    printed->apply_override(filament);
+                    apply_filament_retract_override(printed.get(), filament, true);
             }
         }
         ConfigOption *current = m_config.option(key);
@@ -374,7 +393,10 @@ static t_config_option_keys print_config_diffs(
     const PrintConfig        &current_config,
     const DynamicPrintConfig &new_full_config,
     DynamicPrintConfig       &filament_overrides,
-    int plate_index)
+    int plate_index,
+    // Flow variants PR 1: the printer's retraction vectors hold one value per filament (X2D), see
+    // apply_filament_retract_override.
+    bool per_filament_printer_values = false)
 {
     const std::vector<std::string> &extruder_retract_keys = print_config_def.extruder_retract_keys();
     const std::string               filament_prefix       = "filament_";
@@ -407,7 +429,7 @@ static t_config_option_keys print_config_diffs(
                 auto opt_copy = opt_new->clone();
                 if (!((opt_key == "long_retractions_when_cut" || opt_key == "retraction_distances_when_cut")
                     && new_full_config.option<ConfigOptionInt>("enable_long_retraction_when_cut")->value != LongRectrationLevel::EnableFilament)) // ugly code, remove it later if firmware supports
-                    opt_copy->apply_override(opt_new_filament);
+                    apply_filament_retract_override(opt_copy, opt_new_filament, per_filament_printer_values);
                 bool changed = !config_options_equal(opt_old, opt_copy);
                 if (changed)
                     print_diff.emplace_back(opt_key);
@@ -1907,6 +1929,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         if (printer_variant_layout)
             apply_printer_variant_layout(new_full_config, *printer_variant_layout, incoming_map->values);
     }
+    const bool per_filament_printer_values = printer_variant_layout != nullptr;
     {
         std::scoped_lock<std::mutex> lock(m_printer_variant_layout_mutex);
         m_printer_variant_layout = std::move(printer_variant_layout);
@@ -1924,7 +1947,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // Find modified keys of the various configs. Resolve overrides extruder retract values by filament profiles.
     DynamicPrintConfig   filament_overrides;
     //BBS: add plate index
-    t_config_option_keys print_diff       = print_config_diffs(m_config, new_full_config, filament_overrides, this->m_plate_index);
+    t_config_option_keys print_diff       = print_config_diffs(m_config, new_full_config, filament_overrides, this->m_plate_index,
+                                                               per_filament_printer_values);
     t_config_option_keys full_config_diff = full_print_config_diffs(m_full_print_config, new_full_config, this->m_plate_index);
     m_last_apply_changed_keys             = print_diff;
     if (!print_diff.empty() && this->is_step_done(psGCodeExport)) {
