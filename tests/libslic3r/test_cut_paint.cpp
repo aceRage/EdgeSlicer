@@ -14,6 +14,7 @@
 // the painted face is known (x == +H for the +X face, etc.).
 // ---------------------------------------------------------------------------
 
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <libslic3r/CutUtils.hpp>
@@ -565,7 +566,7 @@ TEST_CASE("Cut paint: painted halves survive a project 3MF save and reload", "[C
             side_before += cp_area(v->mmu_segmentation_facets.get_facets(*v, EnforcerBlockerType::Extruder2));
     REQUIRE(side_before == Approx(CP_CUBE * CP_CUBE).epsilon(0.02));
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string file = (tmp_root / "cut_paint_round_trip.3mf").string();
@@ -743,7 +744,7 @@ TEST_CASE("Edit cut paint: it still works after the project is saved and reopene
 {
     ReeditFixture f;
 
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string file = (tmp_root / "cut_reedit_paint.3mf").string();

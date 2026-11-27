@@ -5,6 +5,7 @@
 // slots 1..6. These tests pin the slot numbering (grouping_nozzle_list), that a rack of one kind numbers as before, the H3C's
 // nine slots, slice_info in a stored 3MF and the get_auto_nozzle_mapping (V0) request.
 
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/BambuNozzleMappingRequest.hpp"
@@ -327,7 +328,7 @@ SCENARIO("A stored 3MF's slice_info names the rack slots", "[H2CRackGroupId][3mf
     }
 
     const std::string             test_file = std::string(TEST_DATA_DIR) + "/test_3mf/h2c_rack_group_id.3mf";
-    const boost::filesystem::path tmp_root  = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root  = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
 
