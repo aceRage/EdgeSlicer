@@ -600,10 +600,11 @@ fins::FinReport generate_fin_supports(PrintObject &object, const std::function<v
         for (ExPolygon &island : s.body) {
             if (island.area() < min_island_area)
                 continue;
-            // Solid concentric loops, outside in: a fin wall a few lines thick is all wall.
+            // Solid concentric loops, outside in: a fin wall a few lines thick is all wall. A speck too thin
+            // for one line (what other support left of a wall) is not printed: it would be a zero-length bead.
             Polygons loop = offset(island, -half_w);
             if (loop.empty())
-                loop = to_polygons(island);
+                continue;
             while (! loop.empty()) {
                 Polygons next = offset(loop, -spacing);
                 extrusion_entities_append_loops(coll->entities, std::move(loop), erSupportMaterial, flow.mm3_per_mm(), flow.width(), flow.height());
