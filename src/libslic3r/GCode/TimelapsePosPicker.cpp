@@ -112,6 +112,21 @@ void TimelapsePosPicker::construct_printable_area_by_printer()
                 wipe_tower_area.emplace_back(std::move(grown));
         }
     }
+    // Per-object prime towers (PR 5 of tests/design_per_object_prime_towers.md, 2.12): the photo spot never lands on
+    // one, printed yet or not, kept clear the same way.
+    for (const std::unique_ptr<ObjectWipeTower> &tower : print->object_wipe_towers()) {
+        const WipeTowerData &wtd = *tower->data;
+        if (!wtd.wipe_tower_mesh_data.has_value() || wtd.wipe_tower_mesh_data->bottom.points.empty())
+            continue;
+        Polygon footprint = wtd.wipe_tower_mesh_data->bottom;
+        footprint.rotate(Geometry::deg2rad(config.wipe_tower_rotation_angle.value));
+        footprint.translate(Point(scale_(tower->pos.x()), scale_(tower->pos.y())));
+        const BoundingBox bb = get_extents(footprint);
+        Polygon box{bb.min, Point(bb.max.x(), bb.min.y()), bb.max, Point(bb.min.x(), bb.max.y())};
+        Polygon grown = expand_object_projection(box, m_print_seq == PrintSequence::ByObject);
+        if (!grown.empty())
+            wipe_tower_area.emplace_back(std::move(grown));
+    }
 
     for (size_t idx = 0; idx < extruder_count; ++idx) {
         ExPolygons printable_area = diff_ex(diff(Polygons{m_bed_polygon}, bed_exclude_area), wipe_tower_area);

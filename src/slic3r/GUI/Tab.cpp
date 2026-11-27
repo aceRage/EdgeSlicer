@@ -4046,6 +4046,20 @@ void TabPrint::build()
         optgroup->append_single_option_line("stabilizer_infill_density");
         optgroup->append_single_option_line("stabilizer_infill_pattern");
 
+        // Support fins: breakaway walls with one-layer tines beside a part printed tilted onto an edge
+        // (libslic3r/Support/Fins.hpp).
+        optgroup = page->new_optgroup(L("Support fins"), L"param_support_tree");
+        optgroup->append_single_option_line("support_fins");
+        optgroup->append_single_option_line("support_fin_thickness");
+        optgroup->append_single_option_line("support_fin_depth");
+        optgroup->append_single_option_line("support_fin_height");
+        optgroup->append_single_option_line("support_fin_spacing");
+        optgroup->append_single_option_line("support_fin_gap");
+        optgroup->append_single_option_line("support_fin_tine_spacing");
+        optgroup->append_single_option_line("support_fin_tine_depth");
+        optgroup->append_single_option_line("support_fin_tine_base_rows");
+        optgroup->append_single_option_line("support_fin_lean_side_only");
+
     page = add_options_page(L("Multimaterial"), "custom-gcode_multi_material"); // ORCA: icon only visible on placeholders
         optgroup = page->new_optgroup(L("Prime tower"), L"param_tower");
         optgroup->append_single_option_line("enable_prime_tower", "multimaterial_settings_prime_tower");
@@ -4117,6 +4131,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("preload_all_filaments", "multimaterial_settings_prime_tower");
         // Per-object prime towers (print by object; shown with the tower on).
         optgroup->append_single_option_line("prime_tower_per_object", "multimaterial_settings_prime_tower");
+        // ... and an object's own opt-out (shown in the object settings only, see ConfigManipulation).
+        optgroup->append_single_option_line("object_prime_tower", "multimaterial_settings_prime_tower");
 
         optgroup = page->new_optgroup(L("Filament for Features"), L"param_filament_for_features");
         optgroup->append_single_option_line("wall_filament", "multimaterial_settings_filament_for_features#walls");
