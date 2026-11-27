@@ -13,14 +13,18 @@
 
 #include <boost/filesystem.hpp>
 
+#include <algorithm>
+#include <cstdlib>
+#include <limits>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
-// Per-object prime towers, PR 3 (tests/design_per_object_prime_towers.md): with prime_tower_per_object on a plate printed by
-// object, every copy that changes filament gets its own Type 1 tower beside it, printed inside its own block. With the
-// setting off nothing changes (the G-code gate proves that against main).
+// Per-object prime towers, PR 3 and PR 4 (tests/design_per_object_prime_towers.md): with prime_tower_per_object on a plate
+// printed by object, every copy that changes filament gets its own tower beside it (Type 1 on Bambu Lab printers, Type 2 on
+// the U1 and Voron), printed inside its own block. With the setting off nothing changes (the G-code gate proves that).
 
 using namespace Slic3r;
 
@@ -66,6 +70,9 @@ const Machine X1C{ "BBL", "Bambu Lab X1 Carbon 0.4 nozzle", "0.20mm Standard @BB
 const Machine H2D{ "BBL", "Bambu Lab H2D 0.4 nozzle", "0.20mm Standard @BBL H2D", "Bambu PLA Basic @BBL H2D", { 165., 160. }, { 40., 250. }, true };
 const Machine H2C{ "BBL", "Bambu Lab H2C 0.4 nozzle", "0.20mm Standard @BBL H2C", "Bambu PLA Basic @BBL H2C", { 165., 160. }, { 40., 250. }, true };
 const Machine U1{ "Snapmaker", "Snapmaker U1 (0.4 nozzle)", "0.20mm Standard @Snapmaker U1 (0.4 nozzle)", "Generic PLA @U1 0.4 nozzle", { 135., 135. }, { 30., 210. }, false };
+// A Type 2 single-extruder multi-material printer (the gate's Voron case): its tower purges by the flush matrix and, by
+// layer, ends with a final purge.
+const Machine Voron{ "Voron", "Voron 2.4 300 0.4 nozzle", "0.20mm Standard @Voron", "Generic PLA @System", { 150., 150. }, { 30., 240. }, false };
 
 DynamicPrintConfig machine_config(const Machine &m, bool per_object, bool by_object = true, bool tower = true)
 {
@@ -161,6 +168,109 @@ std::vector<std::string> blocks_of(const std::string &gcode)
 
 const std::string TOWER_START = "WIPE_TOWER_START";
 
+// The extruding moves inside a block's tower sections (between WIPE_TOWER_START and WIPE_TOWER_END): where they lie on the
+// bed, and the highest Z they print at.
+struct TowerMoves
+{
+    BoundingBoxf box;
+    double       max_z      = 0.;
+    // The lowest Z any move of the block goes to (towers or not).
+    double       min_any_z  = std::numeric_limits<double>::max();
+    size_t       extrusions = 0;
+};
+
+TowerMoves tower_moves(const std::string &block)
+{
+    TowerMoves         out;
+    bool               in_tower = false;
+    double             z        = 0.;
+    std::istringstream lines(block);
+    for (std::string line; std::getline(lines, line);) {
+        if (line.find("WIPE_TOWER_START") != std::string::npos) {
+            in_tower = true;
+            continue;
+        }
+        if (line.find("WIPE_TOWER_END") != std::string::npos) {
+            in_tower = false;
+            continue;
+        }
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0)
+            continue;
+        if (const size_t comment = line.find(';'); comment != std::string::npos)
+            line.resize(comment);
+        std::istringstream words(line);
+        bool               has_x = false, has_y = false;
+        double             x = 0., y = 0., e = 0.;
+        for (std::string word; words >> word;) {
+            if (word.size() < 2)
+                continue;
+            const double value = std::atof(word.c_str() + 1);
+            switch (word.front()) {
+            case 'X': x = value; has_x = true; break;
+            case 'Y': y = value; has_y = true; break;
+            case 'Z': z = value; out.min_any_z = std::min(out.min_any_z, z); break;
+            case 'E': e = value; break;
+            default: break;
+            }
+        }
+        if (in_tower && has_x && has_y && e > 0.) {
+            out.box.merge(Vec2d(x, y));
+            out.max_z = std::max(out.max_z, z);
+            ++out.extrusions;
+        }
+    }
+    return out;
+}
+
+// G-code per block on a Type 2 printer: each block prints its own tower, where that tower stands, no higher than its copy;
+// no print-start priming, no final purge.
+void check_type2_blocks(Print &print)
+{
+    REQUIRE(print.object_wipe_towers().size() == 2);
+    std::string gcode;
+    REQUIRE_NOTHROW(gcode = Test::gcode(print));
+    CHECK(print.by_object_plan_misses() == 0);
+    CHECK(count_of(gcode, "CP PRIMING") == 0);
+    CHECK(count_of(gcode, "M1 Remove priming towers") == 0);
+    const std::vector<std::string> blocks = blocks_of(gcode);
+    REQUIRE(blocks.size() == 2);
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        INFO("block " << i);
+        const ObjectWipeTower &tower = *print.object_wipe_towers()[i];
+        CHECK(count_of(blocks[i], TOWER_START) > 0);
+        CHECK(count_of(blocks[i], TOWER_START) == count_of(blocks[i], "WIPE_TOWER_END"));
+        const TowerMoves moves = tower_moves(blocks[i]);
+        REQUIRE(moves.extrusions > 0);
+        // Where the plan put this copy's tower (its generated outline, brim included; rotation 0), not where the other
+        // copy's tower or the plate tower's wipe_tower_x / wipe_tower_y would be.
+        REQUIRE(tower.data->wipe_tower_mesh_data.has_value());
+        BoundingBox outline = get_extents(tower.data->wipe_tower_mesh_data->bottom);
+        BoundingBoxf expected(unscale(outline.min) + tower.pos, unscale(outline.max) + tower.pos);
+        expected.offset(3.);
+        INFO("tower moves " << moves.box.min.transpose() << " - " << moves.box.max.transpose() << ", expected " << expected.min.transpose()
+                            << " - " << expected.max.transpose());
+        CHECK(expected.contains(moves.box.min));
+        CHECK(expected.contains(moves.box.max));
+        // Never below the bed. The first tower change of a later block once 'unlifted' the z-hop the travel to the copy
+        // had taken, below the first layer (U1: G1 Z-.15).
+        CHECK(moves.min_any_z >= print.config().z_offset.value - 1e-6);
+        // Never taller than its own copy (1 mm cubes).
+        const double top = unscale<double>(tower.instance->print_object->size().z());
+        CHECK(moves.max_z <= top + print.config().z_offset.value + 0.25);
+        // No final purge at the end of the block.
+        CHECK(tower.data->final_purge->gcode.empty());
+    }
+    // The summed statistics are the towers' own.
+    std::vector<float> sum(print.config().filament_diameter.size(), 0.f);
+    for (const std::unique_ptr<ObjectWipeTower> &tower : print.object_wipe_towers())
+        for (size_t i = 0; i < tower->data->used_filament.size() && i < sum.size(); ++i)
+            sum[i] += tower->data->used_filament[i];
+    REQUIRE(print.object_tower_statistics().used_filament.size() == sum.size());
+    for (size_t i = 0; i < sum.size(); ++i)
+        CHECK(std::abs(print.object_tower_statistics().used_filament[i] - sum[i]) < 1e-4f);
+    CHECK(sum[0] + sum[1] > 0.f);
+}
+
 } // namespace
 
 TEST_CASE("Object towers: normalize_fdm_2 keeps the tower only for an opted-in by-object plate of copies", "[ObjectTowers]")
@@ -182,7 +292,9 @@ TEST_CASE("Object towers: normalize_fdm_2 keeps the tower only for an opted-in b
         { false, "by object", "Bambu Lab X1 Carbon", false, 1, 2, true },
         { true,  "by object", "Bambu Lab X1 Carbon", false, 2, 1, false }, // one filament: off, as today
         { true,  "by object", "Bambu Lab X1 Carbon", true,  2, 2, false }, // spiral vase
-        { true,  "by object", "Snapmaker U1",        false, 2, 2, false }, // Type 2: PR 4
+        { true,  "by object", "Snapmaker U1",        false, 2, 2, true },  // Type 2 (PR 4): kept
+        { false, "by object", "Snapmaker U1",        false, 2, 2, false }, // Type 2, off: as today
+        { true,  "by object", "Voron 2.4 300",       false, 2, 2, true },  // Type 2, SEMM
         { true,  "by layer",  "Bambu Lab X1 Carbon", false, 2, 2, true },  // by layer: untouched
     };
     for (const Row &row : rows) {
@@ -233,7 +345,7 @@ TEST_CASE("Object towers: predicates, off and on (X1C, two 2-colour cubes by obj
     }
 }
 
-TEST_CASE("Object towers: a Type 2 printer prints without towers and says so (U1)", "[ObjectTowers]")
+TEST_CASE("Object towers: a Type 2 printer builds its towers too, with no notice (U1)", "[ObjectTowers]")
 {
     Print print;
     Model model;
@@ -241,21 +353,35 @@ TEST_CASE("Object towers: a Type 2 printer prints without towers and says so (U1
     std::vector<StringObjectException> warnings;
     const StringObjectException error = apply_validate(print, model, machine_config(U1, true), U1, &warnings);
     REQUIRE(error.string.empty());
-    CHECK_FALSE(print.config().enable_prime_tower.value);
-    CHECK_FALSE(print.object_towers_requested());
+    CHECK(print.wipe_tower_type() == WipeTowerType::Type2);
+    CHECK(print.config().enable_prime_tower.value);
+    CHECK(print.object_towers_requested());
+    CHECK(print.object_tower_mode());
     CHECK_FALSE(print.has_wipe_tower());
-    bool noticed = false;
-    for (const StringObjectException &w : warnings)
-        noticed |= w.opt_key == "prime_tower_per_object";
-    CHECK(noticed);
+    for (const StringObjectException &w : warnings) {
+        INFO(w.string);
+        CHECK(w.opt_key != "prime_tower_per_object");
+    }
     print.set_status_silent();
     print.process();
-    CHECK_FALSE(print.has_object_wipe_towers());
+    REQUIRE(print.object_wipe_towers().size() == 2);
+    for (const std::unique_ptr<ObjectWipeTower> &tower : print.object_wipe_towers()) {
+        // No print-start priming and no final purge on a copy's tower.
+        REQUIRE(tower->data->priming != nullptr);
+        CHECK(tower->data->priming->empty());
+        REQUIRE(tower->data->final_purge != nullptr);
+        CHECK(tower->data->final_purge->gcode.empty());
+        CHECK_FALSE(tower->data->tool_changes.empty());
+        REQUIRE(tower->data->wipe_tower_mesh_data.has_value());
+        CHECK_FALSE(tower->data->wipe_tower_mesh_data->bottom.empty());
+    }
+    // The plate tower is not generated.
+    CHECK(print.wipe_tower_data().tool_changes.empty());
 }
 
 TEST_CASE("Object towers: each tower stands beside its copy, on the bed, clear of the other copy", "[ObjectTowers]")
 {
-    for (const Machine *m : { &X1C, &H2D }) {
+    for (const Machine *m : { &X1C, &H2D, &U1 }) {
         DYNAMIC_SECTION(m->printer)
         {
             Print print;
@@ -478,63 +604,109 @@ TEST_CASE("Object towers: H2C blocks print M620.14 beside their own tower", "[Ob
 // "append_tcr unexpected toolchange: layer_idx=0 ... requested=1 expected=0 initial=1".
 TEST_CASE("Object towers: a copy that ends on another filament than it starts with (owner's two-part objects)", "[ObjectTowers]")
 {
+    // Type 1 (X1C) and Type 2 (U1): both towers start their first change from the filament loaded when the block starts.
+    for (const Machine *m : { &X1C, &U1 }) {
+        DYNAMIC_SECTION(m->printer)
+        {
+            Print print;
+            Model model;
+            for (int i = 0; i < 2; ++i) {
+                ModelObject *object = model.add_object();
+                object->name        = "assembly" + std::to_string(i);
+                for (int part = 0; part < 2; ++part) {
+                    TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
+                    cube.scale(Vec3f(1.f, 1.f, 0.05f)); // 20 x 20 x 1 mm: 5 layers at 0.2 mm
+                    cube.translate(part == 0 ? 0.5f : -20.5f, 0.f, 0.f); // 1 mm apart, as the owner's cubes
+                    ModelVolume *volume = object->add_volume(cube);
+                    volume->name        = "cube" + std::to_string(part);
+                    volume->config.set("extruder", part == 0 ? 2 : 1);
+                }
+                object->config.set("extruder", 2);
+                place(object, Vec2d(m->bed_center.x() + (i == 0 ? -65. : 65.), m->bed_center.y()));
+            }
+            process(print, model, machine_config(*m, true), *m);
+
+            const ByObjectPlan &plan = print.by_object_plan();
+            REQUIRE(plan.blocks.size() == 2);
+            // The case this covers: the first block's ordering starts with another filament than the start G-code loads.
+            const ToolOrdering fresh(*plan.blocks[0].instance->print_object, (unsigned int) -1);
+            REQUIRE(fresh.first_extruder() != fresh.last_extruder());
+            CHECK(plan.blocks[0].loaded_extruder == fresh.first_extruder());
+            CHECK(plan.blocks[0].first_extruder != plan.blocks[0].loaded_extruder);
+            // Later blocks start after their entry change.
+            CHECK(plan.blocks[1].loaded_extruder == plan.blocks[1].first_extruder);
+            REQUIRE(print.object_wipe_towers().size() == 2);
+            // Each tower's first change starts from the filament loaded when its block starts.
+            for (const std::unique_ptr<ObjectWipeTower> &tower : print.object_wipe_towers()) {
+                const ByObjectBlock *block = nullptr;
+                for (const ByObjectBlock &b : plan.blocks)
+                    if (b.instance == tower->instance)
+                        block = &b;
+                REQUIRE(block != nullptr);
+                const WipeTower::ToolChangeResult *first_change = nullptr;
+                for (const std::vector<WipeTower::ToolChangeResult> &layer : tower->data->tool_changes) {
+                    for (const WipeTower::ToolChangeResult &tcr : layer)
+                        if (tcr.initial_tool != tcr.new_tool) {
+                            first_change = &tcr;
+                            break;
+                        }
+                    if (first_change != nullptr)
+                        break;
+                }
+                REQUIRE(first_change != nullptr);
+                CHECK(first_change->initial_tool == int(block->loaded_extruder));
+            }
+
+            std::string gcode;
+            REQUIRE_NOTHROW(gcode = Test::gcode(print));
+            CHECK(print.by_object_plan_misses() == 0);
+            // The travel to the second copy may be split into several moves (each carries the comment blocks_of() splits on).
+            const std::vector<std::string> blocks = blocks_of(gcode);
+            REQUIRE(blocks.size() >= 2);
+            CHECK(count_of(blocks.front(), TOWER_START) > 0);
+            CHECK(count_of(blocks.back(), TOWER_START) > 0);
+        }
+    }
+}
+
+TEST_CASE("Object towers: G-code per block on the U1 (G12, two 2-colour cubes)", "[ObjectTowers]")
+{
     Print print;
     Model model;
-    for (int i = 0; i < 2; ++i) {
-        ModelObject *object = model.add_object();
-        object->name        = "assembly" + std::to_string(i);
-        for (int part = 0; part < 2; ++part) {
-            TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
-            cube.scale(Vec3f(1.f, 1.f, 0.05f)); // 20 x 20 x 1 mm: 5 layers at 0.2 mm
-            cube.translate(part == 0 ? 0.5f : -20.5f, 0.f, 0.f); // 1 mm apart, as the owner's cubes
-            ModelVolume *volume = object->add_volume(cube);
-            volume->name        = "cube" + std::to_string(part);
-            volume->config.set("extruder", part == 0 ? 2 : 1);
-        }
-        object->config.set("extruder", 2);
-        place(object, Vec2d(X1C.bed_center.x() + (i == 0 ? -65. : 65.), X1C.bed_center.y()));
-    }
-    process(print, model, machine_config(X1C, true), X1C);
+    add_row(model, U1, { 2, 2 }, 110.);
+    process(print, model, machine_config(U1, true), U1);
+    check_type2_blocks(print);
+}
 
-    const ByObjectPlan &plan = print.by_object_plan();
-    REQUIRE(plan.blocks.size() == 2);
-    // The case this covers: the first block's ordering starts with another filament than the start G-code loads.
-    const ToolOrdering fresh(*plan.blocks[0].instance->print_object, (unsigned int) -1);
-    REQUIRE(fresh.first_extruder() != fresh.last_extruder());
-    CHECK(plan.blocks[0].loaded_extruder == fresh.first_extruder());
-    CHECK(plan.blocks[0].first_extruder != plan.blocks[0].loaded_extruder);
-    // Later blocks start after their entry change.
-    CHECK(plan.blocks[1].loaded_extruder == plan.blocks[1].first_extruder);
-    REQUIRE(print.object_wipe_towers().size() == 2);
-    // Each tower's first change starts from the filament loaded when its block starts.
+TEST_CASE("Object towers: a single-extruder multi-material Type 2 printer (Voron) has no final purge per block", "[ObjectTowers]")
+{
+    Print print;
+    Model model;
+    add_row(model, Voron, { 2, 2 }, 110.);
+    const DynamicPrintConfig cfg = machine_config(Voron, true);
+    REQUIRE(cfg.opt_bool("single_extruder_multi_material"));
+    process(print, model, cfg, Voron);
+    CHECK(print.wipe_tower_type() == WipeTowerType::Type2);
+    REQUIRE(print.object_tower_mode());
+    check_type2_blocks(print);
     for (const std::unique_ptr<ObjectWipeTower> &tower : print.object_wipe_towers()) {
-        const ByObjectBlock *block = nullptr;
-        for (const ByObjectBlock &b : plan.blocks)
-            if (b.instance == tower->instance)
-                block = &b;
-        REQUIRE(block != nullptr);
-        const WipeTower::ToolChangeResult *first_change = nullptr;
-        for (const std::vector<WipeTower::ToolChangeResult> &layer : tower->data->tool_changes) {
-            for (const WipeTower::ToolChangeResult &tcr : layer)
-                if (tcr.initial_tool != tcr.new_tool) {
-                    first_change = &tcr;
-                    break;
-                }
-            if (first_change != nullptr)
-                break;
-        }
-        REQUIRE(first_change != nullptr);
-        CHECK(first_change->initial_tool == int(block->loaded_extruder));
+        CHECK(tower->data->priming->empty());
+        CHECK_FALSE(tower->data->final_purge_drop);
     }
+}
 
-    std::string gcode;
-    REQUIRE_NOTHROW(gcode = Test::gcode(print));
-    CHECK(print.by_object_plan_misses() == 0);
-    // The travel to the second copy may be split into several moves (each carries the comment blocks_of() splits on).
-    const std::vector<std::string> blocks = blocks_of(gcode);
-    REQUIRE(blocks.size() >= 2);
-    CHECK(count_of(blocks.front(), TOWER_START) > 0);
-    CHECK(count_of(blocks.back(), TOWER_START) > 0);
+TEST_CASE("Object towers: setting off on the U1 builds no towers, as today", "[ObjectTowers]")
+{
+    Print print;
+    Model model;
+    add_row(model, U1, { 2, 2 }, 110.);
+    process(print, model, machine_config(U1, false), U1);
+    CHECK_FALSE(print.config().enable_prime_tower.value);
+    CHECK_FALSE(print.object_towers_requested());
+    CHECK_FALSE(print.has_wipe_tower());
+    CHECK_FALSE(print.has_object_wipe_towers());
+    const std::string gcode = Test::gcode(print);
+    CHECK(count_of(gcode, TOWER_START) == 0);
 }
 
 // ---------------------------------------------------------------------------------------------
