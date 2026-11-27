@@ -10,12 +10,14 @@
 
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/PaintSplit.hpp"
+#include "libslic3r/PaintSplitPreview.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
 #include "slic3r/GUI/GLModel.hpp"
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -80,7 +82,14 @@ private:
     void rebuild_preview();
     void render_preview();
     PaintSplitSkinParams skin_params() const;
-    void compute_cut_preview(); // Show cut: the claims' cut surfaces, synchronously
+    // R2 (E5/E6): the region and Show cut run on m_worker. request_preview() starts it for the current inputs (a new
+    // generation; the one under way is cancelled); on_preview_results() adopts what it stored for that generation.
+    void request_preview(bool region_too);
+    void start_preview();
+    void on_preview_results();
+    void cancel_show_cut();
+    void compute_cut_preview(); // Show cut: turns the cut preview on and requests it
+    const PaintSplitRegion &region() const;
     bool cuts_ok(size_t comp) const; // the component can be split
     int  masked_part(int *count = nullptr) const;
     Transform3d part_to_cut_frame(int part) const;
@@ -105,6 +114,8 @@ private:
     float m_depth{ 0.f };      // mm under the selected skin; 0 = unlimited
     float m_lip_angle{ 0.f };  // unused since the nearest-skin cut (kept in the undo archive's layout)
     float m_smoothing{ 0.5f }; // "Smooth cut face" (D22, R1): 0..1, the seam stays pinned
+    float m_skin_smoothing{ 0.5f }; // R2, Advanced "Smooth along the skin": 0..1 (0 = R1)
+    bool  m_advanced_open{ false };
     bool  m_snap_to_bed{ false }; // the flat core level
     bool  m_keep_as_parts{ false };
     bool  m_cut_only_painted_part{ false };
@@ -119,11 +130,23 @@ private:
     Transform3d                  m_preview_trafo{ Transform3d::Identity() };
     int                          m_preview_part{ -1 };
     int                          m_masked_parts{ 0 };
-    PaintSplitRegion             m_region;     // of m_preview_part, in the cut frame
-    std::vector<indexed_triangle_set> m_claim_cut; // Show cut: per component, the cut surface inside the part
+    std::shared_ptr<const PaintSplitRegion> m_region;   // of m_preview_part, in the cut frame (null until the first one)
+    std::shared_ptr<const PaintSplitPart>   m_part;     // that part in the cut frame, prepared
+    std::vector<indexed_triangle_set> m_claim_cut;      // Show cut: per component cut, the cut surface inside the part
+    std::vector<int>             m_claim_comps;         // ... and which components those are
+    std::vector<std::shared_ptr<const PaintSplitClaim>> m_claims; // the fine claims (for Apply), per m_claim_comps entry
+    bool                         m_claims_coarse{ false };
     std::vector<std::string>     m_show_log;            // Show cut's time lines, for the Output Log
     bool                         m_output_log_open{ false };
-    TriangleMesh                 m_cut_mesh;            // m_preview_part's mesh in the cut frame
+    // R2: the worker and its generations. m_preview_gen is the inputs' newest generation; a result of another one is stale.
+    std::unique_ptr<PaintSplitPreviewWorker> m_worker;
+    std::shared_ptr<int>         m_alive{ std::make_shared<int>(0) };
+    uint64_t                     m_preview_gen{ 0 };
+    bool                         m_region_pending{ false }; // the region of m_preview_gen is not in yet
+    bool                         m_show_cut{ false };       // Show cut is on: the cut follows every change
+    bool                         m_cut_pending{ false };    // ... and its fine cut is not in yet
+    bool                         m_restart_pending{ false }; // a request waits for the cancelled computation to end
+    bool                         m_restart_region{ false };  // ... and needs the region computed again
     GLModel                      m_plane_fill;          // the cut surfaces (band, skirt, core)
     GLModel                      m_plane_outline;       // the paint lines they follow
     Vec3d                        m_world_offset{ Vec3d::Zero() };

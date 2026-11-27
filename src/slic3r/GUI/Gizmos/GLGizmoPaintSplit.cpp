@@ -95,13 +95,22 @@ void GLGizmoPaintSplit::on_opening()
 
 void GLGizmoPaintSplit::on_shutdown()
 {
+    // Nothing computed for this session may land after it: stop and join the worker, drop what it stored.
+    if (m_worker)
+        m_worker->cancel();
     m_paint_views.clear();
     m_plane_fill.reset();
     m_plane_outline.reset();
     m_claim_cut.clear();
-    m_cut_mesh = TriangleMesh();
-    m_region   = PaintSplitRegion();
-    m_region_dirty = true;
+    m_claim_comps.clear();
+    m_claims.clear();
+    m_region.reset();
+    m_part.reset();
+    m_region_dirty   = true;
+    m_region_pending = false;
+    m_cut_pending    = false;
+    m_show_cut       = false;
+    ++m_preview_gen;
     m_parent.toggle_model_objects_visibility(true);
 }
 
@@ -150,12 +159,12 @@ bool GLGizmoPaintSplit::defer_close(std::function<void()> close)
 
 void GLGizmoPaintSplit::on_save(cereal::BinaryOutputArchive &ar) const
 {
-    // Version 4 (R1): the third float after the hole fill is Smooth cut face. Version 3 (nearest skin): the first is
-    // Depth (0 = unlimited), the other two were kept for the layout. Version 2 held Follow paint's Depth, Lip angle
-    // and Smoothing.
-    const int      version = 4;
+    // Version 5 (R2): the second float after the hole fill (the unused Lip angle's slot) is Smooth along the skin.
+    // Version 4 (R1): the third is Smooth cut face. Version 3 (nearest skin): the first is Depth (0 = unlimited), the
+    // other two were kept for the layout. Version 2 held Follow paint's Depth, Lip angle and Smoothing.
+    const int      version = 5;
     const uint64_t object  = uint64_t(m_committed_object);
-    ar(version, object, m_committed, m_picked_filament, int(m_mode), int(m_style), m_fill_holes_pct, m_depth, m_lip_angle, m_smoothing,
+    ar(version, object, m_committed, m_picked_filament, int(m_mode), int(m_style), m_fill_holes_pct, m_depth, m_skin_smoothing, m_smoothing,
        m_snap_to_bed, m_keep_as_parts);
 }
 
@@ -165,12 +174,12 @@ void GLGizmoPaintSplit::on_load(cereal::BinaryInputArchive &ar)
     uint64_t object  = 0;
     float a = 0.f, b = 0.f, c = 0.f;
     ar(version, object, m_loaded, m_picked_filament, mode, style, m_fill_holes_pct, a, b, c, m_snap_to_bed, m_keep_as_parts);
-    if (version >= 3) {
-        m_depth     = a;
-        m_lip_angle = b;
-    } // older versions held other cut styles' values: Depth keeps its own
+    if (version >= 3)
+        m_depth = a; // older versions held other cut styles' values: Depth keeps its own
     if (version >= 4)
         m_smoothing = std::clamp(c, 0.f, 1.f);
+    if (version >= 5)
+        m_skin_smoothing = std::clamp(b, 0.f, 1.f);
     m_loaded_object = size_t(object);
     m_loaded_valid  = true;
     m_mode          = Mode(std::clamp(mode, 0, int(Mode::PickSegment)));
@@ -425,7 +434,7 @@ int GLGizmoPaintSplit::masked_part(int *count) const
 
 bool GLGizmoPaintSplit::cuts_ok(size_t comp) const
 {
-    return m_region.component_ok(int(comp));
+    return region().component_ok(int(comp));
 }
 
 Transform3d GLGizmoPaintSplit::part_to_cut_frame(int part) const
@@ -457,9 +466,136 @@ void GLGizmoPaintSplit::refresh_preview()
 PaintSplitSkinParams GLGizmoPaintSplit::skin_params() const
 {
     PaintSplitSkinParams sp;
-    sp.depth     = m_depth; // 0 = unlimited
-    sp.smoothing = m_smoothing;
+    sp.depth          = m_depth; // 0 = unlimited
+    sp.smoothing      = m_smoothing;
+    sp.skin_smoothing = m_skin_smoothing;
     return sp;
+}
+
+const PaintSplitRegion &GLGizmoPaintSplit::region() const
+{
+    static const PaintSplitRegion empty;
+    return m_region ? *m_region : empty;
+}
+
+// ------------------------------------------------------------------------------------------- R2: the worker
+
+void GLGizmoPaintSplit::request_preview(bool region_too)
+{
+    // Whatever is under way is stale now.
+    ++m_preview_gen;
+    m_restart_region = m_restart_region || region_too || !m_region || !m_part;
+    if (m_restart_region)
+        m_region_pending = true;
+    m_cut_pending = m_show_cut;
+    m_claim_cut.clear();
+    m_claim_comps.clear();
+    m_claims.clear();
+    m_claims_coarse = false;
+    m_preview_dirty = true;
+    if (!m_worker) {
+        std::weak_ptr<int> alive = m_alive;
+        m_worker = std::make_unique<PaintSplitPreviewWorker>([this, alive]() {
+            wxGetApp().CallAfter([this, alive]() {
+                if (alive.lock())
+                    on_preview_results();
+            });
+        });
+    }
+    if (m_worker->running()) {
+        // Never wait on the UI thread: the cancelled computation ends soon, and its end starts this one.
+        m_worker->request_cancel();
+        m_restart_pending = true;
+        return;
+    }
+    start_preview();
+}
+
+void GLGizmoPaintSplit::start_preview()
+{
+    m_restart_pending      = false;
+    const ModelObject *mo  = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    const ModelVolume *mv  = nullptr;
+    int                idx = -1;
+    if (mo != nullptr && m_preview_part >= 0 && size_t(m_preview_part) < m_triangle_selectors.size())
+        for (const ModelVolume *v : mo->volumes)
+            if (v->is_model_part() && ++idx == m_preview_part) {
+                mv = v;
+                break;
+            }
+    if (mv == nullptr) {
+        m_region_pending = m_cut_pending = m_restart_region = false;
+        return;
+    }
+    PaintSplitPreviewInput in;
+    in.generation                   = m_preview_gen;
+    in.mesh                         = mv->mesh_ptr();
+    in.to_cut                       = part_to_cut_frame(m_preview_part);
+    in.mask                         = m_triangle_selectors[size_t(m_preview_part)]->serialize();
+    in.region_params.fill_holes_pct = m_fill_holes_pct;
+    if (!m_restart_region && m_region && m_part) {
+        in.region = m_region;
+        in.part   = m_part;
+    }
+    m_restart_region = false;
+    in.claims        = m_show_cut;
+    in.skin          = skin_params();
+    m_worker->start(std::move(in));
+    m_parent.set_as_dirty();
+}
+
+void GLGizmoPaintSplit::on_preview_results()
+{
+    if (!m_worker)
+        return;
+    for (PaintSplitPreviewResult &r : m_worker->take()) {
+        if (r.generation != m_preview_gen)
+            continue; // stale: the inputs changed after it was asked for
+        m_region = r.region;
+        m_part   = r.part;
+        if (r.stage == PaintSplitPreviewResult::Stage::Region) {
+            m_region_pending = false;
+        } else {
+            m_claim_cut     = std::move(r.surfaces);
+            m_claim_comps   = r.comps;
+            m_claims_coarse = r.stage == PaintSplitPreviewResult::Stage::Coarse;
+            if (r.stage == PaintSplitPreviewResult::Stage::Fine) {
+                m_claims      = std::move(r.claims);
+                m_cut_pending = false;
+                m_show_log    = r.log;
+                m_show_log.insert(m_show_log.begin(), GUI::format(_u8L("Show cut: %1% s"), wxString::Format("%.1f", r.seconds).ToStdString()));
+                BOOST_LOG_TRIVIAL(info) << "Paint split Show cut: " << m_claims.size() << " region(s) in " << r.seconds << " s";
+            }
+        }
+        m_preview_dirty = true;
+    }
+    if (m_restart_pending && !m_worker->running())
+        start_preview();
+    else if (!m_worker->running() && !m_restart_pending)
+        // Ended: what did not come in for the newest inputs (cancelled, or the part could not be prepared) will not.
+        m_cut_pending = m_region_pending = false;
+    m_parent.set_as_dirty();
+    m_parent.request_extra_frame();
+}
+
+void GLGizmoPaintSplit::cancel_show_cut()
+{
+    m_show_cut    = false;
+    m_cut_pending = false;
+    m_claim_cut.clear();
+    m_claim_comps.clear();
+    m_claims.clear();
+    m_preview_dirty = true;
+    if (m_worker && m_worker->running()) {
+        // Results already stored for this generation are dropped with it; a region still owed is asked for again.
+        const bool region_owed = m_region_pending;
+        ++m_preview_gen;
+        m_worker->request_cancel();
+        if (region_owed) {
+            m_restart_region  = true;
+            m_restart_pending = true;
+        }
+    }
 }
 
 void GLGizmoPaintSplit::rebuild_preview()
@@ -472,37 +608,32 @@ void GLGizmoPaintSplit::rebuild_preview()
     if (mo == nullptr)
         return;
     const int part = masked_part(&m_masked_parts);
-    const ModelVolume *mv  = nullptr;
-    int                idx = -1;
-    if (part >= 0)
-        for (const ModelVolume *v : mo->volumes)
-            if (v->is_model_part() && ++idx == part) {
-                mv = v;
-                break;
-            }
-    if (mv == nullptr) {
-        m_region       = PaintSplitRegion();
-        m_preview_part = -1;
-        m_cut_mesh     = TriangleMesh();
+    if (part < 0) {
+        if (m_preview_part >= 0 || m_region) {
+            // Nothing selected: drop the region and stop what was being computed for it.
+            ++m_preview_gen;
+            if (m_worker && m_worker->running())
+                m_worker->request_cancel();
+            m_restart_pending = m_restart_region = false;
+        }
+        m_region.reset();
+        m_part.reset();
+        m_preview_part   = -1;
+        m_region_pending = m_cut_pending = false;
         m_claim_cut.clear();
+        m_claim_comps.clear();
+        m_claims.clear();
         m_region_dirty = false;
         return;
     }
-
-    const Transform3d to_cut = part_to_cut_frame(part);
     if (m_region_dirty || part != m_preview_part) {
         m_region_dirty = false;
         m_preview_part = part;
-        m_claim_cut.clear(); // the shown cut belongs to the old selection
-        PaintSplitRegionParams rp;
-        rp.fill_holes_pct = m_fill_holes_pct;
-        m_region          = paint_split_region(mv->mesh().its, m_triangle_selectors[size_t(part)]->serialize(), rp);
-        if (m_region.error == PaintSplitError::None)
-            paint_split_transform(m_region, to_cut);
-        m_cut_mesh = TriangleMesh(mv->mesh());
-        m_cut_mesh.transform(to_cut, true);
+        // E5: the region (the strict retriangulation of the whole part) is rebuilt on the worker after each stroke;
+        // with Show cut on, the cut follows, coarse first.
+        request_preview(true);
     }
-    if (m_region.error != PaintSplitError::None)
+    if (region().error != PaintSplitError::None)
         return;
     m_world_offset = mo->instances[m_parent.get_selection().get_instance_idx()]->get_offset();
 
@@ -511,7 +642,7 @@ void GLGizmoPaintSplit::rebuild_preview()
     fill.format    = { Geo::EPrimitiveType::Triangles, Geo::EVertexLayout::P3 };
     outline.format = { Geo::EPrimitiveType::Lines, Geo::EVertexLayout::P3 };
     // The paint lines the cut meets the skin along.
-    for (const std::vector<PaintSplitLoop> &loops : m_region.loops)
+    for (const std::vector<PaintSplitLoop> &loops : region().loops)
         for (const PaintSplitLoop &loop : loops)
             for (size_t i = 0; i < loop.pts.size(); ++i) {
                 const unsigned b = unsigned(outline.vertices_count());
@@ -540,35 +671,8 @@ void GLGizmoPaintSplit::rebuild_preview()
 void GLGizmoPaintSplit::compute_cut_preview()
 {
     refresh_preview();
-    m_claim_cut.clear();
-    if (m_region.error != PaintSplitError::None || m_cut_mesh.empty())
-        return;
-    wxBusyCursor wait;
-    const PaintSplitSkinParams sp = skin_params();
-    m_show_log.clear();
-    auto       one   = [](double v, const char *fmt) { return wxString::Format(fmt, v).ToStdString(); };
-    const auto t_all = std::chrono::steady_clock::now();
-    // On the part as Apply repairs it: the cutter's outside test needs a closed skin.
-    indexed_triangle_set        fixed;
-    PaintSplitRepairStats       repair;
-    const bool                  repaired = paint_split_repair(m_cut_mesh.its, fixed, nullptr, repair);
-    const indexed_triangle_set &part     = repaired && repair.needed ? fixed : m_cut_mesh.its;
-    for (size_t c = 0; c < m_region.num_components(); ++c)
-        if (m_region.component_ok(int(c))) {
-            const auto            t0    = std::chrono::steady_clock::now();
-            const PaintSplitClaim claim = paint_split_nearest_cutter(part, m_region, int(c), sp);
-            const double field = claim.stats.setup_s + claim.stats.field_s + claim.stats.mesh_s + claim.stats.smooth_s;
-            m_claim_cut.push_back(paint_split_claim_cut_surface(part, claim.mesh));
-            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-            m_show_log.push_back(GUI::format(_u8L("Region %1%: field %2% s, surface %3% s (voxel %4% mm, %5% mm at the skin)"), c + 1,
-                                             one(field, "%.1f"), one(secs - field, "%.1f"), one(claim.stats.voxel, "%.2f"),
-                                             one(claim.stats.near_skin_voxel, "%.2f")));
-        }
-    const double all = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count();
-    m_show_log.insert(m_show_log.begin(), GUI::format(_u8L("Show cut: %1% s"), one(all, "%.1f")));
-    BOOST_LOG_TRIVIAL(info) << "Paint split Show cut: " << m_claim_cut.size() << " region(s) in " << all << " s";
-    m_preview_dirty = true;
-    m_parent.set_as_dirty();
+    m_show_cut = true;
+    request_preview(false);
 }
 
 void GLGizmoPaintSplit::render_preview()
@@ -640,7 +744,8 @@ void GLGizmoPaintSplit::apply()
         return;
     if (m_preview_dirty || m_region_dirty)
         rebuild_preview();
-    if (m_preview_part < 0 || m_masked_parts != 1 || m_region.error != PaintSplitError::None)
+    // The region must be the current selection's (it is rebuilt on the worker after each stroke).
+    if (m_region_pending || !m_region || m_preview_part < 0 || m_masked_parts != 1 || region().error != PaintSplitError::None)
         return;
     Plater *plater = wxGetApp().plater();
     Worker &worker = plater->get_ui_job_worker();
@@ -652,7 +757,8 @@ void GLGizmoPaintSplit::apply()
     const int           instance = m_parent.get_selection().get_instance_idx();
     PaintSplitApplyPlan plan;
     plan.instance              = instance;
-    plan.region                = m_region;
+    plan.region                = region();
+    plan.skin                  = skin_params();
     plan.keep_as_parts         = m_keep_as_parts;
     plan.cut_only_painted_part = m_cut_only_painted_part;
     int part = -1;
@@ -663,29 +769,18 @@ void GLGizmoPaintSplit::apply()
         }
     const int filament = size_t(m_preview_part) < m_picked_filament.size() ? m_picked_filament[size_t(m_preview_part)] : 0;
     int       n        = 0;
-    // Each region's selected skin, sampled: a later region's rest piece must stay the body it is cut from.
-    std::vector<std::vector<Vec3d>> skin(m_region.num_components());
-    for (size_t f = 0; f < m_region.surface.indices.size(); ++f) {
-        const int c = m_region.facet_comp[f];
-        if (c >= 0 && size_t(c) < skin.size() && skin[size_t(c)].size() < 256) {
-            const Vec3i32 &t = m_region.surface.indices[f];
-            skin[size_t(c)].push_back(
-                (m_region.surface.vertices[t[0]] + m_region.surface.vertices[t[1]] + m_region.surface.vertices[t[2]]).cast<double>() / 3.);
-        }
-    }
-    for (size_t c = 0; c < m_region.num_components(); ++c) {
-        if (!cuts_ok(c))
-            continue;
+    // E4: Show cut's fine claims, when they are this pass's (the job checks each one's key again).
+    const std::vector<int> comps      = paint_split_pass_components(region());
+    const bool             have_cut   = !m_cut_pending && !m_claims_coarse && m_claim_comps == comps && m_claims.size() == comps.size();
+    for (size_t k = 0; k < comps.size(); ++k) {
         PaintSplitApplyPiece piece;
-        piece.component    = int(c);
-        piece.nearest_skin = true;
-        piece.skin         = skin_params();
-        for (size_t d = c + 1; d < skin.size(); ++d)
-            piece.body_hints.insert(piece.body_hints.end(), skin[d].begin(), skin[d].end());
-        piece.filament = filament;
-        piece.label    = filament > 0 ? GUI::format(_u8L("Filament %1%"), filament) : GUI::format(_u8L("Region %1%"), ++n);
-        if (filament > 0 && m_region.num_components() > 1)
+        piece.component = comps[k];
+        piece.filament  = filament;
+        piece.label     = filament > 0 ? GUI::format(_u8L("Filament %1%"), filament) : GUI::format(_u8L("Region %1%"), ++n);
+        if (filament > 0 && region().num_components() > 1)
             piece.label += " " + std::to_string(++n);
+        if (have_cut)
+            piece.claim = m_claims[k];
         plan.pieces.push_back(std::move(piece));
     }
     if (plan.pieces.empty() || plan.mask_volume_idx < 0)
@@ -812,30 +907,30 @@ void GLGizmoPaintSplit::on_render_input_window(float x, float y, float bottom_li
         ImGui::PopTextWrapPos();
     } else if (m_preview_part < 0) {
         m_imgui->text(_L("Paint or pick the region to split off."));
-    } else if (m_region.error != PaintSplitError::None) {
+    } else if (region().error != PaintSplitError::None) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_w);
-        m_imgui->warning_text(_L(paint_split_error_message(m_region.error)));
+        m_imgui->warning_text(_L(paint_split_error_message(region().error)));
         ImGui::PopTextWrapPos();
         // No Repair button: Fix model clears the painting before it repairs (Plater::clear_before_change_mesh),
         // and an open part is repaired by Apply itself. What is left here is a part that repair cannot close.
     } else {
         // Owner 2026-11-25: holes no longer block the split; Apply closes them and keeps the painting.
-        if (m_region.repaired)
+        if (region().repaired)
             note(_L("Holes will be repaired while splitting. The painting is kept."));
-        for (size_t c = 0; c < m_region.num_components(); ++c) {
-            const size_t edges = m_region.loops[c].size();
+        for (size_t c = 0; c < region().num_components(); ++c) {
+            const size_t edges = region().loops[c].size();
             const wxString cut = edges == 1 ? _L("1 edge") : format_wxstr(_L("%1% edges"), edges);
-            m_imgui->text(format_wxstr(_L("Region %1%: %2%, %3% cm²"), c + 1, cut, wxString::Format("%.1f", m_region.area[c] / 100.)));
-            if (m_region.comp_error[c] != PaintSplitError::None) {
+            m_imgui->text(format_wxstr(_L("Region %1%: %2%, %3% cm²"), c + 1, cut, wxString::Format("%.1f", region().area[c] / 100.)));
+            if (region().comp_error[c] != PaintSplitError::None) {
                 ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_w);
-                m_imgui->warning_text(_L(paint_split_error_message(m_region.comp_error[c])));
+                m_imgui->warning_text(_L(paint_split_error_message(region().comp_error[c])));
                 ImGui::PopTextWrapPos();
             } else
                 can_apply = true;
-            if (m_region.holes_filled[c] > 0)
-                m_imgui->text(format_wxstr(_L("%1% small hole(s) filled"), m_region.holes_filled[c]));
+            if (region().holes_filled[c] > 0)
+                m_imgui->text(format_wxstr(_L("%1% small hole(s) filled"), region().holes_filled[c]));
         }
-        if (std::any_of(m_region.loops.begin(), m_region.loops.end(), [](const std::vector<PaintSplitLoop> &l) { return l.size() > 1; }))
+        if (std::any_of(region().loops.begin(), region().loops.end(), [](const std::vector<PaintSplitLoop> &l) { return l.size() > 1; }))
             note(_L("The region is split off as its own piece; the rest of the part becomes one piece per connected remainder."));
     }
 
@@ -846,23 +941,46 @@ void GLGizmoPaintSplit::on_render_input_window(float x, float y, float bottom_li
     if (ImGui::IsItemHovered())
         m_imgui->tooltip(_L("The piece is the material nearer to the selected skin than to any other skin of the part. On the skin the cut runs along the paint line; inside it runs where the two skins are equally near."), tip_w);
     note(_L("The cut follows the paint line on the skin and stays near the region inside the part. Show cut draws it."));
+    // A change of the cut's settings: with Show cut on the cut is computed again (on the worker), else the drawn one goes.
+    bool cut_changed = false;
     {
         const bool unlimited = m_depth <= 0.f;
-        if (slider("##ps_depth", m_desc.at("depth"), &m_depth, 0.f, 20.f, unlimited ? "Unlimited" : "%.1f mm", 0.1f,
-                   _L("How deep under the selected skin the piece may reach, in mm. 0 is unlimited: as deep as the selected skin is the nearest one.")))
-            m_claim_cut.clear(), dirty = true;
+        cut_changed |= slider("##ps_depth", m_desc.at("depth"), &m_depth, 0.f, 20.f, unlimited ? "Unlimited" : "%.1f mm", 0.1f,
+                              _L("How deep under the selected skin the piece may reach, in mm. 0 is unlimited: as deep as the selected skin is the nearest one."));
     }
-    if (slider("##ps_smooth", m_desc.at("smooth_face"), &m_smoothing, 0.f, 1.f, "%.2f", 0.05f,
-               _L("How much the cut face inside the part is smoothed (0 = off). The cut still meets the skin exactly on the paint line.")))
-        m_claim_cut.clear(), dirty = true;
-    if (m_imgui->button(_L("Show cut")))
-        wxGetApp().CallAfter([this]() { compute_cut_preview(); });
-    if (ImGui::IsItemHovered())
-        m_imgui->tooltip(_L("Computes the cut and draws it inside the part (teal). It takes a few seconds on a detailed part."), tip_w);
-    if (!m_claim_cut.empty()) {
+    cut_changed |= slider("##ps_smooth", m_desc.at("smooth_face"), &m_smoothing, 0.f, 1.f, "%.2f", 0.05f,
+                          _L("How much the cut face inside the part is smoothed (0 = off). The cut still meets the skin exactly on the paint line."));
+    // Advanced (R2, owner 2026-11-27): how far the smoothing reaches towards the skin.
+    if (ImGui::TreeNodeEx(into_u8(_L("Advanced")).c_str(), m_advanced_open ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+        m_advanced_open = true;
+        cut_changed |= slider("##ps_skin_smooth", _L("Smooth along the skin"), &m_skin_smoothing, 0.f, 1.f, "%.2f", 0.05f,
+                              _L("How smooth the piece's inner wall is right next to the painted skin (0 = it follows every painted triangle and the skin's facets, as in earlier versions). The cut still meets the skin on the paint line."));
+        ImGui::TreePop();
+    } else
+        m_advanced_open = false;
+    if (cut_changed) {
+        dirty = true;
+        if (m_show_cut)
+            request_preview(false);
+        else
+            m_claim_cut.clear(), m_claims.clear(), m_claim_comps.clear();
+    }
+    if (m_cut_pending) {
+        // E5/E6: the cut is being computed off the UI thread; painting and the camera stay live.
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.75f, 0.2f, 1.f));
+        m_imgui->text(m_claims_coarse ? _L("Coarse preview; refining...") : _L("Updating..."));
+        ImGui::PopStyleColor();
         ImGui::SameLine();
+        if (m_imgui->button(_L("Cancel")))
+            cancel_show_cut(), dirty = true;
+    } else if (!m_show_cut) {
+        if (m_imgui->button(_L("Show cut")))
+            wxGetApp().CallAfter([this]() { compute_cut_preview(); });
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(_L("Computes the cut in the background and draws it inside the part (teal): coarse at once, then fine. It follows your changes until you hide it."), tip_w);
+    } else {
         if (m_imgui->button(_L("Hide cut")))
-            m_claim_cut.clear(), dirty = true;
+            cancel_show_cut(), dirty = true;
     }
 
     // Result
@@ -873,7 +991,9 @@ void GLGizmoPaintSplit::on_render_input_window(float x, float y, float bottom_li
         m_imgui->bbl_checkbox(m_desc.at("only_painted"), m_cut_only_painted_part);
 
     ImGui::Separator();
-    if (m_imgui->button(m_desc.at("apply"), ImVec2(0.f, 0.f), can_apply && m_masked_parts == 1))
+    if (m_region_pending && m_preview_part >= 0)
+        note(_L("Updating the selection..."));
+    if (m_imgui->button(m_desc.at("apply"), ImVec2(0.f, 0.f), can_apply && m_masked_parts == 1 && !m_region_pending))
         wxGetApp().CallAfter([this]() { apply(); });
 
     // Output Log (R1 step 0): Show cut's times and the last Apply's, per region.

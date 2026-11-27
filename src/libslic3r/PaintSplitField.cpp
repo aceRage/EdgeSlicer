@@ -31,15 +31,12 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
 namespace Slic3r {
-
-namespace {
-
-using PsClock = std::chrono::steady_clock;
-double ps_secs_since(PsClock::time_point t0) { return std::chrono::duration<double>(PsClock::now() - t0).count(); }
 
 // ----------------------------------------------------------------------------------------- inside / outside
 
@@ -48,10 +45,10 @@ double ps_secs_since(PsClock::time_point t0) { return std::chrono::duration<doub
 // (overlapping shells, fan-filled holes), so a flooded cell is outside for sure. A cell the flood misses may still
 // be outside: the claim is just not clipped there. (Pseudo-normal signs were tried first and flip on overlapping
 // shells, which carved holes in the claim.)
-class PsOutside
+class PaintSplitOutside
 {
 public:
-    PsOutside(const indexed_triangle_set& mesh, double margin)
+    PaintSplitOutside(const indexed_triangle_set& mesh, double margin)
     {
         BoundingBoxf3 mb;
         for (const Vec3f& v : mesh.vertices)
@@ -113,6 +110,49 @@ private:
     std::vector<uint8_t> m_flood;
 };
 
+// The flood grids of a prepared part, one per margin (the margin follows the voxel size).
+struct PaintSplitPart::Cache
+{
+    std::mutex                                                     mutex;
+    std::vector<std::pair<double, std::shared_ptr<const PaintSplitOutside>>> grids;
+};
+
+namespace {
+
+using PsClock = std::chrono::steady_clock;
+double ps_secs_since(PsClock::time_point t0) { return std::chrono::duration<double>(PsClock::now() - t0).count(); }
+
+// 64-bit FNV-1a over raw bytes.
+uint64_t ps_hash_bytes(uint64_t h, const void* data, size_t n)
+{
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < n; ++i) {
+        h ^= uint64_t(p[i]);
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+template<class T> uint64_t ps_hash_vec(uint64_t h, const std::vector<T>& v)
+{
+    const uint64_t n = v.size();
+    h                = ps_hash_bytes(h, &n, sizeof(n));
+    return v.empty() ? h : ps_hash_bytes(h, v.data(), v.size() * sizeof(T));
+}
+template<class T> uint64_t ps_hash_val(uint64_t h, const T& v) { return ps_hash_bytes(h, &v, sizeof(T)); }
+
+std::shared_ptr<const PaintSplitOutside> ps_part_outside(const PaintSplitPart& part, double margin)
+{
+    if (!part.cache)
+        return std::make_shared<PaintSplitOutside>(part.mesh, margin);
+    std::lock_guard<std::mutex> lk(part.cache->mutex);
+    for (const auto& [m, g] : part.cache->grids)
+        if (m == margin)
+            return g;
+    auto g = std::make_shared<const PaintSplitOutside>(part.mesh, margin);
+    part.cache->grids.emplace_back(margin, g);
+    return g;
+}
+
 // ----------------------------------------------------------------------------------------- the field
 
 struct PsValue
@@ -128,7 +168,8 @@ struct PsField
 {
     const AABBMesh*  ts{ nullptr };
     const AABBMesh*  tu{ nullptr };
-    const PsOutside* outside{ nullptr };
+    const AABBMesh*  tss{ nullptr }; // R2: a smoothed copy of the selected skin, for the Depth wall only (null: ts)
+    const PaintSplitOutside* outside{ nullptr };
     double           reach{ 0. }, depth{ 0. }, clip{ 0. };
     bool             complement{ false };
     BoundingBoxf3    box;
@@ -159,8 +200,13 @@ struct PsField
         const double du = std::sqrt(tu->squared_distance(p));
         ++nq;
         double f = std::max(ds - du, ds - reach);
-        if (depth > 0.)
-            f = std::max(f, ds - depth);
+        if (depth > 0.) {
+            // The distance to a smoothed copy of S is 1-Lipschitz too, so g stays 2-Lipschitz; it only shapes the
+            // wall Depth mm in, never the seam (where ds - du decides).
+            const double dd = tss != nullptr ? std::sqrt(tss->squared_distance(p)) : ds;
+            nq += tss != nullptr;
+            f = std::max(f, dd - depth);
+        }
         double       v = complement ? -f : f;
         const double d = std::min(ds, du);
         out.d          = float(d);
@@ -378,6 +424,102 @@ void ps_refine_near_skin(indexed_triangle_set& its, std::vector<float>& dist, co
     its.indices.swap(out);
 }
 
+// ----------------------------------------------------------------------------------------- seam snap (D23 b)
+
+// The claim vertex nearest to each paint-line point (within `radius`, among the vertices that close to the skin) is
+// put on that point, nearest pairs first, one point per vertex, unless the move would fold or flatten a triangle
+// round it. The claim then passes through the paint line's corners, where the linear claim cut them by up to 0.17 mm.
+size_t ps_snap_seam(indexed_triangle_set& its, const std::vector<float>& dist, const std::vector<PaintSplitLoop>& loops, double radius,
+                    double* worst_move)
+{
+    const size_t nv = its.vertices.size();
+    if (nv == 0 || radius <= 0. || loops.empty())
+        return 0;
+    const double inv  = 1. / radius;
+    auto         ckey = [&](const Vec3d& p, int dx, int dy, int dz) {
+        const int64_t x = int64_t(std::floor(p.x() * inv)) + dx + (1 << 20), y = int64_t(std::floor(p.y() * inv)) + dy + (1 << 20),
+                      z = int64_t(std::floor(p.z() * inv)) + dz + (1 << 20);
+        return (uint64_t(z & 0x1FFFFF) << 42) | (uint64_t(y & 0x1FFFFF) << 21) | uint64_t(x & 0x1FFFFF);
+    };
+    std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+    for (size_t v = 0; v < nv; ++v)
+        if (double(dist[v]) < radius)
+            grid[ckey(its.vertices[v].cast<double>(), 0, 0, 0)].push_back(uint32_t(v));
+    if (grid.empty())
+        return 0;
+    struct Pair
+    {
+        double   d;
+        uint32_t v;
+        Vec3d    p;
+    };
+    std::vector<Pair> pairs;
+    for (const PaintSplitLoop& loop : loops)
+        for (const DrawCutSample& s : loop.pts) {
+            double   best = radius * radius;
+            uint32_t bv   = UINT32_MAX;
+            for (int dz = -1; dz <= 1; ++dz)
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const auto it = grid.find(ckey(s.pos, dx, dy, dz));
+                        if (it == grid.end())
+                            continue;
+                        for (uint32_t v : it->second) {
+                            const double d2 = (its.vertices[v].cast<double>() - s.pos).squaredNorm();
+                            if (d2 < best)
+                                best = d2, bv = v;
+                        }
+                    }
+            if (bv != UINT32_MAX)
+                pairs.push_back({ std::sqrt(best), bv, s.pos });
+        }
+    std::sort(pairs.begin(), pairs.end(), [](const Pair& a, const Pair& b) { return a.d < b.d; });
+    // Vertex -> faces.
+    std::vector<uint32_t> start(nv + 1, 0), faces(its.indices.size() * 3);
+    for (const Vec3i32& t : its.indices)
+        for (int k = 0; k < 3; ++k)
+            ++start[size_t(t[k]) + 1];
+    for (size_t v = 0; v < nv; ++v)
+        start[v + 1] += start[v];
+    {
+        std::vector<uint32_t> fill(start.begin(), start.end() - 1);
+        for (size_t f = 0; f < its.indices.size(); ++f)
+            for (int k = 0; k < 3; ++k)
+                faces[fill[size_t(its.indices[f][k])]++] = uint32_t(f);
+    }
+    auto normal = [&](uint32_t f) {
+        const Vec3i32& t = its.indices[f];
+        return Vec3d((its.vertices[t[1]] - its.vertices[t[0]]).cast<double>().cross((its.vertices[t[2]] - its.vertices[t[0]]).cast<double>()));
+    };
+    std::vector<uint8_t> used(nv, 0);
+    size_t               moved = 0;
+    for (const Pair& pr : pairs) {
+        if (used[pr.v] || pr.d < 1e-6)
+            continue;
+        const Vec3f old = its.vertices[pr.v];
+        std::vector<Vec3d> before;
+        for (uint32_t i = start[pr.v]; i < start[pr.v + 1]; ++i)
+            before.push_back(normal(faces[i]));
+        its.vertices[pr.v] = pr.p.cast<float>();
+        bool ok = true;
+        for (uint32_t i = start[pr.v]; ok && i < start[pr.v + 1]; ++i) {
+            const Vec3d& n0 = before[i - start[pr.v]];
+            const Vec3d  n1 = normal(faces[i]);
+            // Not flipped, not turned by more than about 70 degrees, not shrunk to a sliver.
+            ok = n0.dot(n1) > 0.34 * n0.norm() * n1.norm() && n1.norm() > 0.05 * n0.norm();
+        }
+        if (!ok) {
+            its.vertices[pr.v] = old;
+            continue;
+        }
+        used[pr.v] = 1;
+        ++moved;
+        if (worst_move != nullptr)
+            *worst_move = std::max(*worst_move, pr.d);
+    }
+    return moved;
+}
+
 // ----------------------------------------------------------------------------------------- the dense field (P2)
 
 indexed_triangle_set ps_dense_claim(const indexed_triangle_set& mesh, const indexed_triangle_set& S, const indexed_triangle_set& U,
@@ -435,18 +577,22 @@ indexed_triangle_set ps_dense_claim(const indexed_triangle_set& mesh, const inde
     return claim;
 }
 
-} // namespace
-
-// ----------------------------------------------------------------------------------------- the sparse claim
-
-PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
-                                           const PaintSplitSkinParams& params)
+PaintSplitClaim ps_nearest_cutter(const indexed_triangle_set& mesh, const PaintSplitPart* part, const PaintSplitRegion& region, int comp,
+                                  const PaintSplitSkinParams& params)
 {
     PaintSplitClaim out;
     if (region.error != PaintSplitError::None || comp < 0 || size_t(comp) >= region.num_components() || mesh.indices.empty())
         return out;
+    const std::atomic<bool>* cancel_flag = params.cancel;
+    auto canceled = [cancel_flag]() { return cancel_flag != nullptr && cancel_flag->load(std::memory_order_relaxed); };
+    auto stop     = [&out]() {
+        out.mesh.clear();
+        out.stats.canceled = true;
+        return out;
+    };
     const auto t0 = PsClock::now();
-    // The skin split in two: this component's selected facets, and every other facet of the part.
+    // The skin split in two: this component's selected facets, and every other facet of the part (R2: but for the
+    // excluded components, whose territory an earlier cut of the same pass took).
     indexed_triangle_set S, U;
     S.vertices = region.surface.vertices;
     U.vertices = region.surface.vertices;
@@ -456,9 +602,10 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
         const double   a = 0.5 * double((region.surface.vertices[t[1]] - region.surface.vertices[t[0]])
                                             .cross(region.surface.vertices[t[2]] - region.surface.vertices[t[0]])
                                             .norm());
-        if (region.facet_comp[f] == comp)
+        const int c = region.facet_comp[f];
+        if (c == comp)
             S.indices.push_back(t), area_s += a;
-        else
+        else if (c < 0 || std::find(params.exclude_components.begin(), params.exclude_components.end(), c) == params.exclude_components.end())
             U.indices.push_back(t), area_u += a;
     }
     if (S.indices.empty() || U.indices.empty())
@@ -484,12 +631,29 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
     // the booleans' time; the seam gets its fine voxel from the near-skin refinement instead (0.075 mm).
     const double h0 = params.voxel > 0. ? params.voxel : 0.6;
 
-    const AABBMesh      tree_s(S), tree_u(U);
-    const PsOutside     outside(mesh, std::max(8. * h0, 1.) + 1.);
+    const AABBMesh tree_s(S), tree_u(U);
+    // R2: the Depth wall follows a smoothed copy of the selected skin (the paint's sub-triangles and the skin's
+    // facets are not copied into the wall), when Depth is set and skin smoothing is on.
+    const double                    skin_s = std::clamp(params.skin_smoothing, 0., 1.);
+    std::unique_ptr<const AABBMesh> tree_ss;
+    if (depth > 0. && skin_s > 0.) {
+        indexed_triangle_set Ss = S;
+        ps_taubin(Ss, std::vector<float>(Ss.vertices.size(), 1.f), int(std::lround(10. * skin_s)));
+        tree_ss = std::make_unique<const AABBMesh>(Ss);
+    }
+    if (canceled())
+        return stop();
+    const double                             margin = std::max(8. * h0, 1.) + 1.;
+    std::shared_ptr<const PaintSplitOutside> outside_ptr =
+        part != nullptr ? ps_part_outside(*part, margin) : std::make_shared<const PaintSplitOutside>(mesh, margin);
+    const PaintSplitOutside& outside = *outside_ptr;
+    if (canceled())
+        return stop();
     std::atomic<size_t> queries{ 0 };
     PsField             field;
     field.ts         = &tree_s;
     field.tu         = &tree_u;
+    field.tss        = tree_ss.get();
     field.outside    = &outside;
     field.reach      = reach + h0;
     field.depth      = depth;
@@ -535,12 +699,16 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
         const double          lim  = std::sqrt(3.) * size * h0 * 1.001 + 1e-9; // 2 x the half-diagonal
         std::vector<uint8_t>  keep(cells.size(), 0);
         tbb::parallel_for(tbb::blocked_range<size_t>(0, cells.size()), [&](const tbb::blocked_range<size_t>& r) {
+            if (canceled())
+                return;
             for (size_t c = r.begin(); c < r.end(); ++c) {
                 const uint64_t key = cells[c];
                 const Vec3d    p   = node_pos((ps_ki(key) + 0.5) * size, (ps_kj(key) + 0.5) * size, (ps_kk(key) + 0.5) * size);
                 keep[c]            = std::abs(field.eval(p).g) <= lim;
             }
         });
+        if (canceled())
+            return stop();
         evaluated += cells.size();
         size_t w = 0;
         for (size_t c = 0; c < cells.size(); ++c)
@@ -596,6 +764,8 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
                 fresh.push_back(k);
         std::vector<PsValue> fv(fresh.size());
         tbb::parallel_for(tbb::blocked_range<size_t>(0, fresh.size()), [&](const tbb::blocked_range<size_t>& r) {
+            if (canceled())
+                return;
             for (size_t n = r.begin(); n < r.end(); ++n)
                 fv[n] = field.eval(node_pos(ps_ki(fresh[n]), ps_kj(fresh[n]), ps_kk(fresh[n])));
         });
@@ -648,7 +818,7 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
         cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
         cand.erase(std::remove_if(cand.begin(), cand.end(), [&](uint64_t k) { return std::binary_search(cells.begin(), cells.end(), k); }),
                    cand.end());
-        if (cand.empty())
+        if (cand.empty() || canceled())
             break;
         add_nodes(cand);
         std::vector<uint64_t> merged(cells.size() + cand.size());
@@ -657,6 +827,8 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
         closure_added += cand.size();
         frontier.swap(cand);
     }
+    if (canceled())
+        return stop();
     st.cells = cells.size();
     st.samples  = evaluated + nodes.size();
     st.field_s  = ps_secs_since(t1);
@@ -736,6 +908,8 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
     std::vector<float> dist(edges.size());
     const int          iters = std::max(0, params.root_iterations);
     tbb::parallel_for(tbb::blocked_range<size_t>(0, edges.size()), [&](const tbb::blocked_range<size_t>& r) {
+        if (canceled())
+            return;
         for (size_t e = r.begin(); e < r.end(); ++e) {
             const uint32_t a = uint32_t(edges[e] >> 32), b = uint32_t(edges[e] & 0xFFFFFFFFu);
             const Vec3d    pa = node_pos(ps_ki(nodes[a]), ps_kj(nodes[a]), ps_kk(nodes[a]));
@@ -763,6 +937,9 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
     tris  = std::vector<Tri>();
     edges = std::vector<uint64_t>();
 
+    if (canceled())
+        return stop();
+
     // ---- D23 (a): a finer voxel near the skin.
     double fine = h;
     // (Not below 0.05 mm: a tenth of a nozzle width is the target, D23.)
@@ -773,16 +950,22 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
     }
     st.near_skin_voxel = fine;
     st.mesh_s          = ps_secs_since(t2);
+    if (canceled())
+        return stop();
 
     // ---- S2: pinned Taubin smoothing.
     const auto t3     = PsClock::now();
     const int  passes = int(std::lround(std::clamp(params.smoothing, 0., 1.) * 20.));
-    if (passes > 0) {
-        const double         pin = 1.5 * h;
-        std::vector<float>   w(claim.vertices.size());
-        for (size_t v = 0; v < w.size(); ++v)
-            w[v] = float(std::clamp((double(dist[v]) - pin) / pin, 0., 1.));
-        // A triangle touching the pin band pins all three corners: one moving corner would move the seam.
+    // Weights by the distance to the skin: 0 up to `pin`, 1 from `full` (linear, or smoothstep), and a triangle
+    // touching the pin band pins all three corners: one moving corner would move the seam.
+    auto weights = [&](double pin, double full, bool smooth_ramp) {
+        std::vector<float> w(claim.vertices.size());
+        for (size_t v = 0; v < w.size(); ++v) {
+            double x = std::clamp((double(dist[v]) - pin) / std::max(1e-9, full - pin), 0., 1.);
+            if (smooth_ramp)
+                x = x * x * (3. - 2. * x);
+            w[v] = float(x);
+        }
         std::vector<uint8_t> pinned(claim.vertices.size(), 0);
         for (const Vec3i32& t : claim.indices)
             if (dist[size_t(t[0])] < pin || dist[size_t(t[1])] < pin || dist[size_t(t[2])] < pin)
@@ -790,9 +973,38 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
         for (size_t v = 0; v < w.size(); ++v)
             if (pinned[v])
                 w[v] = 0.f;
-        ps_taubin(claim, w, passes);
+        return w;
+    };
+    if (passes > 0) {
+        // R1: everything within 1.5 voxels of the skin pinned, full weight from 3 voxels.
+        std::vector<float> w = weights(1.5 * h, 3. * h, false);
+        if (skin_s > 0.) {
+            // R2 (owner 2026-11-27, "too exact on skin depth / triangle following"): only a thin seam band is pinned
+            // (two near-skin voxels, at least 0.1 mm), and the wall rises smoothly to full weight at 3 voxels.
+            const double       pin_s = std::max(2. * fine, 0.1);
+            std::vector<float> w2    = weights(pin_s, 3. * h, true);
+            for (size_t v = 0; v < w.size(); ++v)
+                w[v] = float((1. - skin_s) * double(w[v]) + skin_s * double(w2[v]));
+            ps_taubin(claim, w, passes);
+            if (canceled())
+                return stop();
+            // The wall next to the skin was refined to the fine voxel, where Taubin reaches about sqrt(passes) edges:
+            // extra passes there only (fading out between 3 and 4 voxels) give it the same reach in mm.
+            for (size_t v = 0; v < w2.size(); ++v)
+                w2[v] = float(skin_s * double(w2[v]) * std::clamp((4. * h - double(dist[v])) / h, 0., 1.));
+            ps_taubin(claim, w2, int(std::lround(40. * skin_s)));
+        } else
+            ps_taubin(claim, w, passes);
+    }
+    // ---- D23 (b): the seam through the paint line's corners.
+    if (params.seam_snap && size_t(comp) < region.loops.size()) {
+        double worst = 0.;
+        st.snapped   = ps_snap_seam(claim, dist, region.loops[size_t(comp)], 2. * fine, &worst);
+        BOOST_LOG_TRIVIAL(debug) << "Paint split claim: " << st.snapped << " vertices snapped to the paint line, by up to " << worst << " mm";
     }
     st.smooth_s = ps_secs_since(t3);
+    if (canceled())
+        return stop();
 
     if (its_volume(claim) < 0.)
         its_flip_triangles(claim);
@@ -804,6 +1016,56 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
                             << st.triangles << " triangles" << (st.complement ? " (complement)" : "") << "; setup " << st.setup_s
                             << " s, field " << st.field_s << " s, mesh " << st.mesh_s << " s, smooth " << st.smooth_s << " s";
     return out;
+}
+
+} // namespace
+
+PaintSplitPart paint_split_prepare_part(const indexed_triangle_set& mesh)
+{
+    PaintSplitPart out;
+    indexed_triangle_set fixed;
+    out.ok   = paint_split_repair(mesh, fixed, nullptr, out.repair);
+    out.mesh = out.repair.needed ? std::move(fixed) : mesh;
+    uint64_t h = 1469598103934665603ull;
+    h          = ps_hash_vec(h, out.mesh.vertices);
+    h          = ps_hash_vec(h, out.mesh.indices);
+    out.hash   = h;
+    out.cache  = std::make_shared<PaintSplitPart::Cache>();
+    return out;
+}
+
+uint64_t paint_split_claim_key(const PaintSplitPart& part, const PaintSplitRegion& region, int comp, const PaintSplitSkinParams& p)
+{
+    uint64_t h = 1469598103934665603ull;
+    h          = ps_hash_val(h, uint32_t(2)); // the engine version (R2)
+    h          = ps_hash_val(h, part.hash);
+    h          = ps_hash_vec(h, region.surface.vertices);
+    h          = ps_hash_vec(h, region.surface.indices);
+    h          = ps_hash_vec(h, region.facet_comp);
+    h          = ps_hash_val(h, comp);
+    for (double v : { p.depth, p.voxel, p.smoothing, p.simplify, p.skin_smoothing })
+        h = ps_hash_val(h, v);
+    h = ps_hash_val(h, uint64_t(p.max_samples));
+    h = ps_hash_val(h, uint64_t(p.max_cells));
+    for (int v : { int(p.dense), p.skin_refine, p.root_iterations, int(p.allow_complement), int(p.seam_snap) })
+        h = ps_hash_val(h, v);
+    h = ps_hash_vec(h, p.exclude_components);
+    return h == 0 ? 1 : h;
+}
+
+PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                           const PaintSplitSkinParams& params)
+{
+    return ps_nearest_cutter(mesh, nullptr, region, comp, params);
+}
+
+PaintSplitClaim paint_split_nearest_cutter(const PaintSplitPart& part, const PaintSplitRegion& region, int comp,
+                                           const PaintSplitSkinParams& params)
+{
+    PaintSplitClaim c = ps_nearest_cutter(part.mesh, &part, region, comp, params);
+    if (!c.mesh.indices.empty())
+        c.key = paint_split_claim_key(part, region, comp, params);
+    return c;
 }
 
 indexed_triangle_set paint_split_nearest_claim(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,

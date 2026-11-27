@@ -21,8 +21,10 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <set>
 #include <unordered_map>
@@ -1976,6 +1978,284 @@ PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, co
                             << out.times.mesh << " s, smooth " << out.times.smooth << " s, cut " << out.times.cut << " s; claim "
                             << out.claim.triangles << " triangles at " << out.claim.voxel << " mm"
                             << (skin.dense ? " (dense)" : "");
+    return out;
+}
+
+// -------------------------------------------------------------------------------------------- one pass (R2 E7)
+
+PaintSplitSkinParams paint_split_pass_params(const PaintSplitSkinParams& skin, const std::vector<int>& comps, size_t k)
+{
+    PaintSplitSkinParams p = skin;
+    p.exclude_components.assign(comps.begin(), comps.begin() + std::min(k, comps.size()));
+    return p;
+}
+
+std::vector<indexed_triangle_set> paint_split_claim_cut_surfaces(const indexed_triangle_set& mesh,
+                                                                 const std::vector<const PaintSplitClaim*>& claims,
+                                                                 const std::atomic<bool>* cancel)
+{
+    std::vector<indexed_triangle_set> out(claims.size());
+    if (mesh.indices.empty())
+        return out;
+    auto canceled = [cancel]() { return cancel != nullptr && cancel->load(std::memory_order_relaxed); };
+    const AABBMesh part(mesh);
+    // Earlier claims, for "outside every earlier claim" (the complement's inside is its mesh's outside).
+    std::vector<std::unique_ptr<AABBMesh>> trees(claims.size());
+    for (size_t k = 0; k < claims.size(); ++k)
+        if (claims[k] != nullptr && !claims[k]->mesh.indices.empty() && k + 1 < claims.size())
+            trees[k] = std::make_unique<AABBMesh>(claims[k]->mesh);
+    auto in_claim = [&](size_t j, const Vec3d& p) {
+        int          f = -1;
+        Vec3d        c;
+        const double d2 = trees[j]->squared_distance(p, f, c);
+        if (f < 0 || d2 < 1e-8)
+            return false;
+        const bool inside_mesh = (p - c).dot(its_face_normal(claims[j]->mesh, f).cast<double>()) < 0.;
+        return claims[j]->complement ? !inside_mesh : inside_mesh;
+    };
+    for (size_t k = 0; k < claims.size() && !canceled(); ++k) {
+        if (claims[k] == nullptr || claims[k]->mesh.indices.empty())
+            continue;
+        const indexed_triangle_set& claim = claims[k]->mesh;
+        std::vector<uint8_t>        keep(claim.indices.size(), 0);
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, claim.indices.size()), [&](const tbb::blocked_range<size_t>& r) {
+            if (canceled())
+                return;
+            for (size_t i = r.begin(); i < r.end(); ++i) {
+                const Vec3i32& t = claim.indices[i];
+                const Vec3d    g = (claim.vertices[t[0]] + claim.vertices[t[1]] + claim.vertices[t[2]]).cast<double>() / 3.;
+                int            f = -1;
+                Vec3d          c;
+                const double   d2 = part.squared_distance(g, f, c);
+                if (f < 0 || d2 <= 1e-4 || (g - c).dot(its_face_normal(mesh, f).cast<double>()) >= 0.)
+                    continue;
+                bool ok = true;
+                for (size_t j = 0; ok && j < k; ++j)
+                    if (trees[j])
+                        ok = !in_claim(j, g);
+                keep[i] = ok;
+            }
+        });
+        out[k].vertices = claim.vertices;
+        for (size_t i = 0; i < keep.size(); ++i)
+            if (keep[i])
+                out[k].indices.push_back(claim.indices[i]);
+        its_compactify_vertices(out[k]);
+    }
+    return out;
+}
+
+PaintSplitMultiPieces paint_split_assign_nearest_multi(const indexed_triangle_set& mesh, const PaintSplitRegion& region,
+                                                       const std::vector<int>& comps, const PaintSplitSkinParams& skin,
+                                                       const std::vector<std::shared_ptr<const PaintSplitClaim>>& cached)
+{
+    PaintSplitMultiPieces out;
+    const size_t          n = comps.size();
+    if (region.error != PaintSplitError::None) {
+        out.error = region.error;
+        return out;
+    }
+    for (size_t k = 0; k < n; ++k)
+        if (!region.component_ok(comps[k])) {
+            out.error     = PaintSplitError::BadComponent;
+            out.bad_index = int(k);
+            return out;
+        }
+    if (n == 0) {
+        out.error = PaintSplitError::EmptyMask;
+        return out;
+    }
+    out.times.resize(n);
+    out.claims.resize(n);
+
+    // The part, repaired and hashed once.
+    auto                 t_stage = PsClock2::now();
+    const PaintSplitPart part    = paint_split_prepare_part(mesh);
+    if (!part.ok) {
+        out.error = PaintSplitError::RepairFailed;
+        return out;
+    }
+    if (part.repair.needed)
+        out.warnings.push_back(PaintSplitWarning::Repaired);
+    out.total.repair = ps_secs2(t_stage);
+
+    // The claims, each with the earlier components excluded, in parallel; a cached one is reused when its key matches.
+    std::vector<std::shared_ptr<const PaintSplitClaim>> claims(n);
+    std::vector<uint8_t>                                reused(n, 0);
+    for (size_t k = 0; k < n; ++k)
+        if (k < cached.size() && cached[k] && cached[k]->key != 0 &&
+            cached[k]->key == paint_split_claim_key(part, region, comps[k], paint_split_pass_params(skin, comps, k)))
+            claims[k] = cached[k], reused[k] = 1;
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, n, 1), [&](const tbb::blocked_range<size_t>& r) {
+        for (size_t k = r.begin(); k < r.end(); ++k)
+            if (!claims[k])
+                claims[k] = std::make_shared<const PaintSplitClaim>(
+                    paint_split_nearest_cutter(part, region, comps[k], paint_split_pass_params(skin, comps, k)));
+    });
+    for (size_t k = 0; k < n; ++k) {
+        out.claims[k] = claims[k]->stats;
+        if (!reused[k]) {
+            out.times[k].field  = claims[k]->stats.setup_s + claims[k]->stats.field_s;
+            out.times[k].mesh   = claims[k]->stats.mesh_s;
+            out.times[k].smooth = claims[k]->stats.smooth_s;
+        } else
+            ++out.claims_reused;
+        out.total.field += out.times[k].field;
+        out.total.mesh += out.times[k].mesh;
+        out.total.smooth += out.times[k].smooth;
+        if (claims[k]->mesh.indices.empty()) {
+            out.error     = PaintSplitError::VoxelFailed;
+            out.bad_index = int(k);
+            return out;
+        }
+    }
+
+    t_stage = PsClock2::now();
+    try {
+        manifold::ExecutionContext ctx;
+        Manifold                   M = ColorSplitDetail::to_manifold64(part.mesh, ctx);
+        if (M.Status() != Manifold::Error::NoError || M.IsEmpty()) {
+            out.error = PaintSplitError::NonManifold;
+            return out;
+        }
+        const uint32_t src_id = uint32_t(M.OriginalID());
+        out.source_volume     = M.Volume();
+        // The cutters, imported and simplified in parallel.
+        std::vector<Manifold> C(n);
+        std::vector<int>      bad(n, 0);
+        std::vector<double>   import_s(n, 0.);
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, n, 1), [&](const tbb::blocked_range<size_t>& r) {
+            for (size_t k = r.begin(); k < r.end(); ++k) {
+                const auto t0 = PsClock2::now();
+                try {
+                    manifold::ExecutionContext lctx;
+                    C[k] = ColorSplitDetail::to_manifold64(claims[k]->mesh, lctx);
+                    if (C[k].Status() != Manifold::Error::NoError || C[k].IsEmpty())
+                        bad[k] = 1;
+                    else if (!skin.dense && skin.simplify > 0.)
+                        C[k] = C[k].Simplify(skin.simplify);
+                } catch (...) {
+                    bad[k] = 1;
+                }
+                import_s[k] = ps_secs2(t0);
+            }
+        });
+        for (size_t k = 0; k < n; ++k) {
+            if (bad[k]) {
+                BOOST_LOG_TRIVIAL(error) << "Paint split: Manifold refused claim " << k + 1;
+                out.error     = PaintSplitError::VoxelFailed;
+                out.bad_index = int(k);
+                return out;
+            }
+            out.claims[k].simplified = C[k].NumTri();
+            out.times[k].smooth += import_s[k];
+        }
+
+        // In turn, each from what the earlier ones left: piece k = rest AND claim k (only the components carrying
+        // region k's selection), and the rest loses it.
+        Manifold rest = M;
+        out.pieces.resize(n);
+        out.pieces_from_source.resize(n);
+        out.piece_volume.resize(n, 0.);
+        std::vector<Manifold> piece_m(n);
+        for (size_t k = 0; k < n; ++k) {
+            const auto                            t0 = PsClock2::now();
+            std::vector<std::pair<Vec3d, double>> sel;
+            for (size_t f = 0; f < region.surface.indices.size(); ++f)
+                if (region.facet_comp[f] == comps[k])
+                    sel.emplace_back(ps_tri_centroid(region.surface, f), ps_tri_area(region.surface, f));
+            const double          sel_area = region.area[size_t(comps[k])];
+            std::vector<Manifold> kept;
+            for (Manifold& pc : (claims[k]->complement ? rest - C[k] : rest ^ C[k]).Decompose()) {
+                // A component that cannot hold the selection (its box misses every selected centroid) is skipped
+                // without an export.
+                const manifold::Box bb = pc.BoundingBox();
+                bool                near = false;
+                for (size_t i = 0; i < sel.size() && !near; ++i) {
+                    const Vec3d& g = sel[i].first;
+                    near           = g.x() >= bb.min.x - 1e-3 && g.y() >= bb.min.y - 1e-3 && g.z() >= bb.min.z - 1e-3 &&
+                           g.x() <= bb.max.x + 1e-3 && g.y() <= bb.max.y + 1e-3 && g.z() <= bb.max.z + 1e-3;
+                }
+                double a = 0.;
+                if (near) {
+                    const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
+                    const AABBMesh             aabb(its);
+                    for (const auto& [g, ga] : sel)
+                        if (aabb.squared_distance(g) <= 1e-6)
+                            a += ga;
+                }
+                if (a >= 0.01 * sel_area)
+                    kept.push_back(pc);
+                else
+                    ++out.returned_components;
+            }
+            if (kept.empty()) {
+                out.error     = PaintSplitError::EmptyPiece;
+                out.bad_index = int(k);
+                return out;
+            }
+            piece_m[k] = ps_union(kept);
+            ColorSplitDetail::require_ok(piece_m[k], "piece");
+            rest = rest - piece_m[k];
+            ColorSplitDetail::require_ok(rest, "rest");
+            out.piece_volume[k] = piece_m[k].Volume();
+            out.times[k].cut    = ps_secs2(t0);
+            BOOST_LOG_TRIVIAL(info) << "Paint split one pass: region " << k + 1 << " booleans " << out.times[k].cut << " s, piece "
+                                    << out.piece_volume[k] << " mm3";
+        }
+        const auto            t_rest = PsClock2::now();
+        std::vector<Manifold> parts;
+        for (Manifold& m : rest.Decompose())
+            if (m.Volume() > 1e-9 * std::max(1., out.source_volume))
+                parts.push_back(m);
+        if (parts.empty()) {
+            out.error = PaintSplitError::EmptyBody;
+            return out;
+        }
+        size_t body_idx = 0;
+        for (size_t j = 1; j < parts.size(); ++j)
+            if (parts[j].Volume() > parts[body_idx].Volume())
+                body_idx = j;
+        // The exports, in parallel (the body is the big one).
+        std::vector<std::function<void()>> exports;
+        for (size_t k = 0; k < n; ++k)
+            exports.emplace_back([&, k]() { out.pieces[k] = ps_export_tagged(piece_m[k], src_id, out.pieces_from_source[k]); });
+        std::vector<size_t> loose_idx;
+        for (size_t j = 0; j < parts.size(); ++j)
+            if (j != body_idx)
+                loose_idx.push_back(j);
+        out.loose.resize(loose_idx.size());
+        out.loose_from_source.resize(loose_idx.size());
+        exports.emplace_back([&]() { out.body = ps_export_tagged(parts[body_idx], src_id, out.body_from_source); });
+        for (size_t i = 0; i < loose_idx.size(); ++i)
+            exports.emplace_back([&, i]() { out.loose[i] = ps_export_tagged(parts[loose_idx[i]], src_id, out.loose_from_source[i]); });
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, exports.size(), 1), [&](const tbb::blocked_range<size_t>& r) {
+            for (size_t i = r.begin(); i < r.end(); ++i)
+                exports[i]();
+        });
+        out.body_volume = parts[body_idx].Volume();
+        for (size_t j : loose_idx)
+            out.loose_volume += parts[j].Volume();
+        if (!out.loose.empty())
+            out.warnings.push_back(PaintSplitWarning::LoosePieces);
+        double total = out.body_volume + out.loose_volume;
+        for (double v : out.piece_volume)
+            total += v;
+        if (std::abs(total - out.source_volume) > 1e-6 * std::abs(out.source_volume) + 1e-9)
+            out.warnings.push_back(PaintSplitWarning::VolumeMismatch);
+        BOOST_LOG_TRIVIAL(info) << "Paint split one pass: rest and exports " << ps_secs2(t_rest) << " s, " << out.loose.size()
+                                << " rest piece(s)";
+    } catch (const ColorSplitError& e) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: " << e.what();
+        out.error = PaintSplitError::BooleanFailed;
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: " << e.what();
+        out.error = PaintSplitError::BooleanFailed;
+    }
+    out.total.cut = ps_secs2(t_stage);
+    BOOST_LOG_TRIVIAL(info) << "Paint split one pass, " << n << " region(s): repair " << out.total.repair << " s, field " << out.total.field
+                            << " s, mesh " << out.total.mesh << " s, smooth " << out.total.smooth << " s, booleans and exports "
+                            << out.total.cut << " s; " << out.claims_reused << " claim(s) reused";
     return out;
 }
 

@@ -12,11 +12,13 @@
 #include <libslic3r/MeshBoolean.hpp>
 #include <libslic3r/Model.hpp>
 #include <libslic3r/PaintSplit.hpp>
+#include <libslic3r/PaintSplitPreview.hpp>
 #include <libslic3r/PrintConfig.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/TriangleSelector.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -1992,6 +1994,10 @@ TEST_CASE("Paint split R1: the pieces' painting is copied facet for facet", "[Pa
     CHECK_FALSE(rep2.exact_paint);
 }
 
+namespace {
+double ps_roughness_near_skin(const indexed_triangle_set& face, const indexed_triangle_set& part, double band); // R2, below
+} // namespace
+
 // The owner's figure, through the Cut the way PaintSplitJob runs it: every multi-edge patch in turn on the body the
 // last cut left, as new objects and as parts. Run by hand with PAINT_SPLIT_GRINCH=<copy of the 3MF>. Knobs (env):
 // PAINT_SPLIT_ENGINES dense,sparse; PAINT_SPLIT_MODES objects,parts; PAINT_SPLIT_VOXEL, _SMOOTH, _REFINE, _ROOTS,
@@ -2033,6 +2039,7 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
 
     // The regions: every connected patch of every colour with two or more edges (as the loops harness picks them).
     std::vector<PaintSplitRegion> regions;
+    std::vector<TriangleSelector::TriangleSplittingData> region_masks;
     {
         TriangleSelector sel(tm);
         sel.deserialize(paint, true);
@@ -2059,7 +2066,19 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
                 if (r.error != PaintSplitError::None || r.num_components() != 1 || r.loops[0].size() < 2 || r.area[0] < 100.)
                     continue;
                 paint_split_transform(r, to_cut);
+                const BoundingBoxf3 rb = ps_bbox(r.surface.indices.empty() ? r.surface : [&] {
+                    indexed_triangle_set sel_its;
+                    sel_its.vertices = r.surface.vertices;
+                    for (size_t q = 0; q < r.surface.indices.size(); ++q)
+                        if (r.facet_comp[q] == 0)
+                            sel_its.indices.push_back(r.surface.indices[q]);
+                    its_compactify_vertices(sel_its);
+                    return sel_its;
+                }());
+                WARN("region " << regions.size() + 1 << ": colour " << s << ", " << r.loops[0].size() << " edges, " << r.area[0]
+                               << " mm2, box " << rb.min.transpose() << " .. " << rb.max.transpose());
                 regions.push_back(std::move(r));
+                region_masks.push_back(mask);
             }
         }
     }
@@ -2075,13 +2094,18 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
                                        .cast<double>() / 3.);
             }
 
-    const std::string engines = env_s("PAINT_SPLIT_ENGINES", "dense,sparse");
-    const std::string modes   = env_s("PAINT_SPLIT_MODES", "isolated,objects,parts");
-    for (const bool dense : { true, false }) {
-        if (engines.find(dense ? "dense" : "sparse") == std::string::npos)
+    // Engines: dense (P2), r1 (R1: no skin smoothing, no seam snap), sparse (the shipped defaults). R2 modes:
+    // onepass / onepass_parts (every region of the union mask in one Cut). Knobs: PAINT_SPLIT_SKIN_SMOOTH, _SNAP, _DEPTH.
+    const std::string engines = env_s("PAINT_SPLIT_ENGINES", "r1,sparse");
+    const std::string modes   = env_s("PAINT_SPLIT_MODES", "isolated,onepass,onepass_parts");
+    auto has_mode = [&modes](const std::string& m) { return ("," + modes + ",").find("," + m + ",") != std::string::npos; };
+    for (const std::string eng : { "dense", "r1", "sparse" }) {
+        if (engines.find(eng) == std::string::npos)
             continue;
+        const bool dense = eng == "dense";
         PaintSplitSkinParams skin;
         skin.dense = dense;
+        skin.depth = env_d("PAINT_SPLIT_DEPTH", 0.);
         if (!dense) {
             // Unset knobs keep the shipped defaults.
             skin.voxel           = env_d("PAINT_SPLIT_VOXEL", skin.voxel);
@@ -2089,8 +2113,17 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
             skin.skin_refine     = int(env_d("PAINT_SPLIT_REFINE", double(skin.skin_refine)));
             skin.root_iterations = int(env_d("PAINT_SPLIT_ROOTS", double(skin.root_iterations)));
             skin.max_cells       = size_t(env_d("PAINT_SPLIT_MAXCELLS", double(skin.max_cells)));
+            skin.skin_smoothing  = env_d("PAINT_SPLIT_SKIN_SMOOTH", skin.skin_smoothing);
+            skin.seam_snap       = env_d("PAINT_SPLIT_SNAP", 1.) != 0.;
         }
-        const char* engine = dense ? "BEFORE (dense field, spatial paint remap)" : "AFTER (sparse field, exact paint)";
+        if (eng == "r1") {
+            skin.skin_smoothing = 0.;
+            skin.seam_snap      = false;
+        }
+        const std::string engine_s = eng == "dense" ? "P2 (dense field, spatial paint remap)" :
+                                     eng == "r1"    ? "R1 (sparse field, no skin smoothing)" :
+                                                      "R2 (sparse field, skin smoothing " + std::to_string(skin.skin_smoothing) + ")";
+        const char*       engine   = engine_s.c_str();
 
         // Roughness of each region's cut face, on the original part.
         {
@@ -2121,14 +2154,66 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
                             << claim.stats.samples << " samples, " << claim.stats.queries << " queries, " << claim.mesh.indices.size()
                             << " triangles" << (claim.complement ? " (complement)" : "") << ", open half-edges " << open
                             << ", repeated half-edges " << repeated << "; cut face " << face.indices.size() << " triangles, roughness "
-                            << ps_roughness(face) << " deg, area " << ps_its_area(face) << " mm2");
+                            << ps_roughness(face) << " deg, within 2 mm of the skin " << ps_roughness_near_skin(face, part, 2.)
+                            << " deg, within 1 mm " << ps_roughness_near_skin(face, part, 1.) << " deg, area " << ps_its_area(face)
+                            << " mm2, " << claim.stats.snapped << " snapped");
             }
+        }
+
+        // R2 one pass: every region in one Cut, from the union of their masks (one region, a component each).
+        for (const bool as_parts : { false, true }) {
+            if (!has_mode(as_parts ? "onepass_parts" : "onepass"))
+                continue;
+            TriangleSelector::TriangleSplittingData all = region_masks.front();
+            for (size_t k = 1; k < region_masks.size(); ++k)
+                all = paint_split_mask_combine(tm, all, region_masks[k], PaintSplitMaskOp::Union);
+            PaintSplitRegion ur = paint_split_region(tm.its, all);
+            REQUIRE(ur.error == PaintSplitError::None);
+            paint_split_transform(ur, to_cut);
+            std::vector<int> comps;
+            for (size_t c = 0; c < ur.num_components(); ++c)
+                if (ur.component_ok(int(c)))
+                    comps.push_back(int(c));
+            WARN(engine << " one pass: the union mask has " << ur.num_components() << " components, " << comps.size() << " cut");
+            Model        holder;
+            ModelObject* current = holder.add_object(*src_obj);
+            PaintSplitKeep keep;
+            keep.mask_volume_idx = src_vol;
+            keep.region          = &ur;
+            keep.nearest_skin    = true;
+            keep.skin            = skin;
+            keep.exact_paint     = !dense;
+            keep.components      = comps;
+            ModelObjectCutAttributes attrs = ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                                             ModelObjectCutAttribute::KeepPaint;
+            if (as_parts)
+                attrs = attrs | ModelObjectCutAttribute::KeepAsParts;
+            const auto             t_all = std::chrono::steady_clock::now();
+            Cut                    cut(current, 0, Transform3d::Identity(), attrs);
+            PaintSplitReport       rep;
+            const ModelObjectPtrs& res = cut.perform_with_paint_split_planes(keep, &rep);
+            const double           all_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count();
+            for (size_t k = 0; k < rep.region_times.size(); ++k) {
+                const PaintSplitTimes& t = rep.region_times[k];
+                WARN(engine << (as_parts ? " one pass (parts)" : " one pass (objects)") << " component " << comps[k] + 1 << ": field "
+                            << t.field << " + mesh " << t.mesh << " + smooth/import " << t.smooth << " s, booleans " << t.cut << " s, piece "
+                            << rep.region_piece_volume[k] << " mm3");
+            }
+            const PaintSplitTimes& t = rep.times;
+            WARN(engine << (as_parts ? " one pass (parts)" : " one pass (objects)") << ": "
+                        << (rep.error == PaintSplitError::None ? "ok" : paint_split_error_message(rep.error)) << " (bad index " << rep.bad_index
+                        << "), APPLY TOTAL " << all_s << " s = repair " << t.repair << " + field " << t.field << " + mesh " << t.mesh
+                        << " + smooth " << t.smooth << " + booleans/exports " << t.cut << " + wrapper " << t.wrapper << " + paint " << t.paint
+                        << "; " << res.size() << " object(s), " << rep.loose_parts << " rest piece(s), body " << rep.body_volume
+                        << " mm3, loose " << rep.loose_volume << " mm3; paint " << rep.paint_copied << "/" << rep.paint_resampled << "/"
+                        << rep.paint_unpainted);
+            CHECK(rep.error == PaintSplitError::None);
         }
 
         for (int mode = 0; mode < 3; ++mode) {
             // isolated: each region alone on the uncut part (new objects); objects / parts: in turn, as the job does.
             const bool isolated = mode == 0, as_parts = mode == 2;
-            if (modes.find(isolated ? "isolated" : as_parts ? "parts" : "objects") == std::string::npos)
+            if (!has_mode(isolated ? "isolated" : as_parts ? "parts" : "objects"))
                 continue;
             const char* TAG = "__ps_mask__";
             Model       holder;
@@ -2175,6 +2260,25 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
                             << (rep.exact_paint ? "exact" : "remap") << " " << rep.paint_copied << "/" << rep.paint_resampled << "/"
                             << rep.paint_unpainted);
                 CHECK(rep.error == PaintSplitError::None);
+                if (!isolated && rep.error != PaintSplitError::None) {
+                    // Region 4 diagnosis: the mask part in the cut frame against the region (both should coincide), and how
+                    // much of the region's selected skin lies on that part.
+                    const ModelVolume* mvv = current->volumes[size_t(mask_idx)];
+                    TriangleMesh       now(mvv->mesh());
+                    now.transform(current->instances.front()->get_transformation().get_matrix_no_offset() * mvv->get_matrix(), true);
+                    const AABBMesh tree(now.its);
+                    size_t         on = 0, all_sel = 0;
+                    for (size_t q = 0; q < regions[k].surface.indices.size(); ++q)
+                        if (regions[k].facet_comp[q] == 0) {
+                            const Vec3i32& tq = regions[k].surface.indices[q];
+                            ++all_sel;
+                            on += tree.squared_distance((regions[k].surface.vertices[tq[0]] + regions[k].surface.vertices[tq[1]] +
+                                                         regions[k].surface.vertices[tq[2]]).cast<double>() / 3.) < 1e-6;
+                        }
+                    WARN("refusal at region " << k + 1 << ": the mask part's box in the cut frame " << now.bounding_box().center().transpose()
+                                              << " (" << current->volumes.size() << " volume(s), volume offset "
+                                              << mvv->get_offset().transpose() << "), the selected skin on it " << on << " / " << all_sel);
+                }
                 if (isolated && rep.error != PaintSplitError::None)
                     continue;
                 if (rep.error != PaintSplitError::None || res.empty())
@@ -2214,4 +2318,262 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
                         << " regions (field " << sum_field << " s, cut " << sum_cut << " s, paint " << sum_paint << " s)");
         }
     }
+}
+
+// ============================================================================================ R2
+namespace {
+
+// The cut face's roughness next to the skin: ps_roughness over the face's triangles whose centroid lies within `band`
+// of the part's skin (the owner's R1 complaint: "rough around the skin selection").
+double ps_roughness_near_skin(const indexed_triangle_set& face, const indexed_triangle_set& part, double band)
+{
+    const AABBMesh       tree(part);
+    indexed_triangle_set sub;
+    sub.vertices = face.vertices;
+    for (const Vec3i32& t : face.indices) {
+        const Vec3d g = (face.vertices[t[0]] + face.vertices[t[1]] + face.vertices[t[2]]).cast<double>() / 3.;
+        if (tree.squared_distance(g) < band * band)
+            sub.indices.push_back(t);
+    }
+    return ps_roughness(sub);
+}
+
+// Two bands round a cylinder, 1 mm of unselected skin apart (their claims meet inside), and the top cap: one mask,
+// three components.
+struct PsThreeRegions
+{
+    indexed_triangle_set                    cyl;
+    TriangleSelector::TriangleSplittingData mask;
+    PaintSplitRegion                        region;
+};
+PsThreeRegions ps_three_regions()
+{
+    PsThreeRegions f;
+    f.cyl  = ps_ring_cylinder(10., 0., 40., 40, 48);
+    f.mask = ps_mask_where(f.cyl, [](int, const Vec3d& g) {
+        const double th = std::atan2(g.y(), g.x());
+        const bool   side = std::hypot(g.x(), g.y()) > 5.;
+        const bool   a    = side && g.z() > 11. + 1.5 * std::sin(2. * th) && g.z() < 18.;
+        const bool   b    = side && g.z() > 19. && g.z() < 26. + 1.5 * std::sin(3. * th);
+        const bool   cap  = g.z() > 39.9; // the top cap's fan
+        return a || b || cap;
+    });
+    f.region = paint_split_region(f.cyl, f.mask);
+    return f;
+}
+
+} // namespace
+
+TEST_CASE("Paint split R2: one pass gives the per-region pieces, with no slivers", "[PaintSplit][slow]")
+{
+    const PsThreeRegions f = ps_three_regions();
+    REQUIRE(f.region.error == PaintSplitError::None);
+    REQUIRE(f.region.num_components() == 3);
+    const std::vector<int> comps = { 0, 1, 2 };
+    PaintSplitSkinParams   sp;
+    sp.voxel = 0.5;
+
+    const auto                  t0    = std::chrono::steady_clock::now();
+    const PaintSplitMultiPieces multi = paint_split_assign_nearest_multi(f.cyl, f.region, comps, sp);
+    const double                t_one = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    REQUIRE(multi.ok());
+    REQUIRE(multi.pieces.size() == 3);
+    double sum = multi.body_volume + multi.loose_volume;
+    for (double v : multi.piece_volume)
+        sum += v;
+    CHECK_THAT(sum, WithinRel(multi.source_volume, 1e-6));
+
+    // Each region alone on the uncut part (R1's path): the same pieces within voxel tolerance. The one pass is the
+    // same partition; only the order of the booleans differs.
+    const auto t1    = std::chrono::steady_clock::now();
+    for (size_t k = 0; k < comps.size(); ++k) {
+        const PaintSplitPieces alone = paint_split_assign_nearest(f.cyl, f.region, comps[k], sp);
+        REQUIRE(alone.ok());
+        CAPTURE(k, alone.piece_volume, multi.piece_volume[k]);
+        CHECK_THAT(multi.piece_volume[k], WithinRel(alone.piece_volume, 0.02));
+        // The piece is closed.
+        ps_require_closed(multi.pieces[k]);
+    }
+    const double t_alone = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+    // No film where two claims meet: every rest piece is a real one (the strip between the bands, the bottom).
+    for (const indexed_triangle_set& l : multi.loose)
+        CHECK(std::abs(its_volume(l)) > 1.);
+    WARN("one pass " << t_one << " s, regions alone " << t_alone << " s; " << multi.loose.size() << " rest piece(s), body "
+                     << multi.body_volume << " mm3");
+}
+
+TEST_CASE("Paint split R2: a one-pass Cut gives N pieces and the body, objects or parts", "[PaintSplit][slow]")
+{
+    const PsThreeRegions f = ps_three_regions();
+    REQUIRE(f.region.num_components() == 3);
+    for (const bool as_parts : { false, true }) {
+        DYNAMIC_SECTION((as_parts ? "parts" : "objects")) {
+            Model        model;
+            ModelObject* mo = model.add_object();
+            mo->name        = "cyl";
+            ModelVolume* v  = mo->add_volume(TriangleMesh(f.cyl));
+            v->name         = "mask";
+            mo->add_instance();
+            PaintSplitKeep keep;
+            keep.mask_volume_idx = 0;
+            keep.region          = &f.region;
+            keep.nearest_skin    = true;
+            keep.skin.voxel      = 0.5;
+            keep.components      = { 0, 1, 2 };
+            ModelObjectCutAttributes attrs = ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                                             ModelObjectCutAttribute::KeepPaint;
+            if (as_parts)
+                attrs = attrs | ModelObjectCutAttribute::KeepAsParts;
+            Cut                    cut(mo, 0, Transform3d::Identity(), attrs);
+            PaintSplitReport       rep;
+            const ModelObjectPtrs& res = cut.perform_with_paint_split_planes(keep, &rep);
+            REQUIRE(rep.error == PaintSplitError::None);
+            REQUIRE(rep.region_times.size() == 3);
+            std::set<std::string> names;
+            for (const ModelObject* o : res)
+                for (const ModelVolume* vol : o->volumes)
+                    names.insert(vol->name);
+            if (as_parts) {
+                REQUIRE(res.size() == 1);
+                CHECK(names.count("mask_A1") == 1);
+                CHECK(names.count("mask_A2") == 1);
+                CHECK(names.count("mask_A3") == 1);
+                CHECK(names.count("mask_B") == 1);
+            } else {
+                REQUIRE(res.size() == 4); // three pieces, then the body (with its rest pieces as "_looseN" parts)
+                for (size_t k = 0; k < 3; ++k)
+                    CHECK(res[k]->volumes.size() == 1);
+                CHECK(names.count("mask_loose1") == 1);
+            }
+        }
+    }
+}
+
+TEST_CASE("Paint split R2: the preview worker cancels cleanly and hands its claims to Apply", "[PaintSplit][slow]")
+{
+    const PsThreeRegions f    = ps_three_regions();
+    auto                 mesh = std::make_shared<const TriangleMesh>(f.cyl);
+    std::atomic<int>     notified{ 0 };
+    PaintSplitPreviewWorker worker([&notified]() { ++notified; });
+    auto input = [&](uint64_t gen, bool claims, double voxel) {
+        PaintSplitPreviewInput in;
+        in.generation = gen;
+        in.mesh       = mesh;
+        in.mask       = f.mask;
+        in.claims     = claims;
+        in.skin.voxel = voxel;
+        return in;
+    };
+
+    // Cancel right away: nothing is left behind.
+    worker.start(input(1, true, 0.2));
+    worker.cancel();
+    CHECK_FALSE(worker.running());
+    CHECK(worker.take().empty());
+
+    // A newer request makes the older one's results stale: they are never stored.
+    worker.start(input(2, true, 0.2));
+    worker.start(input(3, false, 0.5));
+    worker.wait();
+    std::vector<PaintSplitPreviewResult> r3 = worker.take();
+    REQUIRE(!r3.empty());
+    for (const PaintSplitPreviewResult& r : r3) {
+        CHECK(r.generation == 3);
+        CHECK(r.stage == PaintSplitPreviewResult::Stage::Region);
+    }
+    REQUIRE(r3.back().region);
+    CHECK(r3.back().region->num_components() == 3);
+
+    // Show cut: the region, then coarse, then fine claims; the fine ones are Apply's (reused, same pieces).
+    PaintSplitPreviewInput in4 = input(4, true, 0.5);
+    in4.region                 = r3.back().region;
+    in4.part                   = r3.back().part;
+    worker.start(std::move(in4));
+    worker.wait();
+    std::vector<PaintSplitPreviewResult> r4 = worker.take();
+    REQUIRE(r4.size() == 3);
+    CHECK(r4[0].stage == PaintSplitPreviewResult::Stage::Region);
+    CHECK(r4[1].stage == PaintSplitPreviewResult::Stage::Coarse);
+    CHECK(r4[2].stage == PaintSplitPreviewResult::Stage::Fine);
+    CHECK(r4[1].claims.front()->stats.voxel > r4[2].claims.front()->stats.voxel);
+    REQUIRE(r4[2].claims.size() == 3);
+    REQUIRE(r4[2].surfaces.size() == 3);
+    for (const indexed_triangle_set& s : r4[2].surfaces)
+        CHECK(!s.indices.empty());
+    CHECK(notified.load() > 0);
+
+    PaintSplitSkinParams sp;
+    sp.voxel                          = 0.5;
+    const PaintSplitMultiPieces fresh = paint_split_assign_nearest_multi(f.cyl, *r4[2].region, r4[2].comps, sp);
+    const PaintSplitMultiPieces reuse = paint_split_assign_nearest_multi(f.cyl, *r4[2].region, r4[2].comps, sp, r4[2].claims);
+    REQUIRE(fresh.ok());
+    REQUIRE(reuse.ok());
+    CHECK(fresh.claims_reused == 0);
+    CHECK(reuse.claims_reused == 3);
+    for (size_t k = 0; k < 3; ++k)
+        CHECK_THAT(reuse.piece_volume[k], WithinRel(fresh.piece_volume[k], 1e-9));
+    // A claim computed with other settings is not reused.
+    PaintSplitSkinParams other        = sp;
+    other.smoothing                   = 0.2;
+    const PaintSplitMultiPieces stale = paint_split_assign_nearest_multi(f.cyl, *r4[2].region, r4[2].comps, other, r4[2].claims);
+    REQUIRE(stale.ok());
+    CHECK(stale.claims_reused == 0);
+}
+
+TEST_CASE("Paint split R2: smoothing along the skin keeps the seam on the paint line and calms the wall beside it", "[PaintSplit]")
+{
+    const double               R   = 10.;
+    const indexed_triangle_set cyl = ps_ring_cylinder(R, 0., 40., 40, 48);
+    auto in_band = [](const Vec3d& g) {
+        const double th = std::atan2(g.y(), g.x());
+        return std::hypot(g.x(), g.y()) > 5. && g.z() > 16. + 2. * std::sin(3. * th) && g.z() < 24.;
+    };
+    const PaintSplitRegion r = paint_split_region(cyl, ps_mask_where(cyl, [&](int, const Vec3d& g) { return in_band(g); }));
+    REQUIRE(r.error == PaintSplitError::None);
+    PaintSplitSkinParams r1, r2;
+    r1.skin_smoothing = 0.;
+    r1.seam_snap      = false; // R1 as it was
+    const PaintSplitClaim c1 = paint_split_nearest_cutter(cyl, r, 0, r1);
+    const PaintSplitClaim c2 = paint_split_nearest_cutter(cyl, r, 0, r2);
+    REQUIRE(!c1.mesh.indices.empty());
+    REQUIRE(!c2.mesh.indices.empty());
+    ps_require_closed(c2.mesh);
+    const indexed_triangle_set f1 = paint_split_claim_cut_surface(cyl, c1.mesh), f2 = paint_split_claim_cut_surface(cyl, c2.mesh);
+    const double near1 = ps_roughness_near_skin(f1, cyl, 2.), near2 = ps_roughness_near_skin(f2, cyl, 2.);
+    WARN("roughness within 2 mm of the skin: R1 " << near1 << " deg, R2 " << near2 << " deg; whole face " << ps_roughness(f1) << " -> "
+                                                  << ps_roughness(f2) << " deg; " << c2.stats.snapped << " seam vertices snapped");
+    CHECK(near2 < near1);
+
+    // The seam stays on the paint line, now through its corners too (D23: a tenth of a millimetre).
+    const PaintSplitPieces p1 = paint_split_assign_nearest(cyl, r, 0, r1);
+    const PaintSplitPieces p2 = paint_split_assign_nearest(cyl, r, 0, r2);
+    REQUIRE(p1.ok());
+    REQUIRE(p2.ok());
+    auto seam_off = [&](const PaintSplitPieces& p, double& mean) {
+        const std::vector<Vec3f> seam = ps_seam(p);
+        double                   off = 0., sum = 0.;
+        for (const Vec3f& v : seam) {
+            const double d = ps_dist_to_loops(r, v.cast<double>());
+            off            = std::max(off, d);
+            sum += d;
+        }
+        mean = seam.empty() ? 1e9 : sum / double(seam.size());
+        return off;
+    };
+    double       mean1 = 0., mean2 = 0.;
+    const double worst1 = seam_off(p1, mean1), worst2 = seam_off(p2, mean2);
+    WARN("seam off the paint line: R1 " << mean1 << " mm mean, " << worst1 << " mm worst; R2 " << mean2 << " mm mean, " << worst2 << " mm worst");
+    CHECK(mean2 < 0.03);
+    CHECK(worst2 < 0.1);
+    CHECK_THAT(p2.piece_volume, WithinRel(p1.piece_volume, 0.02));
+    CHECK_THAT(p2.piece_volume + p2.body_volume + p2.loose_volume, WithinRel(p2.source_volume, 1e-6));
+
+    // With a Depth the wall follows a smoothed copy of the selected skin: the piece stays the same size.
+    r1.depth = r2.depth       = 2.;
+    const PaintSplitPieces d1 = paint_split_assign_nearest(cyl, r, 0, r1);
+    const PaintSplitPieces d2 = paint_split_assign_nearest(cyl, r, 0, r2);
+    REQUIRE(d1.ok());
+    REQUIRE(d2.ok());
+    WARN("Depth 2 mm: piece " << d1.piece_volume << " -> " << d2.piece_volume << " mm3");
+    CHECK_THAT(d2.piece_volume, WithinRel(d1.piece_volume, 0.05));
 }
