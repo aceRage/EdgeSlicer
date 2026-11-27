@@ -177,6 +177,9 @@ bool make_plan(const Print &print, Plan &plan)
             p.filament_nozzle_temps[f] = temperature;
 
     const size_t extruders = cfg.nozzle_diameter.values.size();
+    // Flow variants PR 1 (owner decision D4): each extruder's drive as resolved_extruder_types derives it; the
+    // option itself is dropped on load, so the X2D's mixed-drive pre-heat target below never applied.
+    const std::vector<int> extruder_types = resolved_extruder_types(cfg, extruders);
     for (size_t e = 0; e < extruders; ++e) {
         p.cooling_rate.push_back(extruder_variant_value(cfg, cfg.hotend_cooling_rate.values, e, 2.));
         p.heating_rate.push_back(extruder_variant_value(cfg, cfg.hotend_heating_rate.values, e, 2.));
@@ -194,7 +197,7 @@ bool make_plan(const Print &print, Plan &plan)
             p.cooling_rate_on_rack.back() = p.cooling_rate.back();
         p.physical_extruder_map.push_back(e < cfg.physical_extruder_map.values.size() ? cfg.physical_extruder_map.values[e] : int(e));
         p.extruder_max_nozzle_count.push_back(e < cfg.extruder_max_nozzle_count.values.size() ? cfg.extruder_max_nozzle_count.values[e] : 1);
-        p.extruder_types.push_back(e < cfg.extruder_type.values.size() ? cfg.extruder_type.values[e] : int(ExtruderType::etDirectDrive));
+        p.extruder_types.push_back(extruder_types[e]);
     }
     p.nozzle_diameter           = cfg.nozzle_diameter.values;
     p.has_filament_switcher     = cfg.has_filament_switcher.value;
