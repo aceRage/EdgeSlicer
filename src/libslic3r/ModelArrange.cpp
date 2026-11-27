@@ -3,6 +3,8 @@
 #include <libslic3r/Model.hpp>
 #include <libslic3r/Geometry/ConvexHull.hpp>
 #include <libslic3r/Print.hpp>
+#include <libslic3r/MixedFilament.hpp>
+#include <libslic3r/GCode/WipeTowerEstimate.hpp>
 #include "MTUtils.hpp"
 
 #include <algorithm>
@@ -258,6 +260,123 @@ ArrangePolygon get_instance_arrange_poly(ModelInstance* instance, const Slic3r::
     ap.height = size.z();
     ap.name = obj->name;
     return ap;
+}
+
+// Per-object prime towers: the arrange item of a copy and its tower as one unit (see ModelArrange.hpp). Before, the item
+// was grown on every side by the tower's whole size (on top of half the by-object clearance), so two towered copies
+// already needed some 360 mm side by side on an X1C, and the arrange moved every copy but one onto new plates.
+bool reserve_object_prime_tower(ArrangePolygon &ap, const ModelObject &object, const DynamicPrintConfig &config,
+                                const MixedFilamentManager *mixed)
+{
+    auto global_bool = [&config](const char *key) {
+        const ConfigOption *opt = config.option(key);
+        return opt != nullptr && opt->getBool();
+    };
+    if (!global_bool("prime_tower_per_object") || !global_bool("enable_prime_tower") || ap.poly.contour.points.size() < 3)
+        return false;
+    // Design D13: an object taken out of the per-object towers needs no room for one.
+    if (const ConfigOption *own = object.config.option("object_prime_tower"); own != nullptr && !own->getBool())
+        return false;
+    const auto  *diameters    = config.option<ConfigOptionFloats>("filament_diameter");
+    const size_t num_physical = diameters != nullptr ? diameters->size() : 0;
+    if (num_physical < 2)
+        return false;
+
+    // The object's own value of a key, else the global one.
+    auto value_of = [&](const char *key) -> const ConfigOption * {
+        const ConfigOption *opt = object.config.option(key);
+        return opt != nullptr ? opt : config.option(key);
+    };
+    auto float_of = [&](const char *key, double fallback) {
+        const auto *opt = dynamic_cast<const ConfigOptionFloat *>(value_of(key));
+        return opt != nullptr ? opt->value : fallback;
+    };
+
+    // The filaments the copy prints with, from the model, as Print::plan_object_towers() takes them before slicing: the
+    // parts (painting included), the height ranges, the feature filaments and the support's (1-based here).
+    std::vector<int> ids;
+    for (const ModelVolume *volume : object.volumes)
+        if (volume->is_model_part())
+            append(ids, volume->get_extruders());
+    for (const auto &range : object.layer_config_ranges)
+        if (const ConfigOption *opt = range.second.option("extruder"); opt != nullptr && opt->getInt() > 0)
+            ids.push_back(opt->getInt());
+    for (const char *key : { "wall_filament", "sparse_infill_filament", "solid_infill_filament" })
+        if (const ConfigOption *opt = value_of(key); opt != nullptr && opt->getInt() > 0)
+            ids.push_back(opt->getInt());
+    if (const ConfigOption *support = value_of("enable_support"); support != nullptr && support->getBool())
+        for (const char *key : { "support_filament", "support_interface_filament" })
+            if (const ConfigOption *opt = value_of(key); opt != nullptr && opt->getInt() > 0)
+                ids.push_back(opt->getInt());
+    if (mixed != nullptr)
+        mixed->expand_virtual_extruder_ids(ids, num_physical);
+    std::vector<unsigned int> filaments;
+    for (int id : ids)
+        if (id > 0 && size_t(id) <= num_physical)
+            filaments.push_back(unsigned(id - 1));
+    sort_remove_duplicates(filaments);
+    if (filaments.size() < 2)
+        return false;
+
+    const WipeTowerFootprint footprint = estimate_wipe_tower_footprint(config, resolve_wipe_tower_type(config), filaments,
+                                                                       float_of("layer_height", 0.2), ap.height);
+    if (footprint.depth <= EPSILON)
+        return false;
+    // The tower relative to its anchor (its front left body corner), brim included, as the planner lays it.
+    const Polygon     local = placed_wipe_tower_footprint(config, footprint, Vec2d::Zero());
+    const BoundingBox tb    = get_extents(local);
+    // The copy as it stands on the plate (turned), relative to its position.
+    Polygon hull = ap.poly.contour;
+    hull.rotate(ap.rotation);
+    const BoundingBox cb = get_extents(hull);
+
+    // The room the planner keeps between a copy and its tower: the side scrape's reach and a little air, the copy's brim
+    // and its own skirt; 1 mm more, so the side kept here is clear for the planner too.
+    double scrape = 0.;
+    if (global_bool("prime_tower_side_scrape"))
+        scrape = std::max(0., (config.has("prime_tower_side_scrape_wall_gap") ? config.opt_float("prime_tower_side_scrape_wall_gap") : 0.) +
+                                  (config.has("prime_tower_side_scrape_length") ? config.opt_float("prime_tower_side_scrape_length") : 0.));
+    double brim = 0.;
+    if (const ConfigOption *type = value_of("brim_type"); type != nullptr && type->getInt() != int(btNoBrim))
+        brim = std::max(0., float_of("brim_width", 0.));
+    double skirt = 0.;
+    if (const ConfigOption *type = config.option("skirt_type"), *loops = config.option("skirt_loops");
+        type != nullptr && loops != nullptr && type->getInt() == int(stPerObject) && loops->getInt() > 0)
+        skirt = float_of("skirt_distance", 0.) + 0.5 * loops->getInt();
+    const coord_t gap = scale_(std::max(3., scrape + 2.) + brim + skirt + 1.);
+
+    // Where the tower goes: where the user dragged it (the offset from the copy's centre), else the middle of the right or
+    // the back side, whichever makes the smaller unit (the planner tries both, and slides along every side).
+    std::vector<Point> anchors;
+    const Vec2d        drag(float_of("prime_tower_offset_x", 0.), float_of("prime_tower_offset_y", 0.));
+    if (std::abs(drag.x()) > EPSILON || std::abs(drag.y()) > EPSILON)
+        anchors.push_back(cb.center() + Point::new_scale(drag.x(), drag.y()));
+    else {
+        anchors.emplace_back(cb.max.x() + gap - tb.min.x(), cb.center().y() - tb.center().y());
+        anchors.emplace_back(cb.center().x() - tb.center().x(), cb.max.y() + gap - tb.min.y());
+    }
+    Polygon best;
+    double  best_area = std::numeric_limits<double>::max();
+    for (const Point &anchor : anchors) {
+        Points points = hull.points;
+        for (const Point &p : local.points)
+            points.push_back(p + anchor);
+        Polygon      unit = Geometry::convex_hull(points);
+        const double area = get_extents(unit).size().cast<double>().prod();
+        if (area < best_area - EPSILON) {
+            best_area = area;
+            best      = std::move(unit);
+        }
+    }
+    // A unit larger than the bed is never placed whole: the copy then prints without a tower, so it keeps its own size.
+    const BoundingBox bed = get_extents(Polygon(get_bed_shape(config)));
+    const Point       size = get_extents(best).size();
+    if (best.points.size() < 3 || size.x() > bed.size().x() || size.y() > bed.size().y())
+        return false;
+    best.rotate(-ap.rotation);
+    ap.poly.contour = std::move(best);
+    ap.poly.holes.clear();
+    return true;
 }
 
 } // namespace Slic3r

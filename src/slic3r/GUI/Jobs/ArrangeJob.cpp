@@ -7,7 +7,6 @@
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Print.hpp"
-#include "libslic3r/GCode/WipeTowerEstimate.hpp"
 
 #include <algorithm>
 
@@ -141,7 +140,13 @@ ArrangePolygon ArrangeJob::prepare_arrange_polygon(void* model_instance)
 {
     ModelInstance* instance = (ModelInstance*)model_instance;
     const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
-    return get_instance_arrange_poly(instance, config);
+    ArrangePolygon ap = get_instance_arrange_poly(instance, config);
+    // Per-object prime towers (design 2.5): printing by object with Prime tower per object on, a multi-colour copy and
+    // its tower are arranged as one unit, the fixed (unselected) copies' included, so the arrange leaves room for every
+    // tower. Before, each item was grown on all sides by its whole tower, and the copies were pushed onto new plates.
+    if (params.is_seq_print && instance != nullptr && instance->get_object() != nullptr)
+        reserve_object_prime_tower(ap, *instance->get_object(), config, &wxGetApp().preset_bundle->mixed_filaments);
+    return ap;
 }
 
 void ArrangeJob::prepare_selected() {
@@ -657,39 +662,6 @@ void ArrangeJob::check_unprintable()
     }
 }
 
-// Per-object prime towers (PR 5, design 2.5): printing by object with prime_tower_per_object on, a multi-colour copy
-// needs room beside it for its own tower. Grow such an item by its estimated tower, so the arrange leaves that room
-// (the slicer places the tower beside the copy afterwards), as the CLI's arrange does.
-static void inflate_for_object_towers(arrangement::ArrangePolygons &selected, const DynamicPrintConfig &config,
-                                      const arrangement::ArrangeParams &params)
-{
-    if (!params.is_seq_print || selected.size() < 2)
-        return;
-    const auto *per_object = config.option<ConfigOptionBool>("prime_tower_per_object");
-    const auto *tower      = config.option<ConfigOptionBool>("enable_prime_tower");
-    if (per_object == nullptr || !per_object->value || tower == nullptr || !tower->value ||
-        resolve_wipe_tower_type(config) != WipeTowerType::Type1)
-        return;
-    const size_t num_physical = size_t(std::max(wxGetApp().filaments_cnt(), 0));
-    const auto  &mixed_mgr    = wxGetApp().preset_bundle->mixed_filaments;
-    const double layer_height = config.has("layer_height") ? config.opt_float("layer_height") : 0.2;
-    for (arrangement::ArrangePolygon &ap : selected) {
-        std::vector<int> ids(ap.extrude_ids.begin(), ap.extrude_ids.end());
-        mixed_mgr.expand_virtual_extruder_ids(ids, num_physical);
-        std::vector<unsigned int> filaments;
-        for (int id : ids)
-            if (id > 0 && size_t(id) <= num_physical)
-                filaments.push_back(unsigned(id - 1));
-        sort_remove_duplicates(filaments);
-        if (filaments.size() < 2)
-            continue;
-        const WipeTowerFootprint footprint = estimate_wipe_tower_footprint(config, WipeTowerType::Type1, filaments, layer_height, ap.height);
-        if (footprint.depth <= EPSILON)
-            continue;
-        ap.inflation += scaled<coord_t>(std::max(footprint.width, footprint.depth) + 2. * footprint.brim_width + 5.);
-    }
-}
-
 void ArrangeJob::process(Ctl &ctl)
 {
     static const auto arrangestr = _u8L("Arranging");
@@ -706,7 +678,6 @@ void ArrangeJob::process(Ctl &ctl)
 
     update_arrange_params(params, m_plater->config(), m_selected);
     update_selected_items_inflation(m_selected, m_plater->config(), params);
-    inflate_for_object_towers(m_selected, wxGetApp().preset_bundle->full_config(), params);
     update_unselected_items_inflation(m_unselected, m_plater->config(), params);
     update_selected_items_axis_align(m_selected, m_plater->config(), params);
 

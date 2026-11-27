@@ -3,7 +3,10 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode.hpp"
+#include "libslic3r/ExtruderAreas.hpp"
+#include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -447,19 +450,58 @@ TEST_CASE("Object towers: a copy that has no room keeps printing, without a towe
     CHECK_FALSE(print.has_wipe_tower());
 }
 
-TEST_CASE("Object towers: at most two towers per plate, in model list order", "[ObjectTowers]")
+// Five 2-colour cubes on the H2D: three in a row at the front, two behind (the cap is 4 since 2026-11-27, owner).
+static void add_five(Model &model)
 {
+    const Vec2d spots[] = { { 70., 100. }, { 165., 100. }, { 260., 100. }, { 117., 220. }, { 212., 220. } };
+    for (size_t i = 0; i < 5; ++i)
+        place(add_cube(model, "cube" + std::to_string(i), 2), spots[i]);
+}
+
+TEST_CASE("Object towers: at most four towers per plate, in model list order", "[ObjectTowers]")
+{
+    STATIC_REQUIRE(ObjectTowerPlan::max_object_towers == 4);
     Print print;
     Model model;
-    add_row(model, H2D, { 2, 2, 2 }, 95.);
+    add_five(model);
     process(print, model, machine_config(H2D, true), H2D);
     const ObjectTowerPlan plan = print.plan_object_towers();
-    REQUIRE(plan.towers.size() == 2);
+    REQUIRE(plan.towers.size() == 4);
+    for (size_t i = 0; i < 4; ++i) {
+        CHECK(plan.towers[i].instance->model_instance->get_object()->name == "cube" + std::to_string(i));
+        CHECK(plan.towers[i].placed);
+    }
+    // The fifth prints without a tower, with the notice.
     REQUIRE(plan.warnings.size() == 1);
-    CHECK(plan.warnings.front().find("cube2") != std::string::npos);
-    CHECK(plan.towers[0].instance->model_instance->get_object()->name == "cube0");
-    CHECK(plan.towers[1].instance->model_instance->get_object()->name == "cube1");
-    CHECK(print.object_wipe_towers().size() <= 2);
+    CHECK(plan.warnings.front().find("cube4") != std::string::npos);
+    CHECK(plan.warnings.front().find("at most 4 prime towers") != std::string::npos);
+    CHECK(print.object_wipe_towers().size() == 4);
+    for (const std::unique_ptr<ObjectWipeTower> &tower : print.object_wipe_towers())
+        CHECK(tower->instance->model_instance->get_object()->name != "cube4");
+}
+
+TEST_CASE("Object towers: three and four towers on one plate", "[ObjectTowers]")
+{
+    for (const Machine *m : { &X1C, &H2D }) {
+        for (size_t count : { size_t(3), size_t(4) }) {
+            DYNAMIC_SECTION(m->printer << ", " << count << " copies")
+            {
+                Print print;
+                Model model;
+                // Two rows of short 2-colour cubes, 100 mm apart in both directions.
+                for (size_t i = 0; i < count; ++i)
+                    place(add_cube(model, "cube" + std::to_string(i), 2),
+                          Vec2d(m->bed_center.x() - 50. + 100. * double(i % 2), m->bed_center.y() - 50. + 100. * double(i / 2)));
+                process(print, model, machine_config(*m, true), *m);
+                const ObjectTowerPlan plan = print.plan_object_towers();
+                REQUIRE(plan.towers.size() == count);
+                CHECK(plan.warnings.empty());
+                for (const ObjectTowerPlacement &t : plan.towers)
+                    CHECK(t.placed);
+                CHECK(print.object_wipe_towers().size() == count);
+            }
+        }
+    }
 }
 
 TEST_CASE("Object towers: a single-colour copy gets no tower and prints its block as without the setting", "[ObjectTowers]")
@@ -879,16 +921,189 @@ TEST_CASE("Object towers: an object taken out (object_prime_tower off) gets none
 {
     Print print;
     Model model;
-    add_row(model, H2D, { 2, 2, 2 }, 95.);
+    add_five(model);
     model.objects[0]->config.set_key_value("object_prime_tower", new ConfigOptionBool(false));
     process(print, model, machine_config(H2D, true), H2D);
     const ObjectTowerPlan plan = print.plan_object_towers();
-    REQUIRE(plan.towers.size() == 2);
+    REQUIRE(plan.towers.size() == 4);
     // No copy is over the cap (cube0 does not count).
     for (const std::string &w : plan.warnings)
         CHECK(w.find("at most") == std::string::npos);
-    CHECK(plan.towers[0].instance->model_instance->get_object()->name == "cube1");
-    CHECK(plan.towers[1].instance->model_instance->get_object()->name == "cube2");
+    for (size_t i = 0; i < 4; ++i)
+        CHECK(plan.towers[i].instance->model_instance->get_object()->name == "cube" + std::to_string(i + 1));
     for (const std::unique_ptr<ObjectWipeTower> &tower : print.object_wipe_towers())
         CHECK(tower->instance->model_instance->get_object()->name != "cube0");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Arrange with per-object towers (owner hand test 2026-11-27: Arrange and Plate > Arrange pushed the other copies onto
+// new plates). The arrange is run as the CLI and ArrangeJob run it for a by-object plate: the items from
+// get_instance_arrange_poly, the by-object clearance, the bed exclusion zones as fixed items (and on the H2D the bed
+// clipped to what both nozzles reach, "Avoid nozzle reach zones"); then the plate is planned from the arranged copies.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+enum class TowerRoom { Units, OldInflation };
+
+// Arranges every copy of `model` for a by-object plate of `m`; moves the copies (bed 0 only) and returns the items.
+ArrangePolygons arrange_by_object(Model &model, const DynamicPrintConfig &cfg, const Machine &m, TowerRoom room)
+{
+    ArrangePolygons selected, unselected;
+    for (ModelObject *object : model.objects)
+        for (ModelInstance *instance : object->instances) {
+            ArrangePolygon ap = get_instance_arrange_poly(instance, cfg);
+            ap.itemid         = int(selected.size());
+            if (room == TowerRoom::Units)
+                reserve_object_prime_tower(ap, *object, cfg);
+            selected.push_back(std::move(ap));
+        }
+    // The bed exclusion zones (the X1C's cutter corner), as PartPlateList::preprocess_exclude_areas adds them.
+    if (const auto *zone = cfg.option<ConfigOptionPoints>("bed_exclude_area"); zone != nullptr && zone->values.size() >= 3)
+        for (int bed = 0; bed < 8; ++bed) {
+            ArrangePolygon ap;
+            for (const Vec2d &p : zone->values)
+                ap.poly.contour.points.emplace_back(scaled(p.x()), scaled(p.y()));
+            ap.is_virt_object = true;
+            ap.bed_idx        = bed;
+            ap.height         = 1;
+            ap.name           = "ExcludedRegion";
+            unselected.push_back(std::move(ap));
+        }
+
+    ArrangeParams params;
+    params.parallel                = false;
+    params.is_seq_print            = true;
+    params.clearance_height_to_rod = cfg.opt_float("extruder_clearance_height_to_rod");
+    params.clearance_height_to_lid = cfg.opt_float("extruder_clearance_height_to_lid");
+    params.clearance_radius        = sequential_clearance_radius(cfg);
+    params.printable_height        = cfg.opt_float("printable_height");
+    params.nozzle_height           = cfg.opt_float("nozzle_height");
+    params.min_obj_distance        = 0;
+    if (const auto *pos = cfg.option<ConfigOptionPoint>("best_object_pos"))
+        params.align_center = pos->value;
+    params.bed_shrink_x = BED_SHRINK_SEQ_PRINT;
+    params.bed_shrink_y = BED_SHRINK_SEQ_PRINT;
+    arrangement::update_arrange_params(params, &cfg, selected);
+    arrangement::update_selected_items_inflation(selected, &cfg, params);
+    arrangement::update_unselected_items_inflation(unselected, &cfg, params);
+    if (room == TowerRoom::OldInflation)
+        // PR 3/PR 5: every multi-colour item grown on all sides by its whole tower, on top of half the clearance.
+        for (ArrangePolygon &ap : selected) {
+            const WipeTowerFootprint tower = estimate_wipe_tower_footprint(cfg, WipeTowerType::Type1, { 0, 1 }, 0.2, ap.height);
+            ap.inflation += scaled<coord_t>(std::max(tower.width, tower.depth) + 2. * tower.brim_width + 5.);
+        }
+    Points bed = arrangement::get_shrink_bedpts(&cfg, params);
+    if (&m == &H2D) {
+        // Left nozzle X 0..325, right 25..350.
+        auto rect = [](double x0, double x1) { return Pointfs{ Vec2d(x0, 0), Vec2d(x1, 0), Vec2d(x1, 320), Vec2d(x0, 320) }; };
+        REQUIRE(arrangement::clip_bed_to_nozzle_reach(bed, compute_extruder_areas(rect(0, 350), { rect(0, 325), rect(25, 350) }, {})));
+    }
+    arrangement::arrange(selected, unselected, bed, params);
+    for (ArrangePolygon &ap : selected)
+        if (ap.bed_idx == 0)
+            ap.apply();
+    return selected;
+}
+
+// `count` 20 x 20 x 10 mm cubes (taller than the nozzle, so the full by-object clearance applies), 2-colour unless
+// `colours` says otherwise, all stacked at the bed centre before the arrange.
+void add_tall_cubes(Model &model, const Machine &m, size_t count, int colours = 2)
+{
+    for (size_t i = 0; i < count; ++i)
+        place(add_cube(model, "cube" + std::to_string(i), colours, Vec3f(1.f, 1.f, 0.5f)), m.bed_center);
+}
+
+} // namespace
+
+TEST_CASE("Object towers: arrange keeps the copies and their towers on one plate", "[ObjectTowers]")
+{
+    for (const Machine *m : { &X1C, &H2D }) {
+        for (size_t count : { size_t(2), size_t(3), size_t(4) }) {
+            DYNAMIC_SECTION(m->printer << ", " << count << " copies")
+            {
+                Model model;
+                add_tall_cubes(model, *m, count);
+                const DynamicPrintConfig cfg   = machine_config(*m, true);
+                const ArrangePolygons    items = arrange_by_object(model, cfg, *m, TowerRoom::Units);
+                for (const ArrangePolygon &ap : items) {
+                    INFO(ap.name);
+                    CHECK(ap.bed_idx == 0);
+                }
+                // The slicer finds a clear spot beside every copy for its tower, and the plate validates.
+                Print                              print;
+                std::vector<StringObjectException> warnings;
+                const StringObjectException        error = apply_validate(print, model, cfg, *m, &warnings);
+                INFO(error.string);
+                CHECK(error.string.empty());
+                const ObjectTowerPlan plan = print.plan_object_towers();
+                REQUIRE(plan.towers.size() == count);
+                std::string notices;
+                for (const std::string &w : plan.warnings)
+                    notices += w + "; ";
+                INFO(notices);
+                CHECK(plan.warnings.empty());
+                for (const ObjectTowerPlacement &t : plan.towers)
+                    CHECK(t.placed);
+            }
+        }
+    }
+}
+
+TEST_CASE("Object towers: the old all-round growth sent the copies to other plates (X1C)", "[ObjectTowers]")
+{
+    // The root cause of the owner's finding: a 20 mm copy grown by ~34 mm of clearance and ~45 mm of tower on every side
+    // is ~180 mm wide, so a 256 mm bed takes one of them.
+    Model model;
+    add_tall_cubes(model, X1C, 3);
+    const ArrangePolygons items = arrange_by_object(model, machine_config(X1C, true), X1C, TowerRoom::OldInflation);
+    int beds = 0;
+    for (const ArrangePolygon &ap : items)
+        beds = std::max(beds, ap.bed_idx + 1);
+    CHECK(beds > 1);
+}
+
+TEST_CASE("Object towers: arrange reserves no tower room where none prints", "[ObjectTowers]")
+{
+    const DynamicPrintConfig on = machine_config(X1C, true);
+    Model model;
+    add_tall_cubes(model, X1C, 1);
+    ModelObject   &object = *model.objects.front();
+    ArrangePolygon plain  = get_instance_arrange_poly(object.instances.front(), on);
+    const double   area   = std::abs(plain.poly.contour.area());
+
+    SECTION("2-colour copy, setting on: the item becomes the copy and its tower")
+    {
+        ArrangePolygon ap = plain;
+        REQUIRE(reserve_object_prime_tower(ap, object, on));
+        CHECK(std::abs(ap.poly.contour.area()) > 2. * area);
+        // The copy is still inside its unit.
+        CHECK(diff(Polygons{ plain.poly.contour }, Polygons{ ap.poly.contour }).empty());
+    }
+    SECTION("setting off")
+    {
+        ArrangePolygon ap = plain;
+        CHECK_FALSE(reserve_object_prime_tower(ap, object, machine_config(X1C, false)));
+        CHECK(ap.poly.contour.points == plain.poly.contour.points);
+    }
+    SECTION("object opted out")
+    {
+        object.config.set_key_value("object_prime_tower", new ConfigOptionBool(false));
+        ArrangePolygon ap = plain;
+        CHECK_FALSE(reserve_object_prime_tower(ap, object, on));
+    }
+    SECTION("single-colour copy")
+    {
+        object.config.set("sparse_infill_filament", 1);
+        object.config.set("solid_infill_filament", 1);
+        ArrangePolygon ap = plain;
+        CHECK_FALSE(reserve_object_prime_tower(ap, object, on));
+    }
+    SECTION("a dragged tower is reserved where it was dragged")
+    {
+        set_tower_offset(object, Vec2d(-60., 0.));
+        ArrangePolygon ap = plain;
+        REQUIRE(reserve_object_prime_tower(ap, object, on));
+        CHECK(get_extents(ap.poly.contour).min.x() < get_extents(plain.poly.contour).min.x() - scaled(30.));
+    }
 }
