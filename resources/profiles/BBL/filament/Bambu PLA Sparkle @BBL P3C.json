@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PLA Sparkle @BBL P3C",
-    "inherits": "Bambu PLA Sparkle @base",
+    "inherits": "Bambu PLA Sparkle @base P3C",
     "from": "system",
     "setting_id": "GFSA08_21",
     "instantiation": "true",

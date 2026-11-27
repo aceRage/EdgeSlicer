@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu TPU 85A @BBL P3C 0.6 nozzle",
-    "inherits": "Bambu TPU 85A @base",
+    "inherits": "Bambu TPU 85A @base H3C",
     "from": "system",
     "setting_id": "GFSU04_14",
     "instantiation": "true",

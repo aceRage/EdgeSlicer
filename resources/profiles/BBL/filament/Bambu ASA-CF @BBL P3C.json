@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu ASA-CF @BBL P3C",
-    "inherits": "Bambu ASA-CF @base",
+    "inherits": "Bambu ASA-CF @base H3C",
     "from": "system",
     "setting_id": "GFSB51_18",
     "instantiation": "true",

@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PLA Aero @BBL P3C",
-    "inherits": "Bambu PLA Aero @base",
+    "inherits": "Bambu PLA Aero @base P3C",
     "from": "system",
     "setting_id": "GFSA11_15",
     "instantiation": "true",

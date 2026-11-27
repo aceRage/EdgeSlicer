@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu Support for ABS @BBL P3C",
-    "inherits": "Bambu Support for ABS @base",
+    "inherits": "Bambu Support for ABS @base H3C",
     "from": "system",
     "setting_id": "GFSS06_11",
     "instantiation": "true",

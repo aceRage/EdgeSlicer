@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PETG HF @BBL P3C 0.2 nozzle",
-    "inherits": "Bambu PETG HF @base",
+    "inherits": "Bambu PETG HF @base H3C",
     "from": "system",
     "setting_id": "GFSG02_42",
     "instantiation": "true",

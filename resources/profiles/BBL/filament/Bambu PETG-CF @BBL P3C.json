@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PETG-CF @BBL P3C",
-    "inherits": "Bambu PETG-CF @base",
+    "inherits": "Bambu PETG-CF @base H3C",
     "from": "system",
     "setting_id": "GFSG50_25",
     "instantiation": "true",

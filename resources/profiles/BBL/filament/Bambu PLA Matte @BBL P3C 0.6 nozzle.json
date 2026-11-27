@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PLA Matte @BBL P3C 0.6 nozzle",
-    "inherits": "Bambu PLA Matte @base",
+    "inherits": "Bambu PLA Matte @base P3C",
     "from": "system",
     "setting_id": "GFSA01_41",
     "instantiation": "true",

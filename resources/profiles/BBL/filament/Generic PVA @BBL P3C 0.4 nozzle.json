@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic PVA @BBL P3C 0.4 nozzle",
-    "inherits": "Generic PVA @base",
+    "inherits": "Generic PVA @base P3C",
     "from": "system",
     "setting_id": "GFSS99_23",
     "instantiation": "true",

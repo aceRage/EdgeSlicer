@@ -1,7 +1,7 @@
 {
     "type": "process",
     "name": "0.16mm High Quality @BBL P3C",
-    "inherits": "fdm_process_single_0.16",
+    "inherits": "fdm_process_single_0.16_h3c",
     "from": "system",
     "setting_id": "GP280",
     "instantiation": "true",

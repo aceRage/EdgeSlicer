@@ -12390,6 +12390,210 @@
             "sub_path": "filament/fdm_filament_template_p3c.json"
         },
         {
+            "name": "Generic ABS @base P3C",
+            "sub_path": "filament/Generic ABS @base P3C.json"
+        },
+        {
+            "name": "Generic ASA @base P3C",
+            "sub_path": "filament/Generic ASA @base P3C.json"
+        },
+        {
+            "name": "fdm_filament_bvoh_p3c",
+            "sub_path": "filament/fdm_filament_bvoh_p3c.json"
+        },
+        {
+            "name": "Generic BVOH @base P3C",
+            "sub_path": "filament/Generic BVOH @base P3C.json"
+        },
+        {
+            "name": "fdm_filament_eva_p3c",
+            "sub_path": "filament/fdm_filament_eva_p3c.json"
+        },
+        {
+            "name": "Generic EVA @base P3C",
+            "sub_path": "filament/Generic EVA @base P3C.json"
+        },
+        {
+            "name": "Generic HIPS @base P3C",
+            "sub_path": "filament/Generic HIPS @base P3C.json"
+        },
+        {
+            "name": "Generic PA @base P3C",
+            "sub_path": "filament/Generic PA @base P3C.json"
+        },
+        {
+            "name": "Generic PC @base P3C",
+            "sub_path": "filament/Generic PC @base P3C.json"
+        },
+        {
+            "name": "fdm_filament_pe_p3c",
+            "sub_path": "filament/fdm_filament_pe_p3c.json"
+        },
+        {
+            "name": "Generic PE @base P3C",
+            "sub_path": "filament/Generic PE @base P3C.json"
+        },
+        {
+            "name": "Generic PE-CF @base P3C",
+            "sub_path": "filament/Generic PE-CF @base P3C.json"
+        },
+        {
+            "name": "Generic PETG @base P3C",
+            "sub_path": "filament/Generic PETG @base P3C.json"
+        },
+        {
+            "name": "Generic PETG HF @base P3C",
+            "sub_path": "filament/Generic PETG HF @base P3C.json"
+        },
+        {
+            "name": "Generic PETG-CF @base P3C",
+            "sub_path": "filament/Generic PETG-CF @base P3C.json"
+        },
+        {
+            "name": "fdm_filament_pha_p3c",
+            "sub_path": "filament/fdm_filament_pha_p3c.json"
+        },
+        {
+            "name": "Generic PHA @base P3C",
+            "sub_path": "filament/Generic PHA @base P3C.json"
+        },
+        {
+            "name": "fdm_filament_pla_p3c",
+            "sub_path": "filament/fdm_filament_pla_p3c.json"
+        },
+        {
+            "name": "Bambu PLA Aero @base P3C",
+            "sub_path": "filament/Bambu PLA Aero @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Basic @base P3C",
+            "sub_path": "filament/Bambu PLA Basic @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Galaxy @base P3C",
+            "sub_path": "filament/Bambu PLA Galaxy @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Glow @base P3C",
+            "sub_path": "filament/Bambu PLA Glow @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Lite @base P3C",
+            "sub_path": "filament/Bambu PLA Lite @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Marble @base P3C",
+            "sub_path": "filament/Bambu PLA Marble @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Matte @base P3C",
+            "sub_path": "filament/Bambu PLA Matte @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Metal @base P3C",
+            "sub_path": "filament/Bambu PLA Metal @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Palette @base P3C",
+            "sub_path": "filament/Bambu PLA Palette @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Pure @base P3C",
+            "sub_path": "filament/Bambu PLA Pure @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Silk @base P3C",
+            "sub_path": "filament/Bambu PLA Silk @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Silk+ @base P3C",
+            "sub_path": "filament/Bambu PLA Silk+ @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Sparkle @base P3C",
+            "sub_path": "filament/Bambu PLA Sparkle @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Tough+ @base P3C",
+            "sub_path": "filament/Bambu PLA Tough+ @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Translucent @base P3C",
+            "sub_path": "filament/Bambu PLA Translucent @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA Wood @base P3C",
+            "sub_path": "filament/Bambu PLA Wood @base P3C.json"
+        },
+        {
+            "name": "Bambu PLA-CF @base P3C",
+            "sub_path": "filament/Bambu PLA-CF @base P3C.json"
+        },
+        {
+            "name": "Bambu Support For PLA @base P3C",
+            "sub_path": "filament/Bambu Support For PLA @base P3C.json"
+        },
+        {
+            "name": "Bambu Support For PLA/PETG @base P3C",
+            "sub_path": "filament/Bambu Support For PLA-PETG @base P3C.json"
+        },
+        {
+            "name": "Generic PLA @base P3C",
+            "sub_path": "filament/Generic PLA @base P3C.json"
+        },
+        {
+            "name": "Generic PLA High Speed @base P3C",
+            "sub_path": "filament/Generic PLA High Speed @base P3C.json"
+        },
+        {
+            "name": "Generic PLA Silk @base P3C",
+            "sub_path": "filament/Generic PLA Silk @base P3C.json"
+        },
+        {
+            "name": "Generic PLA-CF @base P3C",
+            "sub_path": "filament/Generic PLA-CF @base P3C.json"
+        },
+        {
+            "name": "fdm_filament_pp_p3c",
+            "sub_path": "filament/fdm_filament_pp_p3c.json"
+        },
+        {
+            "name": "Generic PP @base P3C",
+            "sub_path": "filament/Generic PP @base P3C.json"
+        },
+        {
+            "name": "Generic PP-CF @base P3C",
+            "sub_path": "filament/Generic PP-CF @base P3C.json"
+        },
+        {
+            "name": "Generic PP-GF @base P3C",
+            "sub_path": "filament/Generic PP-GF @base P3C.json"
+        },
+        {
+            "name": "fdm_filament_pva_p3c",
+            "sub_path": "filament/fdm_filament_pva_p3c.json"
+        },
+        {
+            "name": "Bambu PVA @base P3C",
+            "sub_path": "filament/Bambu PVA @base P3C.json"
+        },
+        {
+            "name": "Generic PVA @base P3C",
+            "sub_path": "filament/Generic PVA @base P3C.json"
+        },
+        {
+            "name": "Generic TPU @base P3C",
+            "sub_path": "filament/Generic TPU @base P3C.json"
+        },
+        {
+            "name": "Generic TPU P3C",
+            "sub_path": "filament/Generic TPU P3C.json"
+        },
+        {
+            "name": "Generic TPU for AMS @base P3C",
+            "sub_path": "filament/Generic TPU for AMS @base P3C.json"
+        },
+        {
             "name": "Bambu ABS @BBL P3C",
             "sub_path": "filament/Bambu ABS @BBL P3C.json"
         },

@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PLA Metal @BBL P3C",
-    "inherits": "Bambu PLA Metal @base",
+    "inherits": "Bambu PLA Metal @base P3C",
     "from": "system",
     "setting_id": "GFSA02_33",
     "instantiation": "true",

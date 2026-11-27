@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic TPU for AMS @BBL P3C",
-    "inherits": "Generic TPU for AMS @base",
+    "inherits": "Generic TPU for AMS @base P3C",
     "from": "system",
     "setting_id": "GFSU98_14",
     "instantiation": "true",

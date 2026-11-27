@@ -1,7 +1,7 @@
 {
     "type": "process",
     "name": "0.20mm Standard @BBL P3C",
-    "inherits": "fdm_process_single_0.20",
+    "inherits": "fdm_process_single_0.20_h3c",
     "from": "system",
     "setting_id": "GP284",
     "instantiation": "true",

@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic ABS @BBL P3C 0.2 nozzle",
-    "inherits": "Generic ABS @base",
+    "inherits": "Generic ABS @base P3C",
     "from": "system",
     "setting_id": "GFSB99_25",
     "instantiation": "true",

@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PA6-CF @BBL P3C",
-    "inherits": "Bambu PA6-CF @base",
+    "inherits": "Bambu PA6-CF @base H3C",
     "from": "system",
     "setting_id": "GFSN05_15",
     "instantiation": "true",

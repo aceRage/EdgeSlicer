@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PLA Silk+ @BBL P3C",
-    "inherits": "Bambu PLA Silk+ @base",
+    "inherits": "Bambu PLA Silk+ @base P3C",
     "from": "system",
     "setting_id": "GFSA06_34",
     "instantiation": "true",

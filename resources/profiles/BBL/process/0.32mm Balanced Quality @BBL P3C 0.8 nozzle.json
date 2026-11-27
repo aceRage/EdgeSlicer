@@ -1,7 +1,7 @@
 {
     "type": "process",
     "name": "0.32mm Balanced Quality @BBL P3C 0.8 nozzle",
-    "inherits": "fdm_process_single_0.32_nozzle_0.8",
+    "inherits": "fdm_process_single_0.32_nozzle_0.8_h3c",
     "from": "system",
     "setting_id": "GP289",
     "instantiation": "true",

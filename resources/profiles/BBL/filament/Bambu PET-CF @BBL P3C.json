@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PET-CF @BBL P3C",
-    "inherits": "Bambu PET-CF @base",
+    "inherits": "Bambu PET-CF @base H3C",
     "from": "system",
     "setting_id": "GFST01_12",
     "instantiation": "true",

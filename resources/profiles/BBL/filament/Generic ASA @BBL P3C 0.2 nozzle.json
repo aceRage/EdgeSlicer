@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic ASA @BBL P3C 0.2 nozzle",
-    "inherits": "Generic ASA @base",
+    "inherits": "Generic ASA @base P3C",
     "from": "system",
     "setting_id": "GFSB98_25",
     "instantiation": "true",

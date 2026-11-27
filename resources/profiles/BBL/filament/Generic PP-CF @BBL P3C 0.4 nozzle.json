@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic PP-CF @BBL P3C 0.4 nozzle",
-    "inherits": "Generic PP-CF @base",
+    "inherits": "Generic PP-CF @base P3C",
     "from": "system",
     "setting_id": "GFSP96_12",
     "instantiation": "true",

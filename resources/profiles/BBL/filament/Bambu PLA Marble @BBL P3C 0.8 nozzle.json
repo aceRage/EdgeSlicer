@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PLA Marble @BBL P3C 0.8 nozzle",
-    "inherits": "Bambu PLA Marble @base",
+    "inherits": "Bambu PLA Marble @base P3C",
     "from": "system",
     "setting_id": "GFSA07_32",
     "instantiation": "true",

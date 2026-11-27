@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic PLA Silk @BBL P3C",
-    "inherits": "Generic PLA Silk @base",
+    "inherits": "Generic PLA Silk @base P3C",
     "from": "system",
     "setting_id": "GFSL96_12",
     "instantiation": "true",

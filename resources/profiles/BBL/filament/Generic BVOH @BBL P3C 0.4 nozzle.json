@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic BVOH @BBL P3C 0.4 nozzle",
-    "inherits": "Generic BVOH @base",
+    "inherits": "Generic BVOH @base P3C",
     "from": "system",
     "setting_id": "GFSS97_13",
     "instantiation": "true",

@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PETG Translucent @BBL P3C",
-    "inherits": "Bambu PETG Translucent @base",
+    "inherits": "Bambu PETG Translucent @base H3C",
     "from": "system",
     "setting_id": "GFSG01_34",
     "instantiation": "true",

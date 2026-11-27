@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic PHA @BBL P3C 0.4 nozzle",
-    "inherits": "Generic PHA @base",
+    "inherits": "Generic PHA @base P3C",
     "from": "system",
     "setting_id": "GFSR98_13",
     "instantiation": "true",

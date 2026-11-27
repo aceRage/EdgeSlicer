@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic PCTG @BBL P3C 0.4 nozzle",
-    "inherits": "Generic PCTG @base",
+    "inherits": "Generic PCTG @base H3C",
     "from": "system",
     "setting_id": "GFSG97_13",
     "instantiation": "true",

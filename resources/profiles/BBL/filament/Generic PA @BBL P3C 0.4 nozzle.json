@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic PA @BBL P3C 0.4 nozzle",
-    "inherits": "Generic PA @base",
+    "inherits": "Generic PA @base P3C",
     "from": "system",
     "setting_id": "GFSN99_14",
     "instantiation": "true",

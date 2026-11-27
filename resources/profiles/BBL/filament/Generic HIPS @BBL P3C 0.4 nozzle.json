@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic HIPS @BBL P3C 0.4 nozzle",
-    "inherits": "Generic HIPS @base",
+    "inherits": "Generic HIPS @base P3C",
     "from": "system",
     "setting_id": "GFSS98_25",
     "instantiation": "true",

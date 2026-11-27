@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PC @BBL P3C 0.2 nozzle",
-    "inherits": "Bambu PC @base",
+    "inherits": "Bambu PC @base H3C",
     "from": "system",
     "setting_id": "GFSC00_47",
     "instantiation": "true",

@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PLA Palette @BBL P3C 0.2 nozzle",
-    "inherits": "Bambu PLA Palette @base",
+    "inherits": "Bambu PLA Palette @base P3C",
     "from": "system",
     "setting_id": "GFSA20_52",
     "instantiation": "true",

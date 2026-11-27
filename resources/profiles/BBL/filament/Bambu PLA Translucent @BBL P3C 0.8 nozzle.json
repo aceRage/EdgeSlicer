@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PLA Translucent @BBL P3C 0.8 nozzle",
-    "inherits": "Bambu PLA Translucent @base",
+    "inherits": "Bambu PLA Translucent @base P3C",
     "from": "system",
     "setting_id": "GFSA17_61",
     "instantiation": "true",

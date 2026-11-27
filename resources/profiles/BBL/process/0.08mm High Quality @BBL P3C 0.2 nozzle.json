@@ -1,7 +1,7 @@
 {
     "type": "process",
     "name": "0.08mm High Quality @BBL P3C 0.2 nozzle",
-    "inherits": "fdm_process_single_0.08_nozzle_0.2",
+    "inherits": "fdm_process_single_0.08_nozzle_0.2_h3c",
     "from": "system",
     "setting_id": "GP275",
     "instantiation": "true",

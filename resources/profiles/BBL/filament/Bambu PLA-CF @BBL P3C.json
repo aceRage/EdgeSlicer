@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PLA-CF @BBL P3C",
-    "inherits": "Bambu PLA-CF @base",
+    "inherits": "Bambu PLA-CF @base P3C",
     "from": "system",
     "setting_id": "GFSA50_22",
     "instantiation": "true",

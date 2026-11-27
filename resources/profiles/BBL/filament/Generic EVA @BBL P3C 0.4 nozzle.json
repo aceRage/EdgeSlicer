@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic EVA @BBL P3C 0.4 nozzle",
-    "inherits": "Generic EVA @base",
+    "inherits": "Generic EVA @base P3C",
     "from": "system",
     "setting_id": "GFSR99_14",
     "instantiation": "true",

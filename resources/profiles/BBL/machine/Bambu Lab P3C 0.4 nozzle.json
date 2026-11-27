@@ -1,7 +1,7 @@
 {
     "type": "machine",
     "name": "Bambu Lab P3C 0.4 nozzle",
-    "inherits": "fdm_bbl_3dp_001_common",
+    "inherits": "fdm_bbl_3dp_001_common_h3c",
     "from": "system",
     "setting_id": "GM065",
     "instantiation": "true",

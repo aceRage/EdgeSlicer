@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic PETG @BBL P3C",
-    "inherits": "Generic PETG @base",
+    "inherits": "Generic PETG @base P3C",
     "from": "system",
     "setting_id": "GFSG99_26",
     "instantiation": "true",

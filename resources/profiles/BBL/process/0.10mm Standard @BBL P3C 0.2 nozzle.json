@@ -1,7 +1,7 @@
 {
     "type": "process",
     "name": "0.10mm Standard @BBL P3C 0.2 nozzle",
-    "inherits": "fdm_process_single_0.10_nozzle_0.2",
+    "inherits": "fdm_process_single_0.10_nozzle_0.2_h3c",
     "from": "system",
     "setting_id": "GP322",
     "instantiation": "true",

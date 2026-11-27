@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PETG Matte @BBL P3C 0.2 nozzle",
-    "inherits": "Bambu PETG Matte @base",
+    "inherits": "Bambu PETG Matte @base H3C",
     "from": "system",
     "setting_id": "GFSG03_29",
     "instantiation": "true",

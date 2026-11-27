@@ -1,7 +1,7 @@
 {
     "type": "process",
     "name": "0.40mm Standard @BBL P3C 0.8 nozzle",
-    "inherits": "fdm_process_single_0.40_nozzle_0.8",
+    "inherits": "fdm_process_single_0.40_nozzle_0.8_h3c",
     "from": "system",
     "setting_id": "GP290",
     "instantiation": "true",

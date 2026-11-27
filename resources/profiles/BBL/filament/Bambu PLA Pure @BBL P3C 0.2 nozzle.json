@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PLA Pure @BBL P3C 0.2 nozzle",
-    "inherits": "Bambu PLA Pure @base",
+    "inherits": "Bambu PLA Pure @base P3C",
     "from": "system",
     "setting_id": "GFSA19_21",
     "instantiation": "true",

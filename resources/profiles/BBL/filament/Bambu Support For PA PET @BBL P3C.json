@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu Support For PA/PET @BBL P3C",
-    "inherits": "Bambu Support For PA/PET @base",
+    "inherits": "Bambu Support For PA/PET @base H3C",
     "from": "system",
     "setting_id": "GFSS03_12",
     "instantiation": "true",

@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Generic PPA-GF @BBL P3C 0.4 nozzle",
-    "inherits": "Generic PPA-GF @base",
+    "inherits": "Generic PPA-GF @base H3C",
     "from": "system",
     "setting_id": "GFSN96_11",
     "instantiation": "true",

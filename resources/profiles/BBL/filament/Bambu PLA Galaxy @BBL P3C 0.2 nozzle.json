@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu PLA Galaxy @BBL P3C 0.2 nozzle",
-    "inherits": "Bambu PLA Galaxy @base",
+    "inherits": "Bambu PLA Galaxy @base P3C",
     "from": "system",
     "setting_id": "GFSA15_34",
     "instantiation": "true",

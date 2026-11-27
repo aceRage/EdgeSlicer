@@ -1,7 +1,7 @@
 {
     "type": "filament",
     "name": "Bambu TPU for AMS @BBL P3C",
-    "inherits": "Bambu TPU for AMS @base",
+    "inherits": "Bambu TPU for AMS @base H3C",
     "from": "system",
     "setting_id": "GFSU02_18",
     "instantiation": "true",
