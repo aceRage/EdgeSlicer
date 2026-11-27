@@ -8197,6 +8197,9 @@ ObjectTowerPlan Print::plan_object_towers() const
 
     for (size_t idx = 0; idx < copies.size(); ++idx) {
         Copy &copy = copies[idx];
+        // PR 5, D13: an object the user took out (object setting) gets no tower and does not count toward the cap.
+        if (!copy.object->config().object_prime_tower.value)
+            continue;
         const std::vector<unsigned int> filaments = object_filaments(*copy.object);
         if (filaments.size() < 2)
             continue;
@@ -8215,10 +8218,12 @@ ObjectTowerPlan Print::plan_object_towers() const
         placement.width      = footprint.width;
         placement.depth      = footprint.depth;
         placement.brim_width = footprint.brim_width;
+        placement.height     = height;
         // The outline relative to its anchor (brim included).
         const Polygon     local  = placed_wipe_tower_footprint(m_config, footprint, Vec2d::Zero());
         const BoundingBox tb     = get_extents(local);
         const BoundingBox cb     = get_extents(copy.hull);
+        placement.copy_center    = unscale(cb.center()) - Vec2d(origin3.x(), origin3.y());
         // Candidate anchors (bed coordinates, scaled): right, left, behind, in front of the copy, each slid along that
         // side in 5 mm steps from its middle outwards, as far as the tower still runs at least 5 mm alongside the copy
         // (a tower wider than a small copy, or a copy at the bed's edge, needs to overhang its side).
@@ -8249,36 +8254,64 @@ ObjectTowerPlan Print::plan_object_towers() const
         for (coord_t x : slide(x_lo, x_hi))
             anchors.emplace_back(x, cb.min.y() - own_gap - tb.max.y());
 
-        double best_score = -1.;
-        for (const Point &anchor : anchors) {
-            Polygon tower = local;
+        // Whether a tower anchored there is clear (on the bed, off the exclusions, within reach, its gap to its own copy
+        // and the unit clear of every other unit); score: the distance to the nearest other unit.
+        auto clear_at = [&](const Point &anchor, Polygon &tower, double &score) {
+            tower = local;
             tower.translate(anchor);
             if (!diff(Polygons{ tower }, Polygons{ bed }).empty())
-                continue;
+                return false;
             if (!intersection(excluded, Polygons{ tower }).empty())
-                continue;
+                return false;
             if (areas.multi() && !areas.shared.empty() && !footprint_within(Polygons{ tower }, areas.shared, 0.1))
-                continue;
+                return false;
             if (!intersection(offset(tower, float(own_gap) - float(scale_(0.1))), Polygons{ copy.hull }).empty())
-                continue;
+                return false;
             const Polygon unit = object_tower_unit(copy.hull, tower);
-            bool          clear = true;
-            double        score = std::numeric_limits<double>::max();
-            for (size_t other = 0; other < copies.size() && clear; ++other) {
+            score              = std::numeric_limits<double>::max();
+            for (size_t other = 0; other < copies.size(); ++other) {
                 if (other == idx)
                     continue;
                 const Polygon other_unit = object_tower_unit(copies[other].hull, copies[other].tower);
                 if (object_tower_units_collide(unit, other_unit, unit_distance))
-                    clear = false;
-                else {
-                    // Prefer the side away from the other copies.
-                    const BoundingBox a = get_extents(tower), b = get_extents(other_unit);
-                    const double dx = std::max<double>(0., double(std::max(a.min.x() - b.max.x(), b.min.x() - a.max.x())));
-                    const double dy = std::max<double>(0., double(std::max(a.min.y() - b.max.y(), b.min.y() - a.max.y())));
-                    score = std::min(score, std::hypot(dx, dy));
-                }
+                    return false;
+                // Prefer the side away from the other copies.
+                const BoundingBox a = get_extents(tower), b = get_extents(other_unit);
+                const double dx = std::max<double>(0., double(std::max(a.min.x() - b.max.x(), b.min.x() - a.max.x())));
+                const double dy = std::max<double>(0., double(std::max(a.min.y() - b.max.y(), b.min.y() - a.max.y())));
+                score = std::min(score, std::hypot(dx, dy));
             }
-            if (!clear)
+            return true;
+        };
+
+        // PR 5: a tower the user dragged stands at its offset from the copy's centre, if that is clear; otherwise it is
+        // placed automatically, with a warning (design 2.5: never moved silently).
+        const PrintObjectConfig &object_config = copy.object->config();
+        const Vec2d drag_offset(object_config.prime_tower_offset_x.value, object_config.prime_tower_offset_y.value);
+        if (std::abs(drag_offset.x()) > EPSILON || std::abs(drag_offset.y()) > EPSILON) {
+            const Point anchor = cb.center() + Point::new_scale(drag_offset.x(), drag_offset.y());
+            Polygon     tower;
+            double      score = 0.;
+            if (clear_at(anchor, tower, score)) {
+                placement.placed      = true;
+                placement.from_offset = true;
+                placement.outline     = tower;
+                placement.pos         = unscale(anchor) - Vec2d(origin3.x(), origin3.y());
+            } else {
+                placement.offset_rejected = true;
+                placement.requested_pos   = unscale(anchor) - Vec2d(origin3.x(), origin3.y());
+                plan.warnings.push_back((boost::format(L("The prime tower of %1% is not clear where it was moved to (off the bed, too "
+                                                         "close to an object, or outside what every nozzle reaches), so it is placed "
+                                                         "automatically.")) % name).str());
+            }
+        }
+
+        double best_score = -1.;
+        for (size_t i = 0; i < anchors.size() && !placement.from_offset; ++i) {
+            const Point &anchor = anchors[i];
+            Polygon      tower;
+            double       score = 0.;
+            if (!clear_at(anchor, tower, score))
                 continue;
             if (score > best_score + scale_(0.5)) {
                 best_score         = score;

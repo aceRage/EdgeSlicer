@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -534,4 +535,188 @@ TEST_CASE("Object towers: a copy that ends on another filament than it starts wi
     REQUIRE(blocks.size() >= 2);
     CHECK(count_of(blocks.front(), TOWER_START) > 0);
     CHECK(count_of(blocks.back(), TOWER_START) > 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// PR 5 (GUI): the dragged position (prime_tower_offset_x/y) and the per-object opt-out (object_prime_tower), both
+// object settings.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+void set_tower_offset(ModelObject &object, const Vec2d &offset)
+{
+    object.config.set_key_value("prime_tower_offset_x", new ConfigOptionFloat(offset.x()));
+    object.config.set_key_value("prime_tower_offset_y", new ConfigOptionFloat(offset.y()));
+}
+
+} // namespace
+
+TEST_CASE("Object towers: the dragged offset and the opt-out round-trip through 3MF as object settings", "[ObjectTowers]")
+{
+    Model model;
+    add_row(model, X1C, { 2, 2 }, 110.);
+    set_tower_offset(*model.objects[0], Vec2d(-12.5, 21.25));
+    model.objects[1]->config.set_key_value("object_prime_tower", new ConfigOptionBool(false));
+
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("objtowers5_%%%%-%%%%");
+    boost::filesystem::create_directories(tmp_root);
+    const std::string saved_temporary_dir = Slic3r::temporary_dir();
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string file = (tmp_root / "object_towers.3mf").string();
+
+    StoreParams store;
+    store.path     = file.c_str();
+    store.model    = &model;
+    store.config   = &store_config;
+    store.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(store));
+
+    Model                     loaded;
+    DynamicPrintConfig        loaded_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool ok = load_bbs_3mf(file.c_str(), &loaded_config, &ctxt, &loaded, &plate_data, &project_presets, &is_bbl_3mf, &file_version, nullptr,
+                                 LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances | LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    Slic3r::set_temporary_dir(saved_temporary_dir);
+    boost::filesystem::remove_all(tmp_root);
+    REQUIRE(ok);
+    REQUIRE(loaded.objects.size() == 2);
+
+    const ModelConfigObject &first = loaded.objects[0]->config;
+    REQUIRE(first.has("prime_tower_offset_x"));
+    REQUIRE(first.has("prime_tower_offset_y"));
+    CHECK(std::abs(first.opt_float("prime_tower_offset_x") - -12.5) < 1e-9);
+    CHECK(std::abs(first.opt_float("prime_tower_offset_y") - 21.25) < 1e-9);
+    CHECK_FALSE(first.has("object_prime_tower"));
+    const ModelConfigObject &second = loaded.objects[1]->config;
+    REQUIRE(second.has("object_prime_tower"));
+    CHECK_FALSE(second.option("object_prime_tower")->getBool());
+    CHECK_FALSE(second.has("prime_tower_offset_x"));
+}
+
+TEST_CASE("Object towers: a dragged offset re-plans the towers and the G-code, nothing sliced", "[ObjectTowers]")
+{
+    Print print;
+    Model model;
+    add_row(model, X1C, { 2, 2 }, 110.);
+    const DynamicPrintConfig cfg = machine_config(X1C, true);
+    process(print, model, cfg, X1C);
+    REQUIRE(print.object_wipe_towers().size() == 2);
+    REQUIRE_FALSE(Test::gcode(print).empty());
+    REQUIRE(print.is_step_done(psGCodeExport));
+
+    const ObjectTowerPlan before = print.plan_object_towers();
+    REQUIRE(before.towers.size() == 2);
+    const ObjectTowerPlacement &auto0 = before.towers[0];
+    REQUIRE(auto0.placed);
+    // Keep the automatic spot, 3 mm further along: still clear.
+    set_tower_offset(*model.objects[0], auto0.pos - auto0.copy_center + Vec2d(0., 3.));
+    print.is_BBL_printer() = X1C.bbl;
+    CHECK(print.apply(model, cfg) == Print::APPLY_STATUS_INVALIDATED);
+
+    // Nothing sliced re-runs ...
+    for (const PrintObject *object : print.objects()) {
+        CHECK(object->is_step_done(posSlice));
+        CHECK(object->is_step_done(posPerimeters));
+        CHECK(object->is_step_done(posPrepareInfill));
+        CHECK(object->is_step_done(posInfill));
+    }
+    // ... the towers and the G-code do (and the skirt and brims, which are laid around the towers).
+    CHECK_FALSE(print.is_step_done(psWipeTower));
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+
+    print.set_status_silent();
+    print.process();
+    const ObjectTowerPlan after = print.plan_object_towers();
+    REQUIRE(after.towers.size() == 2);
+    CHECK(after.towers[0].from_offset);
+    CHECK_FALSE(after.towers[0].offset_rejected);
+    CHECK((after.towers[0].pos - (auto0.pos + Vec2d(0., 3.))).norm() < 1e-4);
+    const ObjectWipeTower *tower = print.object_wipe_tower(after.towers[0].instance);
+    REQUIRE(tower != nullptr);
+    CHECK((tower->pos - after.towers[0].pos).norm() < 1e-9);
+    // The other copy keeps its automatic tower.
+    CHECK_FALSE(after.towers[1].from_offset);
+}
+
+TEST_CASE("Object towers: a dragged tower follows its copy after a move", "[ObjectTowers]")
+{
+    Print print;
+    Model model;
+    add_row(model, X1C, { 2, 2 }, 110.);
+    const DynamicPrintConfig cfg = machine_config(X1C, true);
+    process(print, model, cfg, X1C);
+    const ObjectTowerPlan first = print.plan_object_towers();
+    REQUIRE(first.towers.size() == 2);
+    REQUIRE(first.towers[0].placed);
+    const Vec2d offset = first.towers[0].pos - first.towers[0].copy_center + Vec2d(0., 3.);
+    set_tower_offset(*model.objects[0], offset);
+    process(print, model, cfg, X1C);
+    const ObjectTowerPlan dragged = print.plan_object_towers();
+    REQUIRE(dragged.towers.size() == 2);
+    REQUIRE(dragged.towers[0].from_offset);
+
+    // Move the copy 10 mm back and 5 mm right: its tower keeps its place beside it.
+    model.objects[0]->instances[0]->set_offset(model.objects[0]->instances[0]->get_offset() + Vec3d(5., 10., 0.));
+    process(print, model, cfg, X1C);
+    const ObjectTowerPlan moved = print.plan_object_towers();
+    REQUIRE(moved.towers.size() == 2);
+    CHECK(moved.towers[0].from_offset);
+    CHECK((moved.towers[0].pos - (dragged.towers[0].pos + Vec2d(5., 10.))).norm() < 1e-4);
+    CHECK((moved.towers[0].pos - moved.towers[0].copy_center - offset).norm() < 1e-4);
+    REQUIRE(print.object_wipe_towers().size() == 2);
+    const ObjectWipeTower *tower = print.object_wipe_tower(moved.towers[0].instance);
+    REQUIRE(tower != nullptr);
+    CHECK((tower->pos - moved.towers[0].pos).norm() < 1e-9);
+}
+
+TEST_CASE("Object towers: a tower dragged onto its copy is placed automatically, with a notice", "[ObjectTowers]")
+{
+    Print print;
+    Model model;
+    add_row(model, X1C, { 2, 2 }, 110.);
+    // The corner 5 mm inside the copy from its centre: on the copy itself.
+    set_tower_offset(*model.objects[0], Vec2d(-5., -5.));
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = apply_validate(print, model, machine_config(X1C, true), X1C, &warnings);
+    REQUIRE(error.string.empty());
+    const ObjectTowerPlan plan = print.plan_object_towers();
+    REQUIRE(plan.towers.size() == 2);
+    CHECK(plan.towers[0].offset_rejected);
+    CHECK_FALSE(plan.towers[0].from_offset);
+    CHECK(plan.towers[0].placed);
+    CHECK((plan.towers[0].requested_pos - (plan.towers[0].copy_center + Vec2d(-5., -5.))).norm() < 1e-4);
+    REQUIRE(plan.warnings.size() == 1);
+    CHECK(plan.warnings.front().find("cube0") != std::string::npos);
+    size_t noticed = 0;
+    for (const StringObjectException &w : warnings)
+        noticed += w.opt_key == "prime_tower_per_object" ? 1 : 0;
+    CHECK(noticed == 1);
+    print.set_status_silent();
+    print.process();
+    CHECK(print.object_wipe_towers().size() == 2);
+}
+
+TEST_CASE("Object towers: an object taken out (object_prime_tower off) gets none and leaves the cap to others", "[ObjectTowers]")
+{
+    Print print;
+    Model model;
+    add_row(model, H2D, { 2, 2, 2 }, 95.);
+    model.objects[0]->config.set_key_value("object_prime_tower", new ConfigOptionBool(false));
+    process(print, model, machine_config(H2D, true), H2D);
+    const ObjectTowerPlan plan = print.plan_object_towers();
+    REQUIRE(plan.towers.size() == 2);
+    // No copy is over the cap (cube0 does not count).
+    for (const std::string &w : plan.warnings)
+        CHECK(w.find("at most") == std::string::npos);
+    CHECK(plan.towers[0].instance->model_instance->get_object()->name == "cube1");
+    CHECK(plan.towers[1].instance->model_instance->get_object()->name == "cube2");
+    for (const std::unique_ptr<ObjectWipeTower> &tower : print.object_wipe_towers())
+        CHECK(tower->instance->model_instance->get_object()->name != "cube0");
 }

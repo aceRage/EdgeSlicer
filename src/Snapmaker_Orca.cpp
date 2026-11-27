@@ -5846,6 +5846,9 @@ int CLI::run(int argc, char **argv)
                         if (ap.itemid < 0 || size_t(ap.itemid) >= selected_objects.size())
                             continue;
                         const ModelObject &object = *selected_objects[size_t(ap.itemid)];
+                        // PR 5, D13: an object taken out of the per-object towers needs no room for one.
+                        if (const ConfigOption *own = object.config.option("object_prime_tower"); own != nullptr && !own->getBool())
+                            continue;
                         std::vector<unsigned int> filaments;
                         for (const ModelVolume *volume : object.volumes)
                             if (volume->is_model_part())
