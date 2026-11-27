@@ -2094,6 +2094,100 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloatsOrPercents { FloatOrPercent{150, true} });
 
+    // Bambu Studio 02.09.01.70 filament overhang overrides (PrintConfig.cpp:101-108, 7548-7581; Tab.cpp:4663-4673):
+    // Filament > Setting Overrides > Speed. With override_process_overhang_speed on, the filament's overhang slowdown
+    // switch, its overhang speeds and its bridge speed replace the process ones for the walls and bridges it prints.
+    // Same keys, types (mm/s, nullable, per flow variant: filament_flow_variant_options) and defaults as Bambu's,
+    // which copies them from its process keys. Read by GCode::_extrude through FilamentOverhangOverride.
+    def = this->add("override_process_overhang_speed", coBools);
+    def->label = L("Override overhang speed");
+    def->category = L("Speed");
+    def->tooltip = L("Override the overhang speed in process page.\n\n"
+                     "When on, this filament's overhang slowdown switch, overhang speeds and bridge speed are used "
+                     "instead of the process ones.");
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionBoolsNullable{ false });
+
+    def = this->add("filament_enable_overhang_speed", coBools);
+    def->label = L("Slow down for overhang");
+    def->category = L("Speed");
+    def->tooltip = L("Enable this option to slow printing down for different overhang degree.");
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionBoolsNullable{ true });
+
+    def = this->add("filament_overhang_1_4_speed", coFloats);
+    def->label = "(10%, 25%)";
+    def->category = L("Speed");
+    def->full_label = "(10%, 25%)";
+    def->tooltip = L("Speed for walls whose overhang is between 10% and 25% of the line width. 0 means using the wall speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 0 });
+
+    def = this->add("filament_overhang_2_4_speed", coFloats);
+    def->label = "[25%, 50%)";
+    def->category = L("Speed");
+    def->full_label = "[25%, 50%)";
+    def->tooltip = L("Speed for walls whose overhang is between 25% and 50% of the line width. 0 means using the wall speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 0 });
+
+    def = this->add("filament_overhang_3_4_speed", coFloats);
+    def->label = "[50%, 75%)";
+    def->category = L("Speed");
+    def->full_label = "[50%, 75%)";
+    def->tooltip = L("Speed for walls whose overhang is between 50% and 75% of the line width. 0 means using the wall speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 0 });
+
+    def = this->add("filament_overhang_4_4_speed", coFloats);
+    def->label = "[75%, 100%)";
+    def->category = L("Speed");
+    def->full_label = "[75%, 100%)";
+    def->tooltip = L("Speed for walls whose overhang is between 75% and 100% of the line width. 0 means using the wall speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 0 });
+
+    // Owner decision D6 (2026-11-25): we have no fifth process bucket. This is the speed of the fully unsupported
+    // (0% overlap) part of a wall, the slot our process fills with the bridge speed (or the 4/4 speed with "Slow
+    // down for curled perimeters"). Bridge infill keeps filament_bridge_speed there.
+    def = this->add("filament_overhang_totally_speed", coFloats);
+    def->label = "100%";
+    def->category = L("Speed");
+    def->full_label = "100%";
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Speed of 100% overhang wall which has 0 overlap with the lower layer. "
+                     "0 means using the bridge speed there (the 75%-100% speed with Slow down for curled perimeters).");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 10 });
+
+    def = this->add("filament_bridge_speed", coFloats);
+    def->label = L("Bridge");
+    def->category = L("Speed");
+    def->tooltip = L("Speed of bridge and completely overhang wall. A percentage internal bridge speed is taken of this "
+                     "speed. 0 means using the process bridge speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 25 });
+
     def = this->add("brim_width", coFloat);
     def->label = L("Brim width");
     def->category = L("Support");
@@ -11920,6 +12014,15 @@ const std::vector<std::string>& filament_flow_variant_options()
         "filament_ramming_travel_time_nc",
         "filament_ramming_volumetric_speed",
         "filament_ramming_volumetric_speed_nc",
+        // Bambu Studio 02.09.01.70 filament overhang overrides (filament_options_with_variant, PrintConfig.cpp:8578-8585).
+        "override_process_overhang_speed",
+        "filament_enable_overhang_speed",
+        "filament_overhang_1_4_speed",
+        "filament_overhang_2_4_speed",
+        "filament_overhang_3_4_speed",
+        "filament_overhang_4_4_speed",
+        "filament_overhang_totally_speed",
+        "filament_bridge_speed",
     };
     return options;
 }
@@ -12219,6 +12322,89 @@ size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigne
     }
 
     return 0;
+}
+
+// ---- Filament overhang overrides (Bambu Studio 02.09.01.70, D6) ------------------------------------
+
+namespace {
+// The value at `idx` of a Floats / Bools option, nullable or not, or `fallback` when the key is missing, the vector
+// is empty or the slot is nil. An index past the vector reads the first slot (ConfigOptionVector::get_at).
+template<class TNullable, class TPlain, class T>
+T overhang_override_value(const ConfigBase &config, const char *key, size_t idx, T fallback)
+{
+    const ConfigOption *opt = config.option(key);
+    if (const auto *nullable = dynamic_cast<const TNullable *>(opt); nullable != nullptr) {
+        if (nullable->values.empty())
+            return fallback;
+        const size_t i = idx < nullable->values.size() ? idx : 0;
+        if (nullable->is_nil(i))
+            return fallback;
+        return T(nullable->values[i]);
+    }
+    if (const auto *plain = dynamic_cast<const TPlain *>(opt); plain != nullptr && !plain->values.empty())
+        return T(plain->values[idx < plain->values.size() ? idx : 0]);
+    return fallback;
+}
+
+double overhang_override_speed(const ConfigBase &config, const char *key, size_t idx)
+{
+    const double fallback = static_cast<const ConfigOptionFloatsNullable *>(print_config_def.get(key)->default_value.get())->values.front();
+    const double value    = overhang_override_value<ConfigOptionFloatsNullable, ConfigOptionFloats>(config, key, idx, fallback);
+    return std::isfinite(value) && value > 0. ? value : 0.;
+}
+} // namespace
+
+FilamentOverhangOverride filament_overhang_override(const ConfigBase &config, unsigned int filament_id)
+{
+    FilamentOverhangOverride ovr;
+    const size_t idx = get_config_idx(config, ConfigFlowDomain::Filament, filament_id);
+    ovr.on = overhang_override_value<ConfigOptionBoolsNullable, ConfigOptionBools>(config, "override_process_overhang_speed", idx, false);
+    if (!ovr.on)
+        return ovr;
+    ovr.enable   = overhang_override_value<ConfigOptionBoolsNullable, ConfigOptionBools>(config, "filament_enable_overhang_speed", idx, true);
+    ovr.speed[0] = overhang_override_speed(config, "filament_overhang_1_4_speed", idx);
+    ovr.speed[1] = overhang_override_speed(config, "filament_overhang_2_4_speed", idx);
+    ovr.speed[2] = overhang_override_speed(config, "filament_overhang_3_4_speed", idx);
+    ovr.speed[3] = overhang_override_speed(config, "filament_overhang_4_4_speed", idx);
+    ovr.totally  = overhang_override_speed(config, "filament_overhang_totally_speed", idx);
+    ovr.bridge   = overhang_override_speed(config, "filament_bridge_speed", idx);
+    return ovr;
+}
+
+bool any_filament_overhang_override_enabled(const ConfigBase &config)
+{
+    const auto *on = dynamic_cast<const ConfigOptionVectorBase *>(config.option("override_process_overhang_speed"));
+    if (on == nullptr)
+        return false;
+    for (size_t i = 0; i < on->size(); ++i)
+        if (overhang_override_value<ConfigOptionBoolsNullable, ConfigOptionBools>(config, "override_process_overhang_speed", i, false) &&
+            overhang_override_value<ConfigOptionBoolsNullable, ConfigOptionBools>(config, "filament_enable_overhang_speed", i, true))
+            return true;
+    return false;
+}
+
+bool overhang_slowdown_enabled(const FilamentOverhangOverride &ovr, bool process_enable)
+{
+    return ovr.on ? ovr.enable : process_enable;
+}
+
+double overhang_bridge_speed(const FilamentOverhangOverride &ovr, double process_bridge_speed)
+{
+    return ovr.on && ovr.bridge >= 0.5 ? ovr.bridge : process_bridge_speed;
+}
+
+double overhang_bucket_speed(const FilamentOverhangOverride &ovr, int bucket, double process_abs)
+{
+    return ovr.on && bucket >= 0 && bucket < 4 ? ovr.speed[bucket] : process_abs;
+}
+
+double overhang_fully_unsupported_speed(const FilamentOverhangOverride &ovr, bool bridge_infill, bool slowdown_curled,
+                                        double oh4_abs, double bridge_speed)
+{
+    if (ovr.on && !bridge_infill && ovr.totally >= 0.5)
+        return ovr.totally;
+    // Orca #17144: the bridge speed for bridge infill; with the curled slowdown every other role keeps the 4/4 speed.
+    return slowdown_curled && !bridge_infill ? oh4_abs : bridge_speed;
 }
 
 // ---- Per-nozzle process values (per-nozzle process P1) -------------------------------------------

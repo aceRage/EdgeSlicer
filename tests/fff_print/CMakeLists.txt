@@ -7,6 +7,7 @@ add_executable(${_TEST_NAME}_tests
 	test_extrusion_processor.cpp
 	test_height_slowdown.cpp
 	test_infill_retraction_mode.cpp
+	test_overhang_overrides.cpp
 	test_fill.cpp
 	test_narrow_solid_infill.cpp
 	test_flow.cpp

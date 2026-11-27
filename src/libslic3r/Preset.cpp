@@ -1380,6 +1380,9 @@ static std::vector<std::string> s_Preset_filament_options {
     "ironing_fan_speed",
     // Orca #11194: filament ironing overrides
     "filament_ironing_flow", "filament_ironing_spacing", "filament_ironing_inset", "filament_ironing_speed",
+    // Bambu Studio 02.09.01.70 filament overhang overrides (Setting Overrides > Speed)
+    "override_process_overhang_speed", "filament_enable_overhang_speed", "filament_overhang_1_4_speed", "filament_overhang_2_4_speed",
+    "filament_overhang_3_4_speed", "filament_overhang_4_4_speed", "filament_overhang_totally_speed", "filament_bridge_speed",
     "filament_loading_speed", "filament_loading_speed_start",
     "filament_unloading_speed", "filament_unloading_speed_start", "filament_toolchange_delay", "filament_cooling_moves", "filament_stamping_loading_speed", "filament_stamping_distance",
     "filament_cooling_initial_speed", "filament_cooling_final_speed", "filament_ramming_parameters",

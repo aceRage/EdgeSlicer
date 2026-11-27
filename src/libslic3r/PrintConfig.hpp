@@ -773,6 +773,41 @@ bool is_machine_flow_variant_option(const std::string &key);
 
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id = 0);
 
+// ---- Filament overhang overrides (Bambu Studio 02.09.01.70, owner decision D6 of tests/review_missing_bambu_settings_2026-11-25.md)
+// One filament's Setting Overrides > Speed values (override_process_overhang_speed, filament_enable_overhang_speed,
+// filament_overhang_{1_4,2_4,3_4,4_4,totally}_speed, filament_bridge_speed), read from the flow-variant slot
+// get_config_idx(Filament) picks, as Bambu's GCode.cpp:6603-6611 / 7176-7196 read the filament's variant slot. A
+// missing key, an id past the vector or a nil slot reads as the option's default (override off).
+struct FilamentOverhangOverride
+{
+    bool   on       = false;              // override_process_overhang_speed
+    bool   enable   = true;               // filament_enable_overhang_speed
+    double speed[4] = { 0., 0., 0., 0. }; // 1/4 .. 4/4 buckets, mm/s; 0 = the wall speed
+    double totally  = 10.;                // the fully unsupported (0% overlap) part of a wall, mm/s; 0 = see below
+    double bridge   = 25.;                // mm/s; 0 = the process bridge speed
+};
+FilamentOverhangOverride filament_overhang_override(const ConfigBase &config, unsigned int filament_id);
+// True when some filament slot turns the override on together with its overhang slowdown. The overhang estimator
+// then measures every layer with extrusions, as it does for the overhang fan, so a filament can slow its overhangs
+// down even where the process has the slowdown off. False whenever no filament has the override on.
+bool any_filament_overhang_override_enabled(const ConfigBase &config);
+// What GCode::_extrude uses. With the override off every one returns the process value unchanged.
+// The overhang slowdown switch (Bambu GCode::is_enable_overhang_speed).
+bool overhang_slowdown_enabled(const FilamentOverhangOverride &ovr, bool process_enable);
+// The bridge speed of bridges, overhang perimeters, support transitions and the base of a percentage
+// internal_bridge_speed (Bambu GCode.cpp:6639-6640, 7731-7732).
+double overhang_bridge_speed(const FilamentOverhangOverride &ovr, double process_bridge_speed);
+// The speed of overhang bucket `bucket` (0 = 1/4 .. 3 = 4/4) in mm/s; process_abs is the process bucket resolved
+// against the reference speed. 0 keeps the wall speed, as for the process buckets.
+double overhang_bucket_speed(const FilamentOverhangOverride &ovr, int bucket, double process_abs);
+// D6: the speed of the estimator's fully unsupported slot in mm/s (below 0.5 = the wall speed). Without the
+// override it is what the process uses there: the bridge speed, or with "Slow down for curled perimeters" the
+// 4/4 speed for every role but bridge infill. With it, walls take filament_overhang_totally_speed when that is set;
+// bridge infill always keeps the (filament) bridge speed. oh4_abs and bridge_speed are the values already resolved
+// through overhang_bucket_speed / overhang_bridge_speed.
+double overhang_fully_unsupported_speed(const FilamentOverhangOverride &ovr, bool bridge_infill, bool slowdown_curled,
+                                        double oh4_abs, double bridge_speed);
+
 // ---- Per-nozzle process values (per-nozzle process P1, tests/design_per_nozzle_process.md D1) -------
 // The process keys of per_nozzle_process_options() may hold one value per (extruder, variant) slot in
 // Bambu's layout: print_extruder_id / print_extruder_variant name the slots, extruder-major (an H2D
@@ -2620,6 +2655,16 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Not a tower option: Bambu Studio 02.09.01.70 filament_metal_stickiness, read by reduce_infill_retraction_mode
     // = Auto (GCode.cpp). It lives here because GCodeConfig is at the macro nesting limit (C1009).
     ((ConfigOptionEnumsGeneric,       filament_metal_stickiness))
+    // Not tower options either: Bambu Studio 02.09.01.70 filament overhang overrides (Filament > Setting Overrides >
+    // Speed), per flow variant; read through filament_overhang_override(). Here for the same C1009 reason.
+    ((ConfigOptionBoolsNullable,      override_process_overhang_speed))
+    ((ConfigOptionBoolsNullable,      filament_enable_overhang_speed))
+    ((ConfigOptionFloatsNullable,     filament_overhang_1_4_speed))
+    ((ConfigOptionFloatsNullable,     filament_overhang_2_4_speed))
+    ((ConfigOptionFloatsNullable,     filament_overhang_3_4_speed))
+    ((ConfigOptionFloatsNullable,     filament_overhang_4_4_speed))
+    ((ConfigOptionFloatsNullable,     filament_overhang_totally_speed))
+    ((ConfigOptionFloatsNullable,     filament_bridge_speed))
 )
 
 // This object is mapped to Perl as Slic3r::Config::Print.

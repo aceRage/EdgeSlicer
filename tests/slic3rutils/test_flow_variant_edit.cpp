@@ -497,8 +497,9 @@ TEST_CASE("a nil High-Flow override uses the Standard slot, then the printer", "
 }
 
 // Audit of the filament flow-variant keys: the six retract overrides, Bambu's four flush / pre-tower
-// cooling keys and Bambu 2.9.1's four nozzle-change ramming keys (#1049: travel time after ramming and
-// ramming volumetric speed, extruder change and hotend change) are nullable, so only they can hold a nil
+// cooling keys, Bambu 2.9.1's four nozzle-change ramming keys (#1049: travel time after ramming and
+// ramming volumetric speed, extruder change and hotend change) and Bambu 02.09.01.70's eight filament
+// overhang overrides (Bambu parity PR 3, nil reads as the option default) are nullable, so only they can hold a nil
 // High-Flow slot. compose_filament_flow_variant_segment reads a nil High-Flow slot as the Standard value;
 // a slot nil in both reaches the slicer as nil: GCode.cpp reads a nil flush key as its default, and
 // WipeTower::set_extruder reads a nil ramming key as Bambu Studio does (travel time 0, volumetric speed the
@@ -515,13 +516,18 @@ TEST_CASE("only the retract overrides, the flush keys and the ramming keys among
             nullable.push_back(key);
     }
     std::sort(nullable.begin(), nullable.end());
-    CHECK(nullable == std::vector<std::string>{"filament_cooling_before_tower", "filament_deretraction_speed",
+    CHECK(nullable == std::vector<std::string>{"filament_bridge_speed", "filament_cooling_before_tower",
+                                               "filament_deretraction_speed", "filament_enable_overhang_speed",
                                                "filament_flush_temp", "filament_flush_temp_fast",
-                                               "filament_flush_volumetric_speed", "filament_ramming_travel_time",
+                                               "filament_flush_volumetric_speed", "filament_overhang_1_4_speed",
+                                               "filament_overhang_2_4_speed", "filament_overhang_3_4_speed",
+                                               "filament_overhang_4_4_speed", "filament_overhang_totally_speed",
+                                               "filament_ramming_travel_time",
                                                "filament_ramming_travel_time_nc", "filament_ramming_volumetric_speed",
                                                "filament_ramming_volumetric_speed_nc", "filament_retract_length_toolchange",
                                                "filament_retraction_length", "filament_retraction_speed",
-                                               "filament_wipe_distance", "filament_z_hop_types"});
+                                               "filament_wipe_distance", "filament_z_hop_types",
+                                               "override_process_overhang_speed"});
 }
 
 // Slicer-side calibrations (Calibration > Flow rate / Max flowrate) size the test from
