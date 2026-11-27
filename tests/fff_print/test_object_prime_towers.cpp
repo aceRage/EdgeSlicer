@@ -1131,7 +1131,7 @@ TEST_CASE("Object towers: arrange reserves no tower room where none prints", "[O
 // was placed automatically, behind the copy. Every unit was clear in X/Y, but the copies reach above the rod (26 mm)
 // and the tower widened that copy's Y band onto both neighbours' clearance: each then had to print before the other,
 // and validate refused the plate ("Assembly is too tall, and collisions will be caused"). The planner now keeps a tall
-// copy's tower off such spots (another side, here its left side slid back), and real conflicts stay flagged.
+// copy's tower off such spots (another side, or no tower with the notice), and real conflicts stay flagged.
 namespace {
 
 ModelObject *add_assembly(Model &model, const std::string &name, const Vec2d &pos, const Vec2d &tower_offset)
@@ -1168,7 +1168,7 @@ TEST_CASE("Object towers: a tall copy's tower does not break the rod order (owne
     const DynamicPrintConfig cfg = owner_u1_config();
     REQUIRE(cfg.opt_float("extruder_clearance_height_to_rod") < 33.);
 
-    SECTION("the owner's layout slices, with every tower placed")
+    SECTION("the owner's layout slices: no rod conflict, and a copy left without a tower says so")
     {
         Model model;
         add_assembly(model, "AssemblyA", { 90.1315, 25.0968 }, { -78.9164, -10.8642 });
@@ -1181,10 +1181,18 @@ TEST_CASE("Object towers: a tall copy's tower does not break the rod order (owne
         CHECK(error.string.empty());
         const ObjectTowerPlan plan = print.plan_object_towers();
         REQUIRE(plan.towers.size() == 3);
-        for (const ObjectTowerPlacement &t : plan.towers) {
-            INFO(t.instance->model_instance->get_object()->name);
-            CHECK(t.placed);
-        }
+        // A and B keep their towers (B on its left, slid back, clear of A). C then has no spot: its right side is in
+        // B's tower's clearance, left and back are off the bed, and in front its tower would put C and B in each
+        // other's rod band. It prints without one, with the notice, instead of the plate being refused.
+        CHECK(plan.towers[0].placed);
+        CHECK(plan.towers[1].placed);
+        size_t unplaced = 0;
+        for (const ObjectTowerPlacement &t : plan.towers)
+            unplaced += t.placed ? 0 : 1;
+        size_t no_room = 0;
+        for (const std::string &w : plan.warnings)
+            no_room += w.find("no room") != std::string::npos ? 1 : 0;
+        CHECK(no_room == unplaced);
     }
     SECTION("copies that really collide are still refused")
     {

@@ -8270,6 +8270,8 @@ ObjectTowerPlan Print::plan_object_towers() const
 
         // Whether a tower anchored there is clear (on the bed, off the exclusions, within reach, its gap to its own copy
         // and the unit clear of every other unit); score: the distance to the nearest other unit.
+        // Set when a spot clear in X/Y was refused for the rod rule alone (the notice then says so).
+        bool rod_blocked = false;
         auto clear_at = [&](const Point &anchor, Polygon &tower, double &score) {
             tower = local;
             tower.translate(anchor);
@@ -8304,8 +8306,10 @@ ObjectTowerPlan Print::plan_object_towers() const
                 const Polygon unit_x = object_tower_unit(copy.hull, tower);
                 for (size_t other = 0; other < copies.size(); ++other)
                     if (other != idx && copy_tall(other) &&
-                        rod_needs_first(unit_x, copies[other]) && rod_needs_first(object_tower_unit(copies[other].hull, copies[other].tower), copy, &tower))
+                        rod_needs_first(unit_x, copies[other]) && rod_needs_first(object_tower_unit(copies[other].hull, copies[other].tower), copy, &tower)) {
+                        rod_blocked = true;
                         return false;
+                    }
             }
             return true;
         };
@@ -8349,7 +8353,9 @@ ObjectTowerPlan Print::plan_object_towers() const
         if (placement.placed)
             copy.tower = placement.outline;
         else
-            plan.warnings.push_back((boost::format(L("%1% prints without a prime tower: there is no room for one beside it.")) % name).str());
+            plan.warnings.push_back(rod_blocked ?
+                (boost::format(L("%1% prints without a prime tower: there is no room for one beside it that keeps a print order (the object is taller than the X rod clearance, and a tower in front of or behind it would reach the other objects). Move the objects apart in Y, or drag its tower beside it.")) % name).str() :
+                (boost::format(L("%1% prints without a prime tower: there is no room for one beside it.")) % name).str());
         plan.towers.push_back(std::move(placement));
     }
     return plan;
