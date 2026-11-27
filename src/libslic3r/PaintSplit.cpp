@@ -313,11 +313,25 @@ bool paint_split_repair(const indexed_triangle_set& in, indexed_triangle_set& ou
 {
     st  = PaintSplitRepairStats();
     out = in;
-    its_merge_vertices(out); // exact duplicates; the face order is kept
     if (old_to_new != nullptr) {
         old_to_new->resize(in.indices.size());
         std::iota(old_to_new->begin(), old_to_new->end(), 0);
     }
+    // Closed by its own indices: as it is. A piece an earlier split exported from Manifold is closed that way,
+    // while welding its float duplicates (vertices Manifold kept apart in doubles) would pinch it and make edges
+    // used by three faces. That refused the second region of a several-region Apply (R1, owner's figure).
+    {
+        bool closed = std::none_of(out.indices.begin(), out.indices.end(), ps_degenerate);
+        if (closed)
+            for (const auto& [e, n] : ps_edge_use(out))
+                if (n != 2) {
+                    closed = false;
+                    break;
+                }
+        if (closed)
+            return true;
+    }
+    its_merge_vertices(out); // exact duplicates; the face order is kept
     {
         bool closed = std::none_of(out.indices.begin(), out.indices.end(), ps_degenerate);
         if (closed)
@@ -1800,6 +1814,9 @@ PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, co
     indexed_triangle_set  fixed;
     PaintSplitRepairStats repair;
     if (!paint_split_repair(mesh, fixed, nullptr, repair)) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: repair failed on " << mesh.indices.size() << " facets: welded " << repair.welded
+                                 << ", degenerate " << repair.degenerate_removed << ", holes " << repair.holes_filled
+                                 << ", non-manifold edges " << repair.nonmanifold_edges;
         out.error = PaintSplitError::RepairFailed;
         return out;
     }
@@ -1814,6 +1831,8 @@ PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, co
     out.times.mesh              = claim.stats.mesh_s;
     out.times.smooth            = claim.stats.smooth_s;
     if (claim.mesh.indices.empty()) {
+        BOOST_LOG_TRIVIAL(error) << "Paint split: the claim is empty (" << claim.stats.cells << " cells, " << claim.stats.samples
+                                 << " samples, voxel " << claim.stats.voxel << " mm)";
         out.error = PaintSplitError::VoxelFailed;
         return out;
     }
@@ -1837,13 +1856,46 @@ PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, co
         Manifold C;
         try {
             C = ColorSplitDetail::to_manifold64(claim.mesh, ctx);
-        } catch (...) {
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "Paint split: the claim did not import: " << e.what();
             out.error = PaintSplitError::VoxelFailed;
             return out;
         }
         if (C.Status() != Manifold::Error::NoError || C.IsEmpty()) {
+            size_t once = 0, many = 0, same_dir = 0, bad_v = 0;
+            {
+                std::unordered_map<uint64_t, int> use;
+                for (const Vec3i32& t : claim.mesh.indices)
+                    for (int k = 0; k < 3; ++k)
+                        ++use[(uint64_t(uint32_t(t[k])) << 32) | uint32_t(t[(k + 1) % 3])];
+                for (const auto& [e, n] : use) {
+                    same_dir += n > 1;
+                    const auto it = use.find((e << 32) | (e >> 32));
+                    const int  m  = it == use.end() ? 0 : it->second;
+                    once += n == 1 && m == 0;
+                    many += n + m > 2;
+                }
+                for (const Vec3f& v : claim.mesh.vertices)
+                    bad_v += !v.allFinite();
+            }
+            BOOST_LOG_TRIVIAL(error) << "Paint split: Manifold refused the claim (status " << int(C.Status()) << ", empty "
+                                     << C.IsEmpty() << "): " << claim.mesh.indices.size() << " triangles, " << claim.mesh.vertices.size()
+                                     << " vertices; open half-edges " << once << ", edges used more than twice " << many
+                                     << ", repeated half-edges " << same_dir << ", non-finite vertices " << bad_v << "; voxel "
+                                     << claim.stats.voxel << " mm" << (claim.complement ? " (complement)" : "");
             out.error = PaintSplitError::VoxelFailed;
             return out;
+        }
+        // Marching tetrahedra leave many slivers on a smooth face: collapse what moves the cutter by less than
+        // `simplify` (a few microns), so the booleans and the pieces carry far fewer triangles.
+        if (!skin.dense && skin.simplify > 0.) {
+            const auto   t_simplify = PsClock2::now();
+            const size_t before     = C.NumTri();
+            C                       = C.Simplify(skin.simplify);
+            out.times.smooth += ps_secs2(t_simplify);
+            ColorSplitDetail::require_ok(C, "claim");
+            out.claim.simplified = C.NumTri();
+            BOOST_LOG_TRIVIAL(info) << "Paint split: claim simplified from " << before << " to " << C.NumTri() << " triangles";
         }
         // The claim's parts of the part that carry the selection are the piece (a stray voxel bubble is not).
         std::vector<Manifold> kept;

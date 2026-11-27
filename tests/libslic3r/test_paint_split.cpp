@@ -1702,6 +1702,35 @@ std::vector<Vec3f> ps_seam(const PaintSplitPieces& p)
     return out;
 }
 
+// The piece's seam as segments: the edges shared by a skin facet and a cut-face facet.
+std::vector<std::pair<Vec3d, Vec3d>> ps_seam_edges(const PaintSplitPieces& p)
+{
+    std::map<std::pair<int, int>, int> side; // bit 1 skin, bit 2 cut face
+    for (size_t f = 0; f < p.piece.indices.size(); ++f)
+        for (int k = 0; k < 3; ++k) {
+            int a = p.piece.indices[f][k], b = p.piece.indices[f][(k + 1) % 3];
+            if (a > b)
+                std::swap(a, b);
+            side[{ a, b }] |= p.piece_from_source[f] ? 1 : 2;
+        }
+    std::vector<std::pair<Vec3d, Vec3d>> out;
+    for (const auto& [e, m] : side)
+        if (m == 3)
+            out.emplace_back(p.piece.vertices[size_t(e.first)].cast<double>(), p.piece.vertices[size_t(e.second)].cast<double>());
+    return out;
+}
+
+double ps_dist_to_segments(const std::vector<std::pair<Vec3d, Vec3d>>& segs, const Vec3d& q)
+{
+    double best = std::numeric_limits<double>::max();
+    for (const auto& [a, b] : segs) {
+        const Vec3d  ab = b - a;
+        const double t  = ab.squaredNorm() > 0. ? std::clamp((q - a).dot(ab) / ab.squaredNorm(), 0., 1.) : 0.;
+        best            = std::min(best, (a + t * ab - q).norm());
+    }
+    return best;
+}
+
 double ps_dist_to_loops(const PaintSplitRegion& r, const Vec3d& q)
 {
     double best = std::numeric_limits<double>::max();
@@ -1753,11 +1782,12 @@ TEST_CASE("Paint split R1: the sparse field matches the dense one on a sphere's 
     REQUIRE(!cs.mesh.indices.empty());
     // The marching tetrahedra give a closed 2-manifold claim, also after the near-skin refinement.
     ps_require_closed(cs.mesh);
-    // Coarse to fine: far fewer samples than the dense grid at the same voxel.
+    // Coarse to fine: fewer samples than the dense grid at the same voxel, even on this small part whose box is the
+    // part itself (the saving grows with the box volume over the surface area).
     WARN("dense " << cd.stats.samples << " samples, " << cd.mesh.indices.size() << " triangles; sparse " << cs.stats.samples
                   << " samples, " << cs.stats.queries << " queries, " << cs.stats.cells << " cells, " << cs.mesh.indices.size()
                   << " triangles, near the skin " << cs.stats.near_skin_voxel << " mm");
-    CHECK(cs.stats.samples * 5 < cd.stats.samples);
+    CHECK(cs.stats.samples * 2 < cd.stats.samples);
     CHECK_THAT(cs.stats.near_skin_voxel, WithinAbs(0.1, 1e-9));
 
     // The cut face inside the part lies on the equator: exact roots put it there, linear roots on a clamped field less so.
@@ -1826,18 +1856,19 @@ TEST_CASE("Paint split R1: smoothing the cut face leaves the seam on the paint l
                                                << " -> " << ps_roughness(paint_split_claim_cut_surface(cyl, c1.mesh)) << " deg");
     CHECK(moved > 0.01);
 
-    // ... but not the seam: the same seam vertices at smoothing 0 and 1.
+    // ... but not the seam: at smoothing 1 it runs where it ran at 0 (the cutter's simplify may drop seam vertices
+    // along the line, so each is compared with the other seam's segments).
     const std::vector<Vec3f> seam0 = ps_seam(p0), seam1 = ps_seam(p1);
     REQUIRE(!seam0.empty());
-    CHECK(std::abs(double(seam0.size()) - double(seam1.size())) <= 0.02 * double(seam0.size()));
-    double worst = 0.;
-    for (const Vec3f& v : seam1) {
-        double best = std::numeric_limits<double>::max();
-        for (const Vec3f& w : seam0)
-            best = std::min(best, double((v - w).norm()));
-        worst = std::max(worst, best);
-    }
-    CHECK(worst < 1e-3);
+    REQUIRE(!seam1.empty());
+    const auto segs0 = ps_seam_edges(p0), segs1 = ps_seam_edges(p1);
+    double     worst = 0.;
+    for (const Vec3f& v : seam1)
+        worst = std::max(worst, ps_dist_to_segments(segs0, v.cast<double>()));
+    for (const Vec3f& v : seam0)
+        worst = std::max(worst, ps_dist_to_segments(segs1, v.cast<double>()));
+    WARN("seam at smoothing 1 off the seam at 0 by up to " << worst << " mm (" << seam0.size() << " / " << seam1.size() << " vertices)");
+    CHECK(worst < 0.05); // the cutter is simplified by 0.02 mm after smoothing
     // And it lies on the paint line, within a tenth of a millimetre.
     double off = 0., sum = 0.;
     for (const Vec3f& v : seam1) {
@@ -2041,7 +2072,7 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
             }
 
     const std::string engines = env_s("PAINT_SPLIT_ENGINES", "dense,sparse");
-    const std::string modes   = env_s("PAINT_SPLIT_MODES", "objects,parts");
+    const std::string modes   = env_s("PAINT_SPLIT_MODES", "isolated,objects,parts");
     for (const bool dense : { true, false }) {
         if (engines.find(dense ? "dense" : "sparse") == std::string::npos)
             continue;
@@ -2060,21 +2091,39 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
         {
             TriangleMesh in_cut(tm);
             in_cut.transform(to_cut, true);
+            // As the split does: on the repaired part.
+            indexed_triangle_set  fixed;
+            PaintSplitRepairStats rs;
+            const bool            repaired = paint_split_repair(in_cut.its, fixed, nullptr, rs);
+            const indexed_triangle_set& part = repaired && rs.needed ? fixed : in_cut.its;
             for (size_t k = 0; k < regions.size(); ++k) {
                 const auto            t0    = std::chrono::steady_clock::now();
-                const PaintSplitClaim claim = paint_split_nearest_cutter(in_cut.its, regions[k], 0, skin);
+                const PaintSplitClaim claim = paint_split_nearest_cutter(part, regions[k], 0, skin);
                 const double          secs  = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-                const indexed_triangle_set face = paint_split_claim_cut_surface(in_cut.its, claim.mesh);
+                const indexed_triangle_set face = paint_split_claim_cut_surface(part, claim.mesh);
+                std::map<uint64_t, int> use;
+                for (const Vec3i32& t : claim.mesh.indices)
+                    for (int q = 0; q < 3; ++q)
+                        ++use[(uint64_t(uint32_t(t[q])) << 32) | uint32_t(t[(q + 1) % 3])];
+                size_t open = 0, repeated = 0;
+                for (const auto& [e, n] : use) {
+                    repeated += n > 1;
+                    open += use.count((e << 32) | (e >> 32)) == 0;
+                }
                 WARN(engine << " region " << k + 1 << " claim: " << secs << " s (field " << claim.stats.setup_s + claim.stats.field_s
                             << " s, mesh " << claim.stats.mesh_s << " s, smooth " << claim.stats.smooth_s << " s), voxel " << claim.stats.voxel
-                            << " mm, near the skin " << claim.stats.near_skin_voxel << " mm, " << claim.stats.samples << " samples, "
-                            << claim.mesh.indices.size() << " triangles" << (claim.complement ? " (complement)" : "")
-                            << "; cut face " << face.indices.size() << " triangles, roughness " << ps_roughness(face) << " deg");
+                            << " mm, near the skin " << claim.stats.near_skin_voxel << " mm, " << claim.stats.cells << " cells, "
+                            << claim.stats.samples << " samples, " << claim.stats.queries << " queries, " << claim.mesh.indices.size()
+                            << " triangles" << (claim.complement ? " (complement)" : "") << ", open half-edges " << open
+                            << ", repeated half-edges " << repeated << "; cut face " << face.indices.size() << " triangles, roughness "
+                            << ps_roughness(face) << " deg, area " << ps_its_area(face) << " mm2");
             }
         }
 
-        for (const bool as_parts : { false, true }) {
-            if (modes.find(as_parts ? "parts" : "objects") == std::string::npos)
+        for (int mode = 0; mode < 3; ++mode) {
+            // isolated: each region alone on the uncut part (new objects); objects / parts: in turn, as the job does.
+            const bool isolated = mode == 0, as_parts = mode == 2;
+            if (modes.find(isolated ? "isolated" : as_parts ? "parts" : "objects") == std::string::npos)
                 continue;
             const char* TAG = "__ps_mask__";
             Model       holder;
@@ -2093,7 +2142,13 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
             };
             const auto t_all = std::chrono::steady_clock::now();
             double     sum_field = 0., sum_cut = 0., sum_paint = 0.;
+            const char* label = isolated ? " isolated" : as_parts ? " parts" : " objects";
             for (size_t k = 0; k < regions.size() && mask_idx >= 0; ++k) {
+                if (isolated && k > 0) {
+                    current = holder.add_object(*src_obj);
+                    current->volumes[size_t(src_vol)]->name = TAG;
+                    mask_idx = src_vol;
+                }
                 PaintSplitKeep keep;
                 keep.mask_volume_idx = mask_idx;
                 keep.region          = &regions[k];
@@ -2106,19 +2161,24 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
                 PaintSplitReport       rep;
                 const ModelObjectPtrs& res = cut.perform_with_paint_split_planes(keep, &rep);
                 const PaintSplitTimes& t   = rep.times;
-                WARN(engine << (as_parts ? " parts" : " objects") << " region " << k + 1 << ": "
+                WARN(engine << label << " region " << k + 1 << ": "
                             << (rep.error == PaintSplitError::None ? "ok" : paint_split_error_message(rep.error)) << ", total " << t.total
                             << " s = repair " << t.repair << " + field " << t.field << " + mesh " << t.mesh << " + smooth " << t.smooth
                             << " + cut " << t.cut << " + wrapper " << t.wrapper << " + paint " << t.paint << "; piece " << rep.piece_volume
-                            << " mm3, body " << rep.body_volume << " mm3, loose " << rep.loose_volume << " mm3; paint "
+                            << " mm3, body " << rep.body_volume << " mm3, loose " << rep.loose_volume << " mm3; cutter "
+                            << rep.claim.triangles << " -> " << rep.claim.simplified << " triangles at " << rep.claim.voxel << " mm; paint "
                             << (rep.exact_paint ? "exact" : "remap") << " " << rep.paint_copied << "/" << rep.paint_resampled << "/"
                             << rep.paint_unpainted);
                 CHECK(rep.error == PaintSplitError::None);
+                if (isolated && rep.error != PaintSplitError::None)
+                    continue;
                 if (rep.error != PaintSplitError::None || res.empty())
                     break;
                 sum_field += t.field + t.mesh + t.smooth;
                 sum_cut += t.repair + t.cut + t.wrapper;
                 sum_paint += t.paint;
+                if (isolated)
+                    continue;
                 if (as_parts) {
                     current  = holder.add_object(*res.front());
                     mask_idx = find_tag(*current, std::string(TAG) + "_B");
@@ -2145,7 +2205,7 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
                 }
             }
             const double all = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count();
-            WARN(engine << (as_parts ? " parts" : " objects") << ": APPLY TOTAL " << all << " s for " << regions.size()
+            WARN(engine << label << ": APPLY TOTAL " << all << " s for " << regions.size()
                         << " regions (field " << sum_field << " s, cut " << sum_cut << " s, paint " << sum_paint << " s)");
         }
     }

@@ -229,10 +229,11 @@ struct PaintSplitSkinParams
     size_t max_samples{ 6000000 };    // dense: the voxel budget of the automatic size
     bool   dense{ false };            // the P2 engine (no smoothing, no near-skin refinement)
     double smoothing{ 0.5 };          // "Smooth cut face", 0..1: Taubin passes = 20 x this (D22)
-    size_t max_cells{ 2000000 };      // sparse: the fine-cell budget; past it the voxel doubles
+    size_t max_cells{ 600000 };       // sparse: the fine-cell budget; past it the voxel doubles
     int    skin_refine{ 2 };          // sparse: near-skin refinements, each halving the voxel within 2 voxels of the skin
     int    root_iterations{ 4 };      // sparse: regula falsi steps per edge root (0 = linear roots)
     bool   allow_complement{ true };  // sparse: mesh the complement when the selected skin is the larger side
+    double simplify{ 0.02 };          // sparse: mm; Manifold collapses the claim's edges that move it less (0 = off)
 };
 
 // What evaluating one claim cost and gave (the stage timers, design 8.1 step 0).
@@ -241,6 +242,7 @@ struct PaintSplitClaimStats
     double voxel{ 0. }, near_skin_voxel{ 0. };
     bool   complement{ false };
     size_t cells{ 0 }, samples{ 0 }, queries{ 0 }, triangles{ 0 };
+    size_t simplified{ 0 };           // triangles of the cutter after Manifold's simplify (paint_split_assign_nearest)
     double setup_s{ 0. }, field_s{ 0. }, mesh_s{ 0. }, smooth_s{ 0. };
 };
 

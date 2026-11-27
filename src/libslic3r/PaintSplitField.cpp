@@ -6,7 +6,7 @@
 //       2 x its half-diagonal holds no zero and is never refined. Only cells near the surface are sampled.
 //   S1  exact edge roots: a consistent tetrahedral split of every cell (Kuhn), each crossing found on the exact
 //       field by regula falsi. The result is a closed 2-manifold by construction.
-//   D23 near the skin (within 2 voxels) the claim's edges are split and the new vertices put on the exact
+//   D23 near the skin (within a voxel, then half a voxel) the claim's edges are split and the new vertices put on the exact
 //       zero set, twice by default: a finer voxel where the cut meets the paint line.
 //   S2  pinned Taubin smoothing of the claim (the cutter, so both halves still mate). Triangles within 1.5
 //       voxels of the part's skin do not move, so the seam stays on the paint line.
@@ -43,101 +43,74 @@ double ps_secs_since(PsClock::time_point t0) { return std::chrono::duration<doub
 
 // ----------------------------------------------------------------------------------------- inside / outside
 
-// The signed distance to a closed mesh (positive outside), the sign by angle-weighted pseudo-normals
-// (Baerentzen and Aanaes 2005), which is exact for a closed manifold.
-class PsSigner
+// Definitely outside the part: a coarse grid over the part's box, flooded from its border through the cells the
+// skin does not reach (6-connected). A closed skin cannot be crossed that way, whatever its shells do inside
+// (overlapping shells, fan-filled holes), so a flooded cell is outside for sure. A cell the flood misses may still
+// be outside: the claim is just not clipped there. (Pseudo-normal signs were tried first and flip on overlapping
+// shells, which carved holes in the claim.)
+class PsOutside
 {
 public:
-    explicit PsSigner(const indexed_triangle_set& its) : m_its(its), m_tree(its)
+    PsOutside(const indexed_triangle_set& mesh, double margin)
     {
-        const size_t nf = its.indices.size();
-        m_fn.resize(nf);
-        m_vn.assign(its.vertices.size(), Vec3d::Zero());
-        m_en.reserve(3 * nf);
-        for (size_t f = 0; f < nf; ++f) {
-            const Vec3i32& t = its.indices[f];
-            const Vec3d    p[3] = { its.vertices[t[0]].cast<double>(), its.vertices[t[1]].cast<double>(), its.vertices[t[2]].cast<double>() };
-            Vec3d          n    = (p[1] - p[0]).cross(p[2] - p[0]);
-            const double   len  = n.norm();
-            n                   = len > 0. ? Vec3d(n / len) : Vec3d::Zero();
-            m_fn[f]             = n;
-            for (int k = 0; k < 3; ++k) {
-                const Vec3d  e1 = p[(k + 1) % 3] - p[k], e2 = p[(k + 2) % 3] - p[k];
-                const double l1 = e1.norm(), l2 = e2.norm();
-                if (l1 > 0. && l2 > 0.)
-                    m_vn[size_t(t[k])] += std::acos(std::clamp(e1.dot(e2) / (l1 * l2), -1., 1.)) * n;
-                m_en.emplace_back(edge_key(t[k], t[(k + 1) % 3]), n);
-            }
+        BoundingBoxf3 mb;
+        for (const Vec3f& v : mesh.vertices)
+            mb.merge(v.cast<double>());
+        const Vec3d size = mb.size() + Vec3d::Constant(2. * margin);
+        m_c              = std::max(1.5, std::cbrt(std::max(1., size.x() * size.y() * size.z()) / 600000.));
+        m_o              = mb.min - Vec3d::Constant(margin + m_c);
+        for (int a = 0; a < 3; ++a)
+            m_n[a] = int(std::ceil((size(a) + 2. * m_c) / m_c)) + 1;
+        const size_t   total = size_t(m_n[0]) * size_t(m_n[1]) * size_t(m_n[2]);
+        const AABBMesh tree(mesh);
+        const double   lim = 0.5 * std::sqrt(3.) * m_c * 1.01 + 1e-6;
+        std::vector<uint8_t> barrier(total, 0);
+        tbb::parallel_for(tbb::blocked_range<int>(0, m_n[2]), [&](const tbb::blocked_range<int>& r) {
+            for (int k = r.begin(); k < r.end(); ++k)
+                for (int j = 0; j < m_n[1]; ++j)
+                    for (int i = 0; i < m_n[0]; ++i)
+                        barrier[idx(i, j, k)] = tree.squared_distance(m_o + m_c * Vec3d(i + 0.5, j + 0.5, k + 0.5)) <= lim * lim;
+        });
+        m_flood.assign(total, 0);
+        std::vector<size_t> queue;
+        auto push = [&](int i, int j, int k) {
+            if (i < 0 || j < 0 || k < 0 || i >= m_n[0] || j >= m_n[1] || k >= m_n[2])
+                return;
+            const size_t c = idx(i, j, k);
+            if (barrier[c] || m_flood[c])
+                return;
+            m_flood[c] = 1;
+            queue.push_back(c);
+        };
+        for (int k = 0; k < m_n[2]; ++k)
+            for (int j = 0; j < m_n[1]; ++j)
+                for (int i = 0; i < m_n[0]; ++i)
+                    if (i == 0 || j == 0 || k == 0 || i == m_n[0] - 1 || j == m_n[1] - 1 || k == m_n[2] - 1)
+                        push(i, j, k);
+        for (size_t q = 0; q < queue.size(); ++q) {
+            const size_t c = queue[q];
+            const int    i = int(c % size_t(m_n[0])), j = int((c / size_t(m_n[0])) % size_t(m_n[1])),
+                      k = int(c / (size_t(m_n[0]) * size_t(m_n[1])));
+            push(i - 1, j, k), push(i + 1, j, k), push(i, j - 1, k), push(i, j + 1, k), push(i, j, k - 1), push(i, j, k + 1);
         }
-        std::sort(m_en.begin(), m_en.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-        // Merge the two faces of each edge.
-        size_t w = 0;
-        for (size_t r = 0; r < m_en.size();) {
-            size_t e = r + 1;
-            Vec3d  n = m_en[r].second;
-            while (e < m_en.size() && m_en[e].first == m_en[r].first)
-                n += m_en[e++].second;
-            m_en[w++] = { m_en[r].first, n };
-            r         = e;
-        }
-        m_en.resize(w);
     }
 
-    // Positive outside, negative inside; the magnitude is the distance.
-    double signed_distance(const Vec3d& p) const
+    bool flooded(const Vec3d& p) const
     {
-        int          f = -1;
-        Vec3d        c;
-        const double d2 = m_tree.squared_distance(p, f, c);
-        if (f < 0)
-            return std::numeric_limits<double>::max();
-        const double d = std::sqrt(d2);
-        return (p - c).dot(pseudo_normal(f, c)) >= 0. ? d : -d;
+        const Vec3d q = (p - m_o) / m_c;
+        const int   i = int(std::floor(q.x())), j = int(std::floor(q.y())), k = int(std::floor(q.z()));
+        if (i < 0 || j < 0 || k < 0 || i >= m_n[0] || j >= m_n[1] || k >= m_n[2])
+            return true;
+        return m_flood[idx(i, j, k)] != 0;
     }
 
 private:
-    static uint64_t edge_key(int a, int b)
-    {
-        if (a > b)
-            std::swap(a, b);
-        return (uint64_t(uint32_t(a)) << 32) | uint32_t(b);
-    }
+    size_t idx(int i, int j, int k) const { return (size_t(k) * size_t(m_n[1]) + size_t(j)) * size_t(m_n[0]) + size_t(i); }
 
-    Vec3d pseudo_normal(int f, const Vec3d& c) const
-    {
-        const Vec3i32& t  = m_its.indices[size_t(f)];
-        const Vec3d    a  = m_its.vertices[t[0]].cast<double>(), b = m_its.vertices[t[1]].cast<double>(),
-                    cc = m_its.vertices[t[2]].cast<double>();
-        const Vec3d  v0 = b - a, v1 = cc - a, v2 = c - a;
-        const double d00 = v0.dot(v0), d01 = v0.dot(v1), d11 = v1.dot(v1), d20 = v2.dot(v0), d21 = v2.dot(v1);
-        const double den = d00 * d11 - d01 * d01;
-        if (std::abs(den) < 1e-30)
-            return m_fn[size_t(f)];
-        const double            l1 = (d11 * d20 - d01 * d21) / den, l2 = (d00 * d21 - d01 * d20) / den;
-        const std::array<double, 3> bc = { 1. - l1 - l2, l1, l2 };
-        const double            eps   = 1e-7;
-        int                     zeros = 0, zk = -1, big = 0;
-        for (int k = 0; k < 3; ++k) {
-            if (bc[k] < eps)
-                ++zeros, zk = k;
-            if (bc[k] > bc[big])
-                big = k;
-        }
-        if (zeros >= 2)
-            return m_vn[size_t(t[big])];
-        if (zeros == 1) {
-            const uint64_t key = edge_key(t[(zk + 1) % 3], t[(zk + 2) % 3]);
-            auto it = std::lower_bound(m_en.begin(), m_en.end(), key, [](const auto& e, uint64_t k) { return e.first < k; });
-            if (it != m_en.end() && it->first == key)
-                return it->second;
-        }
-        return m_fn[size_t(f)];
-    }
-
-    const indexed_triangle_set&            m_its;
-    AABBMesh                               m_tree;
-    std::vector<Vec3d>                     m_fn, m_vn;
-    std::vector<std::pair<uint64_t, Vec3d>> m_en;
+    double               m_c{ 1. };
+    Vec3d                m_o{ Vec3d::Zero() };
+    int                  m_n[3]{ 0, 0, 0 };
+    std::vector<uint8_t> m_flood;
 };
 
 // ----------------------------------------------------------------------------------------- the field
@@ -155,7 +128,7 @@ struct PsField
 {
     const AABBMesh*  ts{ nullptr };
     const AABBMesh*  tu{ nullptr };
-    const PsSigner*  signer{ nullptr };
+    const PsOutside* outside{ nullptr };
     double           reach{ 0. }, depth{ 0. }, clip{ 0. };
     bool             complement{ false };
     BoundingBoxf3    box;
@@ -191,13 +164,11 @@ struct PsField
         double       v = complement ? -f : f;
         const double d = std::min(ds, du);
         out.d          = float(d);
-        // The clip (part dilated by `clip`) can only win where the distance to the skin exceeds it.
-        if (d - clip > v) {
-            const double s = signer->signed_distance(p) - clip;
-            ++nq;
-            if (s > v)
-                v = s, out.clip = true;
-        }
+        // The clip (the part dilated by `clip`) only where the point is surely outside the part. It can only win
+        // where the distance to the skin exceeds it. Across a flood boundary g jumps, which the closure pass below
+        // makes up for.
+        if (d - clip > v && outside->flooded(p))
+            v = d - clip, out.clip = true;
         if (bx > v)
             v = bx, out.clip = true;
         out.g = v;
@@ -511,15 +482,15 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
     const double h0 = params.voxel > 0. ? params.voxel : 0.2;
 
     const AABBMesh      tree_s(S), tree_u(U);
-    const PsSigner      signer(mesh);
+    const PsOutside     outside(mesh, std::max(8. * h0, 1.) + 1.);
     std::atomic<size_t> queries{ 0 };
     PsField             field;
     field.ts         = &tree_s;
     field.tu         = &tree_u;
-    field.signer     = &signer;
+    field.outside    = &outside;
     field.reach      = reach + h0;
     field.depth      = depth;
-    field.clip       = std::max(4. * h0, 0.5);
+    field.clip       = std::max(8. * h0, 1.);
     field.complement = params.allow_complement && area_s > area_u;
     // Outside the box counts as outside the cutter: for the complement that would claim it, so its box holds
     // the whole part and the clip shell round it.
@@ -555,7 +526,7 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
             for (uint32_t i = 0; i < ntop[0]; ++i)
                 cells.push_back(ps_key(i, j, k));
     int    level = L;
-    size_t evaluated = 0;
+    size_t evaluated = 0, prev_kept = 0;
     for (;; --level) {
         const double          size = double(1u << level);
         const double          lim  = std::sqrt(3.) * size * h0 * 1.001 + 1e-9; // 2 x the half-diagonal
@@ -575,10 +546,13 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
         cells.resize(w);
         if (level == 0)
             break;
-        // The cell budget: the surface's fine cells grow with 4 per level.
-        const double estimate = double(cells.size()) * double(uint64_t(1) << (2 * level));
-        if (estimate > double(std::max<size_t>(1000, params.max_cells)))
+        // The cell budget: a surface's cells grow about 4 times per level, so stop where the next level would not
+        // fit. The voxel then doubles once per level short of the finest.
+        // The growth from the last level predicts the next one better once the cells are small.
+        const double growth = prev_kept > 0 ? std::max(4., double(cells.size()) / double(prev_kept)) : 4.;
+        if (growth * double(cells.size()) > double(std::max<size_t>(1000, params.max_cells)))
             break;
+        prev_kept = cells.size();
         std::vector<uint64_t> next(cells.size() * 8);
         tbb::parallel_for(tbb::blocked_range<size_t>(0, cells.size()), [&](const tbb::blocked_range<size_t>& r) {
             for (size_t c = r.begin(); c < r.end(); ++c) {
@@ -592,24 +566,95 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
     const uint32_t step = 1u << level; // fine voxels per cell
     const double   h    = h0 * double(step);
     st.voxel            = h;
-    st.cells            = cells.size();
 
-    // The cells' corners, evaluated once each.
-    std::vector<uint64_t> nodes(cells.size() * 8);
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, cells.size()), [&](const tbb::blocked_range<size_t>& r) {
-        for (size_t c = r.begin(); c < r.end(); ++c) {
-            const uint32_t i = ps_ki(cells[c]) * step, j = ps_kj(cells[c]) * step, k = ps_kk(cells[c]) * step;
-            for (int q = 0; q < 8; ++q)
-                nodes[8 * c + size_t(q)] = ps_key(i + (q & 1) * step, j + ((q >> 1) & 1) * step, k + ((q >> 2) & 1) * step);
-        }
-    });
-    tbb::parallel_sort(nodes.begin(), nodes.end());
-    nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
-    std::vector<PsValue> nval(nodes.size());
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, nodes.size()), [&](const tbb::blocked_range<size_t>& r) {
-        for (size_t n = r.begin(); n < r.end(); ++n)
-            nval[n] = field.eval(node_pos(ps_ki(nodes[n]), ps_kj(nodes[n]), ps_kk(nodes[n])));
-    });
+    // The cells' corners, evaluated once each; then the closure pass: a cell whose face to a cell outside the set
+    // changes sign takes that neighbour in too, until no face of the set does. The claim is then closed even where
+    // g jumps (at the clip's flood boundary) and the Lipschitz skip was wrong there.
+    tbb::parallel_sort(cells.begin(), cells.end());
+    std::vector<uint64_t> nodes;
+    std::vector<PsValue>  nval;
+    auto corner_key = [step](uint64_t cell, int q) {
+        return ps_key((ps_ki(cell) + uint32_t(q & 1)) * step, (ps_kj(cell) + uint32_t((q >> 1) & 1)) * step,
+                      (ps_kk(cell) + uint32_t((q >> 2) & 1)) * step);
+    };
+    auto add_nodes = [&](const std::vector<uint64_t>& new_cells) {
+        std::vector<uint64_t> add(new_cells.size() * 8);
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, new_cells.size()), [&](const tbb::blocked_range<size_t>& r) {
+            for (size_t c = r.begin(); c < r.end(); ++c)
+                for (int q = 0; q < 8; ++q)
+                    add[8 * c + size_t(q)] = corner_key(new_cells[c], q);
+        });
+        tbb::parallel_sort(add.begin(), add.end());
+        add.erase(std::unique(add.begin(), add.end()), add.end());
+        std::vector<uint64_t> fresh;
+        fresh.reserve(add.size());
+        for (uint64_t k : add)
+            if (!std::binary_search(nodes.begin(), nodes.end(), k))
+                fresh.push_back(k);
+        std::vector<PsValue> fv(fresh.size());
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, fresh.size()), [&](const tbb::blocked_range<size_t>& r) {
+            for (size_t n = r.begin(); n < r.end(); ++n)
+                fv[n] = field.eval(node_pos(ps_ki(fresh[n]), ps_kj(fresh[n]), ps_kk(fresh[n])));
+        });
+        std::vector<uint64_t> mk;
+        std::vector<PsValue>  mv;
+        mk.reserve(nodes.size() + fresh.size());
+        mv.reserve(nodes.size() + fresh.size());
+        size_t x = 0, y = 0;
+        while (x < nodes.size() || y < fresh.size())
+            if (y == fresh.size() || (x < nodes.size() && nodes[x] < fresh[y]))
+                mk.push_back(nodes[x]), mv.push_back(nval[x++]);
+            else
+                mk.push_back(fresh[y]), mv.push_back(fv[y++]);
+        nodes.swap(mk);
+        nval.swap(mv);
+    };
+    add_nodes(cells);
+    size_t                closure_added = 0;
+    std::vector<uint64_t> frontier      = cells;
+    for (int pass = 0; pass < 100000 && !frontier.empty(); ++pass) {
+        tbb::enumerable_thread_specific<std::vector<uint64_t>> found;
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, frontier.size()), [&](const tbb::blocked_range<size_t>& r) {
+            std::vector<uint64_t>& out = found.local();
+            for (size_t c = r.begin(); c < r.end(); ++c) {
+                const uint64_t cell = frontier[c];
+                bool           in[8];
+                for (int q = 0; q < 8; ++q)
+                    in[q] = nval[size_t(std::lower_bound(nodes.begin(), nodes.end(), corner_key(cell, q)) - nodes.begin())].g < 0.;
+                const uint32_t ijk[3] = { ps_ki(cell), ps_kj(cell), ps_kk(cell) };
+                for (int axis = 0; axis < 3; ++axis)
+                    for (int side = 0; side < 2; ++side) {
+                        int n_in = 0;
+                        for (int q = 0; q < 8; ++q)
+                            if (((q >> axis) & 1) == side)
+                                n_in += in[q];
+                        if (n_in == 0 || n_in == 4)
+                            continue;
+                        if (side == 0 && ijk[axis] == 0)
+                            continue;
+                        uint32_t nb[3] = { ijk[0], ijk[1], ijk[2] };
+                        nb[axis]       = side == 0 ? nb[axis] - 1 : nb[axis] + 1;
+                        out.push_back(ps_key(nb[0], nb[1], nb[2]));
+                    }
+            }
+        });
+        std::vector<uint64_t> cand;
+        for (const std::vector<uint64_t>& f : found)
+            cand.insert(cand.end(), f.begin(), f.end());
+        std::sort(cand.begin(), cand.end());
+        cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
+        cand.erase(std::remove_if(cand.begin(), cand.end(), [&](uint64_t k) { return std::binary_search(cells.begin(), cells.end(), k); }),
+                   cand.end());
+        if (cand.empty())
+            break;
+        add_nodes(cand);
+        std::vector<uint64_t> merged(cells.size() + cand.size());
+        std::merge(cells.begin(), cells.end(), cand.begin(), cand.end(), merged.begin());
+        cells.swap(merged);
+        closure_added += cand.size();
+        frontier.swap(cand);
+    }
+    st.cells = cells.size();
     st.samples  = evaluated + nodes.size();
     st.field_s  = ps_secs_since(t1);
 
@@ -717,8 +762,10 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
 
     // ---- D23 (a): a finer voxel near the skin.
     double fine = h;
-    for (int round = 0; round < params.skin_refine; ++round) {
-        ps_refine_near_skin(claim, dist, field, 2. * h);
+    // (Not below 0.05 mm: a tenth of a nozzle width is the target, D23.)
+    for (int round = 0; round < params.skin_refine && fine * 0.5 >= 0.05 - 1e-9; ++round) {
+        // The band narrows each round: the seam needs the fine voxel, the face beside it does not.
+        ps_refine_near_skin(claim, dist, field, (round == 0 ? 1. : 0.5) * h);
         fine *= 0.5;
     }
     st.near_skin_voxel = fine;
@@ -750,7 +797,7 @@ PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, con
     st.queries   = queries.load();
     out.mesh     = std::move(claim);
     BOOST_LOG_TRIVIAL(info) << "Paint split claim: voxel " << st.voxel << " mm (near the skin " << st.near_skin_voxel << " mm), "
-                            << st.cells << " cells, " << st.samples << " samples, " << st.queries << " distance queries, "
+                            << st.cells << " cells (" << closure_added << " from the closure pass), " << st.samples << " samples, " << st.queries << " distance queries, "
                             << st.triangles << " triangles" << (st.complement ? " (complement)" : "") << "; setup " << st.setup_s
                             << " s, field " << st.field_s << " s, mesh " << st.mesh_s << " s, smooth " << st.smooth_s << " s";
     return out;
