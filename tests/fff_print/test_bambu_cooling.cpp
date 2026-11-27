@@ -96,6 +96,16 @@ size_t extrusions_at_part_fan(const std::string &gcode, int value)
     return n;
 }
 
+// The G-code without its config blocks (they list the settings, which differ between the compared slices).
+std::string without_config(std::string gcode)
+{
+    for (size_t start; (start = gcode.find("; CONFIG_BLOCK_START")) != std::string::npos;) {
+        const size_t end = gcode.find("; CONFIG_BLOCK_END", start);
+        gcode.erase(start, end == std::string::npos ? std::string::npos : end + 18 - start);
+    }
+    return gcode;
+}
+
 size_t count_lines_starting(const std::string &gcode, const std::string &prefix)
 {
     std::istringstream in(gcode);
@@ -229,7 +239,7 @@ TEST_CASE("Custom G-code reads the auxiliary fan settings", "[BambuCooling]")
         {"first_x_layer_fan_speed", "40"},
         {"additional_fan_full_speed_layer", "4"},
         {"layer_change_gcode", ";TEST_LAYER_Z=[layer_z]\n;AUX close=[close_additional_fan_first_x_layers[0]] "
-                               "speed=[first_x_layer_fan_speed[0]] full=[additional_fan_full_speed_layer[0]]"},
+                               "speed={int(first_x_layer_fan_speed[0])} full=[additional_fan_full_speed_layer[0]]"},
     });
     const std::string gcode = slice({TestMesh::cube_20x20x20}, config);
     // -1 reaches the templates as the part fan's count.
@@ -273,14 +283,15 @@ TEST_CASE("The pre-start time is unused while the printer moves fan commands its
     without.set_deserialize_strict({{"fan_speedup_time", "0.5"}, {"fan_speedup_overhangs", "1"}});
     DynamicPrintConfig with = without;
     with.set_deserialize_strict({{"pre_start_fan_time", "2"}});
-    CHECK(slice({make_sphere(15., PI / 24.)}, with) == slice({make_sphere(15., PI / 24.)}, without));
+    CHECK(without_config(slice({make_sphere(15., PI / 24.)}, with)) == without_config(slice({make_sphere(15., PI / 24.)}, without)));
 
     // Without the overhang fan there is nothing to start early.
     DynamicPrintConfig no_overhang_fan = sphere_overhang_config();
     no_overhang_fan.set_deserialize_strict({{"enable_overhang_bridge_fan", "0"}});
     DynamicPrintConfig no_overhang_fan_pre = no_overhang_fan;
     no_overhang_fan_pre.set_deserialize_strict({{"pre_start_fan_time", "2"}});
-    CHECK(slice({make_sphere(15., PI / 24.)}, no_overhang_fan_pre) == slice({make_sphere(15., PI / 24.)}, no_overhang_fan));
+    CHECK(without_config(slice({make_sphere(15., PI / 24.)}, no_overhang_fan_pre)) ==
+          without_config(slice({make_sphere(15., PI / 24.)}, no_overhang_fan)));
 }
 
 // Bambu parity PR 4b: the H3C's optional (left) auxiliary fan, "M106 P10" (Bambu Studio 02.09.01.70
