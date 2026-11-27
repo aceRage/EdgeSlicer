@@ -104,7 +104,7 @@ private:
     // Follow paint (the cut style since the owner's hand test 2026-11-26).
     float m_depth{ 0.f };      // mm under the selected skin; 0 = unlimited
     float m_lip_angle{ 0.f };  // unused since the nearest-skin cut (kept in the undo archive's layout)
-    float m_smoothing{ 0.3f }; // likewise
+    float m_smoothing{ 0.5f }; // "Smooth cut face" (D22, R1): 0..1, the seam stays pinned
     bool  m_snap_to_bed{ false }; // the flat core level
     bool  m_keep_as_parts{ false };
     bool  m_cut_only_painted_part{ false };
@@ -121,6 +121,8 @@ private:
     int                          m_masked_parts{ 0 };
     PaintSplitRegion             m_region;     // of m_preview_part, in the cut frame
     std::vector<indexed_triangle_set> m_claim_cut; // Show cut: per component, the cut surface inside the part
+    std::vector<std::string>     m_show_log;            // Show cut's time lines, for the Output Log
+    bool                         m_output_log_open{ false };
     TriangleMesh                 m_cut_mesh;            // m_preview_part's mesh in the cut frame
     GLModel                      m_plane_fill;          // the cut surfaces (band, skirt, core)
     GLModel                      m_plane_outline;       // the paint lines they follow
