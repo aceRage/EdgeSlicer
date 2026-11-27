@@ -63,21 +63,11 @@ FinBakeResult plan_fin_bake(const PrintObject &object, const FinBakeOptions &opt
         return res;
     }
 
-    // What the live generator keeps out of, less the other support (see FinBake.hpp): support blocker
-    // volumes, and painted blockers remove the fins they touch.
+    // What the live fins plan with too (fins win the space from other support, Fins.hpp): support
+    // blocker volumes in the way, and painted blockers remove the fins they touch.
     const size_t            n = layers.size();
-    std::vector<ExPolygons> obstacles(n), blockers(n);
-    {
-        const std::vector<Polygons> volumes = object.slice_support_blockers();
-        for (size_t i = 0; i < n && i < volumes.size(); ++i)
-            if (! volumes[i].empty())
-                obstacles[i] = union_ex(volumes[i]);
-        std::vector<Polygons> painted;
-        object.project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, painted);
-        for (size_t i = 0; i < n && i < painted.size(); ++i)
-            if (! painted[i].empty())
-                blockers[i] = union_ex(painted[i]);
-    }
+    std::vector<ExPolygons> obstacles, blockers;
+    fins::fin_blockers(object, obstacles, blockers);
     // The planner's counts (lean, painted spots) stay; the slicer adds its own.
     res.slices = fins::slice_fins(layers, mesh_st, res.plan, &obstacles, &blockers, &res.report, {});
 

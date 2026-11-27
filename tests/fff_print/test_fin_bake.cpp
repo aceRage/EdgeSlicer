@@ -32,6 +32,7 @@
 #include "libslic3r/Support/FinMesh.hpp"
 #include "libslic3r/Support/Fins.hpp"
 #include "libslic3r/Support/SupportLayer.hpp"
+#include "libslic3r/Support/SupportLayerAt.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
 #include "libslic3r/Utils.hpp"
@@ -582,5 +583,103 @@ TEST_CASE("Fin bake: the part's minimum gap and the refusals", "[SupportFins][Fi
         ModelObject *src = fb_add(model, FbPart::TiltedCube);
         CHECK(apply_fin_bake(model, *src, FinBakeResult{}, FinBakeOptions{}) == nullptr);
         CHECK(src->volumes.size() == 1);
+    }
+}
+
+// Fins win the space (owner, 2026-11-27): with normal or tree support under the part's lean side, the live
+// fins are planned as the bake plans them - nothing dropped - and the support is cut back from them by the
+// fin gap, so no support extrusion comes within the gap of a fin, on any support layer whose Z range
+// overlaps a fin layer.
+TEST_CASE("Support fins displace normal and tree support on the lean side", "[SupportFins][FinBake]")
+{
+    struct Case { const char *type; bool independent; };
+    for (const Case c : { Case{ "normal(auto)", false }, Case{ "tree(auto)", false }, Case{ "normal(auto)", true } }) {
+        DYNAMIC_SECTION(c.type << (c.independent ? ", independent support layer height" : ""))
+        {
+            FbSettings extra = { { "enable_support", "1" }, { "support_type", c.type }, { "support_threshold_angle", "50" } };
+            if (c.independent)
+                extra.insert(extra.end(), { { "independent_support_layer_height", "1" }, { "support_top_z_distance", "0.15" },
+                                            { "support_bottom_z_distance", "0.15" } });
+            FbPrint p;
+            fb_add(p.model, FbPart::TiltedCube);
+            fb_process(p.print, p.model, fb_config(extra));
+            const PrintObject &po = p.po();
+
+            // What the fins are with nothing in the way: the bake's plan, one-line tines as live.
+            FinBakeOptions opts;
+            opts.tines = FinBakeTines::OneLine;
+            const FinBakeResult plan = plan_fin_bake(po, opts);
+            REQUIRE(plan.error.empty());
+            REQUIRE(plan.tines > 0);
+            const fins::FinSettings st = fins::settings_of(po);
+
+            // Nothing dropped: no warning, and every planned tine printed as its own two-point path on its
+            // object layer.
+            bool warned = false;
+            for (const PrintStateBase::Warning &w : po.step_state_with_warnings(posSupportMaterial).warnings)
+                warned |= w.message_id == PrintStateBase::SlicingFinsTinesSkipped;
+            CHECK(! warned);
+            auto same = [](const Point &a, const Point &b) { return (a - b).cast<double>().norm() < 10.; };
+            size_t found = 0;
+            for (size_t i = 0; i < plan.slices.size(); ++i)
+                for (const Polyline &t : plan.slices[i].tines) {
+                    bool hit = false;
+                    for (const SupportLayer *sl : po.support_layers()) {
+                        if (std::abs(sl->print_z - po.layers()[i]->print_z) > EPSILON)
+                            continue;
+                        Polylines pls;
+                        sl->support_fills.collect_polylines(pls);
+                        for (const Polyline &pl : pls)
+                            if (pl.points.size() == 2 && ((same(pl.points[0], t.points[0]) && same(pl.points[1], t.points[1])) ||
+                                                          (same(pl.points[0], t.points[1]) && same(pl.points[1], t.points[0]))))
+                                hit = true;
+                    }
+                    found += hit ? 1 : 0;
+                }
+            CHECK(found == plan.tines);
+            // The fin walls are printed whole: each object layer's support islands hold its planned walls.
+            for (size_t i = 0; i < plan.slices.size(); ++i) {
+                if (plan.slices[i].body.empty())
+                    continue;
+                CHECK(fb_area(diff_ex(plan.slices[i].body, fb_live_islands(po, po.layers()[i]->print_z))) < 0.05);
+            }
+
+            // The support is cut back: no support extrusion within the gap of the fins' footprint.
+            double other_support = 0.;
+            size_t overlapping   = 0;
+            for (const SupportLayer *sl : po.support_layers()) {
+                const double top = sl->print_z, bottom = support_layer_util::support_layer_bottom(*sl);
+                ExPolygons   f;
+                for (size_t i = 0; i < plan.slices.size(); ++i) {
+                    const Layer &l = *po.layers()[i];
+                    if (l.print_z <= bottom + EPSILON || l.print_z - l.height >= top - EPSILON)
+                        continue;
+                    expolygons_append(f, plan.slices[i].body);
+                    expolygons_append(f, plan.slices[i].tine_areas);
+                }
+                ExPolygons islands = sl->support_islands;
+                expolygons_append(islands, sl->tree_support_areas());
+                f = union_ex(f);
+                other_support += fb_area(diff_ex(islands, offset_ex(f, scaled<float>(0.05))));
+                if (f.empty())
+                    continue;
+                // The ring the gap leaves round the fins: only a support extrusion can be in it (the fins'
+                // own loops run inside their walls and the tines inside their footprints).
+                const ExPolygons ring = diff_ex(offset_ex(f, scaled<float>(st.gap)), offset_ex(f, scaled<float>(0.01)));
+                Polylines        pls;
+                sl->support_fills.collect_polylines(pls);
+                const Polylines in_ring = intersection_pl(pls, ring);
+                double len = 0.;
+                for (const Polyline &pl : in_ring)
+                    len += unscaled(pl.length());
+                if (len > 0.05) {
+                    ++overlapping;
+                    WARN("support in the fin gap at z " << sl->print_z << ": " << len << " mm");
+                }
+            }
+            CHECK(overlapping == 0);
+            // There is support besides the fins, on the lean side too: the case is real.
+            CHECK(other_support > 20.);
+        }
     }
 }

@@ -23,9 +23,11 @@
 //    and parts of different objects never fuse, so the tines stop at the part's outline and only catch
 //    it. It does not move with the part.
 //
-// What the bake leaves out on purpose: other support. The live fins keep out of the support layers
-// around them; baked fins are model geometry, and the support generated around them afterwards keeps
-// out of them instead. Support blockers (volumes and paint) still remove the fins they touch.
+// Fins win the space from other support, live and baked alike: the live fins cut the support around
+// them back by the fin gap (displace_supports_for_fins), and baked fins are model geometry, which the
+// support generated afterwards keeps its distance from. So the bake plans the fins with nothing but
+// support blockers in the way, as the live fins do; the blockers (volumes and paint) still remove the
+// fins they touch.
 //
 // Either way the source object's live support_fins is switched off, so the fins are not printed twice.
 // The geometry is planned from the sliced object, so the plate must be sliced first; nothing links the

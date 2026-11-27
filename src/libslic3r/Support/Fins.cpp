@@ -504,6 +504,45 @@ std::vector<stabilizers::PaintedSpot> painted_fin_spots(const PrintObject &objec
     return stabilizers::painted_spots(*object.model_object(), object.trafo_centered(), 0., EnforcerBlockerType::SUPPORT_FIN);
 }
 
+void fin_blockers(const PrintObject &object, std::vector<ExPolygons> &volumes, std::vector<ExPolygons> &painted)
+{
+    const size_t n = object.layers().size();
+    volumes.assign(n, ExPolygons());
+    painted.assign(n, ExPolygons());
+    const std::vector<Polygons> v = object.slice_support_blockers();
+    for (size_t i = 0; i < n && i < v.size(); ++i)
+        if (! v[i].empty())
+            volumes[i] = union_ex(v[i]);
+    std::vector<Polygons> p;
+    object.project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, p);
+    for (size_t i = 0; i < n && i < p.size(); ++i)
+        if (! p[i].empty())
+            painted[i] = union_ex(p[i]);
+}
+
+std::vector<ExPolygons> fin_footprints(const PrintObject &object, const std::function<void()> &throw_if_canceled)
+{
+    std::vector<ExPolygons> out(object.layers().size());
+    if (! object.has_fins() || object.layers().size() < 2 || object.has_raft())
+        return out;
+    const std::vector<FinLayer> layers = layers_of(object);
+    const FinSettings           st     = settings_of(object);
+    const FinPlan               plan   = plan_fins(layers, st, painted_fin_spots(object));
+    if (plan.fins.empty())
+        return out;
+    std::vector<ExPolygons> volumes, painted;
+    fin_blockers(object, volumes, painted);
+    std::vector<FinSlice> slices = slice_fins(layers, st, plan, &volumes, &painted, nullptr, throw_if_canceled);
+    for (size_t i = 0; i < slices.size() && i < out.size(); ++i) {
+        if (slices[i].body.empty() && slices[i].tine_areas.empty())
+            continue;
+        ExPolygons f = std::move(slices[i].body);
+        expolygons_append(f, slices[i].tine_areas);
+        out[i] = union_ex(f);
+    }
+    return out;
+}
+
 std::vector<std::string> objects_with_live_fins(const Model &model, const DynamicPrintConfig &print_config)
 {
     // support_fins is an enum whose 0 is Off.
@@ -546,26 +585,17 @@ fins::FinReport generate_fin_supports(PrintObject &object, const std::function<v
 
     const size_t n = layers.size();
     // Keep out of: support blocker volumes, and every support layer whose Z range overlaps this object
-    // layer's (the support generators' and the stabilizers'), whatever its print_z.
-    std::vector<ExPolygons> obstacles(n);
-    {
-        const std::vector<Polygons> volumes = object.slice_support_blockers();
-        for (size_t i = 0; i < n; ++i) {
-            const Layer &layer = *object.layers()[i];
-            ExPolygons   o     = support_layer_util::support_coverage(object, layer.print_z - layer.height, layer.print_z);
-            if (i < volumes.size() && ! volumes[i].empty())
-                expolygons_append(o, union_ex(volumes[i]));
-            obstacles[i] = o.empty() ? o : union_ex(o);
-        }
-    }
-    // Painted support blockers remove the fins they touch.
-    std::vector<ExPolygons> blockers(n);
-    {
-        std::vector<Polygons> painted;
-        object.project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, painted);
-        for (size_t i = 0; i < n && i < painted.size(); ++i)
-            if (! painted[i].empty())
-                blockers[i] = union_ex(painted[i]);
+    // layer's, whatever its print_z. The support generators' support was cut back from the fins already
+    // (displace_supports_for_fins), so in practice that is the side stabilizers.
+    std::vector<ExPolygons> obstacles, blockers;
+    fins::fin_blockers(object, obstacles, blockers);
+    for (size_t i = 0; i < n; ++i) {
+        const Layer &layer = *object.layers()[i];
+        ExPolygons   o     = support_layer_util::support_coverage(object, layer.print_z - layer.height, layer.print_z);
+        if (o.empty())
+            continue;
+        expolygons_append(o, obstacles[i]);
+        obstacles[i] = union_ex(o);
     }
 
     std::vector<fins::FinSlice> slices = fins::slice_fins(layers, st, plan, &obstacles, &blockers, &report, throw_if_canceled);
@@ -646,6 +676,119 @@ fins::FinReport generate_fin_supports(PrintObject &object, const std::function<v
                              << report.blocked << " blocked, " << report.unreachable.size() << " unreachable, lean "
                              << report.lean.norm() << " mm";
     return report;
+}
+
+// --- fins win the space --------------------------------------------------------------------------
+
+namespace {
+
+// Cuts the extrusions of `entities` (recursively) outside `mask`: an extrusion that does not meet it is
+// kept as it is; a path, multi-path or loop that does is split into the open paths left outside it
+// (pieces shorter than `min_len` dropped); anything else that meets it is dropped whole.
+void fin_cut_entities(ExtrusionEntitiesPtr &entities, const Polygons &mask, const BoundingBox &mask_bb, double min_len, size_t &cut)
+{
+    ExtrusionEntitiesPtr out;
+    out.reserve(entities.size());
+    auto keep_pieces = [&](const ExtrusionPath &path) {
+        for (Polyline &piece : diff_pl(path.polyline, mask))
+            if (piece.length() >= min_len) {
+                auto *p     = static_cast<ExtrusionPath *>(path.clone());
+                p->polyline = std::move(piece);
+                out.push_back(p);
+            }
+    };
+    for (ExtrusionEntity *e : entities) {
+        if (auto *coll = dynamic_cast<ExtrusionEntityCollection *>(e)) {
+            fin_cut_entities(coll->entities, mask, mask_bb, min_len, cut);
+            if (coll->entities.empty())
+                delete coll;
+            else
+                out.push_back(coll);
+            continue;
+        }
+        const Polylines polys = e->as_polylines();
+        BoundingBox     bb;
+        for (const Polyline &pl : polys)
+            bb.merge(get_extents(pl));
+        if (! bb.defined || ! bb.overlap(mask_bb) || intersection_pl(polys, mask).empty()) {
+            out.push_back(e);
+            continue;
+        }
+        ++cut;
+        if (auto *path = dynamic_cast<ExtrusionPath *>(e))
+            keep_pieces(*path);
+        else if (auto *multi = dynamic_cast<ExtrusionMultiPath *>(e)) {
+            for (const ExtrusionPath &p : multi->paths)
+                keep_pieces(p);
+        } else if (auto *loop = dynamic_cast<ExtrusionLoop *>(e)) {
+            for (const ExtrusionPath &p : loop->paths)
+                keep_pieces(p);
+        }
+        delete e;
+    }
+    entities = std::move(out);
+}
+
+void fin_cut_areas(ExPolygons &areas, const Polygons &mask, const BoundingBox &mask_bb)
+{
+    if (areas.empty() || ! get_extents(areas).overlap(mask_bb) || intersection_ex(areas, mask).empty())
+        return;
+    areas = diff_ex(areas, mask);
+}
+
+} // namespace
+
+size_t displace_supports_for_fins(PrintObject &object, const std::function<void()> &throw_if_canceled)
+{
+    size_t cut = 0;
+    if (! object.has_fins() || object.layers().size() < 2 || object.has_raft() || object.support_layers().empty())
+        return cut;
+    const std::vector<ExPolygons> foot = fins::fin_footprints(object, throw_if_canceled);
+    if (std::all_of(foot.begin(), foot.end(), [](const ExPolygons &f) { return f.empty(); }))
+        return cut;
+    const fins::FinSettings st = fins::settings_of(object);
+    // Cut back by the fin gap, plus a line: the support's extrusions end a gap and half a line off the
+    // fins, and what remains of the support's islands stays out of the fins' own keep-out (half a line).
+    const float  dist    = scaled<float>(st.gap + st.line_width);
+    const double min_len = scaled<double>(st.line_width);
+
+    for (SupportLayer *sl : object.support_layers()) {
+        throw_if_canceled();
+        const double top    = sl->print_z;
+        const double bottom = support_layer_util::support_layer_bottom(*sl);
+        ExPolygons   f;
+        for (size_t i = 0; i < foot.size(); ++i) {
+            const Layer &l = *object.layers()[i];
+            // Overlapping Z ranges (open: only touching does not count).
+            if (foot[i].empty() || l.print_z <= bottom + EPSILON || l.print_z - l.height >= top - EPSILON)
+                continue;
+            expolygons_append(f, foot[i]);
+        }
+        if (f.empty())
+            continue;
+        const Polygons    mask    = offset(union_ex(f), dist);
+        const BoundingBox mask_bb = get_extents(mask);
+        fin_cut_entities(sl->support_fills.entities, mask, mask_bb, min_len, cut);
+        for (auto &[extruder, coll] : sl->interface_by_extruder)
+            fin_cut_entities(coll.entities, mask, mask_bb, min_len, cut);
+        fin_cut_areas(sl->support_islands, mask, mask_bb);
+        fin_cut_areas(sl->base_areas, mask, mask_bb);
+        fin_cut_areas(sl->roof_areas, mask, mask_bb);
+        fin_cut_areas(sl->roof_1st_layer, mask, mask_bb);
+        fin_cut_areas(sl->floor_areas, mask, mask_bb);
+        for (auto &part : sl->interlock_roof)
+            fin_cut_areas(part.areas, mask, mask_bb);
+        // A tree layer's outlines, with their boxes when they were kept in step.
+        const bool boxed = ! sl->lslices.empty() && sl->lslices_bboxes.size() == sl->lslices.size();
+        fin_cut_areas(sl->lslices, mask, mask_bb);
+        if (boxed) {
+            sl->lslices_bboxes.clear();
+            for (const ExPolygon &e : sl->lslices)
+                sl->lslices_bboxes.emplace_back(get_extents(e.contour));
+        }
+    }
+    BOOST_LOG_TRIVIAL(debug) << "Support fins: " << cut << " support extrusions cut back from the fins";
+    return cut;
 }
 
 } // namespace Slic3r
