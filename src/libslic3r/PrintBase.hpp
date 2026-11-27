@@ -172,7 +172,15 @@ public:
         // Per-object prime towers: a copy printed without its tower (over the cap of 2, no room beside it, or a feature
         // that does not combine with them), or the printer does not build per-object towers yet. Raised in psWipeTower,
         // so the preview and the CLI's result.json show it. Appended, own id.
-        SlicingObjectPrimeTower
+        SlicingObjectPrimeTower,
+        // Support fins (Support/Fins.hpp): refused for the object (a raft), painted fin spots no fin can reach, fins set to
+        // Painted with nothing painted, tines left out where other support prints, and the by-object clearance not seeing
+        // the fins. Raised in posSupportMaterial; appended, one id each.
+        SlicingFinsRefused,
+        SlicingFinsPaintUnreachable,
+        SlicingFinsPaintedUnpainted,
+        SlicingFinsTinesSkipped,
+        SlicingFinsByObjectFootprint
     };
 
     typedef size_t TimeStamp;

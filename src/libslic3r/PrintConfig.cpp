@@ -481,6 +481,13 @@ static const t_config_enum_values s_keys_map_StabilizerMode = {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(StabilizerMode)
 
+static const t_config_enum_values s_keys_map_SupportFinsMode = {
+    { "off",     sfmOff     },
+    { "auto",    sfmAuto    },
+    { "painted", sfmPainted }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportFinsMode)
+
 // Bambu Studio 02.09.01.70 PrintConfig.cpp:929-942.
 static const t_config_enum_values s_keys_map_ReduceInfillRetractionMode = {
     { "Disabled", rirDisabled },
@@ -9540,6 +9547,116 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Gyroid"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipRectilinear));
+
+    // Support fins (Support/Fins.hpp). The fin keys share OrcaSlicer PR #15839's support_fin_* names where the
+    // meaning is the same (thickness, height, spacing, tine spacing and depth, base rows, lean side only), so a
+    // later upstream merge maps cleanly; the switch, depth and gap are EdgeSlicer's own.
+    def = this->add("support_fins", coEnum);
+    def->label = L("Support fins");
+    def->category = L("Support");
+    def->tooltip = L("Thin breakaway walls that stand on the build plate beside a part printed tilted onto an edge or a "
+                     "corner, with one-layer tines that bridge the gap and fuse into the part every few millimetres, "
+                     "so the part cannot tip away from them. Printed with the support filament, speed and line width; "
+                     "Enable supports does not need to be on. Not with a raft.\n\n"
+                     "Off: no fins.\n"
+                     "Auto: fins on the side the part leans to (both sides when it is balanced on its edge), plus any "
+                     "fin spots painted with the support painting tool.\n"
+                     "Painted: only the painted fin spots.");
+    def->enum_keys_map = &ConfigOptionEnum<SupportFinsMode>::get_enum_values();
+    def->enum_values.push_back("off");
+    def->enum_values.push_back("auto");
+    def->enum_values.push_back("painted");
+    def->enum_labels.push_back(L("Off"));
+    def->enum_labels.push_back(L("Auto"));
+    def->enum_labels.push_back(L("Painted"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<SupportFinsMode>(sfmOff));
+
+    def = this->add("support_fin_thickness", coFloat);
+    def->label = L("Fin thickness");
+    def->category = L("Support");
+    def->tooltip = L("Thickness of each fin wall. Fins get a wider foot on their first millimetre.");
+    def->sidetext = L("mm");
+    def->min = 0.4;
+    def->max = 10.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.2));
+
+    def = this->add("support_fin_depth", coFloat);
+    def->label = L("Fin depth");
+    def->category = L("Support");
+    def->tooltip = L("How far a fin reaches out from the part on the build plate. Deeper fins stand steadier.");
+    def->sidetext = L("mm");
+    def->min = 1.;
+    def->max = 100.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(8.));
+
+    def = this->add("support_fin_height", coFloat);
+    def->label = L("Fin height");
+    def->category = L("Support");
+    def->tooltip = L("Fins are generated up to this height above the bed. Set to 0 to generate them up to the height of "
+                     "the part's centre of mass.");
+    def->sidetext = L("mm");
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("support_fin_spacing", coFloat);
+    def->label = L("Fin spacing");
+    def->category = L("Support");
+    def->tooltip = L("Largest distance between neighbouring fins along the part. A part shorter than half of it gets one fin "
+                     "in the middle, a longer one a fin near each end and more between them.");
+    def->sidetext = L("mm");
+    def->min = 2.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(15.));
+
+    def = this->add("support_fin_gap", coFloat);
+    def->label = L("Fin gap");
+    def->category = L("Support");
+    def->tooltip = L("Space between a fin and the part, beside it and under it. Only the tines cross it.");
+    def->sidetext = L("mm");
+    def->min = 0.1;
+    def->max = 2.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.2));
+
+    def = this->add("support_fin_tine_spacing", coFloat);
+    def->label = L("Tine spacing");
+    def->category = L("Support");
+    def->tooltip = L("Vertical distance between tines. A tine is a one-layer bead that bridges the gap and fuses the fin "
+                     "to the part, always on one of the part's own layers.");
+    def->sidetext = L("mm");
+    def->min = 0.5;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(3.));
+
+    def = this->add("support_fin_tine_depth", coFloat);
+    def->label = L("Tine depth");
+    def->category = L("Support");
+    def->tooltip = L("How far a tine reaches into the part. Deeper tines hold better but leave a larger mark after removal.");
+    def->sidetext = L("mm");
+    def->min = 0.;
+    def->max = 2.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.3));
+
+    def = this->add("support_fin_tine_base_rows", coBool);
+    def->label = L("Extra tines near the bed");
+    def->category = L("Support");
+    def->tooltip = L("Tines on every other layer up to 2 mm above the bed, where the part is least stable, before the "
+                     "tine spacing takes over.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("support_fin_lean_side_only", coBool);
+    def->label = L("Lean side only");
+    def->category = L("Support");
+    def->tooltip = L("Only generate fins on the side the part leans to (where its centre of mass lies beyond its bed "
+                     "contact). A part balanced on its edge gets fins on both sides either way.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
 
     // FDM hollowing: an even-thickness shell around an empty cavity (FDMHollowing.hpp).
     def = this->add("hollow_interior", coBool);

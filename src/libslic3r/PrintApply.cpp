@@ -1602,8 +1602,8 @@ void Print::update_shrinkage_compensation(size_t num_extruders)
         const PrintObjectConfig object_config = PrintObject::object_config_from_model_object(m_default_object_config, *model_object, num_filaments);
         if (PrintObject::has_support_material(object_config))
             append_support_extruders(object_config, (unsigned int)num_filaments, extruders);
-        else if (PrintObject::has_stabilizers(object_config) && object_config.support_filament != 0) {
-            // Stabilizers without supports print with the support filament; 0 follows the object.
+        else if (PrintObject::has_support_addons(object_config) && object_config.support_filament != 0) {
+            // Stabilizers or fins without supports print with the support filament; 0 follows the object.
             unsigned int i = (unsigned int)object_config.support_filament - 1;
             extruders.emplace_back((i >= num_filaments) ? 0 : i);
         }
