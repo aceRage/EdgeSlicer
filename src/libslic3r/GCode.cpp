@@ -13816,7 +13816,13 @@ bool GCode::needs_retraction(const Polyline& travel, ExtrusionRole role, LiftTyp
                     return false;
     }
     // BBS: need retract when long moving to print perimeter to avoid dropping of material
-    if (!is_perimeter(role) && m_config.reduce_infill_retraction && m_layer != nullptr && m_config.sparse_infill_density.value > 0 &&
+    // Bambu Studio 02.09.01.70 GCode.cpp:8466-8482: Enabled always skips, Auto skips only for filaments of
+    // None/Low metal stickiness (None = untested, treated as Low), Disabled always retracts. Only the gate
+    // is ported; the travel test stays ours (Bambu also changed it to ..._no_wall_crossing).
+    if (!is_perimeter(role) &&
+        reduce_infill_retraction_applies(ReduceInfillRetractionMode(m_config.reduce_infill_retraction_mode.value),
+                                         EXTRUDER_CONFIG(filament_metal_stickiness)) &&
+        m_layer != nullptr && m_config.sparse_infill_density.value > 0 &&
         m_retract_when_crossing_perimeters.travel_inside_internal_regions(*m_layer, travel))
         // Skip retraction if travel is contained in an internal slice *and*
         // internal infill is enabled (so that stringing is entirely not visible).

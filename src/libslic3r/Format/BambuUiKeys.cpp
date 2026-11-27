@@ -548,7 +548,6 @@ const std::vector<const char *> &reviewed_missing()
         "filament_adaptive_volumetric_speed",
         "filament_bridge_speed",
         "filament_enable_overhang_speed",
-        "filament_metal_stickiness",
         "filament_overhang_1_4_speed",
         "filament_overhang_2_4_speed",
         "filament_overhang_3_4_speed",

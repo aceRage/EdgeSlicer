@@ -1255,7 +1255,7 @@ static std::vector<std::string> s_Preset_print_options {
     "seam_position", "staggered_inner_seams", "seam_prefer_part_joints", "wall_sequence", "is_infill_first", "sparse_infill_density","fill_multiline", "adaptive_infill_mode", "adaptive_infill_interior_density", "adaptive_infill_gradient", "gyroid_optimized", "sparse_infill_pattern", "sparse_infill_smooth_factor", "lateral_lattice_angle_1", "lateral_lattice_angle_2", "infill_overhang_angle", "lightning_overhang_angle", "lightning_prune_angle", "lightning_straightening_angle", "top_surface_pattern", "top_surface_expansion", "top_surface_expansion_margin", "top_surface_expansion_direction", "undertop_surface_pattern", "bottom_surface_pattern", "top_surface_fill_order", "bottom_surface_fill_order",
     "infill_direction", "solid_infill_direction", "top_layer_direction", "bottom_layer_direction", "counterbore_hole_bridging","infill_shift_step", "sparse_infill_rotate_template", "solid_infill_rotate_template", "symmetric_infill_y_axis", "infill_complete_top","skeleton_infill_density", "infill_lock_depth", "skin_infill_depth", "skin_infill_density",
     "align_infill_direction_to_model", "center_of_surface_pattern", "separated_infills", "extra_solid_infills",
-    "minimum_sparse_infill_area", "reduce_infill_retraction","internal_solid_infill_pattern","gap_fill_target",
+    "minimum_sparse_infill_area", "reduce_infill_retraction_mode","internal_solid_infill_pattern","gap_fill_target",
     "ironing_type", "ironing_pattern", "ironing_flow", "ironing_speed", "ironing_spacing", "ironing_angle", "ironing_angle_fixed", "ironing_inset",
     "zaa_enabled", "zaa_minimize_perimeter_height", "zaa_dont_alternate_fill_direction", "zaa_min_z", "zaa_speed_scaling", "zaa_max_segment_rate", "curved_tops_enabled", "curved_tops_layers", "curved_tops_max_angle", "curved_tops_nozzle_tolerance", "curved_tops_pattern",
     // EdgeSlicer, curved tops P3: developer overrides (Developer mode only; never in a system or vendor profile).
@@ -1361,7 +1361,7 @@ static std::vector<std::string> s_Preset_filament_options {
     "graphic_effect_plate_temp", "graphic_effect_plate_temp_initial_layer",
     // "bed_type",
     //BBS:temperature_vitrification
-    "temperature_vitrification", "fins_extrude_safe_temp", "filament_prime_volume", "filament_prime_volume_nc", "filament_prime_tower_speed_factor_curve", "filament_adhesiveness_category", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
+    "temperature_vitrification", "fins_extrude_safe_temp", "filament_prime_volume", "filament_prime_volume_nc", "filament_prime_tower_speed_factor_curve", "filament_adhesiveness_category", "filament_metal_stickiness", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
     "slow_down_for_layer_cooling", "fan_min_speed",
     "fan_max_speed", "enable_overhang_bridge_fan", "overhang_fan_speed", "overhang_fan_threshold", "close_fan_the_first_x_layers", "full_fan_speed_layer", "initial_layer_fan_speed", "fan_cooling_layer_time", "slow_down_layer_time", "slow_down_min_speed",
     "filament_start_gcode", "filament_end_gcode", "filament_change_extrusion_role_gcode", "filament_plugin_config_overrides",

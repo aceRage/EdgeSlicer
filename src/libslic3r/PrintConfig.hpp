@@ -454,6 +454,33 @@ enum CurvedTopsPattern {
     ctpMonotonic, ctpConcentric, ctpSpiral
 };
 
+// Bambu Studio 02.09.01.70 (PrintConfig.hpp:403-417): reduce_infill_retraction_mode replaced the
+// reduce_infill_retraction bool. Auto skips the infill-travel retraction only for filaments of low
+// metal stickiness. PrintConfigDef::handle_legacy maps the old bool: 1 -> Enabled, 0 -> Disabled
+// (owner decision D3, 2026-11-25; Bambu itself maps 1 -> Auto).
+enum ReduceInfillRetractionMode {
+    rirDisabled = 0, // always retract normally
+    rirAuto     = 1, // skip only for filaments of None/Low metal stickiness
+    rirEnabled  = 2  // always skip in the infill area, whatever the filament
+};
+
+// Bambu Studio 02.09.01.70: how strongly a filament sticks to the metal nozzle (read by Auto above).
+// None (untested or custom filament) behaves like Low.
+enum FilamentMetalStickiness {
+    fmsNone = 0, fmsLow, fmsMedium, fmsHigh
+};
+
+// Whether the infill-travel retraction may be skipped for this mode and the current filament's
+// filament_metal_stickiness (Bambu Studio 02.09.01.70 GCode.cpp:8466-8478).
+inline bool reduce_infill_retraction_applies(ReduceInfillRetractionMode mode, int metal_stickiness)
+{
+    if (mode == rirEnabled)
+        return true;
+    if (mode == rirAuto)
+        return metal_stickiness == int(fmsNone) || metal_stickiness == int(fmsLow);
+    return false;
+}
+
 // Side stabilizers (Support/Stabilizers.hpp): off, the automatic rings plus any painted points, or the
 // painted points only. Replaced a bool; PrintConfigDef::handle_legacy maps 1 to auto and 0 to off.
 enum StabilizerMode {
@@ -1142,6 +1169,8 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InputShaperType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DraftShield)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CurvedTopsPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ReduceInfillRetractionMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentMetalStickiness)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerColumnShape)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeThumbnailsFormat)
@@ -2561,7 +2590,8 @@ PRINT_CONFIG_CLASS_DEFINE(
 )
 
 // Bambu Studio 2.9.1 Type 1 tower options of the H3C, a class of their own: GCodeConfig and PrintConfig are at
-// MSVC's limit of macro nesting (fatal error C1009 with one option more).
+// MSVC's limit of macro nesting (fatal error C1009 with one option more). Also the overflow for later
+// GCodeConfig-style options (filament_metal_stickiness).
 PRINT_CONFIG_CLASS_DEFINE(
     PrintTowerConfig,
 
@@ -2587,6 +2617,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,             filament_tower_interface_purge_volume))
     // Orca #12266: set the print temperature back as an interface purge starts, so the nozzle cools during it.
     ((ConfigOptionBool,               enable_tower_interface_cooldown_during_tower))
+    // Not a tower option: Bambu Studio 02.09.01.70 filament_metal_stickiness, read by reduce_infill_retraction_mode
+    // = Auto (GCode.cpp). It lives here because GCodeConfig is at the macro nesting limit (C1009).
+    ((ConfigOptionEnumsGeneric,       filament_metal_stickiness))
 )
 
 // This object is mapped to Perl as Slic3r::Config::Print.
@@ -2680,7 +2713,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionPoint,              best_object_pos))
     ((ConfigOptionFloats,             slow_down_min_speed))
     ((ConfigOptionFloats,             nozzle_diameter))
-    ((ConfigOptionBool,               reduce_infill_retraction))
+    ((ConfigOptionEnum<ReduceInfillRetractionMode>, reduce_infill_retraction_mode))
     ((ConfigOptionBool,               ooze_prevention))
     ((ConfigOptionString,             filename_format))
     ((ConfigOptionStrings,            post_process))
