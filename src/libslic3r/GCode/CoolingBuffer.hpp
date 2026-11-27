@@ -67,7 +67,10 @@ private:
     std::vector<float>          m_current_pos;
     // Current known fan speed or -1 if not known yet.
     int                         m_fan_speed;
-    int                         m_additional_fan_speed;
+    // Bambu Studio 02.09.01.70: the machine's auxiliary fans (P2, and P10 on the H3C) and the speed last
+    // written to each, -1 if not known yet.
+    std::vector<AuxFanSlot>     m_aux_fan_slots;
+    std::vector<int>            m_aux_fan_speeds;
     // Cached from GCodeWriter.
     // Printing extruder IDs, zero based.
     std::vector<unsigned int>   m_extruder_ids;

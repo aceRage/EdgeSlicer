@@ -530,7 +530,6 @@ const std::vector<const char *> &reviewed_missing()
 {
     static const std::vector<const char *> list = {
         "avoid_crossing_wall_includes_support",
-        "close_optional_fan_first_x_layers",
         "conformal_hub_radius",
         "conformal_infill",
         "conformal_link_flip_layers",
@@ -556,13 +555,10 @@ const std::vector<const char *> &reviewed_missing()
         "filament_scarf_length",
         "filament_scarf_seam_type",
         "filament_velocity_adaptation_factor",
-        "first_x_layer_optional_fan_speed",
         "first_x_layer_part_fan_speed",
         "infill_rotate_step",
         "machine_hotend_change_time",
         "modifier_ignore_infill",
-        "optional_cooling_fan_speed",
-        "optional_fan_full_speed_layer",
         "overhang_threshold_participating_cooling",
         "overhang_totally_speed",
         "override_filament_scarf_seam_setting",

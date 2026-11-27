@@ -36,6 +36,8 @@ CoolingBuffer::CoolingBuffer(GCode &gcodegen) : m_config(gcodegen.config()), m_t
     m_layer_timer_config.machine_tool_change_time.value      = 0.;
     m_layer_timer_config.machine_prepare_time.value          = 0.;
     m_layer_timer_config.machine_switch_extruder_time.value  = 0.;
+    m_aux_fan_slots = collect_aux_fan_slots(m_config);
+    m_aux_fan_speeds.assign(m_aux_fan_slots.size(), -1);
     this->reset(gcodegen.writer().get_position());
 
     const std::vector<Extruder> &extruders = gcodegen.writer().extruders();
@@ -55,7 +57,7 @@ void CoolingBuffer::reset(const Vec3d &position)
     m_current_pos[2] = float(position.z());
     m_current_pos[4] = float(get_value_at(m_config, m_config.travel_speed, ConfigFlowDomain::Process));
     m_fan_speed = -1;
-    m_additional_fan_speed = -1;
+    std::fill(m_aux_fan_speeds.begin(), m_aux_fan_speeds.end(), -1);
     m_current_fan_speed = -1;
     m_fan_speed_unknown = false;
     m_last_layer_slowed_down = false;
@@ -1153,15 +1155,23 @@ std::string CoolingBuffer::apply_layer_cooldown(
         float fan_min_speed = get_value_at(m_config, m_config.fan_min_speed, ConfigFlowDomain::Filament, m_current_extruder);
         float fan_speed_new = EXTRUDER_CONFIG(reduce_fan_stop_start_freq) ? fan_min_speed : 0;
         int close_fan_the_first_x_layers = EXTRUDER_CONFIG(close_fan_the_first_x_layers);
-        //BBS
-        // Bambu Studio 02.09.01.70 (GCodeEditor.cpp:469-479): the auxiliary fan has its own early layers, early speed
+        // Bambu Studio 02.09.01.70 (GCodeEditor.cpp:469-479): each auxiliary fan has its own early layers, early speed
         // and ramp, independent of the part cooling fan. EDGE: close_additional_fan_first_x_layers = -1 follows the part
         // fan's "No cooling for the first" (aux_fan_initial_layers), which is what the auxiliary fan did before.
-        const int additional_fan_speed_new = calc_aux_fan_speed(layer_id,
-            int(get_value_at(m_config, m_config.additional_cooling_fan_speed, ConfigFlowDomain::Filament, m_current_extruder)),
-            int(EXTRUDER_CONFIG(first_x_layer_fan_speed)),
-            aux_fan_initial_layers(EXTRUDER_CONFIG(close_additional_fan_first_x_layers), close_fan_the_first_x_layers),
-            EXTRUDER_CONFIG(additional_fan_full_speed_layer));
+        std::vector<int> aux_fan_speed_new(m_aux_fan_slots.size(), 0);
+        for (size_t i = 0; i < m_aux_fan_slots.size(); ++i) {
+            if (m_aux_fan_slots[i].optional)
+                aux_fan_speed_new[i] = calc_aux_fan_speed(layer_id, EXTRUDER_CONFIG(optional_cooling_fan_speed),
+                                                          int(EXTRUDER_CONFIG(first_x_layer_optional_fan_speed)),
+                                                          EXTRUDER_CONFIG(close_optional_fan_first_x_layers),
+                                                          EXTRUDER_CONFIG(optional_fan_full_speed_layer));
+            else
+                aux_fan_speed_new[i] = calc_aux_fan_speed(layer_id,
+                                                          int(get_value_at(m_config, m_config.additional_cooling_fan_speed, ConfigFlowDomain::Filament, m_current_extruder)),
+                                                          int(EXTRUDER_CONFIG(first_x_layer_fan_speed)),
+                                                          aux_fan_initial_layers(EXTRUDER_CONFIG(close_additional_fan_first_x_layers), close_fan_the_first_x_layers),
+                                                          EXTRUDER_CONFIG(additional_fan_full_speed_layer));
+        }
         // Is the fan speed ramp enabled?
         int full_fan_speed_layer = EXTRUDER_CONFIG(full_fan_speed_layer);
         // ORCA: explicit per-filament first-layer override (-1 = disabled, 0-100 = forced PWM percent on layer 0).
@@ -1193,7 +1203,7 @@ std::string CoolingBuffer::apply_layer_cooldown(
             supp_interface_fan_control  = false;
             ironing_fan_speed           = initial_layer_fan_speed;
             ironing_fan_control         = false;
-            // The auxiliary fan keeps its own speed (independent of the part-cooling override).
+            // The auxiliary fans keep their own speeds (independent of the part-cooling override).
         } else if (int(layer_id) >= close_fan_the_first_x_layers) {
             float   fan_max_speed             = get_value_at(m_config, m_config.fan_max_speed, ConfigFlowDomain::Filament, m_current_extruder);
             float slow_down_layer_time = float(EXTRUDER_CONFIG(slow_down_layer_time));
@@ -1276,10 +1286,14 @@ std::string CoolingBuffer::apply_layer_cooldown(
             }
         }
         //BBS
-        if (additional_fan_speed_new != m_additional_fan_speed) {
-            m_additional_fan_speed = additional_fan_speed_new;
-            if (immediately_apply && m_config.auxiliary_fan.value)
-                new_gcode += GCodeWriter::set_additional_fan(m_additional_fan_speed);
+        for (size_t i = 0; i < m_aux_fan_slots.size(); ++i) {
+            // A fan without independent control just mirrors the standard one.
+            const int speed_new = m_aux_fan_slots[i].independent ? aux_fan_speed_new[i] : aux_fan_speed_new[0];
+            if (speed_new == m_aux_fan_speeds[i])
+                continue;
+            m_aux_fan_speeds[i] = speed_new;
+            if (immediately_apply)
+                new_gcode += GCodeWriter::set_additional_fan(m_aux_fan_slots[i].gcode_index, speed_new);
         }
         // BBS: the pre-start time of this filament, while its overhangs raise the fan.
         pre_start_overhang_fan_time = overhang_fan_control && m_config.fan_speedup_time.value == 0. ?
@@ -1412,8 +1426,9 @@ std::string CoolingBuffer::apply_layer_cooldown(
                 fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] = true;
                 need_set_fan = true;
             }
-            if (m_additional_fan_speed != -1 && m_config.auxiliary_fan.value)
-                new_gcode += GCodeWriter::set_additional_fan(m_additional_fan_speed);
+            for (size_t i = 0; i < m_aux_fan_slots.size(); ++ i)
+                if (m_aux_fan_speeds[i] != -1)
+                    new_gcode += GCodeWriter::set_additional_fan(m_aux_fan_slots[i].gcode_index, m_aux_fan_speeds[i]);
         } else if (line->type & CoolingLine::TYPE_OBJECT_START) {
             new_gcode.append(line_start, line_end - line_start);
             if (pre_started && m_current_fan_speed != -1)

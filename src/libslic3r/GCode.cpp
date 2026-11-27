@@ -5293,8 +5293,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // Disable fan.
     if (m_config.auxiliary_fan.value && print.config().close_fan_the_first_x_layers.get_at(initial_extruder_id)) {
         file.write(m_writer.set_fan(0));
-        // BBS: disable additional fan
-        file.write(m_writer.set_additional_fan(0));
+        // BBS: disable every additional fan (P2, and P10 where the machine has the optional one)
+        for (const AuxFanSlot &slot : collect_aux_fan_slots(m_config))
+            file.write(m_writer.set_additional_fan(slot.gcode_index, 0));
     }
 
     std::string machine_start_gcode = this->placeholder_parser_process("machine_start_gcode", print.config().machine_start_gcode.value,
@@ -5751,9 +5752,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     }
 
     file.write(m_writer.set_fan(0));
-    // BBS: make sure the additional fan is closed when end
-    if (m_config.auxiliary_fan.value)
-        file.write(m_writer.set_additional_fan(0));
+    // BBS: make sure every additional fan is closed when end
+    for (const AuxFanSlot &slot : collect_aux_fan_slots(m_config))
+        file.write(m_writer.set_additional_fan(slot.gcode_index, 0));
     if (is_bbl_printers) {
         // BBS: close spaghetti detector
         // Note: M981 is also used to tell xcam the last layer is finished, so we need always send it even if spaghetti option is disabled.

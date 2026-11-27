@@ -481,6 +481,29 @@ inline bool reduce_infill_retraction_applies(ReduceInfillRetractionMode mode, in
     return false;
 }
 
+// Bambu Studio 02.09.01.70: physical side of an auxiliary part cooling fan (aux_fan_standard_side, GUI only).
+enum FanDirection {
+    fdUndefine = 0, fdLeft, fdRight, fdBoth
+};
+
+// Bambu Studio 02.09.01.70 (PrintConfig.hpp:795-813): the "M106 P<index>" of the standard and the optional
+// auxiliary part cooling fan.
+static constexpr int AUX_FAN_STANDARD_GCODE_INDEX = 2;
+static constexpr int AUX_FAN_OPTIONAL_GCODE_INDEX = 10;
+
+// One auxiliary part cooling fan of the current machine.
+struct AuxFanSlot
+{
+    bool optional;    // false: the standard fan (P2), true: the optional fan (P10, the H3C's left fan)
+    int  gcode_index; // the P index used in "M106 P<index>"
+    // When false, this slot mirrors the speed computed for the standard fan instead of reading its own
+    // filament settings (sync_auxiliary_fan_to_second_fan).
+    bool independent;
+};
+
+// The auxiliary fans of this machine, the standard one first; empty when auxiliary_fan is off.
+std::vector<AuxFanSlot> collect_aux_fan_slots(const ConfigBase &config);
+
 // Bambu Studio 02.09.01.70 (GCodeEditor.cpp:363-376): one auxiliary fan's speed in percent on a layer.
 // Below initial_layers the fan runs at initial_layer_speed; between that and full_speed_layer it ramps
 // linearly; from there on it runs at target_speed.
@@ -1193,6 +1216,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CurvedTopsPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ReduceInfillRetractionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentMetalStickiness)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FanDirection)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerColumnShape)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeThumbnailsFormat)
@@ -2464,6 +2488,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<NozzleType>,    nozzle_type))
     ((ConfigOptionInt,                 nozzle_hrc))
     ((ConfigOptionBool,                auxiliary_fan))
+    // Bambu Studio 02.09.01.70: the optional auxiliary fan (P10; the H3C's left fan) and its control.
+    ((ConfigOptionBool,                sync_auxiliary_fan_to_second_fan))
+    ((ConfigOptionBool,                aux_fan_independent_control))
+    ((ConfigOptionEnum<FanDirection>,  aux_fan_standard_side))
     ((ConfigOptionBool,                support_air_filtration))
     ((ConfigOptionEnum<PrinterStructure>,printer_structure))
     ((ConfigOptionBool,                farthest_point_timelapse))
@@ -2655,11 +2683,15 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
 
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))
-    // Bambu Studio 02.09.01.70: the auxiliary fan's own early layers and ramp, and the early start of the part
-    // fan before overhangs.
+    // Bambu Studio 02.09.01.70: the auxiliary fans' own early layers and ramp, the optional fan's speed, and
+    // the early start of the part fan before overhangs.
     ((ConfigOptionInts,               close_additional_fan_first_x_layers))
     ((ConfigOptionFloats,             first_x_layer_fan_speed))
     ((ConfigOptionInts,               additional_fan_full_speed_layer))
+    ((ConfigOptionInts,               optional_cooling_fan_speed))
+    ((ConfigOptionInts,               close_optional_fan_first_x_layers))
+    ((ConfigOptionFloats,             first_x_layer_optional_fan_speed))
+    ((ConfigOptionInts,               optional_fan_full_speed_layer))
     ((ConfigOptionFloats,             pre_start_fan_time))
     ((ConfigOptionBool,               reduce_crossing_wall))
     ((ConfigOptionFloatOrPercent,     max_travel_detour_distance))

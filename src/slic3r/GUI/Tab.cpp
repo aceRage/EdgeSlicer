@@ -6694,7 +6694,9 @@ void TabFilament::build()
         optgroup->append_single_option_line("support_material_interface_fan_speed");
         optgroup->append_single_option_line("ironing_fan_speed"); // ORCA: Add support for ironing fan speed control
 
-        // Bambu Studio 02.09.01.70 (Tab.cpp): the auxiliary part cooling fan's group, with its own early layers and ramp.
+        // Bambu Studio 02.09.01.70 (Tab.cpp): one group per auxiliary part cooling fan, each with its own early
+        // layers and ramp. Whether the optional (left) fan's group shows, and how both are titled, is decided per
+        // printer in toggle_options().
         auto build_aux_fan_group = [page](const wxString &group_title, const std::string &initial_layers_key,
                                           const std::string &initial_speed_key, const std::string &full_speed_layer_key,
                                           const std::string &speed_key) {
@@ -6719,8 +6721,12 @@ void TabFilament::build()
             aux_optgroup->append_line(aux_line);
             return aux_optgroup;
         };
-        build_aux_fan_group(L("Auxiliary part cooling fan"), "close_additional_fan_first_x_layers", "first_x_layer_fan_speed",
-                            "additional_fan_full_speed_layer", "additional_cooling_fan_speed");
+        m_aux_fan_standard_optgroup = build_aux_fan_group(L("Auxiliary part cooling fan"), "close_additional_fan_first_x_layers",
+                                                          "first_x_layer_fan_speed", "additional_fan_full_speed_layer",
+                                                          "additional_cooling_fan_speed");
+        m_aux_fan_optional_optgroup = build_aux_fan_group(L("Auxiliary part cooling fan (left)"), "close_optional_fan_first_x_layers",
+                                                          "first_x_layer_optional_fan_speed", "optional_fan_full_speed_layer",
+                                                          "optional_cooling_fan_speed");
 
         optgroup = page->new_optgroup(L("Exhaust fan"),L"param_cooling_exhaust");
 
@@ -7318,6 +7324,28 @@ void TabFilament::toggle_options()
       for (auto el : { "additional_cooling_fan_speed", "close_additional_fan_first_x_layers", "first_x_layer_fan_speed",
                        "additional_fan_full_speed_layer" })
           toggle_option(el, has_aux_fan);
+
+      // Bambu Studio 02.09.01.70 (Tab.cpp:5217-5245): only printers whose optional auxiliary fan is driven separately
+      // (the H3C) get its group. Left and right are labels only: the settings belong to the standard and the optional fan.
+      {
+          const std::vector<AuxFanSlot> slots = collect_aux_fan_slots(cfg);
+          const bool show_optional = has_aux_fan && slots.size() > 1 && slots.back().independent;
+          for (auto el : { "close_optional_fan_first_x_layers", "first_x_layer_optional_fan_speed", "optional_fan_full_speed_layer",
+                           "optional_cooling_fan_speed" })
+              toggle_line(el, show_optional);
+          FanDirection standard_side = fdRight;
+          if (const ConfigOption *side_opt = cfg.option("aux_fan_standard_side"))
+              standard_side = FanDirection(side_opt->getInt());
+          if (m_aux_fan_standard_optgroup && m_aux_fan_standard_optgroup->stb) {
+              wxString title = _L("Auxiliary part cooling fan");
+              if (show_optional)
+                  title = standard_side == fdLeft ? _L("Auxiliary part cooling fan (left)") : _L("Auxiliary part cooling fan (right)");
+              m_aux_fan_standard_optgroup->set_name(title);
+          }
+          if (show_optional && m_aux_fan_optional_optgroup && m_aux_fan_optional_optgroup->stb)
+              m_aux_fan_optional_optgroup->set_name(standard_side == fdLeft ? _L("Auxiliary part cooling fan (right)")
+                                                                            : _L("Auxiliary part cooling fan (left)"));
+      }
 
       // Orca #13228: the exhaust fan speeds apply only where their override is on.
       bool activate_air_filtration = m_config->opt_bool("activate_air_filtration", 0);

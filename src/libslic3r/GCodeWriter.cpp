@@ -1498,9 +1498,15 @@ std::string GCodeWriter::set_fan(unsigned int speed) const
 //BBS: set additional fan speed for BBS machine only
 std::string GCodeWriter::set_additional_fan(unsigned int speed)
 {
+    return set_additional_fan(AUX_FAN_STANDARD_GCODE_INDEX, speed);
+}
+
+// Bambu Studio 02.09.01.70: P2 is the standard auxiliary fan, P10 the optional one (the H3C's left fan).
+std::string GCodeWriter::set_additional_fan(int gcode_index, unsigned int speed)
+{
     std::ostringstream gcode;
 
-    gcode << "M106 " << "P2 " << "S" << (int)(255.0 * speed / 100.0);
+    gcode << "M106 " << "P" << gcode_index << " " << "S" << (int)(255.0 * speed / 100.0);
     if (GCodeWriter::full_gcode_comment) {
         if (speed == 0)
             gcode << " ; disable additional fan ";

@@ -282,3 +282,82 @@ TEST_CASE("The pre-start time is unused while the printer moves fan commands its
     no_overhang_fan_pre.set_deserialize_strict({{"pre_start_fan_time", "2"}});
     CHECK(slice({make_sphere(15., PI / 24.)}, no_overhang_fan_pre) == slice({make_sphere(15., PI / 24.)}, no_overhang_fan));
 }
+
+// Bambu parity PR 4b: the H3C's optional (left) auxiliary fan, "M106 P10" (Bambu Studio 02.09.01.70
+// PrintConfig.cpp:8284-8303, GCodeEditor.cpp:469-506).
+TEST_CASE("A printer declares its auxiliary fans", "[BambuCooling][H3C]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"auxiliary_fan", "0"}, {"aux_fan_independent_control", "1"}});
+    CHECK(collect_aux_fan_slots(config).empty());
+
+    config.set_deserialize_strict({{"auxiliary_fan", "1"}, {"aux_fan_independent_control", "0"}});
+    std::vector<AuxFanSlot> slots = collect_aux_fan_slots(config);
+    REQUIRE(slots.size() == 1);
+    CHECK(! slots[0].optional);
+    CHECK(slots[0].gcode_index == 2);
+
+    config.set_deserialize_strict({{"aux_fan_independent_control", "1"}});
+    slots = collect_aux_fan_slots(config);
+    REQUIRE(slots.size() == 2);
+    CHECK(slots[1].optional);
+    CHECK(slots[1].gcode_index == 10);
+    CHECK(slots[1].independent);
+
+    config.set_deserialize_strict({{"aux_fan_independent_control", "0"}, {"sync_auxiliary_fan_to_second_fan", "1"}});
+    slots = collect_aux_fan_slots(config);
+    REQUIRE(slots.size() == 2);
+    CHECK(! slots[1].independent);
+
+    CHECK(GCodeWriter::set_additional_fan(10, 80).rfind("M106 P10 S204", 0) == 0);
+    CHECK(GCodeWriter::set_additional_fan(50).rfind("M106 P2 S127", 0) == 0);
+    CHECK(print_config_def.get("aux_fan_standard_side")->get_default_value<ConfigOptionEnum<FanDirection>>()->value == fdRight);
+}
+
+TEST_CASE("The optional auxiliary fan runs its own speeds", "[BambuCooling][H3C]")
+{
+    DynamicPrintConfig config = aux_fan_config(1);
+    config.set_deserialize_strict({
+        {"aux_fan_independent_control", "1"},
+        {"close_additional_fan_first_x_layers", "1"},
+        {"first_x_layer_fan_speed", "40"},
+        {"optional_cooling_fan_speed", "80"},
+        {"close_optional_fan_first_x_layers", "2"},
+        {"first_x_layer_optional_fan_speed", "30"},
+        {"optional_fan_full_speed_layer", "0"},
+    });
+    const std::string      gcode    = slice({TestMesh::cube_20x20x20}, config);
+    const std::vector<int> standard = aux_fan_per_layer(gcode, 2);
+    const std::vector<int> optional = aux_fan_per_layer(gcode, 10);
+    REQUIRE(standard.size() > 3);
+    REQUIRE(optional.size() > 3);
+    CHECK(standard[0] == 102); // 40 %
+    CHECK(standard[1] == 178); // 70 %
+    CHECK(optional[0] == 76);  // 30 %
+    CHECK(optional[1] == 76);
+    CHECK(optional[2] == 204); // 80 %
+    CHECK(optional[3] == 204);
+    // Both fans are switched off at the end.
+    CHECK(gcode.find("M106 P10 S0") != std::string::npos);
+    CHECK(gcode.rfind("M106 P10 S0") > gcode.rfind("M106 P10 S204"));
+}
+
+TEST_CASE("A synced optional auxiliary fan mirrors the standard one", "[BambuCooling][H3C]")
+{
+    DynamicPrintConfig config = aux_fan_config(1);
+    config.set_deserialize_strict({
+        {"sync_auxiliary_fan_to_second_fan", "1"},
+        {"close_additional_fan_first_x_layers", "1"},
+        {"first_x_layer_fan_speed", "40"},
+        {"optional_cooling_fan_speed", "80"},
+    });
+    const std::string gcode = slice({TestMesh::cube_20x20x20}, config);
+    CHECK(aux_fan_per_layer(gcode, 10) == aux_fan_per_layer(gcode, 2));
+}
+
+TEST_CASE("Printers without the optional auxiliary fan never drive P10", "[BambuCooling][H3C]")
+{
+    DynamicPrintConfig config = aux_fan_config(1);
+    config.set_deserialize_strict({{"optional_cooling_fan_speed", "80"}});
+    CHECK(count_lines_starting(slice({TestMesh::cube_20x20x20}, config), "M106 P10") == 0);
+}

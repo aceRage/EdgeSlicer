@@ -208,6 +208,8 @@ public:
     std::string set_fan(unsigned int speed) const;
     //BBS: set additional fan speed for BBS machine only
     static std::string set_additional_fan(unsigned int speed);
+    // "M106 P<gcode_index>": AUX_FAN_STANDARD_GCODE_INDEX (2) or AUX_FAN_OPTIONAL_GCODE_INDEX (10).
+    static std::string set_additional_fan(int gcode_index, unsigned int speed);
     static std::string set_exhaust_fan(int speed,bool add_eol);
     //BBS
     void set_object_start_str(std::string start_string) { m_gcode_label_objects_start = start_string; }
