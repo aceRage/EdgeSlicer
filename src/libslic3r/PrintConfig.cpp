@@ -13377,10 +13377,9 @@ bool DynamicPrintConfig::keeps_object_prime_towers(const ConfigBase &config, int
     const ConfigOption *sequence = config.option("print_sequence");
     if (sequence == nullptr || PrintSequence(sequence->getInt()) != PrintSequence::ByObject)
         return false;
-    if (const ConfigOption *spiral = config.option("spiral_mode"); spiral != nullptr && spiral->getBool())
-        return false;
-    // Type 2 towers (U1, Voron, Prusa MMU) per object come in a later PR: they keep today's "no tower".
-    return resolve_wipe_tower_type(config) == WipeTowerType::Type1;
+    // Both tower types build per-object towers: Type 1 (Bambu Lab) and, since PR 4, Type 2 (U1, Voron, Prusa MMU).
+    const ConfigOption *spiral = config.option("spiral_mode");
+    return spiral == nullptr || !spiral->getBool();
 }
 
 t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int used_filaments)
