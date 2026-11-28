@@ -2599,10 +2599,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<NozzleType>,    nozzle_type))
     ((ConfigOptionInt,                 nozzle_hrc))
     ((ConfigOptionBool,                auxiliary_fan))
-    // Bambu Studio 02.09.01.70: the optional auxiliary fan (P10; the H3C's left fan) and its control.
-    ((ConfigOptionBool,                sync_auxiliary_fan_to_second_fan))
-    ((ConfigOptionBool,                aux_fan_independent_control))
-    ((ConfigOptionEnum<FanDirection>,  aux_fan_standard_side))
     ((ConfigOptionBool,                support_air_filtration))
     ((ConfigOptionEnum<PrinterStructure>,printer_structure))
     ((ConfigOptionBool,                farthest_point_timelapse))
@@ -2814,23 +2810,34 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              min_temperature_when_ec))
 )
 
+// Bambu Studio 02.09.01.70 auxiliary fans and pre-start fan time, a class of its own for the same MSVC macro
+// nesting limit (C1009) as PrintIdleFloorConfig.
+PRINT_CONFIG_CLASS_DEFINE(
+    PrintAuxFanConfig,
+
+    // The optional auxiliary fan (P10; the H3C's left fan) and its control (printer keys).
+    ((ConfigOptionBool,                sync_auxiliary_fan_to_second_fan))
+    ((ConfigOptionBool,                aux_fan_independent_control))
+    ((ConfigOptionEnum<FanDirection>,  aux_fan_standard_side))
+    // The auxiliary fans' own early layers and ramp, the optional fan's speed, and the early start of the part
+    // fan before overhangs (filament keys).
+    ((ConfigOptionInts,                close_additional_fan_first_x_layers))
+    ((ConfigOptionFloats,              first_x_layer_fan_speed))
+    ((ConfigOptionInts,                additional_fan_full_speed_layer))
+    ((ConfigOptionInts,                optional_cooling_fan_speed))
+    ((ConfigOptionInts,                close_optional_fan_first_x_layers))
+    ((ConfigOptionFloats,              first_x_layer_optional_fan_speed))
+    ((ConfigOptionInts,                optional_fan_full_speed_layer))
+    ((ConfigOptionFloats,              pre_start_fan_time))
+)
+
 // This object is mapped to Perl as Slic3r::Config::Print.
 PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     PrintConfig,
-    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintIdleFloorConfig),
+    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintIdleFloorConfig, PrintAuxFanConfig),
 
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))
-    // Bambu Studio 02.09.01.70: the auxiliary fans' own early layers and ramp, the optional fan's speed, and
-    // the early start of the part fan before overhangs.
-    ((ConfigOptionInts,               close_additional_fan_first_x_layers))
-    ((ConfigOptionFloats,             first_x_layer_fan_speed))
-    ((ConfigOptionInts,               additional_fan_full_speed_layer))
-    ((ConfigOptionInts,               optional_cooling_fan_speed))
-    ((ConfigOptionInts,               close_optional_fan_first_x_layers))
-    ((ConfigOptionFloats,             first_x_layer_optional_fan_speed))
-    ((ConfigOptionInts,               optional_fan_full_speed_layer))
-    ((ConfigOptionFloats,             pre_start_fan_time))
     ((ConfigOptionBool,               reduce_crossing_wall))
     ((ConfigOptionFloatOrPercent,     max_travel_detour_distance))
     ((ConfigOptionPoints,             printable_area))

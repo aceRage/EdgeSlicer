@@ -14392,7 +14392,7 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
         return 1; \
     }
 PRINT_CONFIG_CACHE_INITIALIZE((
-    PrintObjectConfig, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintIdleFloorConfig, PrintConfig, FullPrintConfig,
+    PrintObjectConfig, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintIdleFloorConfig, PrintAuxFanConfig, PrintConfig, FullPrintConfig,
     SLAMaterialConfig, SLAPrintConfig, SLAPrintObjectConfig, SLAPrinterConfig, SLAFullPrintConfig))
 static int print_config_static_initialized = print_config_static_initializer();
 
@@ -14407,7 +14407,7 @@ static int print_config_static_initialized = print_config_static_initializer();
         visit_option_pairs(*dst, *this, [](const char*, ConfigOption &a, const ConfigOption &b) { a.set(&b); return true; }); \
         return true; \
     }
-BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_APPLY_TO_DEFINITION, _, (PrintObjectConfig)(PrintRegionConfig)(MachineEnvelopeConfig)(GCodeConfig)(PrintTowerConfig)(PrintIdleFloorConfig)
+BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_APPLY_TO_DEFINITION, _, (PrintObjectConfig)(PrintRegionConfig)(MachineEnvelopeConfig)(GCodeConfig)(PrintTowerConfig)(PrintIdleFloorConfig)(PrintAuxFanConfig)
     (SLAMaterialConfig)(SLAPrintConfig)(SLAPrintObjectConfig)(SLAPrinterConfig))
 #undef PRINT_CONFIG_APPLY_TO_DEFINITION
 
