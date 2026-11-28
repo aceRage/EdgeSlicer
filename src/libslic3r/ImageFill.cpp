@@ -456,7 +456,7 @@ bool ImageFillParams::from_string(const std::string &s, ImageFillParams &out)
         else if (k == "bg")    out.background = std::atoi(val.c_str());
         else if (k == "sel")   out.selection_state = std::atoi(val.c_str());
         else if (k == "rs")    out.surfaces = std::max(0, std::min(3, std::atoi(val.c_str())));
-        else if (k == "wm")    out.wall_method = std::max(0, std::min(1, std::atoi(val.c_str())));
+        else if (k == "wm")    out.wall_method = std::max(0, std::min(2, std::atoi(val.c_str())));
         else if (k == "wd")    out.stripe_depth_pct = std::max(5, std::min(80, std::atoi(val.c_str())));
         else if (k == "pu")    out.offset_u = float(std::atof(val.c_str()));
         else if (k == "pv")    out.offset_v = float(std::atof(val.c_str()));

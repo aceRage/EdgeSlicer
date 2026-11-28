@@ -327,6 +327,41 @@ bool build_context_for_row(const PrintObject &object, const PrintRegion &region,
     // its top-edge colouring still works.
     ctx.wall_method  = (ctx.surfaces & IMAGE_FILL_SURFACE_WALLS) != 0 ? ctx.params.wall_method : IMAGE_FILL_WALL_RUNS;
     ctx.stripe_depth = float(ctx.params.stripe_depth_pct) / 100.f;
+    ctx.layer_index  = layer_index;
+
+    // Dual wall dithering: the pair table for the row's filaments, backed by the part's own
+    // filament (what the deeper walls and the infill print with). A row that cannot have one
+    // (too many filaments for the model) falls back to plain colour runs.
+    if (ctx.wall_method == IMAGE_FILL_WALL_DWD) {
+        const ConfigOptionFloats &tds = print->config().filament_transmission_distance;
+        const float               width = flow_width_mm > 0.05f ? flow_width_mm : 0.45f;
+        std::vector<DwdFilament>  filaments;
+        auto add = [&](int id) {
+            DwdFilament f;
+            f.srgb  = MixedFilamentManager::hex_to_srgb01(filament_colours[size_t(id) - 1]);
+            f.td_mm = tds.values.empty() ? 4. : tds.get_at(size_t(id) - 1);
+            filaments.push_back(f);
+            ctx.dwd_physical.push_back(id);
+        };
+        for (int id : ctx.candidate_ids)
+            add(id);
+        DwdTableParams table_params;
+        table_params.sequence_filaments = filaments.size();
+        size_t backing = size_t(std::find(ctx.candidate_ids.begin(), ctx.candidate_ids.end(), ctx.base_filament) -
+                                ctx.candidate_ids.begin());
+        if (backing == ctx.candidate_ids.size() && size_t(ctx.base_filament) <= filament_colours.size())
+            add(ctx.base_filament);
+        DwdModelParams model;
+        model.outer_width_mm = width;
+        model.inner_width_mm = width;
+        if (backing < filaments.size() && filaments.size() <= 9)
+            ctx.dwd_table = dwd_cached_table(filaments, uint8_t(backing), model, table_params);
+        if (!ctx.dwd_table || ctx.dwd_table->empty()) {
+            ctx.dwd_table.reset();
+            ctx.dwd_physical.clear();
+            ctx.wall_method = IMAGE_FILL_WALL_RUNS;
+        }
+    }
 
     ctx.row = mf;
     // Nozzle-bounded resolution, the same rule phase 3 applies to top surfaces: a run shorter
@@ -518,6 +553,86 @@ bool compute_wall_samples(const ImageAssetStore &assets, const ImageRowWallConte
     return !samples.empty();
 }
 
+// Dual wall dithering: the wall's runs for THIS wall (outer or first inner) on THIS layer.
+//
+// Each sample takes the pair whose predicted colour is nearest - with no error diffusion, on
+// purpose: the outer and the inner wall are sampled separately (different length, different seam),
+// and a carried error would make them pick different pairs at the same place, which is exactly the
+// registration a pair depends on. The table has up to 256 colours, so plain nearest is fine.
+// The pair then names this wall's filament for this layer, and equal neighbours merge - so a
+// change of pair costs a start and stop only where the two sequences differ on this layer.
+std::vector<ImageRowRun> dwd_wall_runs(const ImageRowWallContext &ctx, const std::vector<ImageRowSample> &samples, bool inner)
+{
+    const std::vector<DwdPair> &table = *ctx.dwd_table;
+    const size_t                layer = size_t(std::max(0, ctx.layer_index));
+    // Samples repeat colours heavily (flat areas of the picture); remember the answers.
+    std::unordered_map<uint32_t, int> nearest;
+    auto filament_at = [&](const ImageRowSample &s) -> int {
+        if (!s.has_color)
+            return ctx.base_filament;
+        auto q = [](float c) { return uint32_t(std::lround(std::min(1.f, std::max(0.f, c)) * 255.f)); };
+        const uint32_t key = (q(s.color[0]) << 16) | (q(s.color[1]) << 8) | q(s.color[2]);
+        auto it = nearest.find(key);
+        if (it == nearest.end())
+            it = nearest.emplace(key, dwd_nearest(table, s.color)).first;
+        if (it->second < 0)
+            return ctx.base_filament;
+        const DwdPair              &pair = table[size_t(it->second)];
+        const std::vector<uint8_t> &seq  = inner ? pair.inner : pair.outer;
+        const uint8_t               f    = seq.empty() ? pair.backing : seq[layer % seq.size()];
+        return f < ctx.dwd_physical.size() ? ctx.dwd_physical[f] : ctx.base_filament;
+    };
+
+    std::vector<ImageRowRun> runs;
+    for (const ImageRowSample &s : samples) {
+        const int id = filament_at(s);
+        if (!runs.empty() && runs.back().filament_id == id) {
+            runs.back().s1 = s.s;
+        } else {
+            ImageRowRun run;
+            run.s0 = run.s1 = s.s;
+            run.filament_id = id;
+            runs.push_back(run);
+        }
+    }
+    // A run shorter than the nozzle can print joins a neighbour (the longer one), then equal
+    // neighbours join. The span a run covers reaches half-way to each neighbour's nearest sample.
+    auto span = [&runs](size_t i) {
+        const float lo = i == 0 ? runs[i].s0 : 0.5f * (runs[i - 1].s1 + runs[i].s0);
+        const float hi = i + 1 == runs.size() ? runs[i].s1 : 0.5f * (runs[i].s1 + runs[i + 1].s0);
+        return hi - lo;
+    };
+    while (runs.size() > 1) {
+        size_t worst = runs.size();
+        float  worst_len = ctx.min_run_len_mm;
+        for (size_t i = 0; i < runs.size(); ++i)
+            if (const float len = span(i); len < worst_len) {
+                worst_len = len;
+                worst     = i;
+            }
+        if (worst == runs.size())
+            break;
+        size_t into;
+        if (worst == 0)
+            into = 1;
+        else if (worst + 1 == runs.size())
+            into = worst - 1;
+        else
+            into = span(worst - 1) >= span(worst + 1) ? worst - 1 : worst + 1;
+        runs[into].s0 = std::min(runs[into].s0, runs[worst].s0);
+        runs[into].s1 = std::max(runs[into].s1, runs[worst].s1);
+        runs.erase(runs.begin() + worst);
+        for (size_t i = 0; i + 1 < runs.size();)
+            if (runs[i].filament_id == runs[i + 1].filament_id) {
+                runs[i].s1 = runs[i + 1].s1;
+                runs.erase(runs.begin() + i + 1);
+            } else {
+                ++i;
+            }
+    }
+    return runs;
+}
+
 bool compute_wall_runs(const ImageAssetStore &assets, const ImageRowWallContext &ctx, const ExtrusionEntity &entity,
                        double print_z, const Layer *layer, ExtrusionPaths &paths, std::vector<ImageRowRun> &runs)
 {
@@ -525,6 +640,10 @@ bool compute_wall_runs(const ImageAssetStore &assets, const ImageRowWallContext 
     bool                        any_color = false;
     if (!compute_wall_samples(assets, ctx, entity, print_z, layer, paths, samples, any_color))
         return false;
+    if (ctx.wall_method == IMAGE_FILL_WALL_DWD && ctx.dwd_table && ctx.base_filament > 0) {
+        runs = dwd_wall_runs(ctx, samples, entity.inset_idx == 1);
+        return !runs.empty();
+    }
     if (ctx.base_filament <= 0) {
         // Phase 4 behaviour: nothing to fall back on but the row itself.
         if (!any_color) {
