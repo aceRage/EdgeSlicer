@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic PHA @base P3C",
+    "inherits": "fdm_filament_pha_p3c",
+    "from": "system",
+    "filament_id": "GFR98",
+    "instantiation": "false"
+}

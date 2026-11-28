@@ -882,6 +882,16 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "extrusion_rate_smoothing_external_perimeter_only",
         "reduce_infill_retraction_mode",
         "filament_metal_stickiness",
+        // Bambu Studio 02.09.01.70 filament overhang overrides: read only by GCode::_extrude and the estimator
+        // preparation of the G-code export.
+        "override_process_overhang_speed",
+        "filament_enable_overhang_speed",
+        "filament_overhang_1_4_speed",
+        "filament_overhang_2_4_speed",
+        "filament_overhang_3_4_speed",
+        "filament_overhang_4_4_speed",
+        "filament_overhang_totally_speed",
+        "filament_bridge_speed",
         "filename_format",
         "retraction_minimum_travel",
         "retract_before_wipe",
@@ -951,6 +961,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "internal_bridge_fan_speed", // ORCA: Add support for separate internal bridge fan speed control
         "ironing_fan_speed",
         "single_extruder_multi_material_priming",
+        "cooling_filter_enabled",
+        "volumetric_speed_coefficients",
         "activate_air_filtration",
         "activate_air_filtration_during_print",
         "activate_air_filtration_on_completion",
@@ -1094,6 +1106,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "nozzle_temperature_initial_layer"
             || opt_key == "filament_minimal_purge_on_wipe_tower"
             || opt_key == "filament_max_volumetric_speed"
+            || opt_key == "filament_adaptive_volumetric_speed"
             || opt_key == "filament_loading_speed"
             || opt_key == "filament_loading_speed_start"
             || opt_key == "filament_unloading_speed"
@@ -8194,6 +8207,23 @@ ObjectTowerPlan Print::plan_object_towers() const
         return scale_(std::max(3., prime_tower_side_scrape_margin(m_config) + 2.) + brim + skirt_gap);
     };
     const coord_t step      = scale_(5.);
+    // The rod rule (see clear_at): whether a copy reaches above the rod, and whether `tall` (a copy, with its placed
+    // tower or with `tall_tower`) needs the copy grown as `other_unit` printed before it: its Y band (the copy and tower
+    // above the rod) overlaps that unit's Y extent grown by the clearance, with the validator's 0.1 mm tolerance.
+    const double rod_height = scale_(m_config.extruder_clearance_height_to_rod.value);
+    auto copy_tall = [&](size_t i) { return copies[i].object->print_z_max() > rod_height; };
+    auto rod_needs_first = [&](const Polygon &other_unit, const Copy &tall, const Polygon *tall_tower = nullptr) {
+        BoundingBox band = get_extents(tall.hull);
+        if (tall_tower != nullptr)
+            band.merge(get_extents(*tall_tower));
+        else if (!tall.tower.empty())
+            band.merge(get_extents(tall.tower));
+        const BoundingBox other = get_extents(other_unit);
+        const coord_t     tol   = scaled<coord_t>(0.1);
+        const coord_t     lo    = std::max(band.min.y() + tol, other.min.y() - coord_t(unit_distance));
+        const coord_t     hi    = std::min(band.max.y() - tol, other.max.y() + coord_t(unit_distance));
+        return hi - lo > 0;
+    };
 
     for (size_t idx = 0; idx < copies.size(); ++idx) {
         Copy &copy = copies[idx];
@@ -8256,6 +8286,8 @@ ObjectTowerPlan Print::plan_object_towers() const
 
         // Whether a tower anchored there is clear (on the bed, off the exclusions, within reach, its gap to its own copy
         // and the unit clear of every other unit); score: the distance to the nearest other unit.
+        // Set when a spot clear in X/Y was refused for the rod rule alone (the notice then says so).
+        bool rod_blocked = false;
         auto clear_at = [&](const Point &anchor, Polygon &tower, double &score) {
             tower = local;
             tower.translate(anchor);
@@ -8280,6 +8312,20 @@ ObjectTowerPlan Print::plan_object_towers() const
                 const double dx = std::max<double>(0., double(std::max(a.min.x() - b.max.x(), b.min.x() - a.max.x())));
                 const double dy = std::max<double>(0., double(std::max(a.min.y() - b.max.y(), b.min.y() - a.max.y())));
                 score = std::min(score, std::hypot(dx, dy));
+            }
+            // The rod rule of sequential_print_clearance_valid(): a copy reaching above extruder_clearance_height_to_rod
+            // must print after every copy whose grown unit overlaps that tall part in Y. A tower is as tall as its copy
+            // (the estimate), so a tower in front of or behind a tall copy widens that Y band. A tower that makes two
+            // copies each need the other first has no print order: validate then refuses the plate ("too tall"), though
+            // the tower is clear in X/Y (owner hand test 2026-11-27). Such a spot is not clear; another side may be.
+            if (copy_tall(idx)) {
+                const Polygon unit_x = object_tower_unit(copy.hull, tower);
+                for (size_t other = 0; other < copies.size(); ++other)
+                    if (other != idx && copy_tall(other) &&
+                        rod_needs_first(unit_x, copies[other]) && rod_needs_first(object_tower_unit(copies[other].hull, copies[other].tower), copy, &tower)) {
+                        rod_blocked = true;
+                        return false;
+                    }
             }
             return true;
         };
@@ -8323,7 +8369,9 @@ ObjectTowerPlan Print::plan_object_towers() const
         if (placement.placed)
             copy.tower = placement.outline;
         else
-            plan.warnings.push_back((boost::format(L("%1% prints without a prime tower: there is no room for one beside it.")) % name).str());
+            plan.warnings.push_back(rod_blocked ?
+                (boost::format(L("%1% prints without a prime tower: there is no room for one beside it that keeps a print order (the object is taller than the X rod clearance, and a tower in front of or behind it would reach the other objects). Move the objects apart in Y, or drag its tower beside it.")) % name).str() :
+                (boost::format(L("%1% prints without a prime tower: there is no room for one beside it.")) % name).str());
         plan.towers.push_back(std::move(placement));
     }
     return plan;

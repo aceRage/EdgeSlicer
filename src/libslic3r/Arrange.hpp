@@ -226,7 +226,10 @@ ArrangePolygons nozzle_reach_blockers(const ExtruderAreas &areas, int num_beds, 
 // items the strips switch the packer to growing the pile around the bed centre, which left a
 // column short of the free width with a single stray object in it. Returns false, and leaves `bed`
 // as it is, when there is nothing to clip or the result is not one polygon (use the blockers then).
-bool clip_bed_to_nozzle_reach(Points &bed, const ExtruderAreas &areas);
+// `grow` (scaled): how far the arrange grew the bed past its edges (printing by object, the items' inflation, half the
+// clearance, may hang over the edge: update_arrange_params). The reach is grown as much, so the clip keeps that room;
+// without it the by-object growth was lost at the strips' edges and a column of copies fell onto the next plate.
+bool clip_bed_to_nozzle_reach(Points &bed, const ExtruderAreas &areas, coord_t grow = 0);
 
 inline void arrange(ArrangePolygons &items, const Points &bed, const ArrangeParams &params = {}) { arrange(items, {}, bed, params); }
 inline void arrange(ArrangePolygons &items, const BoundingBox &bed, const ArrangeParams &params = {}) { arrange(items, {}, bed, params); }

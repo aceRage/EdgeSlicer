@@ -1,0 +1,20 @@
+{
+    "type": "filament",
+    "name": "Generic PLA High Speed @base P3C",
+    "inherits": "fdm_filament_pla_p3c",
+    "from": "system",
+    "filament_id": "GFL95",
+    "instantiation": "false",
+    "filament_flow_ratio": [
+        "0.98"
+    ],
+    "filament_max_volumetric_speed": [
+        "18"
+    ],
+    "fins_extrude_safe_temp": [
+        "57"
+    ],
+    "slow_down_layer_time": [
+        "8"
+    ]
+}

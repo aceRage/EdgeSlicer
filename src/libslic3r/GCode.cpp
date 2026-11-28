@@ -1693,7 +1693,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             toolchange_gcode_str += gcodegen.writer().unlift();
             side_scrape_deretract_pending = true;
         } else
-            toolchange_gcode_str += gcodegen.unretract(side_scrape_extra_unretract);
+            toolchange_gcode_str += gcodegen.unretract(side_scrape_extra_unretract, toolchange_deretract_speed(gcodegen.config(), new_extruder_id));
         check_add_eol(toolchange_gcode_str);
     }
 
@@ -4880,7 +4880,6 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     if (int(e) < int(vend->size()) && vend->get_at(int(e)).find("Bambu") == std::string::npos) { all_bbl = false; break; }
             this->placeholder_parser().set("is_all_bbl_filament", new ConfigOptionBool(all_bbl));
             this->placeholder_parser().set("has_tpu_in_first_layer", new ConfigOptionBool(false));
-            this->placeholder_parser().set("cooling_filter_enabled", new ConfigOptionBool(false));
             this->placeholder_parser().set("max_print_z", new ConfigOptionFloat(0.));
             this->placeholder_parser().set("is_prime_tower_interface", new ConfigOptionBool(false));
             this->placeholder_parser().set("filament_tower_interface_purge_volume", new ConfigOptionFloat(0.));
@@ -6231,9 +6230,12 @@ static bool prepares_overhang_estimator(const Layer &layer, bool overhang_fan)
 
 // Orca #14788: whether the overhang fan can switch on for any filament, which makes _extrude measure the
 // overhangs of walls and bridges even with the overhang slowdown off.
+// Bambu Studio 02.09.01.70 filament overhang overrides: a filament whose override turns the overhang slowdown on
+// slows its overhangs down even in a region whose process has it off, so every layer with extrusions is measured
+// then too. Only true when some filament has the override on, so without one the rule above is unchanged.
 static bool overhang_fan_enabled(const PrintConfig &config, bool cooling_markers)
 {
-    return cooling_markers && any_enabled(config.enable_overhang_bridge_fan);
+    return (cooling_markers && any_enabled(config.enable_overhang_bridge_fan)) || any_filament_overhang_override_enabled(config);
 }
 } // namespace
 
@@ -11191,6 +11193,19 @@ void GCode::append_full_config(const Print& print, std::string& str)
     static const std::set<std::string_view> pre_heating_keys({"enable_pre_heating"sv, "filament_pre_cooling_temperature"sv,
                                                               "filament_preheat_temperature_delta"sv});
     const bool dump_pre_heating_keys = print.config().enable_pre_heating.value;
+    // P3C (Bambu Studio 2.9.2): dump min_temperature_when_ec only when a used filament sets a real
+    // idle floor (> 0, the P3C template's 80). Missing, negative (H2D / H2C default -1) or 0 (H3C)
+    // still read as no floor, so those printers keep the config block they had before the key existed.
+    bool dump_min_temperature_when_ec = false;
+    {
+        const DynamicPrintConfig &full = print.full_print_config();
+        for (unsigned int filament_id : print.extruders(true)) {
+            if (min_temperature_when_ec_at(full, filament_id) > 0.) {
+                dump_min_temperature_when_ec = true;
+                break;
+            }
+        }
+    }
     // Likewise the bed-slinger mass model keys: only for a printer that models it (the A2L sets both).
     static const std::set<std::string_view> mass_model_keys({"machine_max_force_Y"sv, "machine_bed_mass_Y"sv});
     const bool dump_mass_model_keys = print.config().machine_max_force_Y.value > 0. || print.config().machine_bed_mass_Y.value > 0.;
@@ -11225,6 +11240,8 @@ void GCode::append_full_config(const Print& print, std::string& str)
             (key == "line_width_nozzle_diameter" && print.config().line_width_nozzle_diameter.value == 0.))
             continue;
         if (!dump_pre_heating_keys && pre_heating_keys.find(key) != pre_heating_keys.end())
+            continue;
+        if (key == "min_temperature_when_ec" && !dump_min_temperature_when_ec)
             continue;
         // Per-nozzle process P4: its keys only when a job uses them, so every other job's config block stays as it was.
         if (per_nozzle_p4_key_unused(cfg, key))
@@ -12415,6 +12432,12 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // string literal pointer costs nothing on the valid path; it is only ever read if the guard
     // fires.
     const char *speed_setting = nullptr;
+    // Bambu Studio 02.09.01.70 filament overhang overrides (owner decision D6): with the printing filament's
+    // override_process_overhang_speed on, its overhang slowdown switch, overhang speeds and bridge speed replace the
+    // process ones (Bambu GCode.cpp:6603-6640, 7176-7196, 7726-7777). Off, every value below is the process one.
+    const FilamentOverhangOverride overhang_override = filament_overhang_override(m_config, flow_filament_id);
+    const double bridge_speed_value = overhang_bridge_speed(overhang_override, this->process_flow_value(m_config.bridge_speed));
+    const char  *bridge_speed_key   = overhang_override.on && overhang_override.bridge >= 0.5 ? "filament_bridge_speed" : "bridge_speed";
     // A caller-supplied speed (skirt and brim pass support_speed explicitly, extrude_support
     // passes -1 and resolves below) did not come from this role switch, so attribute it to the
     // key those callers actually read rather than leaving the warning with no setting at all.
@@ -12464,17 +12487,18 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 cap_scarf_joint_speed(speed);
         } else if (path.role() == erInternalBridgeInfill) {
             // internal_bridge_speed is a FloatOrPercent vector whose ratio_over target is
-            // bridge_speed; resolve the percentage against the variant-matched bridge_speed.
+            // bridge_speed; resolve the percentage against the variant-matched bridge_speed (the
+            // filament's bridge speed when its overhang override replaces it).
             const auto   ib_fop  = this->process_flow_value(m_config.internal_bridge_speed);
-            const double ib_base = this->process_flow_value(m_config.bridge_speed);
+            const double ib_base = bridge_speed_value;
             speed                = ib_fop.percent ? (ib_fop.value * 0.01 * ib_base) : ib_fop.value;
             // A percentage resolves against bridge_speed, so a zero result can be either key's
             // fault. Name whichever one is actually bad; this is the exact pair that produced the
             // original G1 F0.
-            speed_setting = (ib_fop.percent && !(ib_base > 0.)) ? "bridge_speed" : "internal_bridge_speed";
+            speed_setting = (ib_fop.percent && !(ib_base > 0.)) ? bridge_speed_key : "internal_bridge_speed";
         } else if (path.role() == erOverhangPerimeter || path.role() == erSupportTransition || path.role() == erBridgeInfill) {
-            speed_setting = "bridge_speed";
-            speed = this->process_flow_value(m_config.bridge_speed);
+            speed_setting = bridge_speed_key;
+            speed = bridge_speed_value;
         } else if (path.role() == erInternalInfill) {
             speed_setting = "sparse_infill_speed";
             speed = this->process_flow_value(m_config.sparse_infill_speed);
@@ -12533,8 +12557,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // bridge it is ~162 mm/s where the profile asks for 45, so a mistyped or misresolved setting
     // silently prints ~3.6x too fast. Report it here, with the setting name, for exactly the
     // reason the writer guard reports: the user must be told WHICH value was ignored.
-    const double filament_max_volumetric_speed =
-        m_filament_flow.max_volumetric_speed_for(m_config, m_writer.extruder()->id());
+    // Orca #12688 / BBS: with adaptive volumetric speed on, the cap is also limited by the fit of this
+    // path's layer height and line width. Off (every stock preset): the cached value, unchanged.
+    const double filament_max_volumetric_speed = m_filament_flow.adaptive_max_volumetric_speed(
+        m_writer.extruder()->id(), m_filament_flow.max_volumetric_speed_for(m_config, m_writer.extruder()->id()),
+        path.height, path.width);
     const bool speed_was_invalid = !(speed >= 1e-6);
     if (speed_was_invalid)
         speed = filament_max_volumetric_speed / _mm3_per_mm;
@@ -12695,7 +12722,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     //
     // Orca #14788: the overhang fan needs the overhang measured too, so walls and bridges are measured
     // when either the overhang slowdown or the overhang fan is on.
-    const bool overhang_speed_on       = this->process_flow_value(m_config.enable_overhang_speed);
+    const bool overhang_speed_on       = overhang_slowdown_enabled(overhang_override, this->process_flow_value(m_config.enable_overhang_speed));
     const bool overhang_fan_on         = EXTRUDER_CONFIG(enable_overhang_bridge_fan) && m_enable_cooling_markers;
     const bool need_overhang_detection = overhang_speed_on || overhang_fan_on;
     if (need_overhang_detection && !this->on_first_layer() && !this->object_layer_over_raft() &&
@@ -12729,10 +12756,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         auto oh2_fop = this->process_flow_value(m_config.overhang_2_4_speed);
         auto oh3_fop = this->process_flow_value(m_config.overhang_3_4_speed);
         auto oh4_fop = this->process_flow_value(m_config.overhang_4_4_speed);
-        double oh1_abs = oh1_fop.percent ? (oh1_fop.value * 0.01 * ref_speed) : oh1_fop.value;
-        double oh2_abs = oh2_fop.percent ? (oh2_fop.value * 0.01 * ref_speed) : oh2_fop.value;
-        double oh3_abs = oh3_fop.percent ? (oh3_fop.value * 0.01 * ref_speed) : oh3_fop.value;
-        double oh4_abs = oh4_fop.percent ? (oh4_fop.value * 0.01 * ref_speed) : oh4_fop.value;
+        // A filament override gives its buckets in mm/s (Bambu's type); 0 keeps the wall speed, as here.
+        double oh1_abs = overhang_bucket_speed(overhang_override, 0, oh1_fop.percent ? (oh1_fop.value * 0.01 * ref_speed) : oh1_fop.value);
+        double oh2_abs = overhang_bucket_speed(overhang_override, 1, oh2_fop.percent ? (oh2_fop.value * 0.01 * ref_speed) : oh2_fop.value);
+        double oh3_abs = overhang_bucket_speed(overhang_override, 2, oh3_fop.percent ? (oh3_fop.value * 0.01 * ref_speed) : oh3_fop.value);
+        double oh4_abs = overhang_bucket_speed(overhang_override, 3, oh4_fop.percent ? (oh4_fop.value * 0.01 * ref_speed) : oh4_fop.value);
         const bool slowdown_curled = this->process_flow_value(m_config.slowdown_for_curled_perimeters);
 
         // Overhang Shadow: only the inner wall (erPerimeter) behind an overhang borrows that
@@ -12751,36 +12779,22 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             }
         }
 
-        if (slowdown_curled) {
-            // Orca #17144: the fully unsupported entry is the bridge speed for bridge infill, as in the branch
-            // without the curled slowdown; every other role keeps the 4/4 overhang speed there.
-            const FloatOrPercent fully_unsupported_speed = path.role() == erBridgeInfill ?
-                FloatOrPercent{this->process_flow_value(m_config.bridge_speed) * 100 / ref_speed, true} :
-                ((oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true});
-            ConfigOptionFloatsOrPercents dynamic_overhang_speeds(
-                {FloatOrPercent{100, true},
-                 (oh1_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh1_abs * 100 / ref_speed, true},
-                 (oh2_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh2_abs * 100 / ref_speed, true},
-                 (oh3_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh3_abs * 100 / ref_speed, true},
-                 (oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true},
-                 fully_unsupported_speed});
+        // Orca #17144: the fully unsupported entry is the bridge speed for bridge infill; with the curled slowdown
+        // every other role keeps the 4/4 overhang speed there. D6: a filament override's "100%" speed takes that
+        // slot for walls (overhang_fully_unsupported_speed).
+        const double fully_unsupported_abs = overhang_fully_unsupported_speed(overhang_override, path.role() == erBridgeInfill,
+                                                                              slowdown_curled, oh4_abs, bridge_speed_value);
+        ConfigOptionFloatsOrPercents dynamic_overhang_speeds(
+            {FloatOrPercent{100, true},
+             (oh1_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh1_abs * 100 / ref_speed, true},
+             (oh2_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh2_abs * 100 / ref_speed, true},
+             (oh3_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh3_abs * 100 / ref_speed, true},
+             (oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true},
+             (fully_unsupported_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{fully_unsupported_abs * 100 / ref_speed, true}});
 
-            new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
-                                                                                  ref_speed, speed, slowdown_curled, fan_overlap_threshold,
-                                                                                  shadow_ratio, shadow_reach);
-        } else {
-            ConfigOptionFloatsOrPercents dynamic_overhang_speeds(
-                {FloatOrPercent{100, true},
-                 (oh1_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh1_abs * 100 / ref_speed, true},
-                 (oh2_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh2_abs * 100 / ref_speed, true},
-                 (oh3_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh3_abs * 100 / ref_speed, true},
-                 (oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true},
-                 FloatOrPercent{this->process_flow_value(m_config.bridge_speed) * 100 / ref_speed, true}});
-
-            new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
-                                                                                  ref_speed, speed, slowdown_curled, fan_overlap_threshold,
-                                                                                  shadow_ratio, shadow_reach);
-        }
+        new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
+                                                                              ref_speed, speed, slowdown_curled, fan_overlap_threshold,
+                                                                              shadow_ratio, shadow_reach);
         // Orca #14788: with the slowdown off the points only carry the overhang fan transitions, printed at the
         // path's own speed.
         if (!overhang_speed_on)

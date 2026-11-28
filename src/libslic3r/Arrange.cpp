@@ -1225,11 +1225,11 @@ ArrangePolygons nozzle_reach_blockers(const ExtruderAreas &areas, int num_beds, 
     return out;
 }
 
-bool clip_bed_to_nozzle_reach(Points &bed, const ExtruderAreas &areas)
+bool clip_bed_to_nozzle_reach(Points &bed, const ExtruderAreas &areas, coord_t grow)
 {
     if (!areas.multi() || !areas.has_exclusive_regions() || areas.shared.empty() || bed.size() < 3)
         return false;
-    Polygons clipped = intersection(Polygons{Polygon(bed)}, areas.shared);
+    Polygons clipped = intersection(Polygons{Polygon(bed)}, grow > 0 ? offset(areas.shared, float(grow)) : areas.shared);
     if (clipped.size() != 1 || clipped.front().size() < 3 || std::abs(clipped.front().area()) <= 0.)
         return false;
     clipped.front().make_counter_clockwise();
