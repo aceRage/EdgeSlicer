@@ -2729,11 +2729,12 @@ void SelectMachineDialog::on_send_print()
 
     m_print_job->on_success([this]() { finish_mode(); });
 
-    m_print_job->on_check_ip_address_fail([this]() {
-        wxCommandEvent* evt = new wxCommandEvent(EVT_CLEAR_IPADDRESS);
-        wxQueueEvent(this, evt);
+    // The job shows the error in the status bar, and its cancel button goes back to the prepare page,
+    // as for any other failed send. The IP dialog opens filled in with the stored IP and access code
+    // and changes them only when the user confirms new ones.
+    m_print_job->on_check_ip_address_fail([]() {
         wxGetApp().show_ip_address_enter_dialog();
-     });
+    });
 
     // update ota version
     NetworkAgent* agent = wxGetApp().getAgent();

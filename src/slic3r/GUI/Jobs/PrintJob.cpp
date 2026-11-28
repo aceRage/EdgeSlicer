@@ -28,6 +28,7 @@ static auto upload_ftp_failed_str = _u8L("Failed to upload file to ftp. Please t
 // Ultra: the file reached the printer but the printer never started it - the LAN start command
 // was lost. Say so, instead of reporting a successful send the printer knows nothing about.
 static auto lan_not_started_str   = _u8L("The file was uploaded but the printer did not start the job. Check that the printer is reachable and idle, then send again.");
+static auto verify_job_failed_str = _u8L("Sending to the printer failed. The access code may be wrong, the printer may be unreachable, or its storage may be full or write-protected. Check them, then send again.");
 
 static auto     desc_network_error          = _u8L("Check the current status of the bambu server by clicking on the link above.");
 static auto     desc_file_too_large         = _u8L("The size of the print file is too large. Please adjust the file size and try again.");
@@ -227,8 +228,14 @@ void PrintJob::process(Ctl &ctl)
 
         result = m_agent->start_send_gcode_to_sdcard(params, nullptr, nullptr, nullptr);
         if (result != 0) {
-            BOOST_LOG_TRIVIAL(error) << "access code is invalid";
-            m_enter_ip_address_fun_fail();
+            // The check is a small upload, so a printer that cannot be reached or a full or
+            // write-protected card fails it as well as a wrong access code. The plug-in does not say
+            // which, so say what failed and let the user check the IP address and access code.
+            BOOST_LOG_TRIVIAL(error) << "print_job: verify_job failed, result = " << result;
+            m_plater->update_print_error_info(result, verify_job_failed_str, "");
+            ctl.show_error_info(verify_job_failed_str, 0, "", "");
+            if (m_enter_ip_address_fun_fail)
+                m_enter_ip_address_fun_fail();
             m_job_finished = true;
             return;
         }
