@@ -5,6 +5,7 @@
 // unit tests can use it directly.
 
 #include <string>
+#include <vector>
 
 namespace Slic3r { namespace GUI { namespace AmsTypes {
 
@@ -16,11 +17,16 @@ enum : int {
     N3S            = 4, // AMS HT (1 slot, heated)
     AMS_LITE_MIXED = 5, // AMS lite on an N9
     RACK_A         = 6, // AMS 3H (H3C, 9 slots, two drying zones), Bambu Studio ZMULTI_A
-    RACK_B         = 7, // AMS-B, Bambu Studio ZMULTI_B
+    RACK_B         = 7, // AMS 3P (P3C, 7 slots), Bambu Studio ZMULTI_B
 };
 
-// The H3C's AMS 3H (and the AMS-B) feed a nozzle rack directly: slot N belongs to rack nozzle N.
+// A rack AMS (AMS 3H / AMS 3P) feeds a nozzle rack directly: slot N belongs to rack nozzle N.
 inline bool is_rack_ams(int type) { return type == RACK_A || type == RACK_B; }
+
+// Bambu Studio DevAmsTypeUtil::CanAutoFeed / CanAutoRetract: the AMS 3P has no feeder of its own
+// (Swaptek loads it), and neither rack AMS can pull filament back out unaided.
+inline bool can_auto_feed(int type) { return type != EXT_SPOOL && type != RACK_B; }
+inline bool can_auto_retract(int type) { return type != EXT_SPOOL && !is_rack_ams(type); }
 
 // The unit's bit in ams.ams_exist_bits (Bambu Studio DevAms::IsExist): -1 when it has none.
 inline int unit_exist_bit(int type, int ams_id)
@@ -63,22 +69,26 @@ inline std::string display_name(int type)
     case N3F: return "AMS 2 Pro";
     case N3S: return "AMS HT";
     case RACK_A: return "AMS 3H";
-    case RACK_B: return "AMS-B";
+    case RACK_B: return "AMS 3P";
     default: return "AMS";
     }
 }
 
-// A rack AMS slot is labelled by its number alone, "1".."9" (Bambu Studio get_slot_name).
+// A rack AMS slot is labelled by its number alone, "1".."N" (Bambu Studio get_slot_name).
 inline std::string rack_slot_label(int slot) { return std::to_string(slot + 1); }
 
+// "AMS 3H slot 1" / "AMS 3P slot 7" as the Device tab and RemoteControl name a rack slot.
+inline std::string rack_slot_where(int type, int slot) { return display_name(type) + " slot " + rack_slot_label(slot); }
+
 // A rack printer reports one external spool holder per rack position, ids 255 down to 247;
-// Bambu Studio labels them "1-Ext".."9-Ext" (256 - id) when there are more holders than extruders.
+// Bambu Studio labels them "1-Ext".."N-Ext" (256 - id) when there are more holders than extruders.
+// Nine holders (H3C) use 247..255; seven (P3C) use 249..255. The range covers both.
 inline bool is_rack_virtual_slot(int id) { return id >= 247 && id <= 255; }
 inline std::string rack_ext_label(int id) { return std::to_string(256 - id) + "-Ext"; }
 
 // The tray number a send mapping names a slot by (ams_mapping, the "ams" of ams_mapping_info):
 // Bambu Studio's DevFilaSystem::GetTrayIndexMap / DevMapping for a rack AMS (AMS 3H 28 + slot,
-// AMS-B 37 + slot); this fork's ams_id * 4 + slot for every other unit, as it has always sent
+// AMS 3P 37 + slot); this fork's ams_id * 4 + slot for every other unit, as it has always sent
 // them (Bambu Studio sends an AMS HT as its ams id; this fork keeps 4 * ams id, unchanged here).
 inline int mapping_tray_index(int type, int ams_id, int slot)
 {
@@ -89,9 +99,9 @@ inline int mapping_tray_index(int type, int ams_id, int slot)
     return ams_id * 4 + slot;
 }
 
-// What a rack printer (H3C) calls a mapped tray number: an AMS 3H slot by its number ("1".."9",
-// Bambu Studio transition_tridid: the rack nozzle position the slot feeds), an AMS-B slot likewise,
-// a spool holder "1-Ext".."9-Ext". Empty for a number that is neither.
+// What a rack printer calls a mapped tray number: an AMS 3H slot by its number ("1".."9",
+// Bambu Studio transition_tridid: the rack nozzle position the slot feeds), an AMS 3P slot
+// likewise ("1".."7"), a spool holder "1-Ext".."N-Ext". Empty for a number that is neither.
 inline std::string rack_tray_label(int tray_index)
 {
     if (tray_index >= 28 && tray_index < 37)
@@ -140,9 +150,48 @@ RackSlot bound_slot(const RackNozzle& n, int rack_ams_id, int rack_ams_slots, in
 }
 
 // The width (DIP) of one unit's row in the send dialog's "AMS Slots" picker (Bambu Studio
-// MappingContainer): 230 for up to four slots, as always; 54 per slot plus 20 beyond that, so the
-// AMS 3H's nine slots sit on one row (506 DIP) instead of being clipped after slot 4.
+// MappingContainer): 230 for up to four slots, as always; 54 per slot plus 20 beyond that, so a
+// rack AMS (nine on the AMS 3H, seven on the AMS 3P) sits on one row instead of being clipped
+// after slot 4.
 inline int mapping_container_width_dip(int slots) { return slots > 4 ? slots * 54 + 20 : 230; }
+
+// Bambu Studio AMS_PREVIEW_SLOT_GRID for the Device-tab unit icon. Empty: one horizontal row
+// (this fork's AMS 3H drawing). The AMS 3P's seven slots are two rows, odd indices on top.
+inline std::vector<std::vector<int>> rack_preview_rows(int type, int slot_count)
+{
+    if (type == RACK_B && slot_count == 7)
+        return {{1, 3, 5}, {0, 2, 4, 6}};
+    (void) slot_count;
+    return {};
+}
+
+// Bambu Studio AMS_PREVIEW_SLOT_GRID looks up trays by can_id / slot id, not list position,
+// so a missing or out-of-order tray still lands in the right cell. Slot ids outside 0..63
+// (the tray-bit width) are ignored. -1: empty / unusable.
+inline int parse_rack_slot_id(const std::string &slot_id)
+{
+    if (slot_id.empty() || slot_id.size() > 2)
+        return -1;
+    int v = 0;
+    for (char c : slot_id) {
+        if (c < '0' || c > '9')
+            return -1;
+        v = v * 10 + (c - '0');
+    }
+    if (v > 63)
+        return -1;
+    return v;
+}
+
+inline int rack_preview_slot_index(const std::vector<int> &slot_ids, int cell)
+{
+    if (cell < 0 || cell > 63)
+        return -1;
+    for (int i = 0; i < int(slot_ids.size()); ++i)
+        if (slot_ids[i] == cell)
+            return i;
+    return -1;
+}
 
 // Where the picker opens next to its anchor (the filament it maps), all in screen pixels: below the
 // anchor, flipped above when it does not fit below, and moved left / up so it stays on the work

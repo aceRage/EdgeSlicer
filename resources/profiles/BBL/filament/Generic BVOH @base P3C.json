@@ -1,0 +1,11 @@
+{
+    "type": "filament",
+    "name": "Generic BVOH @base P3C",
+    "inherits": "fdm_filament_bvoh_p3c",
+    "from": "system",
+    "filament_id": "GFS97",
+    "instantiation": "false",
+    "filament_adhesiveness_category": [
+        "797"
+    ]
+}

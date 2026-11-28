@@ -3287,6 +3287,15 @@ void PrintConfigDef::init_fff_params()
     def->nullable = true;
     def->set_default_value(new ConfigOptionFloatsNullable { 10. });
 
+    // BBS 2.9.2 (P3C fdm_filament_template_p3c): idle-nozzle floor during pre-cooling, degrees C.
+    // Negative: no extra floor (Bambu Studio PrintConfig.cpp default -1). The P3C template sets 80.
+    def = this->add("min_temperature_when_ec", coFloats);
+    def->label = L("Idle nozzle floor");
+    def->tooltip = L("Lowest temperature an idle nozzle may cool to between uses. Negative disables the extra floor.");
+    def->sidetext = "°C";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats { -1. });
+
     // Ultra (H2C rack): BambuStudio PrintConfig.cpp:3041. The nozzle-change pre-cool target,
     // read by the wipe tower's nozzle-change block (M104 T<e> S<t> N0 ;Wipe tower nozzle change
     // pre cooling). 0 disables it. The BBL H2C filament profiles in this tree already carry the
@@ -12650,6 +12659,20 @@ double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int f
     return cooling;
 }
 
+double min_temperature_when_ec_at(const ConfigBase &config, unsigned int filament_id)
+{
+    const auto *opt = dynamic_cast<const ConfigOptionFloats *>(config.option("min_temperature_when_ec"));
+    if (opt == nullptr || opt->values.empty())
+        return 0.;
+    // Not a flow-variant key: PresetBundle stores one value per filament. Packed get_config_idx
+    // would skip slots on a P3C Std+HF filament (step_size 2) and read filament 0's floor for 1+.
+    // Past the end is no floor (BambuStudio indexes by filament id), not get_at's fallback to slot 0.
+    if (filament_id >= opt->values.size())
+        return 0.;
+    const double v = opt->values[filament_id];
+    return v >= 0. ? v : 0.;
+}
+
 double ResolvedFilamentFlow::uncached_flow_ratio(const ConfigBase &config, unsigned int filament_id)
 {
     const auto *opt = config.option<ConfigOptionFloats>("filament_flow_ratio");
@@ -14013,7 +14036,7 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
         return 1; \
     }
 PRINT_CONFIG_CACHE_INITIALIZE((
-    PrintObjectConfig, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintConfig, FullPrintConfig,
+    PrintObjectConfig, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintIdleFloorConfig, PrintConfig, FullPrintConfig,
     SLAMaterialConfig, SLAPrintConfig, SLAPrintObjectConfig, SLAPrinterConfig, SLAFullPrintConfig))
 static int print_config_static_initialized = print_config_static_initializer();
 
@@ -14028,7 +14051,7 @@ static int print_config_static_initialized = print_config_static_initializer();
         visit_option_pairs(*dst, *this, [](const char*, ConfigOption &a, const ConfigOption &b) { a.set(&b); return true; }); \
         return true; \
     }
-BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_APPLY_TO_DEFINITION, _, (PrintObjectConfig)(PrintRegionConfig)(MachineEnvelopeConfig)(GCodeConfig)(PrintTowerConfig)
+BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_APPLY_TO_DEFINITION, _, (PrintObjectConfig)(PrintRegionConfig)(MachineEnvelopeConfig)(GCodeConfig)(PrintTowerConfig)(PrintIdleFloorConfig)
     (SLAMaterialConfig)(SLAPrintConfig)(SLAPrintObjectConfig)(SLAPrinterConfig))
 #undef PRINT_CONFIG_APPLY_TO_DEFINITION
 

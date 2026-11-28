@@ -1,4 +1,5 @@
 #include "AmsDualLayout.hpp"
+#include "AmsTypes.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -66,10 +67,10 @@ bool is_virtual_slot(const std::string &ams_id)
 {
     if (ams_id == std::to_string(VIRTUAL_SLOT_MAIN) || ams_id == std::to_string(VIRTUAL_SLOT_DEPUTY))
         return true;
-    // A nozzle rack's holders (H3C): one per rack position, 253 down to 247 beside 255 and 254.
+    // A nozzle rack's holders (H3C 247..255, P3C 249..255): one per rack position beside 255 and 254.
     char      *end = nullptr;
     const long v   = std::strtol(ams_id.c_str(), &end, 10);
-    return end != ams_id.c_str() && *end == '\0' && v >= 247 && v <= 253;
+    return end != ams_id.c_str() && *end == '\0' && AmsTypes::is_rack_virtual_slot(int(v));
 }
 
 int extruder_of_virtual_slot(int virtual_slot_id, int extruder_count)
