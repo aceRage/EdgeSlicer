@@ -1844,12 +1844,13 @@ FilamentGroupContext build_filament_group_context(
             s = std::max(s, total_filaments);
     }
 
-    // extruder_type is one value per extruder in Bambu's profiles but is dropped on load here (a legacy
-    // key, PrintConfigDef::handle_legacy), so the config holds its one-entry default: a missing entry
-    // is Direct Drive rather than whatever lies past the end of the vector.
+    // Bambu sends support and other non-model filaments to a Bowden extruder first (the X2D's right one).
+    // extruder_type is dropped on load (PrintConfigDef::handle_legacy), so the drive comes from
+    // resolved_extruder_types (flow variants PR 1, owner decision D4).
     std::vector<bool> prefer_non_model_filament(extruder_nums, false);
-    for (size_t idx = 0; idx < extruder_nums && idx < print_config.extruder_type.values.size(); ++idx)
-        prefer_non_model_filament[idx] = (print_config.extruder_type.values[idx] == ExtruderType::etBowden);
+    const std::vector<int> extruder_types = resolved_extruder_types(print_config, extruder_nums);
+    for (size_t idx = 0; idx < extruder_nums; ++idx)
+        prefer_non_model_filament[idx] = (extruder_types[idx] == int(ExtruderType::etBowden));
 
     auto machine_filament_info = build_machine_filaments(print->get_extruder_filament_info(), extruder_ams_counts, ignore_ext_filament);
 
@@ -2412,6 +2413,9 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
                             const_cast<DynamicPrintConfig*>(m_print_full_config)->option<ConfigOptionEnumsGeneric>("filament_volume_type", true)->values =
                                 m_print->config().filament_volume_type.values;
                     }
+                    // Flow variants PR 1: on the X2D (left Direct Drive, right Bowden) each filament retracts with the
+                    // values of the extruder the grouping put it on. A no-op on every other printer.
+                    m_print->realign_printer_variants_to_filament_map(em);
                 }
             }
             // Ultra (dual-nozzle): warning-level so it survives the fork's default log filter; lets a slice

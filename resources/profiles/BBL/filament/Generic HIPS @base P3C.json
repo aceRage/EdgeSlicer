@@ -1,0 +1,11 @@
+{
+    "type": "filament",
+    "name": "Generic HIPS @base P3C",
+    "inherits": "fdm_filament_hips_h3c",
+    "from": "system",
+    "filament_id": "GFS98",
+    "instantiation": "false",
+    "filament_is_support": [
+        "1"
+    ]
+}

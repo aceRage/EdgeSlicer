@@ -1005,7 +1005,13 @@ static std::pair<int, std::string> prepare_filament_bambu(const Request& req, st
         } else {
             target = obj->get_ams_tray(ams, slot);
         }
-        if (!target) return { 404, obj->dev_name + " has no " + (holder ? "spool holder " + ams : "AMS 3H slot " + std::to_string(std::atoi(slot.c_str()) + 1)) };
+        int rack_type = GUI::AmsTypes::RACK_A;
+        if (!holder) {
+            auto it = obj->amsList.find(ams);
+            if (it != obj->amsList.end() && it->second)
+                rack_type = it->second->type;
+        }
+        if (!target) return { 404, obj->dev_name + " has no " + (holder ? "spool holder " + ams : GUI::AmsTypes::rack_slot_where(rack_type, std::atoi(slot.c_str()))) };
         const bool exists = holder ? tray_present(*target) : target->is_exists;
         FilamentCommands::PrinterState st = filament_state(obj);
         st.filament_at_extruder           = true; // a rack slot unloads into its own feeder (Bambu Studio sends it regardless)
@@ -1025,7 +1031,7 @@ static std::pair<int, std::string> prepare_filament_bambu(const Request& req, st
         p->fil_new_temp    = FilamentCommands::tray_mid_temp(target->nozzle_temp_min, target->nozzle_temp_max);
         if (const AmsTray* curr = obj->get_curr_tray())
             p->fil_old_temp = FilamentCommands::tray_mid_temp(curr->nozzle_temp_min, curr->nozzle_temp_max);
-        const std::string where = holder ? GUI::AmsTypes::rack_ext_label(std::atoi(ams.c_str())) : "AMS 3H slot " + std::to_string(std::atoi(slot.c_str()) + 1);
+        const std::string where = holder ? GUI::AmsTypes::rack_ext_label(std::atoi(ams.c_str())) : GUI::AmsTypes::rack_slot_where(rack_type, std::atoi(slot.c_str()));
         p->setting_text       = std::string(load ? "load " : "unload ") + where;
         p->status_before      = obj->print_status;
         p->print_error_before = obj->print_error;
