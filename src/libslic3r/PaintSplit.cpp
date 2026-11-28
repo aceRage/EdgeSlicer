@@ -2170,14 +2170,14 @@ PaintSplitMultiPieces paint_split_assign_nearest_multi(const indexed_triangle_se
                 // A component that cannot hold the selection (its box misses every selected centroid) is skipped
                 // without an export.
                 const manifold::Box bb = pc.BoundingBox();
-                bool                near = false;
-                for (size_t i = 0; i < sel.size() && !near; ++i) {
+                bool                near_sel = false;
+                for (size_t i = 0; i < sel.size() && !near_sel; ++i) {
                     const Vec3d& g = sel[i].first;
-                    near           = g.x() >= bb.min.x - 1e-3 && g.y() >= bb.min.y - 1e-3 && g.z() >= bb.min.z - 1e-3 &&
+                    near_sel       = g.x() >= bb.min.x - 1e-3 && g.y() >= bb.min.y - 1e-3 && g.z() >= bb.min.z - 1e-3 &&
                            g.x() <= bb.max.x + 1e-3 && g.y() <= bb.max.y + 1e-3 && g.z() <= bb.max.z + 1e-3;
                 }
                 double a = 0.;
-                if (near) {
+                if (near_sel) {
                     const indexed_triangle_set its = ColorSplitDetail::from_manifold(pc);
                     const AABBMesh             aabb(its);
                     for (const auto& [g, ga] : sel)
