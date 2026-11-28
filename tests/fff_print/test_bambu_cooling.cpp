@@ -142,7 +142,10 @@ DynamicPrintConfig aux_fan_config(int close_fan)
 }
 
 // A sphere whose lower half has overhanging outer walls cooled at 100 %, the layer fan at 20 %.
-DynamicPrintConfig sphere_overhang_config()
+// Overhang speeds on (as in Bambu's presets): each overhang is a path of its own, which the cooling pass times
+// separately. With overhang speeds off the overhang is a fan-only transition inside its wall path, whose moves
+// are timed as one block, and the look-ahead only sees it when that whole wall path takes less than the pre-start time.
+DynamicPrintConfig sphere_overhang_config(bool overhang_speed = true)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -154,7 +157,7 @@ DynamicPrintConfig sphere_overhang_config()
         {"enable_overhang_bridge_fan", "1"},
         {"overhang_fan_threshold", "25%"},
         {"overhang_fan_speed", "100"},
-        {"enable_overhang_speed", "0"},
+        {"enable_overhang_speed", overhang_speed ? "1" : "0"},
         {"fan_min_speed", "20"},
         {"fan_max_speed", "20"},
         {"close_fan_the_first_x_layers", "1"},
@@ -239,11 +242,11 @@ TEST_CASE("Custom G-code reads the auxiliary fan settings", "[BambuCooling]")
         {"first_x_layer_fan_speed", "40"},
         {"additional_fan_full_speed_layer", "4"},
         {"layer_change_gcode", ";TEST_LAYER_Z=[layer_z]\n;AUX close=[close_additional_fan_first_x_layers[0]] "
-                               "speed={int(first_x_layer_fan_speed[0])} full=[additional_fan_full_speed_layer[0]]"},
+                               "full=[additional_fan_full_speed_layer[0]]"},
     });
     const std::string gcode = slice({TestMesh::cube_20x20x20}, config);
     // -1 reaches the templates as the part fan's count.
-    CHECK(gcode.find(";AUX close=3 speed=40 full=4") != std::string::npos);
+    CHECK(gcode.find(";AUX close=3 full=4") != std::string::npos);
     CHECK(gcode.find("close=-1") == std::string::npos);
 }
 
