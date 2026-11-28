@@ -680,6 +680,9 @@ private:
     bool m_event_handlers_bound{ false };
 
     GLVolumeCollection m_volumes;
+    // Per-object prime towers: where reload_scene() put each tower preview (plate coordinates, by volume id), so do_move()
+    // tells a dragged tower from one that only stood still.
+    std::map<int, Vec2d> m_object_tower_loaded_pos;
     GCodeViewer m_gcode_viewer;
     // used to show layers times on the layers slider (libvgcode stage 3, OrcaSlicer #10735)
     std::vector<float> m_gcode_layers_times_cache;

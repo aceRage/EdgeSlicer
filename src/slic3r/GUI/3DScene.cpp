@@ -40,6 +40,7 @@
 #include <boost/format.hpp>
 
 #include <cstring>
+#include <limits>
 #include <set>
 #include <string>
 
@@ -836,9 +837,10 @@ void GLVolumeCollection::load_object_auxiliary(const SLAPrintObject* print_objec
 }
 
 int GLVolumeCollection::load_wipe_tower_preview(
-    int obj_idx, float pos_x, float pos_y, float width, float depth, float height, float rotation_angle, bool size_unknown, float brim_width)
+    int obj_idx, float pos_x, float pos_y, float width, float depth, float height, float rotation_angle, bool size_unknown, float brim_width,
+    bool invalid)
 {
-    int plate_idx = obj_idx - 1000;
+    int plate_idx = tower_volume_plate(obj_idx);
 
     if (depth < 0.01f)
         return int(this->volumes.size() - 1);
@@ -877,6 +879,10 @@ int GLVolumeCollection::load_wipe_tower_preview(
             colors.push_back(extruder_colors[0]);
     }
 
+    // Per-object prime towers: a tower dragged where it is not clear is red (it prints placed automatically instead).
+    if (invalid)
+        for (auto& color : colors)
+            color = ColorRGBA::RED();
     // Orca: make it transparent
     for (auto& color : colors)
         color.a(0.66f);
@@ -900,7 +906,10 @@ int GLVolumeCollection::load_wipe_tower_preview(
     v.set_volume_rotation(Vec3d(0., 0., (M_PI / 180.) * rotation_angle));
     v.composite_id                             = GLVolume::CompositeID(obj_idx, 0, 0);
     v.geometry_id.first                        = 0;
-    v.geometry_id.second                       = wipe_tower_instance_id().id + (obj_idx - 1000);
+    // A per-object tower takes an id no ModelInstance can have (the plate tower's base plus 1000 and more could be one),
+    // so a reload never re-selects something else in its place.
+    v.geometry_id.second                       = is_object_tower_volume_id(obj_idx) ? std::numeric_limits<size_t>::max() - size_t(obj_idx) :
+                                                                                      wipe_tower_instance_id().id + (obj_idx - 1000);
     v.is_wipe_tower                            = true;
     v.shader_outside_printer_detection_enabled = !size_unknown;
     return int(volumes.size() - 1);

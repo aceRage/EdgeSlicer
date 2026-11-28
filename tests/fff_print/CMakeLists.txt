@@ -106,6 +106,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stabilizer_bake.cpp
 	test_stabilizers_v2.cpp
 	test_stabilizers_without_supports.cpp
+	test_support_fins.cpp
 	test_fdm_hollowing.cpp
 	test_empty_first_layer_warning.cpp
 	test_extra_bridge_layer_determinism.cpp
@@ -122,6 +123,8 @@ add_executable(${_TEST_NAME}_tests
 	test_adaptive_pa.cpp
 	test_tool_ordering.cpp
 	test_adaptive_pressure_advance.cpp
+	test_cooling_filter_gcode.cpp
+	test_adaptive_volumetric_speed.cpp
 	test_extruder_variant_arrays.cpp
 	test_filament_map_roundtrip.cpp
 	test_filament_map_bounds.cpp

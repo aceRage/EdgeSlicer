@@ -4880,7 +4880,6 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     if (int(e) < int(vend->size()) && vend->get_at(int(e)).find("Bambu") == std::string::npos) { all_bbl = false; break; }
             this->placeholder_parser().set("is_all_bbl_filament", new ConfigOptionBool(all_bbl));
             this->placeholder_parser().set("has_tpu_in_first_layer", new ConfigOptionBool(false));
-            this->placeholder_parser().set("cooling_filter_enabled", new ConfigOptionBool(false));
             this->placeholder_parser().set("max_print_z", new ConfigOptionFloat(0.));
             this->placeholder_parser().set("is_prime_tower_interface", new ConfigOptionBool(false));
             this->placeholder_parser().set("filament_tower_interface_purge_volume", new ConfigOptionFloat(0.));
@@ -12548,8 +12547,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // bridge it is ~162 mm/s where the profile asks for 45, so a mistyped or misresolved setting
     // silently prints ~3.6x too fast. Report it here, with the setting name, for exactly the
     // reason the writer guard reports: the user must be told WHICH value was ignored.
-    const double filament_max_volumetric_speed =
-        m_filament_flow.max_volumetric_speed_for(m_config, m_writer.extruder()->id());
+    // Orca #12688 / BBS: with adaptive volumetric speed on, the cap is also limited by the fit of this
+    // path's layer height and line width. Off (every stock preset): the cached value, unchanged.
+    const double filament_max_volumetric_speed = m_filament_flow.adaptive_max_volumetric_speed(
+        m_writer.extruder()->id(), m_filament_flow.max_volumetric_speed_for(m_config, m_writer.extruder()->id()),
+        path.height, path.width);
     const bool speed_was_invalid = !(speed >= 1e-6);
     if (speed_was_invalid)
         speed = filament_max_volumetric_speed / _mm3_per_mm;

@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -65,6 +66,7 @@ bool GLGizmoPaintSplit::on_init()
     m_desc["depth"]         = _L("Depth");
     m_desc["lip_angle"]     = _L("Lip angle");
     m_desc["smoothing"]     = _L("Smoothing");
+    m_desc["smooth_face"]   = _L("Smooth cut face");
     m_desc["snap"]          = _L("Square to bed");
     m_desc["result"]        = _L("Result");
     m_desc["keep_as_parts"] = _L("Keep as parts");
@@ -148,9 +150,10 @@ bool GLGizmoPaintSplit::defer_close(std::function<void()> close)
 
 void GLGizmoPaintSplit::on_save(cereal::BinaryOutputArchive &ar) const
 {
-    // Version 3 (nearest skin): the first float after the hole fill is Depth (0 = unlimited); the other two are kept
-    // for the layout. Version 2 held Follow paint's Depth, Lip angle and Smoothing.
-    const int      version = 3;
+    // Version 4 (R1): the third float after the hole fill is Smooth cut face. Version 3 (nearest skin): the first is
+    // Depth (0 = unlimited), the other two were kept for the layout. Version 2 held Follow paint's Depth, Lip angle
+    // and Smoothing.
+    const int      version = 4;
     const uint64_t object  = uint64_t(m_committed_object);
     ar(version, object, m_committed, m_picked_filament, int(m_mode), int(m_style), m_fill_holes_pct, m_depth, m_lip_angle, m_smoothing,
        m_snap_to_bed, m_keep_as_parts);
@@ -165,8 +168,9 @@ void GLGizmoPaintSplit::on_load(cereal::BinaryInputArchive &ar)
     if (version >= 3) {
         m_depth     = a;
         m_lip_angle = b;
-        m_smoothing = c;
     } // older versions held other cut styles' values: Depth keeps its own
+    if (version >= 4)
+        m_smoothing = std::clamp(c, 0.f, 1.f);
     m_loaded_object = size_t(object);
     m_loaded_valid  = true;
     m_mode          = Mode(std::clamp(mode, 0, int(Mode::PickSegment)));
@@ -453,7 +457,8 @@ void GLGizmoPaintSplit::refresh_preview()
 PaintSplitSkinParams GLGizmoPaintSplit::skin_params() const
 {
     PaintSplitSkinParams sp;
-    sp.depth = m_depth; // 0 = unlimited
+    sp.depth     = m_depth; // 0 = unlimited
+    sp.smoothing = m_smoothing;
     return sp;
 }
 
@@ -540,9 +545,28 @@ void GLGizmoPaintSplit::compute_cut_preview()
         return;
     wxBusyCursor wait;
     const PaintSplitSkinParams sp = skin_params();
+    m_show_log.clear();
+    auto       one   = [](double v, const char *fmt) { return wxString::Format(fmt, v).ToStdString(); };
+    const auto t_all = std::chrono::steady_clock::now();
+    // On the part as Apply repairs it: the cutter's outside test needs a closed skin.
+    indexed_triangle_set        fixed;
+    PaintSplitRepairStats       repair;
+    const bool                  repaired = paint_split_repair(m_cut_mesh.its, fixed, nullptr, repair);
+    const indexed_triangle_set &part     = repaired && repair.needed ? fixed : m_cut_mesh.its;
     for (size_t c = 0; c < m_region.num_components(); ++c)
-        if (m_region.component_ok(int(c)))
-            m_claim_cut.push_back(paint_split_claim_cut_surface(m_cut_mesh.its, paint_split_nearest_claim(m_cut_mesh.its, m_region, int(c), sp)));
+        if (m_region.component_ok(int(c))) {
+            const auto            t0    = std::chrono::steady_clock::now();
+            const PaintSplitClaim claim = paint_split_nearest_cutter(part, m_region, int(c), sp);
+            const double field = claim.stats.setup_s + claim.stats.field_s + claim.stats.mesh_s + claim.stats.smooth_s;
+            m_claim_cut.push_back(paint_split_claim_cut_surface(part, claim.mesh));
+            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            m_show_log.push_back(GUI::format(_u8L("Region %1%: field %2% s, surface %3% s (voxel %4% mm, %5% mm at the skin)"), c + 1,
+                                             one(field, "%.1f"), one(secs - field, "%.1f"), one(claim.stats.voxel, "%.2f"),
+                                             one(claim.stats.near_skin_voxel, "%.2f")));
+        }
+    const double all = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count();
+    m_show_log.insert(m_show_log.begin(), GUI::format(_u8L("Show cut: %1% s"), one(all, "%.1f")));
+    BOOST_LOG_TRIVIAL(info) << "Paint split Show cut: " << m_claim_cut.size() << " region(s) in " << all << " s";
     m_preview_dirty = true;
     m_parent.set_as_dirty();
 }
@@ -828,6 +852,9 @@ void GLGizmoPaintSplit::on_render_input_window(float x, float y, float bottom_li
                    _L("How deep under the selected skin the piece may reach, in mm. 0 is unlimited: as deep as the selected skin is the nearest one.")))
             m_claim_cut.clear(), dirty = true;
     }
+    if (slider("##ps_smooth", m_desc.at("smooth_face"), &m_smoothing, 0.f, 1.f, "%.2f", 0.05f,
+               _L("How much the cut face inside the part is smoothed (0 = off). The cut still meets the skin exactly on the paint line.")))
+        m_claim_cut.clear(), dirty = true;
     if (m_imgui->button(_L("Show cut")))
         wxGetApp().CallAfter([this]() { compute_cut_preview(); });
     if (ImGui::IsItemHovered())
@@ -848,6 +875,23 @@ void GLGizmoPaintSplit::on_render_input_window(float x, float y, float bottom_li
     ImGui::Separator();
     if (m_imgui->button(m_desc.at("apply"), ImVec2(0.f, 0.f), can_apply && m_masked_parts == 1))
         wxGetApp().CallAfter([this]() { apply(); });
+
+    // Output Log (R1 step 0): Show cut's times and the last Apply's, per region.
+    const std::vector<std::string> &applied = PaintSplitJob::last_log();
+    if (!m_show_log.empty() || !applied.empty()) {
+        ImGui::Separator();
+        if (m_imgui->button(m_output_log_open ? _L("Hide Output Log") : _L("Output Log")))
+            m_output_log_open = !m_output_log_open;
+        if (m_output_log_open) {
+            for (const std::string &l : m_show_log)
+                note(from_u8(l));
+            if (!applied.empty()) {
+                note(_L("Last Apply:"));
+                for (const std::string &l : applied)
+                    note(from_u8(l));
+            }
+        }
+    }
 
     if (dirty) {
         m_preview_dirty = true;
