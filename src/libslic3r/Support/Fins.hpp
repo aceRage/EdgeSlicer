@@ -18,9 +18,14 @@
 // layers: they are an addition like the side stabilizers (Stabilizers.hpp), with or without Enable
 // supports, never a support type. Tines are always on an object layer's print_z with its height:
 // with supports off, between supports or with an independent support layer height, the fins insert
-// their own support layers at the object's heights and keep out of every support layer whose Z range
-// overlaps theirs, so nothing prints twice. A tine that would cross other support is left out (and
-// counted), never moved to another height.
+// their own support layers at the object's heights, so nothing prints twice.
+//
+// Fins win the space (owner, 2026-11-27): fins hold most tall parts better than support does, so the
+// normal and tree support the generators made is cut back from the fins' footprint by the fin gap
+// (displace_supports_for_fins, run before the side stabilizers), and the fins are planned exactly as
+// the bake plans them, with nothing but support blockers in their way. The side stabilizers are not
+// cut back: the fins keep out of every stabilizer whose Z range overlaps theirs, and a tine that would
+// cross one is left out (and counted), never moved to another height.
 //
 // The planner and the slicer work on plain layer outlines and a FinSettings, not on a PrintObject, so
 // the bake (PR 2) and the tests run them the same way.
@@ -172,6 +177,14 @@ std::vector<FinSlice> slice_fins(const std::vector<FinLayer> &layers, const FinS
 // The painted fin spots of a PrintObject (paint state SUPPORT_FIN, one spot per patch).
 std::vector<stabilizers::PaintedSpot> painted_fin_spots(const PrintObject &object);
 
+// Per object layer: the support blocker volumes (`volumes`, obstacles for slice_fins) and the painted
+// support blockers (`painted`, which remove the fins they touch).
+void fin_blockers(const PrintObject &object, std::vector<ExPolygons> &volumes, std::vector<ExPolygons> &painted);
+
+// The fins' footprint per object layer (walls and tines), planned and sliced with nothing but support
+// blockers in the way: what the live fins print with no stabilizers about, and what the bake builds.
+std::vector<ExPolygons> fin_footprints(const PrintObject &object, const std::function<void()> &throw_if_canceled);
+
 // The objects whose support fins are on (by their own config or the print's): an export for Bambu Studio
 // drops the setting, so they would print there without fins.
 std::vector<std::string> objects_with_live_fins(const Model &model, const DynamicPrintConfig &print_config);
@@ -182,5 +195,12 @@ std::vector<std::string> objects_with_live_fins(const Model &model, const Dynami
 // layer heights where none exist. No-op unless support_fins is on; refused (report.refused_raft) with a
 // raft. Runs inside the support step, after the support generators and the side stabilizers.
 fins::FinReport generate_fin_supports(PrintObject &object, const std::function<void()> &throw_if_canceled);
+
+// Fins win the space: cuts the support the generators made (support_fills, interface partitions, islands
+// and tree areas) back from the fins' footprint by the fin gap plus a support line, on every support
+// layer whose Z range overlaps a fin layer. Run after the support generators and before the side
+// stabilizers and generate_fin_supports. No-op unless support_fins is on (fins off: the support is
+// untouched); nothing with a raft. Returns the number of support extrusions cut or dropped.
+size_t displace_supports_for_fins(PrintObject &object, const std::function<void()> &throw_if_canceled);
 
 } // namespace Slic3r

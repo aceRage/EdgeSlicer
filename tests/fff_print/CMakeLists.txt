@@ -109,6 +109,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stabilizers_v2.cpp
 	test_stabilizers_without_supports.cpp
 	test_support_fins.cpp
+	test_fin_bake.cpp
 	test_fdm_hollowing.cpp
 	test_empty_first_layer_warning.cpp
 	test_extra_bridge_layer_determinism.cpp

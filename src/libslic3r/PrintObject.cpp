@@ -1098,6 +1098,12 @@ void PrintObject::generate_support_material()
         // Side stabilizers below do not read this cache.
         this->clear_tree_support_preview_cache();
 
+        // Support fins win the space (owner, 2026-11-27): the normal and tree support made above is cut back
+        // from the fins' footprint by the fin gap, before the stabilizers, which keep out of the support.
+        // Fins off: nothing is touched.
+        if (this->has_fins() && !m_shared_object)
+            displace_supports_for_fins(*this, [this]() { this->throw_if_canceled(); });
+
         // Side stabilizers (Support/Stabilizers.hpp) ride on whatever support layers exist - the
         // generator's above, or none: they do not depend on Enable supports. With supports off the
         // block above is skipped, so no support, interface or raft is made; the stabilizers insert
@@ -1121,7 +1127,8 @@ void PrintObject::generate_support_material()
                                    this->model_object()->name),
                     PrintStateBase::SlicingStabilizerManualUnpainted);
         }
-        // Support fins (Support/Fins.hpp): after the supports and the stabilizers, which they keep out of.
+        // Support fins (Support/Fins.hpp): after the supports (already cut back from them) and the
+        // stabilizers, which they keep out of.
         if (this->has_fins() && !m_shared_object) {
             m_print->set_status(50, L("Generating support fins"));
             const fins::FinReport fr = generate_fin_supports(*this, [this]() { this->throw_if_canceled(); });
@@ -1147,9 +1154,9 @@ void PrintObject::generate_support_material()
                     PrintStateBase::SlicingFinsPaintedUnpainted);
             if (fr.fins_lost > 0 || fr.tines_lost > 0)
                 this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
-                    Slic3r::format(_u8L("Object %1%: other support prints where its support fins would stand, so %2% fin(s) and %3% tine(s) "
-                                        "were left out (fins never print over other support, and tines stay on the part's own layers). "
-                                        "Turn supports off on that side, or block them there with the support painting tool."),
+                    Slic3r::format(_u8L("Object %1%: its side stabilizers print where its support fins would stand, so %2% fin(s) and %3% tine(s) "
+                                        "were left out (fins never print over a stabilizer, and tines stay on the part's own layers). "
+                                        "Move the stabilizers away from the fins, or turn one of them off."),
                                    name, fr.fins_lost, fr.tines_lost),
                     PrintStateBase::SlicingFinsTinesSkipped);
             if (m_print->config().print_sequence == PrintSequence::ByObject && fr.beyond_footprint > EPSILON)

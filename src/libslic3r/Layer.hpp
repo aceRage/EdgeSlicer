@@ -437,6 +437,18 @@ public:
             out.insert(out.end(), part.areas.begin(), part.areas.end());
         return out;
     }
+    // Edge (support fins win the space, Support/Fins.cpp): `fn` applied to every classic tree support area
+    // list - base, roof, the layer under the roof, floor, the roof gap and the interlock stripes.
+    template<class Fn> void for_each_tree_support_areas(Fn &&fn)
+    {
+        fn(base_areas);
+        fn(roof_areas);
+        fn(roof_1st_layer);
+        fn(floor_areas);
+        fn(roof_gap_areas);
+        for (InterlockRoofPart &part : interlock_roof)
+            fn(part.areas);
+    }
 
 
     // Is there any valid extrusion assigned to this LayerRegion?

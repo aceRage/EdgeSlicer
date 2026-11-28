@@ -494,6 +494,11 @@ public:
     // tests/research_stabilizer_bake.md
     void bake_stabilizers();
     static bool can_bake_stabilizers();
+    // Support fins baked into real geometry (a part of the object or a separate object), so they print
+    // in other slicers too. Enabled when the object is sliced and its support fins are not Off.
+    // tests/design_support_fins.md (PR 2)
+    void bake_fins();
+    static bool can_bake_fins();
     // Re-reads an object's own settings into its list row and the settings panel, after code (not
     // the user) changed ModelObject::config.
     void refresh_object_settings(int obj_idx);

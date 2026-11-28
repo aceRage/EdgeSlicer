@@ -24,6 +24,10 @@
 #include "libslic3r/MeshRound.hpp"
 #include "libslic3r/SliceBake.hpp"
 #include "libslic3r/Support/StabilizerBake.hpp"
+#include "libslic3r/Support/FinBake.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Layer.hpp"
+#include <boost/format.hpp>
 #include "libslic3r/Print.hpp"
 #include "libslic3r/HeightPatternInput.hpp"
 #include "GLCanvas3D.hpp"
@@ -43,6 +47,8 @@
 #include "Jobs/SliceBakeJob.hpp"
 #include "Jobs/StabilizerBakeJob.hpp"
 #include "StabilizerBakeDialog.hpp"
+#include "Jobs/FinBakeJob.hpp"
+#include "FinBakeDialog.hpp"
 #include "Jobs/Worker.hpp"
 #include <wx/filedlg.h>
 #include "QuadRemeshDialog.hpp"
@@ -7099,6 +7105,120 @@ void ObjectList::bake_stabilizers()
     if (!worker.is_idle())
         return;
     replace_job(worker, std::make_unique<StabilizerBakeJob>(plater, po, mo->id(), options, name));
+}
+
+// Support fins baked into real geometry - libslic3r/Support/FinBake.hpp does the work, FinBakeDialog
+// collects the options (with a preview of the planned fins) and FinBakeJob runs it off the UI thread.
+// The technique is Slant3D's designed-in supports, as specified by Support Fins (gittrahan/support-fins,
+// printfins.com, MIT); EdgeSlicer's own implementation.
+//
+// tests/design_support_fins.md (PR 2)
+
+// As for the stabilizers: the object's fin settings as they stand now against those of the slice, so a
+// bake right after another (source switched Off) or after a settings change is not offered.
+static bool fins_baking_allowed(const PrintObject* po, const ModelObject* mo, bool* stale = nullptr)
+{
+    if (stale != nullptr)
+        *stale = false;
+    if (po == nullptr || mo == nullptr || po->config().support_fins.value == sfmOff)
+        return false;
+    const ConfigOption* mode = stabilizer_model_option(mo, "support_fins");
+    if (mode == nullptr || mode->getInt() == int(sfmOff))
+        return false;
+    for (const char* key : { "support_fins", "support_fin_thickness", "support_fin_depth", "support_fin_height", "support_fin_spacing",
+                             "support_fin_gap", "support_fin_tine_spacing", "support_fin_tine_depth", "support_fin_tine_base_rows",
+                             "support_fin_lean_side_only" }) {
+        const ConfigOption* now    = stabilizer_model_option(mo, key);
+        const ConfigOption* sliced = po->config().option(key);
+        if (now != nullptr && sliced != nullptr && !(*now == *sliced)) {
+            if (stale != nullptr)
+                *stale = true;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ObjectList::can_bake_fins()
+{
+    ObjectList* list = wxGetApp().obj_list();
+    if (list == nullptr)
+        return false;
+    std::vector<int> obj_idxs, vol_idxs;
+    list->get_selection_indexes(obj_idxs, vol_idxs);
+    if (obj_idxs.size() != 1)
+        return false;
+    // The fins are planned from the layer outlines, so a slice is all it takes.
+    return fins_baking_allowed(baked_print_object_for(obj_idxs.front(), posSlice), list->object(obj_idxs.front()));
+}
+
+void ObjectList::bake_fins()
+{
+    if (!wxGetApp().plater()->get_view3D_canvas3D()->get_gizmos_manager().check_gizmos_closed_except(GLGizmosManager::Undefined))
+        return;
+
+    std::vector<int> obj_idxs, vol_idxs;
+    get_selection_indexes(obj_idxs, vol_idxs);
+    if (obj_idxs.size() != 1)
+        return;
+    const int obj_idx = obj_idxs.front();
+
+    const PrintObject* po = baked_print_object_for(obj_idx, posSlice);
+    ModelObject* mo = object(obj_idx);
+    bool stale = false;
+    if (!fins_baking_allowed(po, mo, &stale)) {
+        wxGetApp().notification_manager()->push_plater_warning_notification(stale ?
+            _u8L("The object's fin settings changed since the plate was sliced. Slice the plate again before baking the fins.") :
+            _u8L("Turn on the object's support fins (Auto or Painted) and slice the plate before baking them."));
+        return;
+    }
+
+    Plater* plater = wxGetApp().plater();
+    const std::string name = mo->name.empty() ? std::string("object") : mo->name;
+
+    // The preview: the fins planned from the slice now (cheap - no mesh), while nothing reslices it.
+    FinBakePreviewData preview;
+    {
+        const FinBakeResult planned = plan_fin_bake(*po, FinBakeOptions{});
+        if (!planned.error.empty()) {
+            wxGetApp().notification_manager()->push_plater_warning_notification(
+                (boost::format(_u8L("Could not bake the fins of \"%1%\": %2%.")) % name % planned.error).str());
+            return;
+        }
+        ExPolygons part, fins;
+        for (const Layer* layer : po->layers())
+            if (layer->print_z <= planned.fin_top + EPSILON)
+                expolygons_append(part, layer->lslices);
+        for (const fins::FinMeshLayer& band : planned.bands)
+            expolygons_append(fins, band.sections);
+        preview.part = union_ex(part);
+        preview.fins = union_ex(fins);
+        for (const fins::FinSlice& s : planned.slices)
+            preview.tines.insert(preview.tines.end(), s.tines.begin(), s.tines.end());
+        preview.fin_count  = planned.plan.fins.size();
+        preview.tine_count = planned.tines;
+        preview.fin_top    = planned.fin_top;
+    }
+
+    // One part is shared by every instance, so it can only follow instances that share the sliced one's
+    // rotation and scale - those are exactly the PrintObject's own instances.
+    const bool part_allowed = po->instances().size() == mo->instances.size();
+    const bool by_object    = po->print() != nullptr && po->print()->config().print_sequence.value == PrintSequence::ByObject;
+    const wxString mode_label = po->config().support_fins.value == sfmPainted ? _L("Painted") : _L("Auto");
+
+    FinBakeOptions options;
+    {
+        FinBakeDialog dlg(wxGetApp().mainframe, from_u8(name), mode_label, preview, po->config().support_fin_gap.value,
+                          po->config().layer_height.value, po->config().support_filament.value, by_object, part_allowed);
+        if (dlg.ShowModal() != wxID_OK)
+            return;
+        options = dlg.options();
+    }
+
+    Worker& worker = plater->get_ui_job_worker();
+    if (!worker.is_idle())
+        return;
+    replace_job(worker, std::make_unique<FinBakeJob>(plater, po, mo->id(), options, name));
 }
 
 void ObjectList::refresh_object_settings(int obj_idx)
