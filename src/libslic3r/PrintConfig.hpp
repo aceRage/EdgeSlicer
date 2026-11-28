@@ -2752,6 +2752,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     // (see VolumetricSpeedFit). Here for the same macro nesting limit.
     ((ConfigOptionBoolsNullable,      filament_adaptive_volumetric_speed))
     ((ConfigOptionStrings,            volumetric_speed_coefficients))
+    // Not a tower option; here only because GCodeConfig is at the macro limit (see above).
+    // Transmission distance (TD): how deep light gets into a filament. Not used by slicing; it feeds
+    // the colour models (dual wall dithering, see DualWallDither.hpp).
+    ((ConfigOptionFloats,             filament_transmission_distance))
 )
 
 // BBS 2.9.2 P3C idle-nozzle floor, a class of its own: GCodeConfig and PrintConfig are at

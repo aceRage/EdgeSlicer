@@ -6500,6 +6500,7 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_diameter");
 
         optgroup->append_single_option_line("filament_density");
+        optgroup->append_single_option_line("filament_transmission_distance");
         optgroup->append_single_option_line("filament_shrink");
         optgroup->append_single_option_line("filament_shrinkage_compensation_z");
         optgroup->append_single_option_line("filament_cost");

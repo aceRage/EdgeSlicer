@@ -162,6 +162,8 @@ set(lisbslic3r_sources
     Showcase/ShowcaseGltf.hpp
     Showcase/ShowcaseTubes.cpp
     Showcase/ShowcaseTubes.hpp
+    DualWallDither.cpp
+    DualWallDither.hpp
     ImageRowWalls.cpp
     ImageRowWalls.hpp
     ColorSplitInternal.hpp

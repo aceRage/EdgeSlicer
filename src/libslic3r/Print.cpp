@@ -845,6 +845,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "default_filament_colour",
         "filament_diameter",
         "filament_density",
+        "filament_transmission_distance",
         "filament_cost",
         // Only the cost statistics read it (machine time cost); not a slicing input.
         "time_cost",
