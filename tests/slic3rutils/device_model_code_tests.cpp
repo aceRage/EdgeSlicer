@@ -159,8 +159,9 @@ TEST_CASE("A printer that reports no usable model code is identified by its seri
 
     // Every shipped definition carries Bambu's prefix, and no two share one.
     const auto prefixes = Slic3r::GUI::load_model_sn_prefixes(kPrinters);
-    CHECK(prefixes.size() == 15);
+    CHECK(prefixes.size() == 16);
     CHECK(prefixes.at("32X") == "N10"); // H3C (Bambu Studio 2.9.1)
+    CHECK(prefixes.at("331") == "N11"); // P3C (Bambu Studio 2.9.2)
     CHECK(prefixes.at("20P") == "N6");
     CHECK(prefixes.at("22E") == "N7");
     CHECK(prefixes.at("26A") == "N9");
@@ -241,4 +242,22 @@ TEST_CASE("The P2S, A2L and H2D Pro model codes resolve to their definitions", "
         compatible.push_back(c.get<std::string>());
     CHECK(Slic3r::GUI::device_matches_profile_model("O1D", "O1E", compatible));
     CHECK_FALSE(Slic3r::GUI::device_matches_profile_model("N6", "O1E", compatible));
+}
+
+TEST_CASE("The H3C and P3C printer definitions keep nine and seven nozzles", "[DeviceModelCode]")
+{
+    const nlohmann::json n10 = read_json(kPrinters + "/N10.json");
+    const nlohmann::json n11 = read_json(kPrinters + "/N11.json");
+    REQUIRE(n10.is_object());
+    REQUIRE(n11.is_object());
+    CHECK(n10["00.00.00.00"]["display_name"] == "Bambu Lab H3C");
+    CHECK(n10["00.00.00.00"]["print"]["default_nozzle_count"] == 9);
+    CHECK(n11["00.00.00.00"]["display_name"] == "Bambu Lab P3C");
+    CHECK(n11["00.00.00.00"]["print"]["default_nozzle_count"] == 7);
+    CHECK(n11["00.00.00.00"]["model_id"] == "N11");
+    CHECK(n11["00.00.00.00"]["sn_prefix"] == "331");
+    CHECK(identify("", "3310000000000001") == "N11");
+    CHECK(identify("N11", "3310000000000001") == "N11");
+    CHECK(Slic3r::GUI::device_matches_profile_model("N11", identify("N11", "3310000000000001"), {}));
+    CHECK_FALSE(Slic3r::GUI::device_matches_profile_model("N10", "N11", {}));
 }
