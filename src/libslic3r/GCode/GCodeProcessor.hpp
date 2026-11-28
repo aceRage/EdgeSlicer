@@ -439,6 +439,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
         // Tracks G90 (absolute) / G91 (relative) positioning: a relative Z move is a
         // delta added to the running Z, not an absolute position (Snapmaker #1083 / #1191).
         static bool get_last_z_from_gcode(const std::string& gcode_str, double& z, double start_z);
+        // True when the block commands a toolhead move. Inert custom g-code (comments, M-codes,
+        // E-only G1) cannot invalidate the writer position; G28 and Bambu M9711 can.
+        static bool gcode_moves_toolhead(const std::string &gcode_str);
 
         static const float Wipe_Width;
         static const float Wipe_Height;

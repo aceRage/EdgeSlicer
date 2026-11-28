@@ -2263,6 +2263,100 @@ bool GCodeProcessor::get_last_z_from_gcode(const std::string& gcode_str, double&
     return is_z_changed;
 }
 
+// Custom g-code is often inert (a timelapse block compiled out by its conditionals, a marker).
+// G0-G3 with an axis word move the head; G28 homes; Bambu M9711 / G150 / G387 relocate in firmware.
+bool GCodeProcessor::gcode_moves_toolhead(const std::string &gcode_str)
+{
+    auto line_moves = [](std::string_view line) {
+        size_t first = line.find_first_not_of(" \t\r");
+        if (first == std::string_view::npos)
+            return false;
+        line.remove_prefix(first);
+        const size_t comment = line.find(';');
+        if (comment != std::string_view::npos)
+            line = line.substr(0, comment);
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r'))
+            line.remove_suffix(1);
+        if (line.empty())
+            return false;
+
+        const char letter = line[0];
+        const bool is_g   = letter == 'G' || letter == 'g';
+        const bool is_m   = letter == 'M' || letter == 'm';
+        if (!is_g && !is_m)
+            return false;
+
+        size_t i = 1;
+        if (i >= line.size() || line[i] < '0' || line[i] > '9')
+            return false;
+        int cmd = 0;
+        while (i < line.size() && line[i] >= '0' && line[i] <= '9') {
+            // G/M numbers in this helper stay well below this; the cap is MSVC-safe overflow guard.
+            if (cmd > 100000)
+                return false;
+            cmd = cmd * 10 + (line[i] - '0');
+            ++i;
+        }
+        if (i < line.size() && line[i] == '.') {
+            ++i;
+            while (i < line.size() && line[i] >= '0' && line[i] <= '9')
+                ++i;
+        }
+
+        if (is_m)
+            // M9711: Bambu firmware photo that can park the head at U/V (and Z). M971 is shutter-only.
+            return cmd == 9711;
+
+        switch (cmd) {
+        case 28:  // home
+        case 29:  // bed leveling
+        case 38:  // probe
+        case 39:  // Bambu nozzle-clog detect
+        case 150: // Bambu garbage-can park (G150.3)
+        case 387: // Bambu coordinated move
+            return true;
+        case 0:
+        case 1:
+        case 2:
+        case 3:
+            break;
+        default:
+            return false;
+        }
+
+        // G0-G3: an X/Y/Z word, or an arc centre I/J/K. G1 E only, G10, and a bare G0 do not count.
+        // Axis letters may be spaced ("G1 X10") or attached ("G1X10").
+        while (i < line.size()) {
+            const char c = line[i];
+            if (c == ' ' || c == '\t') {
+                ++i;
+                continue;
+            }
+            if (c == 'X' || c == 'Y' || c == 'Z' || c == 'I' || c == 'J' || c == 'K' ||
+                c == 'x' || c == 'y' || c == 'z' || c == 'i' || c == 'j' || c == 'k')
+                return true;
+            ++i;
+            while (i < line.size() && line[i] != ' ' && line[i] != '\t')
+                ++i;
+        }
+        return false;
+    };
+
+    size_t start = 0;
+    const size_t n = gcode_str.size();
+    while (start <= n) {
+        size_t end = gcode_str.find('\n', start);
+        if (end == std::string::npos)
+            end = n;
+        if (end > start && line_moves(std::string_view(gcode_str.data() + start, end - start)))
+            return true;
+        if (end == n)
+            break;
+        start = end + 1;
+    }
+    return false;
+}
+
 void GCodeProcessor::process_tags(const std::string_view comment, bool producers_enabled)
 {
     // producers tags
