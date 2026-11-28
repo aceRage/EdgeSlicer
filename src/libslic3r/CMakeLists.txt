@@ -962,6 +962,12 @@ target_compile_definitions(libslic3r PUBLIC -DUSE_TBB -DTBB_USE_CAPTURED_EXCEPTI
 # Make source directory PUBLIC so other modules (like libslic3r_gui) can include headers like SentryWrapper.hpp
 target_include_directories(libslic3r PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(libslic3r SYSTEM PUBLIC ${EXPAT_INCLUDE_DIRS})
+if (WIN32)
+    # Orca #17290: expat is linked statically; upstream headers declare the API __declspec(dllimport)
+    # unless XML_STATIC is defined. Edge (Snapmaker #590): the pinned copy is built with 64-bit
+    # position counters (EXPAT_LARGE_SIZE), and the header has to agree with it.
+    target_compile_definitions(libslic3r PUBLIC XML_STATIC XML_LARGE_SIZE)
+endif()
 
 # Find the OCCT and related libraries
 set(OpenCASCADE_DIR "${OCCT_PREFIX}/lib/cmake/occt")

@@ -821,18 +821,11 @@ if (NOT EIGEN3_FOUND)
 endif ()
 include_directories(BEFORE SYSTEM ${EIGEN3_INCLUDE_DIR})
 
-# Find expat or use bundled version
-# Always use the system libexpat on Linux.
-
-find_package(EXPAT)
-
-if (NOT EXPAT_FOUND)
-    # deps_src/expat provides the expat target with XML_LARGE_SIZE enabled.
-    # Just set the variables needed by consumers.
-    set(EXPAT_FOUND 1)
-    set(EXPAT_INCLUDE_DIRS ${LIBDIR}/expat/)
-    set(EXPAT_LIBRARIES expat)
-endif ()
+# Orca #17290: Linux links the system libexpat when it is the pinned version; every other case
+# builds that version in the deps project, so all platforms link the same parser.
+# Requiring 2.10.0 rather than the 2.4.0 security floor keeps distro packages that
+# are missing later fixes from slipping in.
+find_package(EXPAT 2.10.0 REQUIRED)
 
 find_package(PNG REQUIRED)
 

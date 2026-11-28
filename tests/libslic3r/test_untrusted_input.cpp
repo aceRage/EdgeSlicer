@@ -25,6 +25,7 @@
 #include <boost/nowide/fstream.hpp>
 #include <boost/system/error_code.hpp>
 #include <nlohmann/json.hpp>
+#include <expat.h>
 
 #include <array>
 #include <cstdio>
@@ -3713,6 +3714,87 @@ TEST_CASE("an AMF metadata tag without a type fails to load instead of crashing"
 
     boost::system::error_code ec;
     fs::remove_all(dir, ec);
+}
+
+// Orca #17290: the bundled expat 2.5.0 had its entity-amplification guard compiled out, so a crafted
+// AMF could freeze the app. The pinned 2.10.0 is built with the guard.
+namespace {
+
+// An internal DTD subset has to precede the root element, so splice it in ahead of the root tag.
+std::string amf_with_dtd(const std::string &declarations, const std::string &name)
+{
+    std::string xml = one_triangle_amf("<metadata type=\"name\">");
+    const size_t oops = xml.find("oops");
+    xml.replace(oops, 4, name);
+    xml.insert(xml.find("<amf"), "<!DOCTYPE amf [\n" + declarations + "\n]>\n");
+    return xml;
+}
+
+bool load_temp_amf(const std::string &xml, Model &model)
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_amf_%%%%%%%%");
+    fs::create_directories(dir);
+    const fs::path file = dir / "entity.amf";
+    write_temp_amf(file, xml);
+    DynamicPrintConfig        cfg;
+    ConfigSubstitutionContext ctx{ForwardCompatibilitySubstitutionRule::Enable};
+    bool                      use_inches = false;
+    bool                      loaded     = false;
+    REQUIRE_NOTHROW(loaded = load_amf(file.string().c_str(), &cfg, &ctx, &model, &use_inches));
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+    return loaded;
+}
+
+} // namespace
+
+TEST_CASE("AMF rejects an XML entity amplification bomb", "[Untrusted][AMF][Security][Orca17290]")
+{
+    // Seven levels expand to 10^7 characters, past expat's 8 MiB output and 100x amplification thresholds, yet a
+    // build without the guard still parses that in well under a second instead of exhausting memory as ten would.
+    std::string declarations = "<!ENTITY e1 \"AAAAAAAAAA\">";
+    for (int level = 2; level <= 7; ++level) {
+        std::string body;
+        for (int repeat = 0; repeat < 10; ++repeat)
+            body += "&e" + std::to_string(level - 1) + ";";
+        declarations += "\n<!ENTITY e" + std::to_string(level) + " \"" + body + "\">";
+    }
+    Model model;
+    CHECK_FALSE(load_temp_amf(amf_with_dtd(declarations, "&e7;"), model));
+}
+
+TEST_CASE("AMF still expands an ordinary internal entity", "[Untrusted][AMF][Security][Orca17290]")
+{
+    // The amplification cap must not turn entity support off: ordinary AMF files keep parsing.
+    Model model;
+    REQUIRE(load_temp_amf(amf_with_dtd("<!ENTITY name \"hello\">", "&name;"), model));
+    REQUIRE(model.objects.size() == 1);
+    CHECK(model.objects.front()->name == "hello");
+}
+
+// Edge: which expat is linked, and how it was built. The guard needs DTD and general entity support
+// compiled in; Snapmaker #590 needs the 64-bit position counters on Windows, where long is 32-bit.
+TEST_CASE("the linked expat is the pinned release with the amplification guard", "[Untrusted][Security][Orca17290]")
+{
+    const XML_Expat_Version version = XML_ExpatVersionInfo();
+    INFO("expat " << version.major << "." << version.minor << "." << version.micro);
+    CHECK((version.major > 2 || (version.major == 2 && version.minor >= 10)));
+
+    bool dtd = false, ge = false, large_size = false;
+    for (const XML_Feature *feature = XML_GetFeatureList(); feature->feature != XML_FEATURE_END; ++feature) {
+        dtd        = dtd || feature->feature == XML_FEATURE_DTD;
+        ge         = ge || feature->feature == XML_FEATURE_GE;
+        large_size = large_size || feature->feature == XML_FEATURE_LARGE_SIZE;
+    }
+    CHECK(dtd);
+    CHECK(ge);
+#ifdef _WIN32
+    CHECK(large_size);
+    CHECK(sizeof(XML_Size) == 8);
+    CHECK(sizeof(XML_Index) == 8);
+#else
+    (void) large_size;
+#endif
 }
 
 // Orca #15608: a preset name is appended to the preset directory, so it must not climb out of it.
