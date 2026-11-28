@@ -1870,7 +1870,9 @@ TEST_CASE("Paint split R1: smoothing the cut face leaves the seam on the paint l
     for (const Vec3f& v : seam0)
         worst = std::max(worst, ps_dist_to_segments(segs1, v.cast<double>()));
     WARN("seam at smoothing 1 off the seam at 0 by up to " << worst << " mm (" << seam0.size() << " / " << seam1.size() << " vertices)");
-    CHECK(worst < 0.05); // the cutter is simplified by 0.02 mm after smoothing
+    // The cutter is simplified by 0.02 mm after smoothing, and since R2 the skin smoothing pins only a 0.15 mm seam
+    // band (R1: 0.9 mm), so the seam may move by a few hundredths (0.065 mm measured): within D23's tenth of a mm.
+    CHECK(worst < 0.1);
     // And it lies on the paint line.
     double off = 0., sum = 0.;
     for (const Vec3f& v : seam1) {
