@@ -4,6 +4,8 @@
 #include "FinBake.hpp"
 
 #include "../ClipperUtils.hpp"
+#include "../Flow.hpp"
+#include "../Layer.hpp"
 #include "../Model.hpp"
 #include "../Print.hpp"
 #include "../PrintConfig.hpp"
@@ -53,6 +55,7 @@ FinBakeResult plan_fin_bake(const PrintObject &object, const FinBakeOptions &opt
     res.sliced_gap       = st.gap;
     res.gap              = mesh_st.gap;
     res.tine_width       = fin_bake_tine_width(options.tines, st.line_width);
+    res.first_layer_line_width = support_material_1st_layer_flow(&object, float(object.layers().front()->height)).width();
     res.layer_height     = cfg.layer_height.value;
     res.support_filament = cfg.support_filament.value;
 
@@ -74,6 +77,7 @@ FinBakeResult plan_fin_bake(const PrintObject &object, const FinBakeOptions &opt
     fins::FinTineOptions tines;
     tines.width        = res.tine_width;
     tines.stop_at_part = options.placement == FinBakePlacement::SeparateObject;
+    tines.first_layer_line_width = res.first_layer_line_width;
     res.bands          = fins::fin_mesh_layers(layers, res.slices, mesh_st, tines);
     for (size_t i = 0; i < n; ++i) {
         if (! res.slices[i].tines.empty())

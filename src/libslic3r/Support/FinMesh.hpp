@@ -66,10 +66,17 @@ struct FinTineOptions
     // Stop every tine at the part's outline instead of `tine_depth` inside it: for fins baked as a separate
     // object, which would otherwise print the overlap twice.
     bool   stop_at_part = false;
+    // The walls' line width on the first layer, mm (the support's first-layer flow); 0 = the live line width.
+    double first_layer_line_width = 0.;
 };
 
-// The sections a bake builds: each fin layer's walls and tines, unioned, with the tines rebuilt from their
-// paths at `tines.width` (and trimmed at the part when `tines.stop_at_part`). One entry per object layer.
+// The wall islands the live generator prints: an island too small or too thin for one line of
+// `line_width` is left out there (generate_fin_supports), so it is left out of the bake too.
+ExPolygons printable_fin_islands(const ExPolygons &islands, double line_width);
+
+// The sections a bake builds: each fin layer's printable walls and its tines, unioned, with the tines
+// rebuilt from their paths at `tines.width` (and trimmed at the part when `tines.stop_at_part`). One entry
+// per object layer.
 std::vector<FinMeshLayer> fin_mesh_layers(const std::vector<FinLayer> &layers, const std::vector<FinSlice> &slices,
                                           const FinSettings &settings, const FinTineOptions &tines = {});
 

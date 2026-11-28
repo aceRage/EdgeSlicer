@@ -168,7 +168,8 @@ double fb_support_area(const PrintObject &po)
 
 // The worst per-layer symmetric difference of two section stacks, relative to the first, over layers
 // whose first section is over 1 mm^2; the summed one in `total`.
-double fb_worst_xor(const std::vector<ExPolygons> &want, const std::vector<ExPolygons> &got, double &total, size_t &layers)
+double fb_worst_xor(const std::vector<ExPolygons> &want, const std::vector<ExPolygons> &got, double &total, size_t &layers,
+                    size_t *worst_layer = nullptr)
 {
     double worst = 0., sum_x = 0., sum_a = 0.;
     layers = 0;
@@ -179,6 +180,8 @@ double fb_worst_xor(const std::vector<ExPolygons> &want, const std::vector<ExPol
         sum_x += x;
         if (a > 1.) {
             ++layers;
+            if (x / a > worst && worst_layer != nullptr)
+                *worst_layer = i;
             worst = std::max(worst, x / a);
         }
     }
@@ -254,18 +257,24 @@ TEST_CASE("Fin bake: the mesh slices back to the live sections", "[SupportFins][
             const std::vector<ExPolygons> baked = slice_mesh_ex(mesh, zs);
             std::vector<ExPolygons> planned, live;
             for (size_t i = 0; i < po.layers().size(); ++i) {
-                ExPolygons s = res.slices[i].body;
+                ExPolygons s = fins::printable_fin_islands(res.slices[i].body, i == 0 ? res.first_layer_line_width : fins::settings_of(po).line_width);
                 expolygons_append(s, res.slices[i].tine_areas);
                 planned.emplace_back(union_ex(s));
                 live.emplace_back(fb_live_islands(po, po.layers()[i]->print_z));
             }
             double total = 0.;
-            size_t layers = 0;
-            CHECK(fb_worst_xor(planned, baked, total, layers) < 0.02);
-            CHECK(total < 0.01);
+            size_t layers = 0, worst = 0;
+            const double worst_planned = fb_worst_xor(planned, baked, total, layers, &worst);
+            {
+                INFO("worst layer " << worst << " at z " << po.layers()[worst]->print_z);
+                CHECK(worst_planned < 0.02);
+                CHECK(total < 0.01);
+            }
             CHECK(layers > 5);
-            // What the live generator printed: the same, less specks too thin for a line.
-            CHECK(fb_worst_xor(live, baked, total, layers) < 0.05);
+            // What the live generator printed: the same.
+            const double worst_live = fb_worst_xor(live, baked, total, layers, &worst);
+            INFO("worst live layer " << worst << " at z " << po.layers()[worst]->print_z);
+            CHECK(worst_live < 0.02);
             CHECK(total < 0.01);
 
             // Every tine is in the mesh, on its own layer only.
@@ -641,7 +650,9 @@ TEST_CASE("Support fins displace normal and tree support on the lean side", "[Su
             for (size_t i = 0; i < plan.slices.size(); ++i) {
                 if (plan.slices[i].body.empty())
                     continue;
-                CHECK(fb_area(diff_ex(plan.slices[i].body, fb_live_islands(po, po.layers()[i]->print_z))) < 0.05);
+                INFO("fin layer " << i << " at z " << po.layers()[i]->print_z);
+                const ExPolygons walls = fins::printable_fin_islands(plan.slices[i].body, i == 0 ? plan.first_layer_line_width : st.line_width);
+                CHECK(fb_area(diff_ex(walls, fb_live_islands(po, po.layers()[i]->print_z))) < 0.05);
             }
 
             // The support is cut back: no support extrusion within the gap of the fins' footprint.

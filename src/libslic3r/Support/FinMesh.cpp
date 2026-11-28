@@ -75,6 +75,18 @@ bool fin_mesh_same_sections(const ExPolygons &a, const ExPolygons &b)
 
 } // namespace
 
+ExPolygons printable_fin_islands(const ExPolygons &islands, double line_width)
+{
+    // As generate_fin_supports: islands under 0.2 x 0.2 mm, and islands with no room for a loop half a line in.
+    const double min_area = sqr(scaled<double>(0.2));
+    const float  half_w   = scaled<float>(0.5 * line_width);
+    ExPolygons   out;
+    for (const ExPolygon &island : islands)
+        if (island.area() >= min_area && ! offset(island, -half_w).empty())
+            out.push_back(island);
+    return out;
+}
+
 std::vector<FinMeshLayer> fin_mesh_layers(const std::vector<FinLayer> &layers, const std::vector<FinSlice> &slices,
                                           const FinSettings &st, const FinTineOptions &tines)
 {
@@ -89,7 +101,7 @@ std::vector<FinMeshLayer> fin_mesh_layers(const std::vector<FinLayer> &layers, c
         const FinSlice &s  = slices[i];
         if (s.body.empty() && s.tines.empty())
             continue;
-        ExPolygons all = s.body;
+        ExPolygons all = printable_fin_islands(s.body, i == 0 && tines.first_layer_line_width > EPSILON ? tines.first_layer_line_width : live_w);
         if (! rebuild)
             expolygons_append(all, s.tine_areas);
         else {

@@ -98,6 +98,8 @@ struct FinBakeResult
     double                        gap              = 0.;
     double                        sliced_gap       = 0.;
     double                        tine_width       = 0.;
+    // The support line width on the first layer (what the live walls are printed with there), mm.
+    double                        first_layer_line_width = 0.;
     double                        layer_height     = 0.;
     // The source's support filament, 1-based; 0 = the object's own.
     int                           support_filament = 0;
