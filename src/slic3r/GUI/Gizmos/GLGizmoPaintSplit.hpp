@@ -114,7 +114,7 @@ private:
     float m_depth{ 0.f };      // mm under the selected skin; 0 = unlimited
     float m_lip_angle{ 0.f };  // unused since the nearest-skin cut (kept in the undo archive's layout)
     float m_smoothing{ 0.5f }; // "Smooth cut face" (D22, R1): 0..1, the seam stays pinned
-    float m_skin_smoothing{ 0.5f }; // R2, Advanced "Smooth along the skin": 0..1 (0 = R1)
+    float m_skin_smoothing{ 0.75f }; // R2, Advanced "Smooth along the skin": 0..1 (0 = R1)
     bool  m_advanced_open{ false };
     bool  m_snap_to_bed{ false }; // the flat core level
     bool  m_keep_as_parts{ false };

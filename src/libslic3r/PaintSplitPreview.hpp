@@ -44,7 +44,7 @@ struct PaintSplitPreviewResult
 };
 
 // The coarse preview's parameters: a voxel of at least 1.2 mm (twice the fine one), one near-skin round, two root
-// steps and no seam snap. It shows within about a second where the cut will run.
+// steps. It shows within about a second where the cut will run.
 PaintSplitSkinParams paint_split_coarse_params(const PaintSplitSkinParams& fine);
 // The components one Apply cuts: every component that can be split, in order.
 std::vector<int> paint_split_pass_components(const PaintSplitRegion& region);

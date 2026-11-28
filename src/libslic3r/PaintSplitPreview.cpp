@@ -23,7 +23,6 @@ PaintSplitSkinParams paint_split_coarse_params(const PaintSplitSkinParams& fine)
     p.voxel                = std::max(1.2, 2. * (fine.voxel > 0. ? fine.voxel : 0.6));
     p.skin_refine          = std::min(fine.skin_refine, 1);
     p.root_iterations      = std::min(fine.root_iterations, 2);
-    p.seam_snap            = false;
     return p;
 }
 

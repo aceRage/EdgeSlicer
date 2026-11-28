@@ -237,22 +237,16 @@ struct PaintSplitSkinParams
     bool   allow_complement{ true };  // sparse: mesh the complement when the selected skin is the larger side
     double simplify{ 0.02 };          // sparse: mm; Manifold collapses the claim's edges that move it less (0 = off)
     // R2 (owner's R1 hand test, 2026-11-27: "still a bit rough around the skin selection"), sparse only, 0..1 (Advanced,
-    // "Smooth along the skin"). 0 is R1: everything within 1.5 voxels of the skin is pinned and the face beside the
-    // skin is not smoothed. Above 0 only a thin seam band (2 near-skin voxels, at least 0.1 mm) is pinned and the wall
-    // from there out to 3 voxels is smoothed too, with extra passes at the fine voxel; a Depth wall follows a smoothed
-    // copy of the selected skin instead of every facet of it.
-    double skin_smoothing{ 0.5 };
-    // R2 (D23 b): the claim vertex nearest to each point of the paint line, within two near-skin voxels, is put on it,
-    // so the seam passes through the paint line's corners. Sparse only.
-    bool   seam_snap{ true };
-    // Tuning of the two above (tests and the hidden harness; -1 = the default): the seam band pinned (mm), the extra
-    // passes next to the skin, displacement along the normal only (no sliding of the fine mesh), and the snap radius
-    // in near-skin voxels (-1: 3).
+    // "Smooth along the skin"). 0 is R1: everything within 1.5 voxels of the skin is pinned and the smoothing reaches
+    // full weight at 3 voxels, so the wall next to the skin keeps every wiggle of the paint line. Above 0 only a thin seam
+    // band (2 near-skin voxels, at least 0.1 mm) is pinned, the smoothing reaches full weight much closer to the skin
+    // (0.5 mm at 1), and extra passes (40 at 1) smooth the finer mesh there. The seam itself stays where it was.
+    double skin_smoothing{ 0.75 };
+    // Tuning of the above (tests and the hidden harness; -1 = from skin_smoothing): the seam band pinned (mm), where
+    // the smoothing reaches full weight (mm from the skin), and the extra passes next to the skin.
     double skin_pin{ -1. };
-    double skin_ramp{ -1. };          // mm from the skin where the skin smoothing reaches full weight (-1: 3 voxels)
+    double skin_ramp{ -1. };
     int    skin_extra_passes{ -1 };
-    bool   skin_normal_only{ false }; // (unstable on the claim's slivers: off)
-    double snap_radius{ -1. };
     // R2 (E7): these components' selected skin counts as neither side: the claim reaches into their territory, which an
     // earlier cut of the same pass took already. Their shared wall is then that earlier cut alone (one surface, not two
     // near-coincident ones). paint_split_assign_nearest_multi() sets it; it is part of a cached claim's key.
@@ -269,7 +263,6 @@ struct PaintSplitClaimStats
     bool   canceled{ false };
     size_t cells{ 0 }, samples{ 0 }, queries{ 0 }, triangles{ 0 };
     size_t simplified{ 0 };           // triangles of the cutter after Manifold's simplify (paint_split_assign_nearest)
-    size_t snapped{ 0 };              // claim vertices put on the paint line (seam_snap)
     double setup_s{ 0. }, field_s{ 0. }, mesh_s{ 0. }, smooth_s{ 0. };
 };
 
