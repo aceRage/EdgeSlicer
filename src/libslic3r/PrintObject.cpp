@@ -1832,6 +1832,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "stabilizer_wall_loops"
             || opt_key == "stabilizer_infill_density"
             || opt_key == "stabilizer_infill_pattern"
+            || opt_key == "stabilizer_rib_tine_spacing"
+            || opt_key == "stabilizer_rib_grip_from"
             || opt_key == "support_fins"
             || opt_key == "support_fin_thickness"
             || opt_key == "support_fin_depth"

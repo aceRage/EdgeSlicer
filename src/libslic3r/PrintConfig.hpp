@@ -539,9 +539,10 @@ enum SupportFinsMode {
 };
 
 // Cross-section of the side stabilizer pillars: round, a filleted rectangle like a prime tower (stiffer),
-// or round with rounded-rectangle columns where a pillar is tall and left unbraced.
+// or round with rounded-rectangle columns where a pillar is tall and left unbraced. Rib: no struts or
+// pillars at all but an edge-on rib against the part's side with a comb of one-layer tines (sway braces).
 enum StabilizerColumnShape {
-    scsRound, scsRoundedRect, scsAuto
+    scsRound, scsRoundedRect, scsAuto, scsRib
 };
 
 enum class PerimeterGeneratorType
@@ -2062,6 +2063,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                stabilizer_wall_loops))
     ((ConfigOptionPercent,            stabilizer_infill_density))
     ((ConfigOptionEnum<InfillPattern>, stabilizer_infill_pattern))
+    ((ConfigOptionFloat,              stabilizer_rib_tine_spacing))
+    ((ConfigOptionFloat,              stabilizer_rib_grip_from))
     // Support fins (Support/Fins.hpp)
     ((ConfigOptionEnum<SupportFinsMode>, support_fins))
     ((ConfigOptionFloat,              support_fin_thickness))

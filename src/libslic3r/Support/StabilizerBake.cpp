@@ -1,5 +1,8 @@
 #include "StabilizerBake.hpp"
 
+#include "FinBake.hpp"
+
+#include "../Flow.hpp"
 #include "../Model.hpp"
 #include "../Print.hpp"
 #include "../PrintConfig.hpp"
@@ -56,14 +59,46 @@ StabilizerBakeResult bake_stabilizers(const PrintObject &object, const Stabilize
     // The whole plan - pillars (tapered, columns) and braces too - exactly as the live generator prints it.
     res.plan   = stabilizers::plan_stabilizers(stabilizers::outlines_of(object), st, stabilizers::painted_spots(object), &res.plan_report);
     res.struts = res.plan.struts;
-    if (res.struts.empty()) {
+    if (res.struts.empty() && ! res.ribs()) {
         res.error = "no stabilizer fits this object with its settings";
         return res;
     }
 
-    stabilizers::MeshOptions mopts;
-    mopts.segments = options.segments;
-    res.mesh = stabilizers::stabilizer_mesh(res.plan, mesh_st, mopts, &res.mesh_report);
+    if (res.ribs()) {
+        // Ribs: the live sections, extruded layer by layer (see the header). The rib gap (at least
+        // RIB_MIN_GAP) is above STABILIZER_BAKE_PART_MIN_GAP, so a part's ribs are the live ones too.
+        const std::vector<stabilizers::LayerOutline> outlines = stabilizers::outlines_of(object);
+        res.rib_slices = stabilizers::slice_ribs(outlines, st, res.plan, &res.plan_report, nullptr);
+        std::vector<fins::FinLayer> fl;
+        std::vector<fins::FinSlice> fs;
+        fl.reserve(outlines.size());
+        fs.reserve(outlines.size());
+        for (size_t i = 0; i < outlines.size(); ++i) {
+            fl.push_back({ outlines[i].print_z, outlines[i].height, outlines[i].islands });
+            fs.push_back({ res.rib_slices[i].body, res.rib_slices[i].tines, res.rib_slices[i].tine_areas });
+            res.rib_tines += res.rib_slices[i].tines.size();
+        }
+        fins::FinSettings fin_st;
+        fin_st.line_width = st.line_width;
+        fins::FinTineOptions tines;
+        res.rib_tine_width           = FIN_BAKE_WIDE_TINE_LINES * st.line_width;
+        tines.width                  = res.rib_tine_width;
+        tines.stop_at_part           = options.placement == StabilizerBakePlacement::SeparateObject;
+        tines.first_layer_line_width = object.layers().empty() ? 0. :
+            double(support_material_1st_layer_flow(&object, float(object.layers().front()->height)).width());
+        res.rib_bands = fins::fin_mesh_layers(fl, fs, fin_st, tines);
+        fins::FinMeshReport frep;
+        res.mesh = fins::fin_mesh(res.rib_bands, {}, &frep);
+        res.mesh_report.shells    = frep.prisms;
+        res.mesh_report.triangles = frep.triangles;
+        res.mesh_report.unioned   = frep.unioned;
+        res.mesh_report.closed    = frep.closed;
+        res.mesh_report.volume    = frep.volume;
+    } else {
+        stabilizers::MeshOptions mopts;
+        mopts.segments = options.segments;
+        res.mesh = stabilizers::stabilizer_mesh(res.plan, mesh_st, mopts, &res.mesh_report);
+    }
     if (res.mesh.indices.empty()) {
         res.error = "the stabilizer mesh came out empty";
         return res;
@@ -93,7 +128,7 @@ StabilizerBakeResult bake_stabilizers(const PrintObject &object, const Stabilize
                             << res.mesh_report.columns << " columns), " << res.mesh_report.braces << " braces, "
                             << res.mesh_report.triangles << " triangles, " << (res.mesh_report.unioned ? "unioned" : "overlapping shells")
                             << ", " << (res.mesh_report.closed ? "closed" : "NOT closed") << ", " << res.plan_report.unreachable.size()
-                            << " painted point(s) unreachable";
+                            << " painted point(s) unreachable, " << res.plan.ribs.size() << " ribs with " << res.rib_tines << " tines";
     return res;
 }
 
@@ -155,9 +190,13 @@ ModelObject *apply_stabilizer_bake(Model &model, ModelObject &source, const Stab
     } else {
         ModelVolume *vol = source.add_volume(TriangleMesh(result.mesh), ModelVolumeType::MODEL_PART);
         vol->name        = "Stabilizers";
-        // Region settings are all a part can have of its own (supports and brim are object-wide).
-        vol->config.set_key_value("extruder", new ConfigOptionInt(result.support_filament > 0 ? result.support_filament : 0));
-        set_body_infill(vol->config, result);
+        // Ribs get no settings of their own: they share the part's region, so their tines fuse into it as
+        // the live tines do (a region of their own would print its own walls against the part's instead).
+        if (! result.ribs()) {
+            // Region settings are all a part can have of its own (supports and brim are object-wide).
+            vol->config.set_key_value("extruder", new ConfigOptionInt(result.support_filament > 0 ? result.support_filament : 0));
+            set_body_infill(vol->config, result);
+        }
         source.invalidate_bounding_box();
         target = &source;
     }

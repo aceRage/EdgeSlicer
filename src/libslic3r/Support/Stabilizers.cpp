@@ -102,7 +102,7 @@ std::vector<Contact> ring_contacts(const std::vector<LayerOutline> &layers, cons
                 if (t <= 0.)
                     continue;
                 const Vec2d p = c + dir * t;
-                out.push_back({ Vec2d(unscaled(p.x()), unscaled(p.y())), dir, size_t(it - layers.begin()), it->slice_z, normal });
+                out.push_back({ Vec2d(unscaled(p.x()), unscaled(p.y())), dir, size_t(it - layers.begin()), it->slice_z, normal, unscaled(t) });
             }
         }
     }
@@ -148,6 +148,10 @@ StabilizerSettings StabilizerSettings::from_config(const PrintObjectConfig &cfg,
     s.wall_loops             = std::max(0, cfg.stabilizer_wall_loops.value);
     s.infill_density         = std::clamp(cfg.stabilizer_infill_density.value / 100., 0., 1.);
     s.infill_pattern         = cfg.stabilizer_infill_pattern.value;
+    // Ribs (Rib column shape only).
+    s.rib_tine_spacing       = std::max(0., cfg.stabilizer_rib_tine_spacing.value);
+    s.rib_grip_from          = std::max(0., cfg.stabilizer_rib_grip_from.value);
+    s.line_width             = support_line_width > EPSILON ? support_line_width : 0.42;
     // A wide base stands further out; give its strut the room to reach it.
     if (s.tapered())
         s.max_run = std::max(s.max_run, s.pillar_base_radius + s.clearance + 4.);
@@ -164,7 +168,7 @@ std::vector<LayerOutline> outlines_of(const PrintObject &object)
     std::vector<LayerOutline> outlines;
     outlines.reserve(object.layers().size());
     for (const Layer *layer : object.layers())
-        outlines.push_back({ float(layer->slice_z), &layer->lslices });
+        outlines.push_back({ float(layer->slice_z), &layer->lslices, layer->print_z, layer->height });
     return outlines;
 }
 
@@ -966,6 +970,9 @@ Plan complete_plan(const std::vector<LayerOutline> &layers, const StabilizerSett
 Plan plan_stabilizers(const std::vector<LayerOutline> &layers, const StabilizerSettings &st, const std::vector<PaintedSpot> &painted,
                       PlanReport *report)
 {
+    // Ribs instead of struts and pillars: nothing of the strut planner runs.
+    if (st.ribs())
+        return plan_ribs(layers, st, painted, report);
     const std::vector<Strut> struts = plan_struts(layers, st, painted, report);
     return complete_plan(layers, st, struts, report);
 }
@@ -978,6 +985,293 @@ Plan plan_stabilizers(const PrintObject &object, PlanReport *report)
         return {};
     }
     return plan_stabilizers(outlines_of(object), settings_of(object), painted_spots(object), report);
+}
+
+// --- ribs (column_shape Rib) ------------------------------------------------------------------------
+//
+// Sway braces with a tine comb, as Support Fins (gittrahan/support-fins, printfins.com, MIT) describes
+// them; EdgeSlicer's own implementation (see Stabilizers.hpp). The rib follows the support fins' wall
+// rules (Fins.cpp): a band along the centre line, clipped by the part grown by the gap.
+
+double StabilizerSettings::rib_gap() const { return std::max(tip_gap, RIB_MIN_GAP); }
+
+double rib_bed_depth(double top_z) { return std::max(RIB_TOP_DEPTH, RIB_DEPTH_RATIO * std::max(0., top_z)); }
+
+double rib_thickness(double top_z, double line_width)
+{
+    const double t = std::min(RIB_MAX_THICKNESS, RIB_BASE_THICKNESS + RIB_THICKNESS_PER_MM * std::max(0., top_z));
+    // Two lines at least, or the rib is a single wobbly bead.
+    return std::max(t, 2. * line_width);
+}
+
+double Rib::depth_at(double z) const
+{
+    const double bed = rib_bed_depth(top_z);
+    const double f   = top_z > EPSILON ? std::clamp(z / top_z, 0., 1.) : 1.;
+    return bed + (RIB_TOP_DEPTH - bed) * f;
+}
+
+// The rib's band from t0 to t1 along its centre line, `half` to either side of it.
+static ExPolygon rib_band(const Rib &r, double t0, double t1, double half)
+{
+    const Vec2d p = r.perp();
+    Polygon     poly;
+    for (const Vec2d &v : { Vec2d(r.at(t0) - p * half), Vec2d(r.at(t1) - p * half), Vec2d(r.at(t1) + p * half),
+                            Vec2d(r.at(t0) + p * half) })
+        poly.points.emplace_back(scaled(v.x()), scaled(v.y()));
+    if (poly.is_clockwise())
+        poly.reverse();
+    return ExPolygon(std::move(poly));
+}
+
+// The range of t (along the rib's centre line) the outlines' contour points span. False when empty.
+static bool rib_t_range(const Rib &r, const ExPolygons &expolys, double &tmin, double &tmax)
+{
+    tmin = std::numeric_limits<double>::max();
+    tmax = std::numeric_limits<double>::lowest();
+    for (const ExPolygon &e : expolys)
+        for (const Point &pt : e.contour.points) {
+            const double t = (unscaled(pt) - r.origin).dot(r.dir);
+            tmin = std::min(tmin, t);
+            tmax = std::max(tmax, t);
+        }
+    return tmin <= tmax;
+}
+
+// The part's outermost point on the rib's centre line (its band) on any layer up to its top: where the rib's
+// inner edge starts. Only the part's pieces that begin before the contact (`contact_t` along the line)
+// count, not another island further out. False when the band never meets the part.
+static bool rib_edge(const std::vector<LayerOutline> &layers, Rib &r, double contact_t)
+{
+    const ExPolygons b{ rib_band(r, 0., 1000., 0.5 * r.thickness) };
+    bool             found = false;
+    for (size_t i = 0; i < layers.size(); ++i) {
+        if (layers[i].slice_z > r.top_z + EPSILON)
+            break;
+        const ExPolygons &islands = islands_at(layers, i);
+        if (islands.empty())
+            continue;
+        for (const ExPolygon &piece : intersection_ex(islands, b)) {
+            double tmin, tmax;
+            if (! rib_t_range(r, ExPolygons{ piece }, tmin, tmax) || tmin > contact_t + 1.)
+                continue;
+            r.edge = found ? std::max(r.edge, tmax) : tmax;
+            found  = true;
+        }
+    }
+    return found;
+}
+
+std::vector<size_t> rib_tine_layers(const std::vector<LayerOutline> &layers, const StabilizerSettings &st, double top_z)
+{
+    std::vector<size_t> out;
+    if (st.rib_tine_spacing <= EPSILON || layers.size() < 2)
+        return out;
+    // Not finer than every other layer, whatever the spacing.
+    const double step = std::max(st.rib_tine_spacing, 0.1);
+    for (double z = st.rib_grip_from; z <= top_z + EPSILON; z += step) {
+        const size_t i = size_t(nearest_layer(layers, z) - layers.begin());
+        if (i == 0 || layers[i].slice_z > top_z + EPSILON)
+            continue;
+        if (! out.empty() && i <= out.back() + 1)
+            continue;
+        out.push_back(i);
+    }
+    return out;
+}
+
+Plan plan_ribs(const std::vector<LayerOutline> &layers, const StabilizerSettings &st, const std::vector<PaintedSpot> &painted,
+               PlanReport *report)
+{
+    Plan       plan;
+    PlanReport rep;
+    if (layers.size() < 2) {
+        if (report != nullptr)
+            *report = rep;
+        return plan;
+    }
+
+    // Every contact - a ring's, then a painted spot's - asks for a rib in its direction; contacts in the
+    // same direction on the same line (every ring uses the same angles) share one, up to the highest.
+    struct Group
+    {
+        Rib    rib;
+        double contact_t = 0.;  // the first contact's distance along the centre line
+        bool   ring      = false;
+        std::vector<size_t> spots;  // painted spots it serves
+    };
+    std::vector<Group> groups;
+    auto add = [&groups](const Contact &c, bool painted_spot, size_t spot) {
+        for (Group &g : groups)
+            if (g.rib.dir.dot(c.dir) > RIB_MERGE_COS && std::abs((c.pos - g.rib.origin).dot(g.rib.perp())) < RIB_MERGE_DISTANCE) {
+                g.rib.top_z = std::max(g.rib.top_z, double(c.z));
+                if (painted_spot)
+                    g.spots.push_back(spot);
+                else
+                    g.ring = true;
+                return painted_spot && g.ring;
+            }
+        Group g;
+        // The centre line starts at the island's centre (a ring contact), or 2 mm inside a painted spot.
+        const double back = c.inward > EPSILON ? c.inward : 2.;
+        g.rib.dir       = c.dir.normalized();
+        g.rib.origin    = c.pos - g.rib.dir * back;
+        g.rib.top_z     = c.z;
+        g.rib.painted   = painted_spot;
+        g.contact_t     = back;
+        g.ring          = ! painted_spot;
+        if (painted_spot)
+            g.spots.push_back(spot);
+        groups.emplace_back(std::move(g));
+        return false;
+    };
+
+    if (st.ring_struts)
+        for (const Contact &c : ring_contacts(layers, st.rings))
+            add(c, false, 0);
+
+    static const std::vector<PaintedSpot> no_spots;
+    const std::vector<PaintedSpot> &spots = st.painted_points ? painted : no_spots;
+    rep.painted              = spots.size();
+    rep.manual_without_paint = ! st.ring_struts && st.painted_points && spots.empty();
+    for (size_t k = 0; k < spots.size(); ++k) {
+        Contact c;
+        if (! painted_contact(layers, spots[k], c)) {
+            rep.unreachable.push_back(spots[k].pos);
+            continue;
+        }
+        if (add(c, true, k))
+            ++rep.painted_on_ring;
+    }
+
+    const double gap = st.rib_gap();
+    for (Group &g : groups) {
+        g.rib.gap       = gap;
+        g.rib.thickness = rib_thickness(g.rib.top_z, st.line_width);
+        if (rib_edge(layers, g.rib, g.contact_t)) {
+            if (! g.ring)
+                rep.painted_placed += g.spots.size();
+            plan.ribs.push_back(g.rib);
+        } else if (! g.ring)
+            for (size_t k : g.spots)
+                rep.unreachable.push_back(spots[k].pos);
+    }
+    rep.ribs = plan.ribs.size();
+
+    double top = 0.;
+    for (const Rib &r : plan.ribs)
+        top = std::max(top, r.top_z);
+    plan.rib_tine_layers = rib_tine_layers(layers, st, top);
+    if (report != nullptr)
+        *report = std::move(rep);
+    return plan;
+}
+
+// The tine of rib `r` on a layer: a single bead along the centre line from inside the rib, across the
+// opening, RIB_TINE_DEPTH into the part's section. False when the rib has no wall on its centre line there,
+// the part is not in front of it, or the opening is wider than a tine bridges.
+static bool rib_tine(const Rib &r, const ExPolygons &islands, const ExPolygons &section, double z, double w, Polyline &path,
+                     ExPolygon &area)
+{
+    if (islands.empty())
+        return false;
+    const double     outer = r.outer_at(z);
+    const ExPolygons wall  = intersection_ex(section, ExPolygons{ rib_band(r, 0., outer, 0.5 * w) });
+    double           wall_min, wall_max;
+    if (wall.empty() || ! rib_t_range(r, wall, wall_min, wall_max))
+        return false;
+    const ExPolygons part = intersection_ex(islands, ExPolygons{ rib_band(r, 0., wall_min, 0.5 * w) });
+    double           part_min, part_max;
+    if (part.empty() || ! rib_t_range(r, part, part_min, part_max))
+        return false;
+    const double span = wall_min - part_max;
+    if (span <= 0. || span > r.gap + RIB_TINE_MAX_EXTRA_SPAN)
+        return false;
+    // From the rib's outer loop (half a line in) to RIB_TINE_DEPTH inside the part.
+    const double t_rib  = std::min(wall_min + 0.5 * w, wall_max);
+    const double t_part = part_max - RIB_TINE_DEPTH;
+    const Vec2d  a = r.at(t_rib), b = r.at(t_part);
+    path = Polyline(Point(scaled(a.x()), scaled(a.y())), Point(scaled(b.x()), scaled(b.y())));
+    area = rib_band(r, t_part - 0.5 * w, t_rib, 0.5 * w);
+    return true;
+}
+
+std::vector<RibSlice> slice_ribs(const std::vector<LayerOutline> &layers, const StabilizerSettings &st, const Plan &plan,
+                                 PlanReport *report, const std::function<void()> &throw_if_canceled)
+{
+    const size_t          n = layers.size();
+    std::vector<RibSlice> out(n);
+    if (plan.ribs.empty())
+        return out;
+
+    const double w        = st.line_width;
+    const float  half_w   = scaled<float>(0.5 * w);
+    const double min_area = sqr(scaled<double>(0.3));
+    const double gap      = st.rib_gap();
+
+    // What a rib keeps the gap off: the part on its layer and on the layers up to the gap above (the next
+    // layer always, or an overhang would print straight onto the rib's top).
+    std::vector<ExPolygons> clip(n);
+    for (size_t i = 0; i < n; ++i) {
+        ExPolygons part;
+        for (size_t j = i; j < n && (j <= i + 1 || layers[j].slice_z <= layers[i].slice_z + gap + EPSILON); ++j)
+            expolygons_append(part, islands_at(layers, j));
+        if (! part.empty())
+            clip[i] = offset_ex(union_ex(part), scaled<float>(gap));
+    }
+    const std::set<size_t> tine_set(plan.rib_tine_layers.begin(), plan.rib_tine_layers.end());
+
+    for (const Rib &r : plan.ribs) {
+        if (throw_if_canceled)
+            throw_if_canceled();
+        const double half = 0.5 * r.thickness;
+        ExPolygons   prev;
+        double       prev_z = 0.;
+        for (size_t i = 0; i < n; ++i) {
+            const double z = layers[i].slice_z;
+            if (z > r.top_z + EPSILON)
+                break;
+            const double outer = r.outer_at(z);
+            ExPolygons   sec   = diff_ex(ExPolygons{ rib_band(r, 0., outer, half) }, clip[i]);
+            if (i == 0) {
+                // Standing on the bed: only the piece that reaches the rib's outer end (not bits behind the part).
+                sec.erase(std::remove_if(sec.begin(), sec.end(),
+                                         [&](const ExPolygon &e) {
+                                             double tmin, tmax;
+                                             return ! rib_t_range(r, ExPolygons{ e }, tmin, tmax) || tmax < outer - w;
+                                         }),
+                          sec.end());
+            } else
+                // Each layer stands on the one below, grown by at most the height between them: a rib follows a
+                // part that narrows upwards at 45 degrees, and never hangs over anything.
+                sec = intersection_ex(sec, offset_ex(prev, scaled<float>(std::max(0., z - prev_z))));
+            // No slivers thinner than half a line.
+            sec = offset2_ex(sec, -0.5f * half_w, 0.5f * half_w);
+            sec.erase(std::remove_if(sec.begin(), sec.end(), [min_area](const ExPolygon &e) { return e.area() < min_area; }), sec.end());
+            if (sec.empty())
+                break;
+            if (i == 0 && report != nullptr)
+                ++report->ribs_standing;
+            if (tine_set.count(i)) {
+                Polyline  path;
+                ExPolygon area;
+                if (rib_tine(r, islands_at(layers, i), sec, z, w, path, area)) {
+                    out[i].tines.push_back(std::move(path));
+                    out[i].tine_areas.push_back(std::move(area));
+                    if (report != nullptr)
+                        ++report->rib_tines;
+                } else if (report != nullptr)
+                    ++report->rib_tines_skipped;
+            }
+            expolygons_append(out[i].body, sec);
+            prev   = std::move(sec);
+            prev_z = z;
+        }
+    }
+    for (RibSlice &s : out)
+        if (s.body.size() > 1)
+            s.body = union_ex(s.body);
+    return out;
 }
 
 // The band between the vertical planes through `from` and `from + dir * span`, as a wide rectangle.
@@ -1106,6 +1400,76 @@ std::vector<ExPolygons> sparse_infill_areas(const std::vector<ExPolygons> &slice
 using support_layer_util::support_layer_find;
 using support_layer_util::support_layer_at;
 
+// The live ribs (column_shape Rib): solid concentric loops for the walls and one open bead per tine, into
+// the support layers at the object's own heights.
+static void generate_rib_supports(PrintObject &object, const Plan &plan, PlanReport &report, const std::function<void()> &throw_if_canceled)
+{
+    const std::vector<LayerOutline> outlines = outlines_of(object);
+    const StabilizerSettings        st       = settings_of(object);
+    std::vector<RibSlice>           slices   = slice_ribs(outlines, st, plan, &report, throw_if_canceled);
+
+    const double min_island_area = sqr(scaled<double>(0.2));
+    bool         inserted        = false;
+    for (size_t i = 0; i < object.layers().size() && i < slices.size(); ++i) {
+        RibSlice &s = slices[i];
+        if (s.body.empty() && s.tines.empty())
+            continue;
+        const Layer &layer = *object.layers()[i];
+        const Flow   flow  = i == 0 ? support_material_1st_layer_flow(&object, float(layer.height)) :
+                                      support_material_flow(&object, float(layer.height));
+        const float half_w  = 0.5f * float(flow.scaled_width());
+        const float spacing = float(flow.scaled_spacing());
+
+        // Where the regular supports already print, don't print a second time.
+        const SupportLayer *existing = support_layer_find(object, layer);
+        const bool          other    = existing != nullptr && ! existing->support_islands.empty();
+        ExPolygons          body     = other ? diff_ex(s.body, existing->support_islands) : std::move(s.body);
+
+        auto      *coll = new ExtrusionEntityCollection();
+        ExPolygons printed;
+        for (ExPolygon &island : body) {
+            if (island.area() < min_island_area)
+                continue;
+            // A speck too thin for one line (what other support left of a rib) is not printed.
+            Polygons loop = offset(island, -half_w);
+            if (loop.empty())
+                continue;
+            while (! loop.empty()) {
+                Polygons next = offset(loop, -spacing);
+                extrusion_entities_append_loops(coll->entities, std::move(loop), erSupportMaterial, flow.mm3_per_mm(), flow.width(), flow.height());
+                loop = std::move(next);
+            }
+            printed.emplace_back(std::move(island));
+        }
+        // Tines: one bead each, an open path (a loop would trace the thin footprint twice).
+        Polylines tines;
+        for (size_t k = 0; k < s.tines.size() && k < s.tine_areas.size(); ++k) {
+            if (other && ! intersection_ex(ExPolygons{ s.tine_areas[k] }, existing->support_islands).empty()) {
+                --report.rib_tines;
+                ++report.rib_tines_skipped;
+                continue;
+            }
+            tines.push_back(std::move(s.tines[k]));
+            printed.push_back(std::move(s.tine_areas[k]));
+        }
+        if (! tines.empty())
+            extrusion_entities_append_paths(coll->entities, std::move(tines), erSupportMaterial, flow.mm3_per_mm(), flow.width(), flow.height());
+        if (coll->entities.empty()) {
+            delete coll;
+            continue;
+        }
+        SupportLayer *sl = support_layer_at(object, layer, inserted);
+        sl->support_fills.entities.push_back(coll);
+        expolygons_append(sl->support_islands, printed);
+        if (sl->support_type == stInnerTree)
+            expolygons_append(sl->lslices, printed);
+    }
+    if (inserted)
+        support_layer_util::relink_support_layers(object);
+    BOOST_LOG_TRIVIAL(debug) << "Stabilizer ribs: " << plan.ribs.size() << " ribs, " << report.ribs_standing << " standing, "
+                             << report.rib_tines << " tines, " << report.rib_tines_skipped << " tines skipped";
+}
+
 } // namespace stabilizers
 
 stabilizers::PlanReport generate_stabilizer_supports(PrintObject &object, const std::function<void()> &throw_if_canceled)
@@ -1120,6 +1484,12 @@ stabilizers::PlanReport generate_stabilizer_supports(PrintObject &object, const 
                              << plan.braces.size() << " braces, " << report.columns << " columns, " << report.unbraced_pillars
                              << " pillar(s) left long-unbraced, " << report.painted << " painted point(s), "
                              << report.unreachable.size() << " unreachable";
+    // Rib column shape: ribs and their tines, nothing else.
+    if (! plan.ribs.empty()) {
+        throw_if_canceled();
+        stabilizers::generate_rib_supports(object, plan, report, throw_if_canceled);
+        return report;
+    }
     if (plan.struts.empty())
         return report;
     throw_if_canceled();

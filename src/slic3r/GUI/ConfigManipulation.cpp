@@ -1083,20 +1083,29 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_field("stabilizer_supports", true);
     toggle_field("support_object_xy_distance", have_support_material || stab_on);
     {
-        for (auto el : {"stabilizer_ring_spacing", "stabilizer_points_per_ring", "stabilizer_tip_diameter", "stabilizer_tip_gap",
-                        "stabilizer_pillar_diameter", "stabilizer_max_island_width"})
+        // The Rib column shape builds ribs instead of struts and pillars: the strut, pillar, bracing, column and
+        // wall settings have nothing to say there, the rib tine comb does. The tip gap is the ribs' gap.
+        const StabilizerColumnShape shape  = config->opt_enum<StabilizerColumnShape>("stabilizer_column_shape");
+        const bool                  ribs   = stab_on && shape == scsRib;
+        const bool                  struts = stab_on && shape != scsRib;
+        for (auto el : {"stabilizer_ring_spacing", "stabilizer_points_per_ring", "stabilizer_tip_gap", "stabilizer_max_island_width"})
             toggle_line(el, stab_on);
+        for (auto el : {"stabilizer_tip_diameter", "stabilizer_pillar_diameter"})
+            toggle_line(el, struts);
         // Manual places struts at the painted points only: the ring settings have nothing to say there.
         for (auto el : {"stabilizer_ring_spacing", "stabilizer_points_per_ring", "stabilizer_max_island_width"})
             toggle_field(el, stab_on && stab_mode == smAuto);
+        for (auto el : {"stabilizer_rib_tine_spacing", "stabilizer_rib_grip_from"})
+            toggle_line(el, ribs);
+        toggle_field("stabilizer_rib_grip_from", ribs && config->opt_float("stabilizer_rib_tine_spacing") > 0.);
 
         // v2: tapered pillars, bracing, columns, walls and infill.
-        const bool                  bracing = stab_on && config->opt_bool("stabilizer_bracing");
-        const StabilizerColumnShape shape   = config->opt_enum<StabilizerColumnShape>("stabilizer_column_shape");
-        const bool                  columns = stab_on && shape != scsRound;
-        const bool                  walls   = stab_on && config->opt_int("stabilizer_wall_loops") > 0;
-        for (auto el : {"stabilizer_pillar_base_diameter", "stabilizer_bracing", "stabilizer_column_shape", "stabilizer_wall_loops"})
-            toggle_line(el, stab_on);
+        const bool                  bracing = struts && config->opt_bool("stabilizer_bracing");
+        const bool                  columns = struts && shape != scsRound;
+        const bool                  walls   = struts && config->opt_int("stabilizer_wall_loops") > 0;
+        toggle_line("stabilizer_column_shape", stab_on);
+        for (auto el : {"stabilizer_pillar_base_diameter", "stabilizer_bracing", "stabilizer_wall_loops"})
+            toggle_line(el, struts);
         // The max unbraced height and span are what bracing works to, and what Auto columns call a long
         // unbraced or a lone pillar.
         for (auto el : {"stabilizer_brace_max_unbraced", "stabilizer_brace_max_span"})

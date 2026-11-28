@@ -21,7 +21,15 @@
 // Either way the source object's live stabilizer_supports is switched off, so the stabilizers are
 // not printed twice. The geometry is planned from the sliced object, so the plate must be sliced
 // first; nothing links the bake to its source afterwards (no re-bake, no stale check: phase 2).
+//
+// Ribs (stabilizer_column_shape = Rib) have no analytic shape: a rib's inner edge follows the part's side
+// layer by layer and its tines are one object layer tall. So they are baked the way the support fins are
+// (FinMesh.hpp): the live sections, each extruded over its own layer's Z band. Their tines are baked
+// FIN_BAKE_WIDE_TINE_LINES lines wide (a one-line strip is dropped by the classic wall generator). As a part
+// of the object the ribs get no settings of their own, so they share the part's region and the tines fuse
+// into it as they do live; as a separate object the tines stop at the part's outline and only catch it.
 
+#include "FinMesh.hpp"
 #include "StabilizerMesh.hpp"
 #include "Stabilizers.hpp"
 
@@ -86,8 +94,17 @@ struct StabilizerBakeResult
     int                      wall_loops       = 0;
     double                   infill_density   = 1.;
     InfillPattern            infill_pattern   = ipRectilinear;
+    // Rib column shape: the ribs' sections per object layer as the live generator slices them, the mesh
+    // bands built from them (tines rebuilt rib_tine_width wide, stopped at the part's outline for a
+    // separate object) and the tines that made it into the mesh.
+    std::vector<stabilizers::RibSlice> rib_slices;
+    std::vector<fins::FinMeshLayer>    rib_bands;
+    size_t                   rib_tines        = 0;
+    double                   rib_tine_width   = 0.;
     // Why there is no mesh, when there is none.
     std::string              error;
+
+    bool ribs() const { return ! plan.ribs.empty(); }
 };
 
 // Plans and builds the stabilizers of a sliced PrintObject (its layers built; posSlice is enough).
