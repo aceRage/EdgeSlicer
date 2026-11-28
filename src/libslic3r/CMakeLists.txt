@@ -97,6 +97,7 @@ set(lisbslic3r_sources
     PaintDepth.hpp
     PaintSplit.cpp
     PaintSplit.hpp
+    PaintSplitField.cpp
     PaintTransfer.cpp
     PaintTransfer.hpp
     RepairPaint.cpp
@@ -744,6 +745,10 @@ set(lisbslic3r_sources
     Support/SupportParameters.hpp
     Support/Stabilizers.cpp
     Support/Stabilizers.hpp
+    Support/SupportLayerAt.cpp
+    Support/SupportLayerAt.hpp
+    Support/Fins.cpp
+    Support/Fins.hpp
     Support/StabilizerMesh.cpp
     Support/StabilizerMesh.hpp
     Support/StabilizerBake.cpp

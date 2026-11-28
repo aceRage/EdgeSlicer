@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp
 	test_bambu_parity_infill_retraction.cpp
+	test_bambu_parity_orca_package5.cpp
 	test_bambu_parity_overhang_overrides.cpp
 	test_bambu_ui_keys.cpp
 	test_settings_view.cpp
@@ -256,6 +257,7 @@ add_executable(${_TEST_NAME}_tests
     test_fine_detail.cpp
     test_thin_features.cpp
     test_bbl_h3c.cpp
+    test_bbl_p3c.cpp
     test_bs29_keys_import.cpp
     test_tower_interface.cpp
     test_wipe_path.cpp

@@ -219,13 +219,18 @@ bool object_prints_support(const ModelObject &object, const DynamicPrintConfig &
     return config_bool_or(global, "enable_support", false) || config_int_or(global, "raft_layers", 0) > 0;
 }
 
-// Side stabilizers print as support with the support filament, with or without Enable supports.
+// Side stabilizers and support fins print as support with the support filament, with or without Enable supports.
 bool object_prints_stabilizers(const ModelObject &object, const DynamicPrintConfig &global)
 {
-    const ConfigOption *opt = object.config.option("stabilizer_supports");
-    if (opt == nullptr)
-        opt = global.option("stabilizer_supports");
-    return opt != nullptr && opt->getInt() != int(smOff);
+    for (const char *key : { "stabilizer_supports", "support_fins" }) {
+        const ConfigOption *opt = object.config.option(key);
+        if (opt == nullptr)
+            opt = global.option(key);
+        // Both are enums whose 0 is Off.
+        if (opt != nullptr && opt->getInt() != 0)
+            return true;
+    }
+    return false;
 }
 
 void append_support_filament_ids(const ModelObject &object, const DynamicPrintConfig &global, std::vector<int> &ids,
@@ -360,6 +365,8 @@ void append_config_filament_ids(const DynamicPrintConfig &cfg, std::vector<int> 
     if (config_bool_or(cfg, "enable_support", false) || config_int_or(cfg, "raft_layers", 0) > 0)
         append_positive_int_keys(cfg, {"support_filament", "support_interface_filament"}, ids);
     else if (const ConfigOption *stab = cfg.option("stabilizer_supports"); stab != nullptr && stab->getInt() != int(smOff))
+        append_positive_int_keys(cfg, {"support_filament"}, ids);
+    else if (const ConfigOption *fins = cfg.option("support_fins"); fins != nullptr && fins->getInt() != int(sfmOff))
         append_positive_int_keys(cfg, {"support_filament"}, ids);
 }
 

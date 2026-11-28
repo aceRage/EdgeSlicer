@@ -4880,7 +4880,6 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     if (int(e) < int(vend->size()) && vend->get_at(int(e)).find("Bambu") == std::string::npos) { all_bbl = false; break; }
             this->placeholder_parser().set("is_all_bbl_filament", new ConfigOptionBool(all_bbl));
             this->placeholder_parser().set("has_tpu_in_first_layer", new ConfigOptionBool(false));
-            this->placeholder_parser().set("cooling_filter_enabled", new ConfigOptionBool(false));
             this->placeholder_parser().set("max_print_z", new ConfigOptionFloat(0.));
             this->placeholder_parser().set("is_prime_tower_interface", new ConfigOptionBool(false));
             this->placeholder_parser().set("filament_tower_interface_purge_volume", new ConfigOptionFloat(0.));
@@ -11194,6 +11193,19 @@ void GCode::append_full_config(const Print& print, std::string& str)
     static const std::set<std::string_view> pre_heating_keys({"enable_pre_heating"sv, "filament_pre_cooling_temperature"sv,
                                                               "filament_preheat_temperature_delta"sv});
     const bool dump_pre_heating_keys = print.config().enable_pre_heating.value;
+    // P3C (Bambu Studio 2.9.2): dump min_temperature_when_ec only when a used filament sets a real
+    // idle floor (> 0, the P3C template's 80). Missing, negative (H2D / H2C default -1) or 0 (H3C)
+    // still read as no floor, so those printers keep the config block they had before the key existed.
+    bool dump_min_temperature_when_ec = false;
+    {
+        const DynamicPrintConfig &full = print.full_print_config();
+        for (unsigned int filament_id : print.extruders(true)) {
+            if (min_temperature_when_ec_at(full, filament_id) > 0.) {
+                dump_min_temperature_when_ec = true;
+                break;
+            }
+        }
+    }
     // Likewise the bed-slinger mass model keys: only for a printer that models it (the A2L sets both).
     static const std::set<std::string_view> mass_model_keys({"machine_max_force_Y"sv, "machine_bed_mass_Y"sv});
     const bool dump_mass_model_keys = print.config().machine_max_force_Y.value > 0. || print.config().machine_bed_mass_Y.value > 0.;
@@ -11228,6 +11240,8 @@ void GCode::append_full_config(const Print& print, std::string& str)
             (key == "line_width_nozzle_diameter" && print.config().line_width_nozzle_diameter.value == 0.))
             continue;
         if (!dump_pre_heating_keys && pre_heating_keys.find(key) != pre_heating_keys.end())
+            continue;
+        if (key == "min_temperature_when_ec" && !dump_min_temperature_when_ec)
             continue;
         // Per-nozzle process P4: its keys only when a job uses them, so every other job's config block stays as it was.
         if (per_nozzle_p4_key_unused(cfg, key))
@@ -12543,8 +12557,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // bridge it is ~162 mm/s where the profile asks for 45, so a mistyped or misresolved setting
     // silently prints ~3.6x too fast. Report it here, with the setting name, for exactly the
     // reason the writer guard reports: the user must be told WHICH value was ignored.
-    const double filament_max_volumetric_speed =
-        m_filament_flow.max_volumetric_speed_for(m_config, m_writer.extruder()->id());
+    // Orca #12688 / BBS: with adaptive volumetric speed on, the cap is also limited by the fit of this
+    // path's layer height and line width. Off (every stock preset): the cached value, unchanged.
+    const double filament_max_volumetric_speed = m_filament_flow.adaptive_max_volumetric_speed(
+        m_writer.extruder()->id(), m_filament_flow.max_volumetric_speed_for(m_config, m_writer.extruder()->id()),
+        path.height, path.width);
     const bool speed_was_invalid = !(speed >= 1e-6);
     if (speed_was_invalid)
         speed = filament_max_volumetric_speed / _mm3_per_mm;

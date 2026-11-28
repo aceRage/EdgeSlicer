@@ -166,7 +166,10 @@ std::map<std::string, std::vector<SimpleSettingData>>  SettingsFactory::OBJECT_C
                     {"stabilizer_supports","",29},{"stabilizer_ring_spacing","",30},{"stabilizer_points_per_ring","",31},
                     {"stabilizer_tip_diameter","",32},{"stabilizer_tip_gap","",32},{"stabilizer_pillar_diameter","",33},{"stabilizer_max_island_width","",34},
                     {"stabilizer_pillar_base_diameter","",35},{"stabilizer_bracing","",36},{"stabilizer_brace_max_unbraced","",37},{"stabilizer_brace_max_span","",38},{"stabilizer_column_shape","",39},{"stabilizer_column_width","",40},
-                    {"stabilizer_column_length","",41},{"stabilizer_column_min_height","",42},{"stabilizer_wall_loops","",43},{"stabilizer_infill_density","",44},{"stabilizer_infill_pattern","",45}
+                    {"stabilizer_column_length","",41},{"stabilizer_column_min_height","",42},{"stabilizer_wall_loops","",43},{"stabilizer_infill_density","",44},{"stabilizer_infill_pattern","",45},
+                    {"support_fins","",46},{"support_fin_thickness","",47},{"support_fin_depth","",48},{"support_fin_height","",49},{"support_fin_spacing","",50},{"support_fin_gap","",51},{"support_fin_tine_spacing","",52},{"support_fin_tine_depth","",53},{"support_fin_tine_base_rows","",54},{"support_fin_lean_side_only","",55},
+                    // Per-object prime towers: the object's own tower on or off (design D13).
+                    {"object_prime_tower","",56}
                             }},
     { L("Speed"), {{"support_speed", "",12}, {"support_interface_speed", "",13}
                     }}

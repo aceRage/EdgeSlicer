@@ -2945,7 +2945,8 @@ void GLCanvas3D::toggle_selected_volume_visibility(bool selected_visible)
         const Selection::IndicesList &idxs = m_selection.get_volume_idxs();
         if (idxs.size() > 0) {
             for (GLVolume *vol : m_volumes.volumes) {
-                if (vol->composite_id.object_id >= 1000 && vol->composite_id.object_id < 1000 + wxGetApp().plater()->get_partplate_list().get_plate_count())
+                if (is_object_tower_volume_id(vol->composite_id.object_id) ||
+                    (vol->composite_id.object_id >= 1000 && vol->composite_id.object_id < 1000 + wxGetApp().plater()->get_partplate_list().get_plate_count()))
                     continue; // the wipe tower
                 if (vol->composite_id.volume_id >= 0) {
                     vol->is_active = false;
@@ -2958,7 +2959,8 @@ void GLCanvas3D::toggle_selected_volume_visibility(bool selected_visible)
         }
     } else { // show all
         for (GLVolume *vol : m_volumes.volumes) {
-            if (vol->composite_id.object_id >= 1000 && vol->composite_id.object_id < 1000 + wxGetApp().plater()->get_partplate_list().get_plate_count())
+            if (is_object_tower_volume_id(vol->composite_id.object_id) ||
+                    (vol->composite_id.object_id >= 1000 && vol->composite_id.object_id < 1000 + wxGetApp().plater()->get_partplate_list().get_plate_count()))
                 continue; // the wipe tower
             if (vol->composite_id.volume_id >= 0) {
                 vol->is_active = true;
@@ -3004,8 +3006,8 @@ void GLCanvas3D::toggle_sla_auxiliaries_visibility(bool visible, const ModelObje
     std::vector<std::shared_ptr<SceneRaycasterItem>>* raycasters = get_raycasters_for_picking(SceneRaycaster::EType::Volume);
 
     for (GLVolume* vol : m_volumes.volumes) {
-        if (vol->composite_id.object_id >= 1000 &&
-            vol->composite_id.object_id < 1000 + wxGetApp().plater()->get_partplate_list().get_plate_count())
+        if (is_object_tower_volume_id(vol->composite_id.object_id) || (vol->composite_id.object_id >= 1000 &&
+            vol->composite_id.object_id < 1000 + wxGetApp().plater()->get_partplate_list().get_plate_count()))
             continue; // the wipe tower
       if ((mo == nullptr || m_model->objects[vol->composite_id.object_id] == mo)
             && (instance_idx == -1 || vol->composite_id.instance_id == instance_idx)
@@ -3171,7 +3173,9 @@ bool GLCanvas3D::apply_plate_focus_hide()
         // The wipe tower carries a synthetic per-plate object id rather than a model object, so
         // resolve its plate from that id instead of from the instance sets.
         int owner = -1;
-        if (v->composite_id.object_id >= 1000 && v->composite_id.object_id < 1000 + plate_count)
+        if (is_object_tower_volume_id(v->composite_id.object_id))
+            owner = tower_volume_plate(v->composite_id.object_id);
+        else if (v->composite_id.object_id >= 1000 && v->composite_id.object_id < 1000 + plate_count)
             owner = v->composite_id.object_id - 1000;
         else
             owner = owner_plate_of(v->object_idx(), v->instance_idx());
@@ -3213,8 +3217,8 @@ void GLCanvas3D::toggle_model_objects_visibility(bool visible, const ModelObject
     std::vector<std::shared_ptr<SceneRaycasterItem>>* raycasters = get_raycasters_for_picking(SceneRaycaster::EType::Volume);
     for (GLVolume* vol : m_volumes.volumes) {
         // BBS: add partplate logic
-        if (vol->composite_id.object_id >= 1000 &&
-            vol->composite_id.object_id < 1000 + wxGetApp().plater()->get_partplate_list().get_plate_count()) { // wipe tower
+        if (is_object_tower_volume_id(vol->composite_id.object_id) || (vol->composite_id.object_id >= 1000 &&
+            vol->composite_id.object_id < 1000 + wxGetApp().plater()->get_partplate_list().get_plate_count())) { // wipe tower
             vol->is_active = (visible && mo == nullptr);
         }
         else {
@@ -4923,6 +4927,41 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
                 int volume_idx_wipe_tower_old = volume_idxs_wipe_tower_old[plate_id];
                 if (volume_idx_wipe_tower_old != -1)
                     map_glvolume_old_to_new[volume_idx_wipe_tower_old] = volume_idx_wipe_tower_new;
+            }
+        }
+    }
+
+    // Per-object prime towers (PR 5 of tests/design_per_object_prime_towers.md): every tower the plate's Print planned,
+    // beside its copy (see PartPlate::update_object_tower_previews), moved along with a copy that moved since.
+    m_object_tower_loaded_pos.clear();
+    if (printer_technology == ptFFF && m_canvas_type != ECanvasType::CanvasAssembleView) {
+        for (int plate_id = 0; plate_id < n_plates; ++plate_id) {
+            PartPlate *part_plate = ppl.get_plate(plate_id);
+            if (part_plate == nullptr)
+                continue;
+            const std::vector<ObjectTowerPreview> &previews = part_plate->object_tower_previews();
+            const Vec3d plate_origin = part_plate->get_origin();
+            for (size_t slot = 0; slot < previews.size() && slot < size_t(OBJECT_TOWER_SLOTS); ++slot) {
+                const ObjectTowerPreview &p = previews[slot];
+                if (!p.placed && !p.rejected)
+                    continue;
+                // The copy, if it is still on this plate.
+                const ModelInstance *instance = nullptr;
+                for (int obj_idx = 0; obj_idx < int(m_model->objects.size()) && instance == nullptr; ++obj_idx)
+                    for (int inst_idx = 0; inst_idx < int(m_model->objects[obj_idx]->instances.size()); ++inst_idx)
+                        if (m_model->objects[obj_idx]->instances[inst_idx]->id() == p.instance_id) {
+                            if (part_plate->contain_instance(obj_idx, inst_idx))
+                                instance = m_model->objects[obj_idx]->instances[inst_idx];
+                            break;
+                        }
+                if (instance == nullptr)
+                    continue;
+                const Vec3d moved = instance->get_offset() - p.instance_offset;
+                const Vec2d pos   = (p.rejected ? p.requested_pos : p.pos) + Vec2d(moved.x(), moved.y());
+                const int   id    = object_tower_volume_id(plate_id, int(slot));
+                m_volumes.load_wipe_tower_preview(id, float(pos.x() + plate_origin.x()), float(pos.y() + plate_origin.y()), float(p.width),
+                                                  float(p.depth), float(p.height), 0.f, true, float(p.brim_width), p.rejected);
+                m_object_tower_loaded_pos[id] = pos;
             }
         }
     }
@@ -7105,6 +7144,8 @@ void GLCanvas3D::do_move(const std::string& snapshot_type, bool force_volume_mov
     // BBS: support wipe-tower for multi-plates
     int n_plates = wxGetApp().plater()->get_partplate_list().get_plate_count();
     std::vector<Vec3d> wipe_tower_origins(n_plates, Vec3d::Zero());
+    // Per-object prime towers dragged: volume id, new position (plate coordinates).
+    std::vector<std::pair<int, Vec2d>> object_towers_moved;
 
     Selection::EMode selection_mode = m_selection.get_mode();
 
@@ -7150,6 +7191,41 @@ void GLCanvas3D::do_move(const std::string& snapshot_type, bool force_volume_mov
             // Move a wipe tower proxy.
             wipe_tower_origins[object_idx - 1000] = v->get_volume_offset();
         }
+        else if (is_object_tower_volume_id(object_idx) && m_canvas_type != ECanvasType::CanvasAssembleView) {
+            // Per-object prime tower: only one that was dragged (every tower preview passes here).
+            const int   plate_id = tower_volume_plate(object_idx);
+            const auto  loaded   = m_object_tower_loaded_pos.find(object_idx);
+            if (plate_id < 0 || plate_id >= n_plates || loaded == m_object_tower_loaded_pos.end())
+                continue;
+            const Vec3d plate_origin = wxGetApp().plater()->get_partplate_list().get_plate(plate_id)->get_origin();
+            const Vec2d pos          = Vec2d(v->get_volume_offset().x() - plate_origin.x(), v->get_volume_offset().y() - plate_origin.y());
+            if ((pos - loaded->second).norm() > 0.01)
+                object_towers_moved.emplace_back(object_idx, pos);
+        }
+    }
+
+    // Per-object prime towers (PR 5, design 2.5): a dragged tower is stored on its object as an offset from the copy's
+    // bounding-box centre (prime_tower_offset_x/y), so it moves with the object; the slicer checks it is clear.
+    for (const auto &[volume_id, pos] : object_towers_moved) {
+        PartPlate *plate = wxGetApp().plater()->get_partplate_list().get_plate(tower_volume_plate(volume_id));
+        const int  slot  = object_tower_slot(volume_id);
+        if (plate == nullptr || slot >= int(plate->object_tower_previews().size()))
+            continue;
+        ObjectTowerPreview &preview = plate->object_tower_previews()[size_t(slot)];
+        for (ModelObject *model_object : m_model->objects)
+            for (const ModelInstance *instance : model_object->instances) {
+                if (instance->id() != preview.instance_id)
+                    continue;
+                const Vec3d moved  = instance->get_offset() - preview.instance_offset;
+                const Vec2d offset = pos - (preview.copy_center + Vec2d(moved.x(), moved.y()));
+                model_object->config.set_key_value("prime_tower_offset_x", new ConfigOptionFloat(offset.x()));
+                model_object->config.set_key_value("prime_tower_offset_y", new ConfigOptionFloat(offset.y()));
+                // Drawn where it was dropped until the background apply plans it again.
+                preview.pos      = pos - Vec2d(moved.x(), moved.y());
+                preview.placed   = true;
+                preview.rejected = false;
+                object_moved     = true;
+            }
     }
 
     //BBS: notify instance updates to part plater list

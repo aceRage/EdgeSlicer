@@ -1838,6 +1838,43 @@ std::vector<int> PartPlate::get_used_extruders()
 	return std::vector(used_extruders_set.begin(), used_extruders_set.end());
 }
 
+bool PartPlate::update_object_tower_previews()
+{
+    std::vector<ObjectTowerPreview> previews;
+    if (m_print != nullptr && m_model != nullptr && printer_technology == ptFFF && m_print->object_tower_mode()) {
+        const ObjectTowerPlan plan = m_print->plan_object_towers();
+        for (const ObjectTowerPlacement &t : plan.towers) {
+            if (t.instance == nullptr || t.instance->model_instance == nullptr)
+                continue;
+            ObjectTowerPreview p;
+            p.instance_id = t.instance->model_instance->id();
+            // The plater's instance of that copy (the Print's model is a copy of it, ids kept).
+            const ModelInstance *instance = nullptr;
+            for (const ModelObject *object : m_model->objects)
+                for (const ModelInstance *mi : object->instances)
+                    if (mi->id() == p.instance_id)
+                        instance = mi;
+            if (instance == nullptr)
+                continue;
+            p.instance_offset = instance->get_offset();
+            p.pos             = t.pos;
+            p.copy_center     = t.copy_center;
+            p.placed          = t.placed;
+            p.rejected        = t.offset_rejected;
+            p.requested_pos   = t.requested_pos;
+            p.width           = t.width;
+            p.depth           = t.depth;
+            p.height          = t.height;
+            p.brim_width      = t.brim_width;
+            previews.push_back(p);
+        }
+    }
+    if (previews == m_object_tower_previews)
+        return false;
+    m_object_tower_previews = std::move(previews);
+    return true;
+}
+
 WipeTowerFootprint PartPlate::estimate_wipe_tower_footprint(const DynamicPrintConfig &config, int plate_extruder_size, bool use_global_objects) const
 {
     // The CLI calls this too, so the plate's filaments are derived from the passed config:
@@ -2861,6 +2898,9 @@ void PartPlate::set_vase_mode_related_object_config(int obj_id) {
 	// Side stabilizers are support-role layers a vase cannot carry (Print::validate rejects them).
 	if (global_config->has("stabilizer_supports"))
 		new_conf.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
+	// So are support fins.
+	if (global_config->has("support_fins"))
+		new_conf.set_key_value("support_fins", new ConfigOptionEnum<SupportFinsMode>(sfmOff));
 	const auto applying_keys = global_config->diff(new_conf);
 
 	for (ModelObject* object : obj_ptrs) {
@@ -5123,6 +5163,10 @@ int PartPlateList::notify_instance_update(int obj_id, int instance_id, bool is_n
 		const DynamicPrintConfig& global_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
 		const DynamicPrintConfig& stabilizer_src = config.has("stabilizer_supports") ? config : global_config;
 		if (stabilizer_src.has("stabilizer_supports") && stabilizer_src.opt_enum<StabilizerMode>("stabilizer_supports") != smOff)
+			return false;
+		// And its support fins.
+		const DynamicPrintConfig& fins_src = config.has("support_fins") ? config : global_config;
+		if (fins_src.has("support_fins") && fins_src.opt_enum<SupportFinsMode>("support_fins") != sfmOff)
 			return false;
 		if (config.has("wall_loops") && config.opt_int("wall_loops") == 1 &&
 			config.has("top_shell_layers") && config.opt_int("top_shell_layers") == 0 &&

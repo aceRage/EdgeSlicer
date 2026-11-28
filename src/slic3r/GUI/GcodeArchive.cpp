@@ -722,7 +722,7 @@ std::map<std::string, std::string> load_model_names(const std::string& printers_
         { "BL-P001", "Bambu Lab X1 Carbon" }, { "BL-P002", "Bambu Lab X1" }, { "C11", "Bambu Lab P1P" },
         { "C12", "Bambu Lab P1S" },           { "C13", "Bambu Lab X1E" },    { "N1", "Bambu Lab A1 mini" },
         { "N2S", "Bambu Lab A1" },            { "N6", "Bambu Lab X2D" },     { "N7", "Bambu Lab P2S" },
-        { "N9", "Bambu Lab A2L" },            { "N10", "Bambu Lab H3C" },    { "O1C2", "Bambu Lab H2C" },   { "O1D", "Bambu Lab H2D" },
+        { "N9", "Bambu Lab A2L" },            { "N10", "Bambu Lab H3C" },    { "N11", "Bambu Lab P3C" },    { "O1C2", "Bambu Lab H2C" },   { "O1D", "Bambu Lab H2D" },
         { "O1E", "Bambu Lab H2D Pro" },       { "O1S", "Bambu Lab H2S" },
     };
     boost::system::error_code ec;

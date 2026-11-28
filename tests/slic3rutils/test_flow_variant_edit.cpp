@@ -506,7 +506,7 @@ TEST_CASE("a nil High-Flow override uses the Standard slot, then the printer", "
 // filament's maximum volumetric speed; is_nil() reads a slot past the end as slot 0). The filament tab shows
 // a nil slot as N/A. The other keys are plain vectors whose short presets read the Standard value through
 // get_at.
-TEST_CASE("only the retract overrides, the flush keys and the ramming keys among the filament flow-variant keys are nullable", "[FlowVariantEdit][Overrides]")
+TEST_CASE("only the retract overrides, the flush keys, the ramming keys and adaptive volumetric speed among the filament flow-variant keys are nullable", "[FlowVariantEdit][Overrides]")
 {
     std::vector<std::string> nullable;
     for (const std::string &key : filament_flow_variant_options()) {
@@ -516,7 +516,8 @@ TEST_CASE("only the retract overrides, the flush keys and the ramming keys among
             nullable.push_back(key);
     }
     std::sort(nullable.begin(), nullable.end());
-    CHECK(nullable == std::vector<std::string>{"filament_bridge_speed", "filament_cooling_before_tower",
+    CHECK(nullable == std::vector<std::string>{"filament_adaptive_volumetric_speed", "filament_bridge_speed",
+                                               "filament_cooling_before_tower",
                                                "filament_deretraction_speed", "filament_enable_overhang_speed",
                                                "filament_flush_temp", "filament_flush_temp_fast",
                                                "filament_flush_volumetric_speed", "filament_overhang_1_4_speed",
