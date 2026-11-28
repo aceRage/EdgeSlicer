@@ -1351,7 +1351,7 @@ static std::vector<std::string> s_Preset_filament_options {
     "filament_extruder_variant", "filament_self_index", // Ultra (dual-nozzle)
     "filament_nozzle_variants", // per-nozzle process P4: values per nozzle size / flow / tool
     /*"filament_colour", */ "default_filament_colour","required_nozzle_HRC","filament_diameter", "pellet_flow_coefficient", "filament_type", "filament_soluble", "filament_is_support",
-    "filament_max_volumetric_speed",
+    "filament_max_volumetric_speed", "filament_adaptive_volumetric_speed", "volumetric_speed_coefficients",
     "filament_flow_ratio", "filament_density", "filament_cost", "filament_z_offset", "filament_minimal_purge_on_wipe_tower",
     "nozzle_temperature", "nozzle_temperature_initial_layer",
     // BBS
@@ -1444,7 +1444,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "default_print_profile", "inherits",
     "silent_mode",
     "scan_first_layer", "enable_power_loss_recovery", "machine_load_filament_time", "machine_unload_filament_time", "machine_tool_change_time", "machine_prepare_time", "tool_change_temprature_wait", "time_cost", "machine_pause_gcode", "template_custom_gcode",
-    "nozzle_type", "nozzle_hrc","auxiliary_fan", "nozzle_volume","upward_compatible_machine", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_enforce","support_chamber_temp_control","support_air_filtration","printer_structure","farthest_point_timelapse",
+    "nozzle_type", "nozzle_hrc","auxiliary_fan", "nozzle_volume","upward_compatible_machine", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_enforce","support_chamber_temp_control","support_air_filtration","support_cooling_filter","cooling_filter_enabled","printer_structure","farthest_point_timelapse",
     "best_object_pos","head_wrap_detect_zone",
     "host_type", "print_host", "printhost_apikey", "flashforge_serial_number", "bbl_use_printhost",
     "print_host_webui",

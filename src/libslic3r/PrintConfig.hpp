@@ -952,6 +952,19 @@ inline bool filament_flow_variants_active(const ConfigBase &config)
     return false;
 }
 
+// Orca #12688 / Bambu Studio: the volumetric speed a filament can take at a given layer height h and line
+// width w, a quadratic fitted by Bambu's calibration: a*h^2 + b*w^2 + c*h*w + d*h + e*w + f (mm3/s).
+// volumetric_speed_coefficients holds "a b c d e f"; empty, malformed (not six numbers) or all zero is not a fit.
+struct VolumetricSpeedFit
+{
+    bool   valid{false};
+    double c[6]{};
+
+    // The fitted limit, or no limit (the largest double) when there is no fit.
+    double max_volumetric_speed(double layer_height, double line_width) const;
+};
+VolumetricSpeedFit parse_volumetric_speed_coefficients(const std::string &coefficients);
+
 // The per-filament values GCode::_extrude reads on every extrusion path, resolved
 // once per export (GCode::apply_print_config) instead of through string-keyed
 // option lookups and get_config_idx on every path. The *_for accessors return the
@@ -972,6 +985,9 @@ struct ResolvedFilamentFlow
     std::vector<double>        flow_ratio;
     std::vector<double>        max_volumetric_speed;
     std::vector<unsigned char> enable_pressure_advance;
+    // Orca #12688: per filament, the fit of the filaments that turned adaptive volumetric speed on; empty when
+    // none did (the usual case, every stock preset has it off), so _extrude pays nothing.
+    std::vector<VolumetricSpeedFit> adaptive_fit;
 
     static ResolvedFilamentFlow resolve(const ConfigBase &config);
 
@@ -1002,6 +1018,18 @@ struct ResolvedFilamentFlow
     {
         return filament_id < max_volumetric_speed.size() ? max_volumetric_speed[filament_id] :
                                                            uncached_max_volumetric_speed(config, filament_id);
+    }
+    // `limit` (the filament's max volumetric speed) capped by the fit of layer height and line width when the
+    // filament has adaptive volumetric speed on and a usable fit; `limit` unchanged otherwise. A fit that
+    // comes out at or below zero for this height and width is a bad calibration: it is ignored, not applied.
+    double adaptive_max_volumetric_speed(unsigned int filament_id, double limit, double layer_height, double line_width) const
+    {
+        if (filament_id >= adaptive_fit.size() || !adaptive_fit[filament_id].valid)
+            return limit;
+        const double fitted = adaptive_fit[filament_id].max_volumetric_speed(layer_height, line_width);
+        if (!(fitted > 0.))
+            return limit;
+        return limit > 0. ? std::min(limit, fitted) : fitted; // limit <= 0: no cap of its own
     }
     bool enable_pressure_advance_for(const ConfigBase &config, unsigned int filament_id) const
     {
@@ -2650,6 +2678,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Not a tower option: Bambu Studio 02.09.01.70 filament_metal_stickiness, read by reduce_infill_retraction_mode
     // = Auto (GCode.cpp). It lives here because GCodeConfig is at the macro nesting limit (C1009).
     ((ConfigOptionEnumsGeneric,       filament_metal_stickiness))
+    // Orca #14685: the printer has a cooling filter (not air filtration); the cooling filter is fitted (read by machine G-code).
+    ((ConfigOptionBool,               support_cooling_filter))
+    ((ConfigOptionBool,               cooling_filter_enabled))
+    // Orca #10780 / #12688: cap the flow at the fit of layer height and line width too; the fit "a b c d e f"
+    // (see VolumetricSpeedFit). Here for the same macro nesting limit.
+    ((ConfigOptionBoolsNullable,      filament_adaptive_volumetric_speed))
+    ((ConfigOptionStrings,            volumetric_speed_coefficients))
 )
 
 // This object is mapped to Perl as Slic3r::Config::Print.
