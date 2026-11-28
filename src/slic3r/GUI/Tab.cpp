@@ -6650,6 +6650,8 @@ void TabFilament::build()
         //BBS
         optgroup = page->new_optgroup(L("Volumetric speed limitation"), L"param_volumetric_speed");
         optgroup->append_single_option_line("filament_max_volumetric_speed");
+        // Orca #12688 / Bambu Studio: cap the flow at the fit of layer height and line width as well.
+        optgroup->append_single_option_line("filament_adaptive_volumetric_speed");
 
         // Per-nozzle process P4 (spec 09-07 "Phase 5"): values this filament takes on particular nozzles, e.g. a hotter
         // temperature and a higher volumetric speed on a 0.6. Resolved when the print is sliced
@@ -7341,6 +7343,16 @@ void TabFilament::toggle_options()
         bool pa = m_config->opt_bool("enable_pressure_advance", variant_index);
         toggle_option("pressure_advance", pa);
 
+        // Orca #12688: the fit needs six usable coefficients, which only a calibrated profile carries. A line
+        // that is already on stays editable, so it can always be switched off.
+        {
+            const auto *adaptive = m_config->option<ConfigOptionBoolsNullable>("filament_adaptive_volumetric_speed");
+            const bool  adaptive_on = adaptive != nullptr && !adaptive->values.empty() && !adaptive->is_nil(size_t(variant_index)) &&
+                                      adaptive->get_at(size_t(variant_index));
+            toggle_option("filament_adaptive_volumetric_speed",
+                adaptive_on || parse_volumetric_speed_coefficients(m_config->opt_string("volumetric_speed_coefficients", (unsigned int) variant_index)).valid);
+        }
+
         // BBS: 控制床温选项的显示
         auto support_multi_bed_types = is_BBL_printer || cfg.opt_bool("support_multi_bed_types");
         bool is_snapmaker_u1 = false;
@@ -7696,6 +7708,7 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("auxiliary_fan", "auxiliary-fan");
         optgroup->append_single_option_line("support_chamber_temp_control", "chamber-temperature");
         optgroup->append_single_option_line("support_air_filtration", "air-filtration");
+        optgroup->append_single_option_line("cooling_filter_enabled");
 
         // Only a Snapmaker tool changer can do this; toggle_options() hides the whole line for
         // every other printer, so nobody is offered a switch their machine will ignore.
@@ -9047,6 +9060,12 @@ void TabPrinter::toggle_options()
         // "Unload filaments after print" is a Snapmaker tool-changer preference: the flag goes
         // to the printer with the print start, and only that firmware's PRINT_END acts on it.
         toggle_line("unload_filaments_at_end", is_snapmaker_toolchanger(*m_config));
+
+        // Orca #14685: the cooling filter and air filtration are alternative accessories on one duct;
+        // show the one the printer profile declares (support_cooling_filter), like Bambu Studio.
+        const bool cooling_filter_printer = m_config->opt_bool("support_cooling_filter");
+        toggle_line("support_air_filtration", !cooling_filter_printer);
+        toggle_line("cooling_filter_enabled", cooling_filter_printer);
     }
 
     if (m_active_page->title() == L("Multimaterial")) {
