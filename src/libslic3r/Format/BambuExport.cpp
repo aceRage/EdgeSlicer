@@ -669,6 +669,15 @@ Config convert_impl(const ConfigBase &cfg, const Context &ctx, Scope scope, Repo
             dropped.emplace_back(our_key, r.reason);
             continue;
         }
+        if (bkey == "close_additional_fan_first_x_layers") {
+            // EDGE: our -1 ("as many layers as the part cooling fan") has no Bambu spelling; write that count.
+            const auto *part = cfg.option<ConfigOptionInts>("close_fan_the_first_x_layers");
+            for (size_t i = 0; i < v.values.size(); ++i)
+                if (! v.values[i].empty() && v.values[i][0] == '-') {
+                    v.values[i] = std::to_string(part && ! part->values.empty() ? std::max(0, part->get_at(i)) : 1);
+                    r.changed   = true;
+                }
+        }
         bool layout_changed = false;
         if (scope != Scope::Object || def->variant != VariantClass::Filament) {
             fit_layout(v, def->variant, ctx, ours_print, ours_printer, ours_filament, ctx.print, ctx.printer, target_filament, filament_count, layout_changed,

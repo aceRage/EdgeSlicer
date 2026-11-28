@@ -507,6 +507,15 @@ static const t_config_enum_values s_keys_map_FilamentMetalStickiness = {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FilamentMetalStickiness)
 
+// Bambu Studio 02.09.01.70 (PrintConfig.cpp:860-866).
+static const t_config_enum_values s_keys_map_FanDirection = {
+    { "undefine", fdUndefine },
+    { "left",     fdLeft },
+    { "right",    fdRight },
+    { "both",     fdBoth }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FanDirection)
+
 static const t_config_enum_values s_keys_map_StabilizerColumnShape = {
     { "round",        scsRound       },
     { "rounded_rect", scsRoundedRect },
@@ -2460,6 +2469,83 @@ void PrintConfigDef::init_fff_params()
     def->max=100;
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionInts{80});
+
+    // Bambu Studio 02.09.01.70 (PrintConfig.cpp:2483-2551): the auxiliary fans' own early layers and ramp.
+    def = this->add("close_additional_fan_first_x_layers", coInts);
+    def->label = L("For the first");
+    def->tooltip = L("Set special auxiliary cooling fan for the first certain layers. "
+                     "-1 uses the part cooling fan's \"No cooling for the first\" layers.");
+    def->sidetext = L("layers");
+    def->min = -1;
+    def->max = 100000;
+    def->mode = comSimple;
+    // EDGE: Bambu's default is 1; -1 keeps presets that do not set it as they printed before the port.
+    def->set_default_value(new ConfigOptionInts { -1 });
+
+    def = this->add("additional_fan_full_speed_layer", coInts);
+    def->label = L("Full fan speed at layer");
+    def->tooltip = L("Auxiliary fan speed will be ramped up linearly from layer \"For the first\" to maximum at layer \"Full fan speed at layer\". \"Full fan speed at layer\" will be ignored if lower than \"For the first\", in which case the fan will be running at maximum allowed speed at layer \"For the first\" + 1.");
+    def->min = 0;
+    def->max = 100000;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionInts { 0 });
+
+    def = this->add("first_x_layer_fan_speed", coFloats);
+    def->label = L("Fan speed");
+    def->tooltip = L("Special auxiliary cooling fan speed, effective only for the first x layers");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloats { 0 });
+
+    def = this->add("close_optional_fan_first_x_layers", coInts);
+    def->label = L("For the first");
+    def->tooltip = L("Set special optional auxiliary cooling fan for the first certain layers.");
+    def->sidetext = L("layers");
+    def->min = 0;
+    def->max = 100000;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionInts { 1 });
+
+    def = this->add("optional_fan_full_speed_layer", coInts);
+    def->label = L("Full fan speed at layer");
+    def->tooltip = L("Optional auxiliary fan speed will be ramped up linearly from layer \"For the first\" to maximum at layer \"Full fan speed at layer\". \"Full fan speed at layer\" will be ignored if lower than \"For the first\", in which case the fan will be running at maximum allowed speed at layer \"For the first\" + 1.");
+    def->min = 0;
+    def->max = 100000;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionInts { 0 });
+
+    def = this->add("first_x_layer_optional_fan_speed", coFloats);
+    def->label = L("Fan speed");
+    def->tooltip = L("Special optional auxiliary cooling fan speed, effective only for the first x layers");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloats { 0 });
+
+    def = this->add("optional_cooling_fan_speed", coInts);
+    def->label = L("Fan speed");
+    def->tooltip = L("Speed of the optional auxiliary part cooling fan. It will run at this speed during printing except the first several layers "
+                     "which are defined by no cooling layers");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionInts { 0 });
+
+    // Bambu Studio 02.09.01.70 (PrintConfig.cpp:1959): EDGE applies it only when the printer's fan_speedup_time is 0.
+    def = this->add("pre_start_fan_time", coFloats);
+    def->label = L("Pre start fan time");
+    def->tooltip = L("Force fan start early(0-5 second) when encountering overhangs. "
+                     "This is because the fan needs time to physically increase its speed. "
+                     "Not used when the printer's own fan speed-up time is set.");
+    def->sidetext = L("s");
+    def->min = 0.;
+    def->max = 5.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0. });
 
     def = this->add("close_fan_the_first_x_layers", coInts);
     def->label = L("No cooling for the first");
@@ -5479,6 +5565,34 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Enable this option if machine has auxiliary part cooling fan. G-code command: M106 P2 S(0-255).");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    // Bambu Studio 02.09.01.70 (PrintConfig.cpp:4315-4340).
+    def = this->add("sync_auxiliary_fan_to_second_fan", coBool);
+    def->label = L("Sync auxiliary fan to second fan");
+    def->tooltip = L("Enable this if the printer has a second auxiliary part cooling fan that should use the same speed as the auxiliary fan");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("aux_fan_independent_control", coBool);
+    def->label = L("Independent optional auxiliary fan control");
+    def->tooltip = L("Enable this if the printer has an optional auxiliary part cooling fan that can be adjusted separately from the standard one");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("aux_fan_standard_side", coEnum);
+    def->label = L("Standard auxiliary fan side");
+    def->tooltip = L("Physical side of the standard auxiliary part cooling fan. Only used to tell the two fans apart in the user interface");
+    def->enum_keys_map = &ConfigOptionEnum<FanDirection>::get_enum_values();
+    def->enum_values.push_back("undefine");
+    def->enum_values.push_back("left");
+    def->enum_values.push_back("right");
+    def->enum_values.push_back("both");
+    def->enum_labels.push_back(L("Undefine"));
+    def->enum_labels.push_back(L("Left"));
+    def->enum_labels.push_back(L("Right"));
+    def->enum_labels.push_back(L("Both"));
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionEnum<FanDirection>(fdRight));
 
     def = this->add("fan_speedup_time", coFloat);
 	// Label is set in Tab.cpp in the Line object.
@@ -13028,6 +13142,24 @@ ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
 
 // ==== end Snapmaker: flow-variant support ========================================================
 
+// Bambu Studio 02.09.01.70 (PrintConfig.cpp:8284-8303).
+std::vector<AuxFanSlot> collect_aux_fan_slots(const ConfigBase &config)
+{
+    // No auxiliary fan on this machine: neither the standard (P2) nor the optional (P10) slot exists.
+    const ConfigOptionBool *auxiliary_fan = config.option<ConfigOptionBool>("auxiliary_fan");
+    if (auxiliary_fan == nullptr || ! auxiliary_fan->value)
+        return {};
+    // The standard fan (P2) always exists; P10 is added only when the machine has an independent or a synced optional fan.
+    std::vector<AuxFanSlot> slots{ AuxFanSlot{ false, AUX_FAN_STANDARD_GCODE_INDEX, true } };
+    const ConfigOptionBool *independent = config.option<ConfigOptionBool>("aux_fan_independent_control");
+    const ConfigOptionBool *synced      = config.option<ConfigOptionBool>("sync_auxiliary_fan_to_second_fan");
+    const bool has_independent = independent != nullptr && independent->value;
+    const bool has_synced      = synced != nullptr && synced->value;
+    if (has_independent || has_synced)
+        slots.push_back(AuxFanSlot{ true, AUX_FAN_OPTIONAL_GCODE_INDEX, has_independent });
+    return slots;
+}
+
 void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &value)
 {
     // Bambu Studio's names for settings we spell differently (prime_tower_rib_wall ->
@@ -14260,7 +14392,7 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
         return 1; \
     }
 PRINT_CONFIG_CACHE_INITIALIZE((
-    PrintObjectConfig, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintIdleFloorConfig, PrintConfig, FullPrintConfig,
+    PrintObjectConfig, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintIdleFloorConfig, PrintAuxFanConfig, PrintConfig, FullPrintConfig,
     SLAMaterialConfig, SLAPrintConfig, SLAPrintObjectConfig, SLAPrinterConfig, SLAFullPrintConfig))
 static int print_config_static_initialized = print_config_static_initializer();
 
@@ -14275,7 +14407,7 @@ static int print_config_static_initialized = print_config_static_initializer();
         visit_option_pairs(*dst, *this, [](const char*, ConfigOption &a, const ConfigOption &b) { a.set(&b); return true; }); \
         return true; \
     }
-BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_APPLY_TO_DEFINITION, _, (PrintObjectConfig)(PrintRegionConfig)(MachineEnvelopeConfig)(GCodeConfig)(PrintTowerConfig)(PrintIdleFloorConfig)
+BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_APPLY_TO_DEFINITION, _, (PrintObjectConfig)(PrintRegionConfig)(MachineEnvelopeConfig)(GCodeConfig)(PrintTowerConfig)(PrintIdleFloorConfig)(PrintAuxFanConfig)
     (SLAMaterialConfig)(SLAPrintConfig)(SLAPrintObjectConfig)(SLAPrinterConfig))
 #undef PRINT_CONFIG_APPLY_TO_DEFINITION
 

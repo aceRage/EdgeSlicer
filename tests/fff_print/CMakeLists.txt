@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
 	test_flow.cpp
 	test_gcode.cpp
 	test_cooling.cpp
+	test_bambu_cooling.cpp
 	test_mass_limited_acceleration.cpp
 	test_min_layer_time_pause.cpp
 	test_fine_detail_print.cpp

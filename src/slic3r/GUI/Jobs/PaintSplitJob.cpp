@@ -60,135 +60,124 @@ void PaintSplitJob::process(Ctl &ctl)
 {
     if (m_source.objects.empty() || m_plan.pieces.empty())
         return;
-    const std::string status = _u8L("Splitting off the selected region");
+    const std::string status = _u8L("Splitting off the selected regions");
     ctl.update_status(0, status);
 
-    ModelObject *current = m_source.objects.front();
-    if (m_plan.mask_volume_idx < 0 || size_t(m_plan.mask_volume_idx) >= current->volumes.size()) {
+    ModelObject *source = m_source.objects.front();
+    if (m_plan.mask_volume_idx < 0 || size_t(m_plan.mask_volume_idx) >= source->volumes.size()) {
         m_error = PaintSplitError::BadComponent;
         return;
     }
-    const std::string mask_name = current->volumes[size_t(m_plan.mask_volume_idx)]->name;
-    current->volumes[size_t(m_plan.mask_volume_idx)]->name = PAINT_SPLIT_TAG;
-    int mask_idx = m_plan.mask_volume_idx;
+    const std::string mask_name = source->volumes[size_t(m_plan.mask_volume_idx)]->name;
+    source->volumes[size_t(m_plan.mask_volume_idx)]->name = PAINT_SPLIT_TAG;
 
     ModelObjectCutAttributes attrs = ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
                                      ModelObjectCutAttribute::KeepPaint;
     if (m_plan.keep_as_parts)
         attrs = attrs | ModelObjectCutAttribute::KeepAsParts;
 
+    // R2 (E7): every region in one cut, from the uncut part. (In turn, each cut read the body the last one left,
+    // whose frame moved when a single part remained: ModelObject::delete_volume() folds that part's transformation
+    // into the instance, and the region, still in the first cut frame, then missed it: "The cut does not reach the
+    // selected region" at region 4 on the owner's figure.)
+    PaintSplitKeep keep;
+    keep.mask_volume_idx       = m_plan.mask_volume_idx;
+    keep.region                = &m_plan.region;
+    keep.nearest_skin          = true;
+    keep.skin                  = m_plan.skin;
+    keep.cut_only_painted_part = m_plan.cut_only_painted_part;
+    for (const PaintSplitApplyPiece &p : m_plan.pieces) {
+        keep.components.push_back(p.component);
+        keep.claims.push_back(p.claim);
+    }
+    const auto             t_start = std::chrono::steady_clock::now();
+    Cut                    cut(source, m_plan.instance, Transform3d::Identity(), attrs);
+    PaintSplitReport       rep;
+    const ModelObjectPtrs &res = cut.perform_with_paint_split_planes(keep, &rep);
+    if (ctl.was_canceled())
+        return;
+    if (rep.error != PaintSplitError::None || res.empty()) {
+        m_error     = rep.error != PaintSplitError::None ? rep.error : PaintSplitError::BooleanFailed;
+        m_bad_label = rep.bad_index >= 0 && size_t(rep.bad_index) < m_plan.pieces.size() ? m_plan.pieces[size_t(rep.bad_index)].label : std::string();
+        return;
+    }
+    // Step 0 of the refinement plan: where the time goes, per region.
+    for (size_t k = 0; k < m_plan.pieces.size() && k < rep.region_times.size(); ++k) {
+        const PaintSplitTimes &t = rep.region_times[k];
+        m_log.push_back(GUI::format(_u8L("%1%: field %2% s, cut %3% s"), m_plan.pieces[k].label, secs(t.field + t.mesh + t.smooth), secs(t.cut)));
+    }
+    m_log.push_back(GUI::format(_u8L("All regions: repair %1% s, field %2% s, cut %3% s, paint %4% s, rest %5% s; %6% of %7% cut(s) from Show cut"),
+                                secs(rep.times.repair), secs(rep.times.field + rep.times.mesh + rep.times.smooth), secs(rep.times.cut),
+                                secs(rep.times.paint), secs(rep.times.wrapper), rep.claims_reused, m_plan.pieces.size()));
+    BOOST_LOG_TRIVIAL(info) << "Paint split: " << m_plan.pieces.size() << " region(s), total " << rep.times.total << " s; repair "
+                            << rep.times.repair << " s, field " << rep.times.field << " s, mesh " << rep.times.mesh << " s, smooth "
+                            << rep.times.smooth << " s, cut " << rep.times.cut << " s, wrapper " << rep.times.wrapper << " s, paint "
+                            << rep.times.paint << " s (" << (rep.exact_paint ? "exact" : "remap") << "); " << rep.claims_reused
+                            << " claim(s) from Show cut";
+    m_returned += rep.returned_components;
+    for (PaintSplitWarning w : rep.warnings)
+        if (std::find(m_warnings.begin(), m_warnings.end(), w) == m_warnings.end())
+            m_warnings.push_back(w);
+
+    const size_t n = m_plan.pieces.size();
     ModelObjectPtrs pieces;
-    const auto      t_start = std::chrono::steady_clock::now();
-    for (size_t k = 0; k < m_plan.pieces.size(); ++k) {
-        if (ctl.was_canceled())
-            return;
-        const PaintSplitApplyPiece &p = m_plan.pieces[k];
-        PaintSplitKeep keep;
-        keep.mask_volume_idx = mask_idx;
-        keep.region          = &m_plan.region;
-        keep.component       = p.component;
-        keep.planes          = p.planes;
-        keep.cutters         = p.cutters;
-        keep.nearest_skin    = p.nearest_skin;
-        keep.skin            = p.skin;
-        keep.assign.body_hints = p.body_hints;
-        keep.cut_only_painted_part = m_plan.cut_only_painted_part;
-
-        Cut                    cut(current, m_plan.instance, Transform3d::Identity(), attrs);
-        PaintSplitReport       rep;
-        const ModelObjectPtrs &res = cut.perform_with_paint_split_planes(keep, &rep);
-        if (rep.error != PaintSplitError::None || res.empty()) {
-            m_error     = rep.error != PaintSplitError::None ? rep.error : PaintSplitError::BooleanFailed;
-            m_bad_loop  = rep.bad_loop;
-            m_bad_label = p.label;
-            return;
+    ModelObject    *body = nullptr;
+    if (m_plan.keep_as_parts) {
+        body       = m_source.add_object(*res.front());
+        body->name = m_name;
+        for (size_t k = 0; k < n; ++k)
+            if (int a = find_volume(*body, std::string(PAINT_SPLIT_TAG) + "_A" + std::to_string(k + 1)); a >= 0)
+                set_piece(*body->volumes[size_t(a)], m_name + " - " + m_plan.pieces[k].label, m_plan.pieces[k].filament);
+        if (int b = find_volume(*body, std::string(PAINT_SPLIT_TAG) + "_B"); b >= 0)
+            body->volumes[size_t(b)]->name = mask_name;
+        for (int r = 1;; ++r) {
+            const int l = find_volume(*body, std::string(PAINT_SPLIT_TAG) + "_loose" + std::to_string(r));
+            if (l < 0)
+                break;
+            body->volumes[size_t(l)]->name = mask_name + " - " + GUI::format(_u8L("Rest %1%"), ++m_rest_count);
         }
-        // Step 0 of the refinement plan: where the time goes, per region.
-        {
-            const PaintSplitTimes &t = rep.times;
-            m_log.push_back(GUI::format(_u8L("%1%: field %2% s, cut %3% s, paint %4% s"), p.label, secs(t.field + t.mesh + t.smooth),
-                                        secs(t.repair + t.cut + t.wrapper), secs(t.paint)));
-            BOOST_LOG_TRIVIAL(info) << "Paint split " << p.label << ": total " << t.total << " s; repair " << t.repair << " s, field "
-                                    << t.field << " s, mesh " << t.mesh << " s, smooth " << t.smooth << " s, cut " << t.cut
-                                    << " s, wrapper " << t.wrapper << " s, paint " << t.paint << " s ("
-                                    << (rep.exact_paint ? "exact" : "remap") << "); claim " << rep.claim.triangles << " triangles, voxel "
-                                    << rep.claim.voxel << " mm, near the skin " << rep.claim.near_skin_voxel << " mm; piece "
-                                    << rep.piece_volume << " mm3";
-        }
-        m_returned += rep.returned_components;
-        m_attached += rep.attached_components;
-        for (PaintSplitWarning w : rep.warnings)
-            if (std::find(m_warnings.begin(), m_warnings.end(), w) == m_warnings.end())
-                m_warnings.push_back(w);
-
-        if (m_plan.keep_as_parts) {
-            ModelObject *obj = m_source.add_object(*res.front());
-            obj->name        = m_name;
-            // The piece is the tag's "_A", the body its "_B"; the body keeps the tag for the next cut.
-            if (int a = find_volume(*obj, std::string(PAINT_SPLIT_TAG) + "_A"); a >= 0)
-                set_piece(*obj->volumes[size_t(a)], m_name + " - " + p.label, p.filament);
-            mask_idx = find_volume(*obj, std::string(PAINT_SPLIT_TAG) + "_B");
-            if (mask_idx >= 0)
-                obj->volumes[size_t(mask_idx)]->name = PAINT_SPLIT_TAG;
-            // A band's rest pieces: parts of their own beside the body.
-            for (int r = 1;; ++r) {
-                const int l = find_volume(*obj, std::string(PAINT_SPLIT_TAG) + "_loose" + std::to_string(r));
-                if (l < 0)
-                    break;
-                obj->volumes[size_t(l)]->name = mask_name + " - " + GUI::format(_u8L("Rest %1%"), ++m_rest_count);
-            }
-            current = obj;
-        } else {
-            if (res.size() < 2) {
-                m_error = PaintSplitError::EmptyBody;
-                return;
-            }
-            ModelObject *piece = m_source.add_object(*res[0]);
-            ModelObject *body  = m_source.add_object(*res[1]);
-            piece->name        = m_name + " - " + p.label;
-            body->name         = m_name;
-            if (int a = find_volume(*piece, PAINT_SPLIT_TAG); a >= 0)
-                set_piece(*piece->volumes[size_t(a)], piece->name, p.filament);
-            pieces.push_back(piece);
-            // A band's rest pieces: objects of their own (the body keeps the other parts and modifiers).
-            for (int r = 1;; ++r) {
-                const int l = find_volume(*body, std::string(PAINT_SPLIT_TAG) + "_loose" + std::to_string(r));
-                if (l < 0)
-                    break;
-                ModelObject *rest = m_source.add_object(*body);
-                for (int v = int(rest->volumes.size()) - 1; v >= 0; --v)
-                    if (v != l)
-                        rest->delete_volume(size_t(v));
-                body->delete_volume(size_t(l));
-                rest->name = m_name + " - " + GUI::format(_u8L("Rest %1%"), ++m_rest_count);
-                if (!rest->volumes.empty())
-                    rest->volumes.front()->name = rest->name;
-                rest->invalidate_bounding_box();
-                pieces.push_back(rest);
-            }
-            body->invalidate_bounding_box();
-            mask_idx = find_volume(*body, PAINT_SPLIT_TAG);
-            current  = body;
-        }
-        if (mask_idx < 0 && k + 1 < m_plan.pieces.size()) {
+    } else {
+        if (res.size() != n + 1) {
             m_error = PaintSplitError::EmptyBody;
             return;
         }
-        ctl.update_status(int(100 * (k + 1) / m_plan.pieces.size()), status);
-    }
-    // The body keeps the part's own name.
-    for (ModelObject *o : pieces)
-        for (ModelVolume *v : o->volumes)
+        for (size_t k = 0; k < n; ++k) {
+            ModelObject *piece = m_source.add_object(*res[k]);
+            piece->name        = m_name + " - " + m_plan.pieces[k].label;
+            if (int a = find_volume(*piece, PAINT_SPLIT_TAG); a >= 0)
+                set_piece(*piece->volumes[size_t(a)], piece->name, m_plan.pieces[k].filament);
+            pieces.push_back(piece);
+        }
+        body       = m_source.add_object(*res[n]);
+        body->name = m_name;
+        // The rest pieces: objects of their own (the body keeps the other parts and modifiers). Nothing is cut after
+        // this, so delete_volume() folding a lone part's transformation into the instance moves nothing.
+        for (int r = 1;; ++r) {
+            const int l = find_volume(*body, std::string(PAINT_SPLIT_TAG) + "_loose" + std::to_string(r));
+            if (l < 0)
+                break;
+            ModelObject *rest = m_source.add_object(*body);
+            for (int v = int(rest->volumes.size()) - 1; v >= 0; --v)
+                if (v != l)
+                    rest->delete_volume(size_t(v));
+            body->delete_volume(size_t(l));
+            rest->name = m_name + " - " + GUI::format(_u8L("Rest %1%"), ++m_rest_count);
+            if (!rest->volumes.empty())
+                rest->volumes.front()->name = rest->name;
+            rest->invalidate_bounding_box();
+            pieces.push_back(rest);
+        }
+        body->invalidate_bounding_box();
+        for (ModelVolume *v : body->volumes)
             if (v->name == PAINT_SPLIT_TAG)
                 v->name = mask_name;
-    for (ModelVolume *v : current->volumes)
-        if (v->name == PAINT_SPLIT_TAG)
-            v->name = mask_name;
+    }
+    ctl.update_status(100, status);
 
     m_results = pieces;
-    m_results.push_back(current);
+    m_results.push_back(body);
     m_total_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
-    BOOST_LOG_TRIVIAL(info) << "Paint split: " << m_plan.pieces.size() << " region(s) in " << m_total_s << " s";
+    BOOST_LOG_TRIVIAL(info) << "Paint split: " << n << " region(s) in " << m_total_s << " s";
 }
 
 const std::vector<std::string> &PaintSplitJob::last_log() { return last_log_lines(); }
