@@ -510,7 +510,8 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FilamentMetalStickiness)
 static const t_config_enum_values s_keys_map_StabilizerColumnShape = {
     { "round",        scsRound       },
     { "rounded_rect", scsRoundedRect },
-    { "auto",         scsAuto        }
+    { "auto",         scsAuto        },
+    { "rib",          scsRib         }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(StabilizerColumnShape)
 
@@ -9604,14 +9605,20 @@ void PrintConfigDef::init_fff_params()
                      "Rounded rectangle: every pillar is a column with a filleted rectangular cross-section, like a "
                      "prime tower, which is much stiffer than a thin round pillar.\n"
                      "Auto: round pillars, and a rounded-rectangle column for a pillar at least the column height "
-                     "tall that stands alone or still has a stretch longer than the max unbraced height.");
+                     "tall that stands alone or still has a stretch longer than the max unbraced height.\n"
+                     "Rib: no struts or pillars. An edge-on rib stands on the plate against the part's side in each "
+                     "stabilizer direction, up to the highest ring: 15% of its height deep at the plate, narrowing to a "
+                     "4 mm flat top, 1.2 mm thick plus 0.004 mm per mm of height (at most 2.4 mm). It keeps the tip gap "
+                     "(at least 0.2 mm) off the part, and one-layer tines bridge that gap every rib tine spacing.");
     def->enum_keys_map = &ConfigOptionEnum<StabilizerColumnShape>::get_enum_values();
     def->enum_values.push_back("round");
     def->enum_values.push_back("rounded_rect");
     def->enum_values.push_back("auto");
+    def->enum_values.push_back("rib");
     def->enum_labels.push_back(L("Round"));
     def->enum_labels.push_back(L("Rounded rectangle"));
     def->enum_labels.push_back(L("Auto"));
+    def->enum_labels.push_back(L("Rib"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<StabilizerColumnShape>(scsRound));
 
@@ -9684,6 +9691,32 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Gyroid"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipRectilinear));
+
+    // Rib stabilizers (stabilizer_column_shape = rib): the tine comb. The technique (sway braces with an
+    // evenly spaced tine comb) follows Support Fins (gittrahan/support-fins, MIT); EdgeSlicer's own code.
+    def = this->add("stabilizer_rib_tine_spacing", coFloat);
+    def->label = L("Rib tine spacing");
+    def->category = L("Support");
+    def->tooltip = L("With the Rib column shape: the height between two tines of a rib. A tine is a single bead, one "
+                     "layer tall, that bridges the gap between the rib and the part and fuses a little into the part, "
+                     "so the part cannot sway away from the rib; it snaps off by bending. 0 prints plain ribs without tines.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(6.));
+
+    def = this->add("stabilizer_rib_grip_from", coFloat);
+    def->label = L("Rib tines from");
+    def->category = L("Support");
+    def->tooltip = L("With the Rib column shape: the height above the plate of the first rib tine; the others follow "
+                     "every rib tine spacing above it. Never on the first layer. Raise it to keep tine marks off the "
+                     "bottom of the part.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
     // Support fins (Support/Fins.hpp). The fin keys share OrcaSlicer PR #15839's support_fin_* names where the
     // meaning is the same (thickness, height, spacing, tine spacing and depth, base rows, lean side only), so a

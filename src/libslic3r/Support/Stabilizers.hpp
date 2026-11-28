@@ -34,8 +34,13 @@
 //    the same settings to the baked object).
 // A Plan carries the struts with their pillars and braces; the live slicer and the bake both build
 // from it.
+//
+// Ribs (column shape Rib, support fins PR 3): instead of struts and pillars, an edge-on rib against the
+// part's side in every stabilizer direction, with a comb of one-layer tines that fuse into the part (sway
+// braces; see "ribs" below). Every other shape plans and prints exactly as before.
 
 #include "../ExPolygon.hpp"
+#include "../Polyline.hpp"
 #include "../PrintConfig.hpp"
 #include "../SLA/SupportPoint.hpp"
 
@@ -108,7 +113,18 @@ struct StabilizerSettings
     double        infill_density = 0.15;
     InfillPattern infill_pattern = ipRectilinear;
 
+    // --- ribs (column_shape Rib) ---
+    // Height between two tines of a rib, mm; 0 = plain ribs without tines.
+    double rib_tine_spacing = 6.;
+    // Height above the bed of the first tine, mm (never on the first layer).
+    double rib_grip_from    = 0.;
+    // The support line width, mm: a tine is one bead of it, and a rib two of them thick at least.
+    double line_width       = 0.42;
+
     bool tapered() const { return pillar_base_radius > pillar_radius + EPSILON; }
+    bool ribs() const { return column_shape == scsRib; }
+    // How far a rib stands off the part: the tip gap, never under RIB_MIN_GAP.
+    double rib_gap() const;
 
     // `support_line_width` is the object's support material flow width, mm.
     static StabilizerSettings from_config(const PrintObjectConfig &cfg, double support_line_width);
@@ -117,11 +133,15 @@ struct StabilizerSettings
 // The settings of a PrintObject (its config and its support flow).
 StabilizerSettings settings_of(const PrintObject &object);
 
-// One object layer as the ring placer sees it: its slicing height (object frame) and outline.
+// One object layer as the ring placer sees it: its slicing height (object frame) and outline. The
+// layer's top and height (print_z, height) are what the rib bake builds its one-layer tines between;
+// 0 = unknown (the band is then taken half way to the neighbouring slicing planes).
 struct LayerOutline
 {
     float             slice_z;
     const ExPolygons *islands;
+    double            print_z = 0.;
+    double            height  = 0.;
 };
 
 // The outlines of a sliced PrintObject's layers (Layer::lslices). Valid while the layers are.
@@ -135,6 +155,9 @@ struct Contact
     size_t layer; // index of the layer the ring was placed on
     float  z;     // that layer's slice_z
     Vec2d  normal = Vec2d::Zero(); // the outline's outward normal there (unit; zero when unknown)
+    // How far behind pos (against dir) the island's centre is, mm; 0 = unknown. Where a rib's centre
+    // line starts.
+    double inward = 0.;
 };
 
 // Contact points on the outlines, ring by ring. Layers must be sorted by slice_z. Every ring uses
@@ -222,8 +245,69 @@ struct Brace
     double z_top() const { return z_high() + M_SQRT2 * radius; }
 };
 
+// --- ribs (column_shape Rib) ----------------------------------------------------------------------
+//
+// A rib is a sway brace: a thin vertical wall standing on the bed edge-on to the part, in the plane of a
+// stabilizer direction, its inner edge following the part's side at the rib gap layer by layer (closing
+// in on a part that narrows upwards at 45 degrees at most, so it never overhangs). It is RIB_DEPTH_RATIO of
+// its height deep at the bed and narrows linearly to a RIB_TOP_DEPTH flat top at the highest ring in its
+// direction; its thickness grows with its height. Every rib tine spacing (from the grip height up) a
+// tine - one bead, one object layer tall - bridges the gap and runs RIB_TINE_DEPTH into the part's section,
+// so the object's own wall fuses to it and the part cannot sway away; it snaps off by bending.
+//
+// Credit: sway braces with an evenly spaced tine comb are a Support Fins option (gittrahan/support-fins,
+// printfins.com, MIT), after Slant3D's designed-in supports. This is EdgeSlicer's own implementation,
+// written from the published description; no code was taken from that project.
+static constexpr double RIB_DEPTH_RATIO         = 0.15;  // depth at the bed per mm of rib height
+static constexpr double RIB_TOP_DEPTH           = 4.;    // the flat top's depth, mm
+static constexpr double RIB_BASE_THICKNESS      = 1.2;   // mm
+static constexpr double RIB_THICKNESS_PER_MM    = 0.004; // extra thickness per mm of rib height
+static constexpr double RIB_MAX_THICKNESS       = 2.4;   // mm (never under two support lines)
+static constexpr double RIB_MIN_GAP             = 0.2;   // the rib's least standoff from the part, mm
+static constexpr double RIB_TINE_DEPTH          = 0.3;   // how far a tine runs into the part, mm
+// A tine bridges at most the rib gap plus this, mm; a wider opening (the part drawing away above the
+// rib faster than the rib may follow) gets no tine there.
+static constexpr double RIB_TINE_MAX_EXTRA_SPAN = 1.;
+// Two contacts whose directions differ by less than this (cosine) and whose lateral offset is under
+// RIB_MERGE_DISTANCE mm share one rib: every ring uses the same angles, so one rib serves them all.
+static constexpr double RIB_MERGE_COS           = 0.996;
+static constexpr double RIB_MERGE_DISTANCE      = 1.;
+
+// A rib's depth at the bed and its thickness, from its height (top_z), mm.
+double rib_bed_depth(double top_z);
+double rib_thickness(double top_z, double line_width);
+
+struct Rib
+{
+    // The centre line runs from `origin` (inside the part) along `dir` (unit, away from it); t is the
+    // distance along it.
+    Vec2d  origin    = Vec2d::Zero();
+    Vec2d  dir       = Vec2d(1., 0.);
+    // The part's outermost point on the centre line below top_z, mm along it.
+    double edge      = 0.;
+    double gap       = RIB_MIN_GAP;
+    double top_z     = 0.;  // the flat top, mm (the stabilizer frame's slicing heights)
+    double thickness = RIB_BASE_THICKNESS;
+    bool   painted   = false;
+
+    Vec2d  perp() const { return Vec2d(-dir.y(), dir.x()); }
+    Vec2d  at(double t) const { return origin + dir * t; }
+    // The rib's depth beyond the gap at height z: rib_bed_depth at the bed down to RIB_TOP_DEPTH at top_z.
+    double depth_at(double z) const;
+    // Its outer end at height z, along the centre line.
+    double outer_at(double z) const { return edge + gap + depth_at(z); }
+};
+
+// One object layer of ribs: the wall sections and the tines (one-bead paths, with their footprints).
+struct RibSlice
+{
+    ExPolygons body;
+    Polylines  tines;
+    ExPolygons tine_areas;
+};
+
 // What the live generator prints and the bake builds: the struts, the pillars they stand on, and the
-// braces between the pillars.
+// braces between the pillars. With the Rib column shape: the ribs instead, and nothing else.
 struct Plan
 {
     std::vector<Strut>  struts;
@@ -231,6 +315,10 @@ struct Plan
     std::vector<Brace>  braces;
     // The pillar each strut comes down onto (an index into pillars, one per strut).
     std::vector<size_t> strut_pillar;
+    // Rib column shape.
+    std::vector<Rib>    ribs;
+    // Indices of the layers that carry rib tines (every rib standing there gets one).
+    std::vector<size_t> rib_tine_layers;
 };
 
 // Struts whose pillars stand closer than this (axis to axis, mm) share one pillar.
@@ -256,6 +344,14 @@ struct PlanReport
     size_t columns           = 0;  // pillars built as rounded-rectangle columns
     // Auto columns that would come too close to the part, left round.
     size_t column_fallbacks  = 0;
+
+    // Ribs (column_shape Rib).
+    size_t ribs              = 0;  // ribs planned
+    size_t ribs_standing     = 0;  // ribs that stand on the bed (have a first layer)
+    size_t rib_tines         = 0;  // tines printed
+    // Tines left out: the opening wider than a tine bridges, no part in front of the rib, or (live)
+    // other support printing there.
+    size_t rib_tines_skipped = 0;
 };
 
 // --- v2 pillar geometry (shared by the live slicer and the bake) ---
@@ -323,6 +419,25 @@ Plan plan_from_struts(const StabilizerSettings &settings, const std::vector<Stru
 // the outline grown by the tip gap. One entry per layer, the areas that print as stabilizer.
 std::vector<ExPolygons> slice_plan(const std::vector<LayerOutline> &layers, const StabilizerSettings &settings,
                                    const Plan &plan, const std::function<void()> &throw_if_canceled);
+
+// --- ribs (column_shape Rib) ---
+
+// The ribs for the layers: one per stabilizer direction of every ring contact (Auto) and painted spot
+// (Auto or Manual), contacts in the same direction sharing one rib up to the highest of them, plus the
+// layers that carry tines. What plan_stabilizers returns with the Rib column shape. A painted spot whose
+// rib meets no part is reported unreachable.
+Plan plan_ribs(const std::vector<LayerOutline> &layers, const StabilizerSettings &settings,
+               const std::vector<PaintedSpot> &painted = {}, PlanReport *report = nullptr);
+// The layers that carry rib tines up to `top_z`: the layer whose slicing plane is nearest to each
+// rib_grip_from + k * rib_tine_spacing, never the first layer and never two in a row. Empty when
+// rib_tine_spacing is 0.
+std::vector<size_t> rib_tine_layers(const std::vector<LayerOutline> &layers, const StabilizerSettings &settings, double top_z);
+// The ribs' sections at the layers. Each layer of a rib stands on the one below grown by at most the
+// height between them (45 degrees), keeps the rib gap off the part on its layer and on the layers up to
+// the gap above, and on a tine layer gets a tine across the gap. `report` (may be null) gets
+// ribs_standing, rib_tines and rib_tines_skipped.
+std::vector<RibSlice> slice_ribs(const std::vector<LayerOutline> &layers, const StabilizerSettings &settings, const Plan &plan,
+                                 PlanReport *report, const std::function<void()> &throw_if_canceled);
 
 // The struts' cross-sections at the layers, completed into a plan first (complete_plan), clipped by
 // the part's outline (grown by the tip gap): one entry per layer, the areas that print as stabilizer.

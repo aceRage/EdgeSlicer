@@ -4042,6 +4042,9 @@ void TabPrint::build()
         optgroup->append_single_option_line("stabilizer_column_width");
         optgroup->append_single_option_line("stabilizer_column_length");
         optgroup->append_single_option_line("stabilizer_column_min_height");
+        // Rib column shape: the tine comb (sway braces).
+        optgroup->append_single_option_line("stabilizer_rib_tine_spacing");
+        optgroup->append_single_option_line("stabilizer_rib_grip_from");
         optgroup->append_single_option_line("stabilizer_wall_loops");
         optgroup->append_single_option_line("stabilizer_infill_density");
         optgroup->append_single_option_line("stabilizer_infill_pattern");

@@ -107,8 +107,14 @@ void StabilizerBakeJob::finalize(bool canceled, std::exception_ptr &eptr)
     if (PartPlate *plate = plates.get_curr_plate())
         plate->update_slice_result_valid_state(false);
 
-    std::string summary = (boost::format(_u8L("Baked %1% stabilizer struts of \"%2%\" into %3% triangles.")) % m_result.struts.size()
-                           % m_name % m_result.mesh_report.triangles).str();
+    std::string summary = m_result.ribs() ?
+        (boost::format(_u8L("Baked %1% stabilizer ribs with %2% tines of \"%3%\" into %4% triangles.")) % m_result.plan.ribs.size()
+         % m_result.rib_tines % m_name % m_result.mesh_report.triangles).str() :
+        (boost::format(_u8L("Baked %1% stabilizer struts of \"%2%\" into %3% triangles.")) % m_result.struts.size()
+         % m_name % m_result.mesh_report.triangles).str();
+    // Separate ribs only catch the part: their tines stop at its outline.
+    if (m_result.ribs() && m_options.placement == StabilizerBakePlacement::SeparateObject && m_result.rib_tines > 0)
+        summary += " " + _u8L("As a separate object the rib tines only touch the part; bake as a part of the object for tines that fuse.");
     if (m_options.placement == StabilizerBakePlacement::SeparateObject) {
         summary += " " + (boost::format(_u8L("They are the object \"%1%\": it does not follow moves of the part or arrange, so bake again "
                                              "after moving the part.")) % target->name).str();
@@ -116,7 +122,7 @@ void StabilizerBakeJob::finalize(bool canceled, std::exception_ptr &eptr)
             summary += " " + _u8L("Copies of the part with another rotation or scale got no stabilizers; bake those separately.");
     }
     summary += " " + _u8L("The object's live side stabilizers are now off.");
-    if (m_result.tip_gap > m_result.sliced_tip_gap + EPSILON)
+    if (! m_result.ribs() && m_result.tip_gap > m_result.sliced_tip_gap + EPSILON)
         summary += " " + (boost::format(_u8L("The tips keep a %1% mm gap from the part (the slice used %2% mm).")) % m_result.tip_gap
                           % m_result.sliced_tip_gap).str();
     if (! m_result.plan_report.unreachable.empty())
