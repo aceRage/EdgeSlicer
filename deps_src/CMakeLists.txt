@@ -17,7 +17,7 @@ add_subdirectory(Shiny)
 add_subdirectory(admesh)
 add_subdirectory(clipper)
 add_subdirectory(colorsolver)  # nearest reachable filament mix (AGPL-3.0, see colorsolver/NOTICE)
-add_subdirectory(expat)
+
 add_subdirectory(glu-libtess)
 add_subdirectory(hidapi)
 add_subdirectory(hints)        # Hints library with utility executable

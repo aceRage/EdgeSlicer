@@ -17,6 +17,18 @@ else ()
     set(_wx_edge "-DwxUSE_WEBVIEW_EDGE=OFF")
 endif ()
 
+# Orca #17290: wxUSE_EXPAT=sys makes wxxml compile against the expat installed in the deps
+# prefix. That library is static, and upstream expat headers declare its API
+# __declspec(dllimport) unless XML_STATIC is defined, which wx never does.
+if (WIN32)
+    set(_wx_expat_static
+        "-DCMAKE_C_FLAGS:STRING=${CMAKE_C_FLAGS} -DXML_STATIC"
+        "-DCMAKE_CXX_FLAGS:STRING=${CMAKE_CXX_FLAGS} -DXML_STATIC"
+    )
+else ()
+    set(_wx_expat_static "")
+endif ()
+
 # Note: The flatpak build builds wxwidgets separately due to CI size constraints.
 # ANY CHANGES MADE IN HERE MUST ALSO BE REFLECTED IN `scripts/flatpak/io.github.Snapmaker.Snapmaker_Orca.yml`.
 # ** THIS INCLUDES BUILD ARGS. **
@@ -59,6 +71,7 @@ Snapmaker_Orca_add_cmake_project(
         -DwxUSE_LIBTIFF=OFF
         -DwxUSE_NANOSVG=OFF
         -DwxUSE_EXPAT=sys
+        ${_wx_expat_static}
 )
 
 if (MSVC)
