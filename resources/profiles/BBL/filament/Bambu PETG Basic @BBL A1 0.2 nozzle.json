@@ -11,6 +11,9 @@
     "filament_max_volumetric_speed": [
         "1"
     ],
+    "pre_start_fan_time": [
+        "0"
+    ],
     "compatible_printers": [
         "Bambu Lab A1 0.2 nozzle"
     ]

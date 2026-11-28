@@ -7,6 +7,9 @@
     "setting_id": "GFSN99",
     "instantiation": "true",
     "description": "When printing this filament, there's a risk of nozzle clogging, oozing, warping and low layer adhesion strength. To get better results, please refer to this wiki: Printing Tips for High Temp / Engineering materials.",
+    "additional_fan_full_speed_layer": [
+        "2"
+    ],
     "fan_cooling_layer_time": [
         "5"
     ],
