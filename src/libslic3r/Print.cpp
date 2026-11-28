@@ -882,6 +882,16 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "extrusion_rate_smoothing_external_perimeter_only",
         "reduce_infill_retraction_mode",
         "filament_metal_stickiness",
+        // Bambu Studio 02.09.01.70 filament overhang overrides: read only by GCode::_extrude and the estimator
+        // preparation of the G-code export.
+        "override_process_overhang_speed",
+        "filament_enable_overhang_speed",
+        "filament_overhang_1_4_speed",
+        "filament_overhang_2_4_speed",
+        "filament_overhang_3_4_speed",
+        "filament_overhang_4_4_speed",
+        "filament_overhang_totally_speed",
+        "filament_bridge_speed",
         "filename_format",
         "retraction_minimum_travel",
         "retract_before_wipe",

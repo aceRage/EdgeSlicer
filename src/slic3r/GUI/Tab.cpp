@@ -6254,6 +6254,19 @@ PageShp TabFilament::add_filament_overrides_page()
                                      })
         append_single_option_line(opt_key);
 
+    // Bambu Studio 02.09.01.70 (Tab.cpp:4663-4673): Speed, the filament overhang overrides. Plain lines under one
+    // switch, as in Bambu: override_process_overhang_speed shows the rest (update_filament_overrides_page).
+    ConfigOptionsGroupShp speed_optgroup = page->new_optgroup(L("Speed"), L"param_speed");
+    for (const char *opt_key : { "override_process_overhang_speed",
+                                 "filament_enable_overhang_speed",
+                                 "filament_overhang_1_4_speed",
+                                 "filament_overhang_2_4_speed",
+                                 "filament_overhang_3_4_speed",
+                                 "filament_overhang_4_4_speed",
+                                 "filament_overhang_totally_speed",
+                                 "filament_bridge_speed" })
+        speed_optgroup->append_single_option_line(opt_key);
+
     // Orca #11194: filament ironing overrides. Unlike the retraction overrides above, these
     // fall back to the PROCESS preset (ironing_flow / ironing_spacing / ironing_inset /
     // ironing_speed), not the printer preset.
@@ -6314,6 +6327,26 @@ void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* print
 {
     if (!m_active_page || m_active_page->title() != "Setting Overrides")
         return;
+
+    // Bambu Studio 02.09.01.70 (Tab.cpp:4764-4777): the overhang override rows follow its switch, the speed rows
+    // also the filament's own slowdown switch. Read at the flow variant on view, as the slice reads them.
+    {
+        const size_t flow_index = flow_variant_view_index();
+        auto bool_at = [this, flow_index](const char *opt_key, bool fallback) {
+            const auto *opt = m_config->option<ConfigOptionBoolsNullable>(opt_key);
+            if (opt == nullptr || opt->values.empty())
+                return fallback;
+            const size_t i = flow_index < opt->values.size() ? flow_index : 0;
+            return opt->is_nil(i) ? fallback : opt->values[i] != 0;
+        };
+        const bool overhang_override = bool_at("override_process_overhang_speed", false);
+        const bool overhang_slowdown = bool_at("filament_enable_overhang_speed", true);
+        toggle_line("filament_enable_overhang_speed", overhang_override);
+        toggle_line("filament_bridge_speed", overhang_override);
+        for (const char *opt_key : { "filament_overhang_1_4_speed", "filament_overhang_2_4_speed", "filament_overhang_3_4_speed",
+                                     "filament_overhang_4_4_speed", "filament_overhang_totally_speed" })
+            toggle_line(opt_key, overhang_override && overhang_slowdown);
+    }
 
     //BBS: GUI refactor
     if (m_overrides_options.size() <= 0)
