@@ -4935,6 +4935,8 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
     // beside its copy (see PartPlate::update_object_tower_previews), moved along with a copy that moved since.
     m_object_tower_loaded_pos.clear();
     if (printer_technology == ptFFF && m_canvas_type != ECanvasType::CanvasAssembleView) {
+        // Turned as the plan and the generator turn them: wipe_tower_rotation_angle on a Type 2 tower (PR 4), 0 on Type 1.
+        std::optional<float> tower_angle;
         for (int plate_id = 0; plate_id < n_plates; ++plate_id) {
             PartPlate *part_plate = ppl.get_plate(plate_id);
             if (part_plate == nullptr)
@@ -4959,8 +4961,10 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
                 const Vec3d moved = instance->get_offset() - p.instance_offset;
                 const Vec2d pos   = (p.rejected ? p.requested_pos : p.pos) + Vec2d(moved.x(), moved.y());
                 const int   id    = object_tower_volume_id(plate_id, int(slot));
+                if (!tower_angle)
+                    tower_angle = float(gui_wipe_tower_rotation_deg(wxGetApp().preset_bundle->full_config()));
                 m_volumes.load_wipe_tower_preview(id, float(pos.x() + plate_origin.x()), float(pos.y() + plate_origin.y()), float(p.width),
-                                                  float(p.depth), float(p.height), 0.f, true, float(p.brim_width), p.rejected);
+                                                  float(p.depth), float(p.height), *tower_angle, true, float(p.brim_width), p.rejected);
                 m_object_tower_loaded_pos[id] = pos;
             }
         }

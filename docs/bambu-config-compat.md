@@ -114,11 +114,13 @@ nullable axis needs no translation for keys both sides know about, and the only 
 work is the `nil`-in-a-non-nullable-type problem handled here.
 
 Asymmetries land in the missing-key counts instead:
-- Bambu-only nullable options the fork does not declare (7): `filament_bridge_speed`,
+- Bambu-only nullable options the fork did not declare (7): `filament_bridge_speed`,
   `filament_enable_overhang_speed`, `filament_overhang_{1,2,3,4}_4_speed`,
-  `filament_overhang_totally_speed`. These are dropped as unknown keys - no crash, but the
-  per-filament overhang overrides a Bambu user set are silently lost. Worth adding if
-  cross-compatibility is to be complete.
+  `filament_overhang_totally_speed`. They were dropped as unknown keys until Bambu parity PR 3
+  ported them under Bambu's own names, nullable and per flow variant, together with
+  `override_process_overhang_speed` (Filament > Setting Overrides > Speed). The process has no
+  "totally" bucket: the filament's 100% speed takes the fully unsupported slot of our overhang
+  estimator for walls (owner decision D6).
 - Fork-only nullable options (3): `filament_retract_length_toolchange`,
   `filament_retract_restart_extra_toolchange`, `filament_retract_lift_enforce`.
 

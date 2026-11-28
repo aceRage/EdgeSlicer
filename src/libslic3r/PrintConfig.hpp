@@ -487,6 +487,12 @@ enum StabilizerMode {
     smOff, smAuto, smManual
 };
 
+// Support fins (Support/Fins.hpp): off, automatic placement (the side the part leans to, or both
+// sides of a balanced one) plus any painted fin spots, or the painted spots only.
+enum SupportFinsMode {
+    sfmOff, sfmAuto, sfmPainted
+};
+
 // Cross-section of the side stabilizer pillars: round, a filleted rectangle like a prime tower (stiffer),
 // or round with rounded-rectangle columns where a pillar is tall and left unbraced.
 enum StabilizerColumnShape {
@@ -773,6 +779,41 @@ bool is_machine_flow_variant_option(const std::string &key);
 
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id = 0);
 
+// ---- Filament overhang overrides (Bambu Studio 02.09.01.70, owner decision D6 of tests/review_missing_bambu_settings_2026-11-25.md)
+// One filament's Setting Overrides > Speed values (override_process_overhang_speed, filament_enable_overhang_speed,
+// filament_overhang_{1_4,2_4,3_4,4_4,totally}_speed, filament_bridge_speed), read from the flow-variant slot
+// get_config_idx(Filament) picks, as Bambu's GCode.cpp:6603-6611 / 7176-7196 read the filament's variant slot. A
+// missing key, an id past the vector or a nil slot reads as the option's default (override off).
+struct FilamentOverhangOverride
+{
+    bool   on       = false;              // override_process_overhang_speed
+    bool   enable   = true;               // filament_enable_overhang_speed
+    double speed[4] = { 0., 0., 0., 0. }; // 1/4 .. 4/4 buckets, mm/s; 0 = the wall speed
+    double totally  = 10.;                // the fully unsupported (0% overlap) part of a wall, mm/s; 0 = see below
+    double bridge   = 25.;                // mm/s; 0 = the process bridge speed
+};
+FilamentOverhangOverride filament_overhang_override(const ConfigBase &config, unsigned int filament_id);
+// True when some filament slot turns the override on together with its overhang slowdown. The overhang estimator
+// then measures every layer with extrusions, as it does for the overhang fan, so a filament can slow its overhangs
+// down even where the process has the slowdown off. False whenever no filament has the override on.
+bool any_filament_overhang_override_enabled(const ConfigBase &config);
+// What GCode::_extrude uses. With the override off every one returns the process value unchanged.
+// The overhang slowdown switch (Bambu GCode::is_enable_overhang_speed).
+bool overhang_slowdown_enabled(const FilamentOverhangOverride &ovr, bool process_enable);
+// The bridge speed of bridges, overhang perimeters, support transitions and the base of a percentage
+// internal_bridge_speed (Bambu GCode.cpp:6639-6640, 7731-7732).
+double overhang_bridge_speed(const FilamentOverhangOverride &ovr, double process_bridge_speed);
+// The speed of overhang bucket `bucket` (0 = 1/4 .. 3 = 4/4) in mm/s; process_abs is the process bucket resolved
+// against the reference speed. 0 keeps the wall speed, as for the process buckets.
+double overhang_bucket_speed(const FilamentOverhangOverride &ovr, int bucket, double process_abs);
+// D6: the speed of the estimator's fully unsupported slot in mm/s (below 0.5 = the wall speed). Without the
+// override it is what the process uses there: the bridge speed, or with "Slow down for curled perimeters" the
+// 4/4 speed for every role but bridge infill. With it, walls take filament_overhang_totally_speed when that is set;
+// bridge infill always keeps the (filament) bridge speed. oh4_abs and bridge_speed are the values already resolved
+// through overhang_bucket_speed / overhang_bridge_speed.
+double overhang_fully_unsupported_speed(const FilamentOverhangOverride &ovr, bool bridge_infill, bool slowdown_curled,
+                                        double oh4_abs, double bridge_speed);
+
 // ---- Per-nozzle process values (per-nozzle process P1, tests/design_per_nozzle_process.md D1) -------
 // The process keys of per_nozzle_process_options() may hold one value per (extruder, variant) slot in
 // Bambu's layout: print_extruder_id / print_extruder_variant name the slots, extruder-major (an H2D
@@ -831,24 +872,37 @@ bool is_printer_extruder_variant_option(const std::string &key);
 // the same thing).
 std::vector<std::vector<size_t>> printer_extruder_variant_slots(const ConfigBase &config);
 
-// The slot of extruder `extruder_idx`'s current variant (extruder_type + nozzle_volume_type), its first
-// slot when that variant is not listed, or -1 when printer_extruder_id / printer_extruder_variant differ
+// The slot of extruder `extruder_idx`'s current variant (its resolved_extruder_types drive + nozzle_volume_type),
+// its first slot when that variant is not listed, or -1 when printer_extruder_id / printer_extruder_variant differ
 // in size or do not list the extruder.
 int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx);
 
-// extruder_type per extruder (ExtruderType values) as the 3MF slice_info reports it, `extruder_count` long.
+// Flow variants PR 1 (owner decision D3): each extruder's drive (ExtruderType values), `extruder_count` long.
 // PrintConfigDef::handle_legacy drops a profile's extruder_type on load, so the option usually holds its
-// one-element Direct Drive default; when it is shorter than the extruder count, each extruder's type is read
-// off its extruder_variant_list entry ("Bowden Standard,..." -> Bowden), which is what Bambu Studio's
-// extruder_type says for the same profile (X2D: Direct Drive, Bowden). Entries with nothing to go on repeat
-// the last known value.
+// one-element Direct Drive default. The drive is therefore read off the extruder's extruder_variant_list entry
+// ("Bowden Standard,..." -> Bowden, the X2D's right extruder); an extruder_type entry counts only when it names
+// Bowden. Everything else is Direct Drive. Without a count: one entry per nozzle_diameter value.
+std::vector<int> resolved_extruder_types(const ConfigBase &config, size_t extruder_count);
+std::vector<int> resolved_extruder_types(const ConfigBase &config);
+// Whether resolved_extruder_types names more than one drive (the X2D).
+bool has_mixed_extruder_types(const ConfigBase &config);
+// The speed (mm/s) of the unretract that restores a tower toolchange's retraction. GCode writes it before the writer
+// switches to the new filament, so it used to run at the old filament's deretraction speed. Bambu unretracts after
+// the switch; on a mixed-drive machine (X2D) that is the new filament's deretraction_speed (its retraction_speed when
+// 0). 0 (keep the writer's) on every other machine and for no new filament.
+double toolchange_deretract_speed(const ConfigBase &config, int new_filament_id);
+
+// extruder_type per extruder as the 3MF slice_info reports it: resolved_extruder_types, or the option's own
+// values for a count of 0.
 std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count);
 
 // The G-code reads per-extruder settings by tool index. In a multi-extruder printer config
 // (single_extruder_multi_material off) in the per-variant layout, cut every per-variant vector down to
 // one value per extruder: each extruder's current variant, or, on a Bambu nozzle-grouping machine
 // (support_different_extruders), the first value per extruder index as the slicer has always read them
-// there. Leaves any other config alone.
+// there. A grouping machine with mixed drives (the X2D) reads them by filament id, so there each vector gets
+// one value per filament: the current variant of the extruder filament_map puts it on (flow variants PR 1).
+// Leaves any other config alone. Not idempotent on that mixed-drive path: apply it to an unresolved config.
 class DynamicPrintConfig;
 void resolve_printer_extruder_variants(DynamicPrintConfig &config);
 
@@ -882,6 +936,9 @@ template<class ConfigT> bool keep_legacy_surface_filaments(ConfigT &config, bool
 
 // The slot resolve_printer_extruder_variants reads for each extruder, or empty when it leaves the config alone.
 std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config);
+// On a mixed-drive grouping machine (X2D) the slot each filament reads (its extruder's, by
+// process_extruder_for_filament), one per filament; empty on every other machine.
+std::vector<size_t> printer_extruder_variant_filament_sources(const DynamicPrintConfig &config);
 
 // The index of extruder `extruder_idx`'s value of `key` that the slicer uses: its slot from `sources`
 // (printer_extruder_variant_sources) when `key` is a per-variant vector of the layout's length, else
@@ -916,6 +973,12 @@ inline double filament_flow_ratio_at(const ConfigBase &config, unsigned int fila
 // both read this, so a toolchange that cools always heats back.
 double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra);
 
+// BBS 2.9.2: idle-nozzle floor in C (min_temperature_when_ec). One value per filament, not a
+// packed flow-variant slot (the key is not in filament_flow_variant_options). Negative, missing,
+// or past the end of the vector reads as 0 (no floor), matching BambuStudio's filament-id index.
+// Do not use get_at: an out-of-range id would fall back to filament 0.
+double min_temperature_when_ec_at(const ConfigBase &config, unsigned int filament_id);
+
 // Packed flow-variant vectors are segmented by filament_flow_step_size. Filament / tool id
 // count is filament_diameter, not the packed length.
 inline size_t flow_variant_filament_count(const ConfigBase &config)
@@ -946,6 +1009,19 @@ inline bool filament_flow_variants_active(const ConfigBase &config)
     return false;
 }
 
+// Orca #12688 / Bambu Studio: the volumetric speed a filament can take at a given layer height h and line
+// width w, a quadratic fitted by Bambu's calibration: a*h^2 + b*w^2 + c*h*w + d*h + e*w + f (mm3/s).
+// volumetric_speed_coefficients holds "a b c d e f"; empty, malformed (not six numbers) or all zero is not a fit.
+struct VolumetricSpeedFit
+{
+    bool   valid{false};
+    double c[6]{};
+
+    // The fitted limit, or no limit (the largest double) when there is no fit.
+    double max_volumetric_speed(double layer_height, double line_width) const;
+};
+VolumetricSpeedFit parse_volumetric_speed_coefficients(const std::string &coefficients);
+
 // The per-filament values GCode::_extrude reads on every extrusion path, resolved
 // once per export (GCode::apply_print_config) instead of through string-keyed
 // option lookups and get_config_idx on every path. The *_for accessors return the
@@ -966,6 +1042,9 @@ struct ResolvedFilamentFlow
     std::vector<double>        flow_ratio;
     std::vector<double>        max_volumetric_speed;
     std::vector<unsigned char> enable_pressure_advance;
+    // Orca #12688: per filament, the fit of the filaments that turned adaptive volumetric speed on; empty when
+    // none did (the usual case, every stock preset has it off), so _extrude pays nothing.
+    std::vector<VolumetricSpeedFit> adaptive_fit;
 
     static ResolvedFilamentFlow resolve(const ConfigBase &config);
 
@@ -996,6 +1075,18 @@ struct ResolvedFilamentFlow
     {
         return filament_id < max_volumetric_speed.size() ? max_volumetric_speed[filament_id] :
                                                            uncached_max_volumetric_speed(config, filament_id);
+    }
+    // `limit` (the filament's max volumetric speed) capped by the fit of layer height and line width when the
+    // filament has adaptive volumetric speed on and a usable fit; `limit` unchanged otherwise. A fit that
+    // comes out at or below zero for this height and width is a bad calibration: it is ignored, not applied.
+    double adaptive_max_volumetric_speed(unsigned int filament_id, double limit, double layer_height, double line_width) const
+    {
+        if (filament_id >= adaptive_fit.size() || !adaptive_fit[filament_id].valid)
+            return limit;
+        const double fitted = adaptive_fit[filament_id].max_volumetric_speed(layer_height, line_width);
+        if (!(fitted > 0.))
+            return limit;
+        return limit > 0. ? std::min(limit, fitted) : fitted; // limit <= 0: no cap of its own
     }
     bool enable_pressure_advance_for(const ConfigBase &config, unsigned int filament_id) const
     {
@@ -1169,6 +1260,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InputShaperType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DraftShield)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CurvedTopsPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportFinsMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ReduceInfillRetractionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentMetalStickiness)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerColumnShape)
@@ -1924,6 +2016,17 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                stabilizer_wall_loops))
     ((ConfigOptionPercent,            stabilizer_infill_density))
     ((ConfigOptionEnum<InfillPattern>, stabilizer_infill_pattern))
+    // Support fins (Support/Fins.hpp)
+    ((ConfigOptionEnum<SupportFinsMode>, support_fins))
+    ((ConfigOptionFloat,              support_fin_thickness))
+    ((ConfigOptionFloat,              support_fin_depth))
+    ((ConfigOptionFloat,              support_fin_height))
+    ((ConfigOptionFloat,              support_fin_spacing))
+    ((ConfigOptionFloat,              support_fin_gap))
+    ((ConfigOptionFloat,              support_fin_tine_spacing))
+    ((ConfigOptionFloat,              support_fin_tine_depth))
+    ((ConfigOptionBool,               support_fin_tine_base_rows))
+    ((ConfigOptionBool,               support_fin_lean_side_only))
     ((ConfigOptionBool,               detect_narrow_internal_solid_infill))
     // ((ConfigOptionBool,               adaptive_layer_height))
     ((ConfigOptionFloat,              support_bottom_interface_spacing))
@@ -2632,12 +2735,39 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Not a tower option: Bambu Studio 02.09.01.70 filament_metal_stickiness, read by reduce_infill_retraction_mode
     // = Auto (GCode.cpp). It lives here because GCodeConfig is at the macro nesting limit (C1009).
     ((ConfigOptionEnumsGeneric,       filament_metal_stickiness))
+    // Not tower options either: Bambu Studio 02.09.01.70 filament overhang overrides (Filament > Setting Overrides >
+    // Speed), per flow variant; read through filament_overhang_override(). Here for the same C1009 reason.
+    ((ConfigOptionBoolsNullable,      override_process_overhang_speed))
+    ((ConfigOptionBoolsNullable,      filament_enable_overhang_speed))
+    ((ConfigOptionFloatsNullable,     filament_overhang_1_4_speed))
+    ((ConfigOptionFloatsNullable,     filament_overhang_2_4_speed))
+    ((ConfigOptionFloatsNullable,     filament_overhang_3_4_speed))
+    ((ConfigOptionFloatsNullable,     filament_overhang_4_4_speed))
+    ((ConfigOptionFloatsNullable,     filament_overhang_totally_speed))
+    ((ConfigOptionFloatsNullable,     filament_bridge_speed))
+    // Orca #14685: the printer has a cooling filter (not air filtration); the cooling filter is fitted (read by machine G-code).
+    ((ConfigOptionBool,               support_cooling_filter))
+    ((ConfigOptionBool,               cooling_filter_enabled))
+    // Orca #10780 / #12688: cap the flow at the fit of layer height and line width too; the fit "a b c d e f"
+    // (see VolumetricSpeedFit). Here for the same macro nesting limit.
+    ((ConfigOptionBoolsNullable,      filament_adaptive_volumetric_speed))
+    ((ConfigOptionStrings,            volumetric_speed_coefficients))
+)
+
+// BBS 2.9.2 P3C idle-nozzle floor, a class of its own: GCodeConfig and PrintConfig are at
+// MSVC's limit of macro nesting (fatal error C1009 with one option more). Same split as
+// PrintTowerConfig above.
+PRINT_CONFIG_CLASS_DEFINE(
+    PrintIdleFloorConfig,
+
+    // BBS 2.9.2 P3C: idle-nozzle floor in C during pre-cooling (negative = no extra floor).
+    ((ConfigOptionFloats,              min_temperature_when_ec))
 )
 
 // This object is mapped to Perl as Slic3r::Config::Print.
 PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     PrintConfig,
-    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig),
+    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintIdleFloorConfig),
 
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))

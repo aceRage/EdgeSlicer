@@ -327,7 +327,7 @@ TEST_CASE("the owner's A1 report resolves against the shipped tables", "[HmsLook
 
     // Every Bambu serial prefix in resources/printers has a shipped English table, A1 and A1 mini
     // included (they had none before this change).
-    for (const char* series : {"00M", "00W", "01S", "01P", "03W", "030", "039", "093", "094", "20P", "22E", "239", "26A", "31B", "32X"}) {
+    for (const char* series : {"00M", "00W", "01S", "01P", "03W", "030", "039", "093", "094", "20P", "22E", "239", "26A", "31B", "32X", "331"}) {
         INFO(series);
         CHECK(fs::exists(fs::path(SLIC3R_TEST_RESOURCES_DIR) / "hms" / HMSQuery::get_hms_file(QUERY_HMS_INFO, "en", series)));
         CHECK(fs::exists(fs::path(SLIC3R_TEST_RESOURCES_DIR) / "hms" / HMSQuery::get_hms_file(QUERY_HMS_ACTION, "en", series)));

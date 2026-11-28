@@ -5,6 +5,15 @@
     "from": "system",
     "setting_id": "GFST01_10",
     "instantiation": "true",
+    "filament_overhang_2_4_speed": [
+        "35"
+    ],
+    "filament_overhang_3_4_speed": [
+        "35"
+    ],
+    "override_process_overhang_speed": [
+        "1"
+    ],
     "reduce_fan_stop_start_freq": [
         "0"
     ],

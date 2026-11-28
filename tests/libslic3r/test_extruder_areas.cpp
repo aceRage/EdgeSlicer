@@ -16,7 +16,10 @@
 #include <boost/filesystem.hpp>
 
 #include <array>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <sstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1100,13 +1103,177 @@ SCENARIO("slice_info reports the X2D's second extruder as Bowden", "[ExtruderAre
 
     DynamicPrintConfig cfg;
     cfg.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ int(etDirectDrive) }));
-    // No variant list: the single value is repeated (the old padding).
+    // No variant list: Direct Drive for every extruder.
     CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etDirectDrive), int(etDirectDrive) });
     CHECK(slice_info_extruder_types(cfg, 1) == std::vector<int>{ int(etDirectDrive) });
-    // A full-length value is kept as it is.
+    // Flow variants PR 1 (D3): an extruder is Bowden when its variant list or its extruder_type entry says so; a Direct
+    // Drive entry never overrides the list.
     cfg.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ int(etBowden), int(etDirectDrive) }));
     cfg.set_key_value("extruder_variant_list", new ConfigOptionStrings({ "Direct Drive Standard", "Bowden Standard" }));
-    CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etBowden), int(etDirectDrive) });
+    CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etBowden), int(etBowden) });
+}
+
+SCENARIO("the X2D's right extruder retracts with Bambu's Bowden values", "[FlowVariants][X2D]")
+{
+    // Bambu's X2D 0.4: Direct Drive 0.8 mm at 30 mm/s, Bowden 2 mm at 20 mm/s. Before flow variants PR 1 both
+    // filaments read the first two Direct Drive slots (0.8 mm at 30 mm/s).
+    auto floats_of = [](const ConfigBase &cfg, const char *key) { return cfg.option<ConfigOptionFloats>(key)->values; };
+    GIVEN("filament 1 on the left extruder, filament 2 on the right one")
+    {
+        const DynamicPrintConfig cfg = x2d_config("Manual", "1,2");
+        CHECK(resolved_extruder_types(cfg) == std::vector<int>{ int(etDirectDrive), int(etBowden) });
+        Model model;
+        add_x2d_cube(model, 60., 1);
+        add_x2d_cube(model, 200., 2);
+        Print print;
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        THEN("each filament gets its extruder's machine values")
+        {
+            CHECK(floats_of(print.full_print_config(), "retraction_length") == std::vector<double>{ 0.8, 2. });
+            CHECK(floats_of(print.full_print_config(), "retraction_speed") == std::vector<double>{ 30., 20. });
+            CHECK(floats_of(print.full_print_config(), "deretraction_speed") == std::vector<double>{ 30., 20. });
+            // PLA Basic sets no retraction speed of its own, so the machine's reaches the G-code.
+            CHECK(print.config().retraction_speed.values == std::vector<double>{ 30., 20. });
+        }
+        THEN("the map the slice already has changes nothing") { CHECK_FALSE(print.realign_printer_variants_to_filament_map({ 1, 2 })); }
+    }
+    GIVEN("automatic grouping, both filaments on the left before the slice")
+    {
+        const DynamicPrintConfig cfg = x2d_config("Auto For Flush", "1,1");
+        Model model;
+        add_x2d_cube(model, 60., 1);
+        add_x2d_cube(model, 200., 2);
+        Print print;
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        CHECK(floats_of(print.full_print_config(), "retraction_length") == std::vector<double>{ 0.8, 0.8 });
+        WHEN("the grouping puts filament 2 on the right extruder")
+        {
+            REQUIRE(print.realign_printer_variants_to_filament_map({ 1, 2 }));
+            THEN("filament 2 follows it")
+            {
+                CHECK(floats_of(print.full_print_config(), "retraction_length") == std::vector<double>{ 0.8, 2. });
+                CHECK(print.config().retraction_speed.values == std::vector<double>{ 30., 20. });
+                CHECK_FALSE(print.realign_printer_variants_to_filament_map({ 1, 2 }));
+            }
+        }
+    }
+}
+
+SCENARIO("H2D retraction vectors are untouched by the drive fix", "[FlowVariants][H2D]")
+{
+    // Both H2D extruders are Direct Drive: one value per extruder index, the first two slots, as before.
+    DynamicPrintConfig cfg = h2d_config("by layer", "Manual", "2,1");
+    const std::vector<double> all = cfg.option<ConfigOptionFloats>("retraction_length")->values;
+    REQUIRE(all.size() >= 2);
+    CHECK_FALSE(has_mixed_extruder_types(cfg));
+    Model model;
+    add_cube(model, 60., 1);
+    add_cube(model, 200., 2);
+    Print print;
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    CHECK(print.full_print_config().option<ConfigOptionFloats>("retraction_length")->values == std::vector<double>{ all[0], all[1] });
+    CHECK_FALSE(print.realign_printer_variants_to_filament_map({ 1, 2 }));
+}
+
+namespace {
+// The owner's hand test (2026-11-27): Bambu PLA Basic (its own 0.4 mm retraction) on the left extruder, Generic PLA
+// (no retraction of its own) on the right, Bowden one, with a prime tower.
+DynamicPrintConfig x2d_mixed_filaments_config()
+{
+    PresetBundle     &b     = bbl_bundle();
+    const std::string basic = "Bambu PLA Basic @BBL X2D 0.4 nozzle";
+    const std::string plain = "Generic PLA @BBL X2D 0.4 nozzle";
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab X2D 0.4 nozzle", true));
+    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL X2D", true));
+    REQUIRE(b.filaments.select_preset_by_name(basic, true));
+    b.filament_presets = { basic };
+    b.set_num_filaments(2, std::vector<std::string>{ "#E01919", "#1943E0" });
+    b.filament_presets = { basic, plain };
+    DynamicPrintConfig cfg = b.full_config_secure();
+    cfg.set_deserialize_strict({
+        { "print_sequence", "by layer" },
+        { "filament_map_mode", "Manual" },
+        { "filament_map", "1,2" },
+        { "enable_prime_tower", "1" },
+        { "wipe_tower_x", 150. },
+        { "wipe_tower_y", 200. },
+        { "wipe_tower_rotation_angle", 0 },
+        { "gcode_comments", 0 },
+    });
+    return cfg;
+}
+} // namespace
+
+SCENARIO("A filament without its own retraction keeps its Bowden extruder's value next to one that has it", "[FlowVariants][X2D]")
+{
+    // Hand test 2026-11-27: one filament with a retraction override (PLA Basic, 0.4 mm) made apply_override fill every
+    // nil filament with filament 1's printer value, so Generic PLA on the Bowden extruder retracted 0.8 mm, not 2 mm.
+    const DynamicPrintConfig cfg = x2d_mixed_filaments_config();
+    Model model;
+    add_x2d_cube(model, 60., 1);
+    add_x2d_cube(model, 200., 2);
+    Print print;
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    CHECK(print.config().retraction_length.values == std::vector<double>{ 0.4, 2. });
+    CHECK(print.config().deretraction_speed.values == std::vector<double>{ 30., 20. });
+
+    WHEN("the same settings are applied again, as the GUI does before every slice")
+    {
+        const Print::ApplyStatus status = print.apply(model, cfg);
+        THEN("nothing changes")
+        {
+            CHECK(status == Print::APPLY_STATUS_UNCHANGED);
+            CHECK(print.config().retraction_length.values == std::vector<double>{ 0.4, 2. });
+            CHECK(print.full_print_config().option<ConfigOptionFloats>("retraction_length")->values == std::vector<double>{ 0.8, 2. });
+        }
+    }
+    WHEN("the plate is sliced")
+    {
+        const std::string gcode = Test::gcode(print);
+        REQUIRE_FALSE(gcode.empty());
+        THEN("the unretract after each tower toolchange runs at the new filament's deretraction speed")
+        {
+            // The restore follows "; custom gcode end" and comes before "; filament start gcode". It used to run at the
+            // previous filament's speed: F1800 (30 mm/s) when switching to the Bowden extruder instead of its F1200.
+            std::istringstream in(gcode);
+            std::string        line;
+            int                tool = -1, last_f = 0, restores_t0 = 0, restores_t1 = 0, wrong = 0;
+            bool               after_change = false;
+            while (std::getline(in, line)) {
+                if (line.size() > 1 && line[0] == 'T' && std::isdigit((unsigned char) line[1])) {
+                    const int t = std::atoi(line.c_str() + 1);
+                    if (t == 0 || t == 1)
+                        tool = t;
+                }
+                if (line.rfind("; custom gcode end", 0) == 0)
+                    after_change = true;
+                if (line.rfind("; filament start gcode", 0) == 0)
+                    after_change = false;
+                if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0)
+                    continue;
+                const size_t f_pos = line.find(" F");
+                if (f_pos != std::string::npos)
+                    last_f = std::atoi(line.c_str() + f_pos + 2);
+                if (after_change && line.size() > 4 && line.rfind("G1 E", 0) == 0 && line[4] != '-') {
+                    after_change = false;
+                    if (tool == 1) {
+                        ++restores_t1;
+                        wrong += last_f != 1200;
+                    } else if (tool == 0) {
+                        ++restores_t0;
+                        wrong += last_f != 1800;
+                    }
+                }
+            }
+            CHECK(restores_t1 > 0);
+            CHECK(restores_t0 > 0);
+            CHECK(wrong == 0);
+        }
+    }
 }
 
 // Review #1056 S1: with the side scrape on (H3C presets; a user may turn it on on the H2D), the nozzle travels up to
