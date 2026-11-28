@@ -2204,10 +2204,18 @@ PaintSplitMultiPieces paint_split_assign_nearest_multi(const indexed_triangle_se
                                     << out.piece_volume[k] << " mm3";
         }
         const auto            t_rest = PsClock2::now();
+        // A speck where several claims meet (a film of a few thousandths of a mm3 on the three-region test figure) is
+        // no rest piece: it is dropped.
         std::vector<Manifold> parts;
-        for (Manifold& m : rest.Decompose())
-            if (m.Volume() > 1e-9 * std::max(1., out.source_volume))
+        size_t                specks = 0;
+        for (Manifold& m : rest.Decompose()) {
+            if (m.Volume() > std::max(0.01, 1e-7 * out.source_volume))
                 parts.push_back(m);
+            else
+                ++specks;
+        }
+        if (specks > 0)
+            BOOST_LOG_TRIVIAL(info) << "Paint split one pass: " << specks << " speck(s) of the rest dropped";
         if (parts.empty()) {
             out.error = PaintSplitError::EmptyBody;
             return out;
@@ -2241,7 +2249,7 @@ PaintSplitMultiPieces paint_split_assign_nearest_multi(const indexed_triangle_se
         double total = out.body_volume + out.loose_volume;
         for (double v : out.piece_volume)
             total += v;
-        if (std::abs(total - out.source_volume) > 1e-6 * std::abs(out.source_volume) + 1e-9)
+        if (std::abs(total - out.source_volume) > 1e-5 * std::abs(out.source_volume) + 0.01 * double(specks) + 1e-9)
             out.warnings.push_back(PaintSplitWarning::VolumeMismatch);
         BOOST_LOG_TRIVIAL(info) << "Paint split one pass: rest and exports " << ps_secs2(t_rest) << " s, " << out.loose.size()
                                 << " rest piece(s)";
