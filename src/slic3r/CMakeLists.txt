@@ -1381,6 +1381,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/AMSDryCtrlDialog.cpp                      # file-scope using namespace AmsDrying leaks into neighbours
     GUI/AuxiliaryDataViewModel.cpp                # s_default_folders / count clash
     GUI/BindDialog.cpp                            # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/FileArchiveDialog.cpp                     # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
     GUI/calib_dlg.cpp                             # file-local names clash
     GUI/CalibrationWizard.cpp                     # NA_STR also in CalibrationWizardCaliPage.cpp
     GUI/ConfigWizard.cpp                          # _MSW_DARK_MODE from a neighbour's GUI_App.hpp pulls a missing header
