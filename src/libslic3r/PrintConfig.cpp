@@ -14944,6 +14944,15 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "\"1,2,3,1\"";
     def->set_default_value(new ConfigOptionInts());
 
+    def = this->add("bed_type", coString);
+    def->label = L("Bed type");
+    def->tooltip = L("Plate (bed) type for every plate that is sliced, for preset slices and for --load projects. "
+                     "Short keys: cool, engineering, high_temp, textured_pei, textured_cool, supertack, graphic_effect. "
+                     "The full names (\"Textured PEI Plate\") are accepted too. Without it the plate keeps its own bed type "
+                     "(project) or the printer default.");
+    def->cli_params = "textured_pei";
+    def->set_default_value(new ConfigOptionString(""));
+
     def = this->add("allow_multicolor_oneplate", coBool);
     def->label = L("Allow multiple colors on one plate");
     def->tooltip = L("If enabled, Arrange will allow multiple colors on one plate.");

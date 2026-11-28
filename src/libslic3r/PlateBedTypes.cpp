@@ -1,8 +1,10 @@
 #include "PlateBedTypes.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/trim.hpp>
 
 namespace Slic3r {
 namespace PlateBedTypes {
@@ -72,6 +74,51 @@ BedType listed_bed_type(BedType wanted, const std::vector<std::string> &listed_k
     if (std::find(listed.begin(), listed.end(), printer_default) != listed.end())
         return printer_default;
     return listed.front();
+}
+
+const std::vector<std::pair<std::string, BedType>> &cli_bed_type_keys()
+{
+    static const std::vector<std::pair<std::string, BedType>> keys = {
+        { "cool", btPC },          { "engineering", btEP },        { "high_temp", btPEI },
+        { "textured_pei", btPTE }, { "textured_cool", btPCT },     { "supertack", btSuperTack },
+        { "graphic_effect", btGESP },
+    };
+    return keys;
+}
+
+std::string cli_bed_type_key_list()
+{
+    std::string out;
+    for (const auto &kv : cli_bed_type_keys())
+        out += (out.empty() ? "" : ", ") + kv.first;
+    return out;
+}
+
+static std::string normalize_bed_type_name(std::string s)
+{
+    boost::trim(s);
+    for (char &c : s)
+        c = (c == ' ' || c == '-') ? '_' : char(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+bool parse_cli_bed_type(const std::string &value, BedType &out)
+{
+    const std::string wanted = normalize_bed_type_name(value);
+    if (wanted.empty())
+        return false;
+    for (const auto &kv : cli_bed_type_keys())
+        if (wanted == kv.first) {
+            out = kv.second;
+            return true;
+        }
+    // Full names: the keys of the curr_bed_type enum ("Default Plate" is no plate to ask for).
+    for (const auto &kv : ConfigOptionEnum<BedType>::get_enum_values())
+        if (kv.second != btDefault && wanted == normalize_bed_type_name(kv.first)) {
+            out = BedType(kv.second);
+            return true;
+        }
+    return false;
 }
 
 } // namespace PlateBedTypes

@@ -114,6 +114,7 @@ using namespace nlohmann;
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/PlateBedTypes.hpp"
 #include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/ToolSlots.hpp"
@@ -7728,6 +7729,9 @@ int CLI::run(int argc, char **argv)
             plate_bbox->first_extruder = print->get_tool_ordering().first_extruder();
             //bed type;
             BedType plate_bed_type = part_plate->get_bed_type();
+            // --bed-type overrides the plate's own bed type for the slice, so it is what the plate used.
+            if (m_given_option_keys.count("bed_type") > 0 || m_given_option_keys.count("curr_bed_type") > 0)
+                plate_bed_type = btDefault;
             if (plate_bed_type == btDefault) {
                 auto cur_bed_type  = m_print_config.option<ConfigOptionEnum<BedType>>("curr_bed_type");
                 if (cur_bed_type) {
@@ -8072,6 +8076,20 @@ bool CLI::setup(int argc, char **argv)
         input_file = resolve_cli_input_path(input_file);
 
     m_given_option_keys.insert(opt_order.begin(), opt_order.end());
+
+    // --bed-type <key>: the plate type for every plate that slices. It becomes curr_bed_type in the command
+    // line config, which is applied after the presets, the project and the plate's own bed type.
+    if (const ConfigOptionString *bed_type_opt = m_config.option<ConfigOptionString>("bed_type");
+        bed_type_opt != nullptr && m_given_option_keys.count("bed_type") > 0) {
+        BedType bed_type = btDefault;
+        if (!PlateBedTypes::parse_cli_bed_type(bed_type_opt->value, bed_type)) {
+            boost::nowide::cerr << "Invalid value for option --bed-type: `" << bed_type_opt->value
+                                << "`. Valid keys: " << PlateBedTypes::cli_bed_type_key_list()
+                                << " (the full names such as \"Textured PEI Plate\" work too)." << std::endl;
+            return false;
+        }
+        m_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
+    }
 
     // Parse actions and transform options.
     for (auto const &opt_key : opt_order) {

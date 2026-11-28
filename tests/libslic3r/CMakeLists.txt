@@ -111,6 +111,7 @@ add_executable(${_TEST_NAME}_tests
 	test_custom_gcode.cpp
 	test_filament_delete.cpp
 	test_default_bed_type.cpp
+	test_cli_bed_type.cpp
 	test_u1c_pack.cpp
 	test_dual_nozzle_group.cpp
 	test_filament_inventory.cpp

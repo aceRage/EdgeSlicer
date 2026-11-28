@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "PrintConfig.hpp"
@@ -44,6 +45,18 @@ bool normalize(std::vector<BedType> &plate_bed_types, const Allowed &allowed);
 // `wanted` when it is listed, else `printer_default` (Preset::get_default_bed_type) when that is listed, else
 // the first plate listed. `wanted` when the list holds no plate.
 BedType listed_bed_type(BedType wanted, const std::vector<std::string> &listed_keys, BedType printer_default);
+
+// ---- CLI --bed-type -----------------------------------------------------------------------------------
+// The plate (bed) types a command line run can ask for, short key first: cool, engineering, high_temp,
+// textured_pei, textured_cool, supertack, graphic_effect.
+const std::vector<std::pair<std::string, BedType>> &cli_bed_type_keys();
+
+// "cool, engineering, ..." for messages and --help.
+std::string cli_bed_type_key_list();
+
+// Resolves a --bed-type value to a BedType. Accepts the short keys and the full names of the curr_bed_type enum
+// ("Textured PEI Plate"), ignoring case and treating space, '-' and '_' alike. False when the value is no plate.
+bool parse_cli_bed_type(const std::string &value, BedType &out);
 
 } // namespace PlateBedTypes
 } // namespace Slic3r
