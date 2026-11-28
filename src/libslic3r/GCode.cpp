@@ -14272,6 +14272,17 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
         set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
 
         std::string gcode;
+        // Orca #14763: the T command goes before the filament start G-code, as on the multi-extruder path below,
+        // so a temperature the firmware applies on T (a single-extruder MMU or CFS resetting it) cannot follow
+        // the user's own start G-code. Nothing is written when one filament is configured.
+        const std::string toolchange_command = m_writer.toolchange(extruder_id);
+        gcode += toolchange_command;
+        // Firmware can change the temperature on a T command, so set it again, as the multi-extruder path does.
+        if (!toolchange_command.empty() && m_config.single_extruder_multi_material && !this->prime_tower_takes_changes()) {
+            const int temp = (m_layer_index <= 0 ? get_value_at(m_config, m_config.nozzle_temperature_initial_layer, ConfigFlowDomain::Filament, extruder_id) :
+                                                   get_value_at(m_config, m_config.nozzle_temperature, ConfigFlowDomain::Filament, extruder_id));
+            gcode += m_writer.set_temperature(temp, false);
+        }
         // Append the filament start G-code.
         const std::string& filament_start_gcode = m_config.filament_start_gcode.get_at(extruder_id);
         if (!filament_start_gcode.empty()) {
@@ -14289,8 +14300,6 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
             check_add_eol(gcode);
         }
         gcode += this->set_filament_pressure_advance(extruder_id);
-
-        gcode += m_writer.toolchange(extruder_id);
         return gcode;
     }
 
