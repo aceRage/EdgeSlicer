@@ -1378,6 +1378,10 @@ static std::vector<std::string> s_Preset_filament_options {
     //SoftFever
     "enable_pressure_advance", "pressure_advance","adaptive_pressure_advance","adaptive_pressure_advance_model","adaptive_pressure_advance_overhangs", "adaptive_pressure_advance_bridges","chamber_temperature", "chamber_minimal_temperature", "filament_shrink","filament_shrinkage_compensation_z", "support_material_interface_fan_speed","internal_bridge_fan_speed", "filament_notes" /*,"filament_seam_gap"*/,
     "ironing_fan_speed",
+    // Bambu Studio 02.09.01.70: auxiliary fan early layers, the optional (left) auxiliary fan, pre-start fan time
+    "close_additional_fan_first_x_layers", "first_x_layer_fan_speed", "additional_fan_full_speed_layer",
+    "optional_cooling_fan_speed", "close_optional_fan_first_x_layers", "first_x_layer_optional_fan_speed", "optional_fan_full_speed_layer",
+    "pre_start_fan_time",
     // Orca #11194: filament ironing overrides
     "filament_ironing_flow", "filament_ironing_spacing", "filament_ironing_inset", "filament_ironing_speed",
     // Bambu Studio 02.09.01.70 filament overhang overrides (Setting Overrides > Speed)
@@ -1448,7 +1452,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "default_print_profile", "inherits",
     "silent_mode",
     "scan_first_layer", "enable_power_loss_recovery", "machine_load_filament_time", "machine_unload_filament_time", "machine_tool_change_time", "machine_prepare_time", "tool_change_temprature_wait", "time_cost", "machine_pause_gcode", "template_custom_gcode",
-    "nozzle_type", "nozzle_hrc","auxiliary_fan", "nozzle_volume","upward_compatible_machine", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_enforce","support_chamber_temp_control","support_air_filtration","support_cooling_filter","cooling_filter_enabled","printer_structure","farthest_point_timelapse",
+    "nozzle_type", "nozzle_hrc","auxiliary_fan", "sync_auxiliary_fan_to_second_fan", "aux_fan_independent_control", "aux_fan_standard_side", "nozzle_volume","upward_compatible_machine", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_enforce","support_chamber_temp_control","support_air_filtration","support_cooling_filter","cooling_filter_enabled","printer_structure","farthest_point_timelapse",
     "best_object_pos","head_wrap_detect_zone",
     "host_type", "print_host", "printhost_apikey", "flashforge_serial_number", "bbl_use_printhost",
     "print_host_webui",

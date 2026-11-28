@@ -8,6 +8,9 @@
     "chamber_temperatures": [
         "60"
     ],
+    "additional_fan_full_speed_layer": [
+        "2"
+    ],
     "compatible_printers": [
         "Bambu Lab X1E 0.4 nozzle",
         "Bambu Lab X1E 0.6 nozzle",

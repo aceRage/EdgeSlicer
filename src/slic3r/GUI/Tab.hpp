@@ -817,6 +817,9 @@ class TabFilament : public Tab
 private:
 	ogStaticText*	m_volumetric_speed_description_line {nullptr};
 	ogStaticText*	m_cooling_description_line {nullptr};
+    // Bambu Studio 02.09.01.70: the Cooling page's group of the standard and of the optional (H3C left) auxiliary fan.
+    ConfigOptionsGroupShp m_aux_fan_standard_optgroup;
+    ConfigOptionsGroupShp m_aux_fan_optional_optgroup;
 
     // Per-nozzle process P5: the Nozzle size switch. While a size is selected the Filament pages' fields read and
     // write m_size_view, a copy of the edited preset with that size's values applied; an edit is stored as the

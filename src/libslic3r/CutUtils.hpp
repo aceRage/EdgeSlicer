@@ -373,6 +373,12 @@ public:
     // With keep.planes.size() > 1, perform_with_cutter_solid() ignores its `cutter` and does the same.
     // keep.cutters (Follow paint, one closed cutter per loop) win over keep.planes: paint_split_assign_cutters().
     const ModelObjectPtrs& perform_with_paint_split_planes(const PaintSplitKeep& keep, PaintSplitReport* report = nullptr);
+    // R2 (E7): every component in keep.components cut in ONE pass (paint_split_assign_nearest_multi), so the
+    // wrapper, the paint carry and finalize() run once. perform_with_paint_split_planes() comes here when
+    // keep.nearest_skin and keep.components are set. Results: KeepAsParts gives one object with "_A1".."_AN", "_B"
+    // and "_looseN"; otherwise objects 0..N-1 are the pieces and the last one the body (with its "_looseN" parts).
+    // Another model part goes whole to the piece holding most of it, else to the body.
+    const ModelObjectPtrs& perform_paint_split_one_pass(const PaintSplitKeep& keep, PaintSplitReport* report = nullptr);
     // Flexi joint cut: one object, two watertight model parts, a real Manifold boolean.
     // perform_with_plane() dispatches here automatically when a flexi connector is present.
     const ModelObjectPtrs& perform_with_flexi_joints();
