@@ -1901,7 +1901,7 @@ GuardSettings guard_settings(const PrintObject &object, int multi_filament)
     s.skirt            = pcfg.skirt_loops.value > 0 && (pcfg.draft_shield.value != dsDisabled || pcfg.skirt_height.value > 1);
     // Recorded so that turning supports or stabilizers on or off re-plans the block, but no longer a
     // blocker by itself (P2): the block is checked against the support layers once they exist.
-    s.support          = object.has_support_material() || object.has_stabilizers();
+    s.support          = object.has_support_material() || object.has_support_addons();
     s.printable_height = pcfg.printable_height.value;
     s.layers           = ocfg.curved_tops_layers.value;
     s.angle            = ocfg.curved_tops_max_angle.value;

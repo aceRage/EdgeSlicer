@@ -97,6 +97,19 @@ template<>
 arrangement::ArrangePolygon get_arrange_poly(ModelInstance* inst, const DynamicPrintConfig& config);
 
 ArrangePolygon get_instance_arrange_poly(ModelInstance* instance, const DynamicPrintConfig& config);
+
+class MixedFilamentManager;
+
+// Per-object prime towers (tests/design_per_object_prime_towers.md 2.5 and 4): printing by object with
+// prime_tower_per_object on, a multi-colour copy needs room beside it for its own tower. Grows the arrange item `ap` of a
+// copy of `object` into its unit, the convex hull of the copy and its estimated tower (brim included) on one side, so
+// arrange packs copy + tower as one item and keeps the clearance between units, as Print::plan_object_towers() needs.
+// The tower stands where the object's prime_tower_offset_x/y put it, else at the middle of the side (right of, or
+// behind, the copy) that makes the smaller unit. `config` is the full config; `mixed` expands mixed filament ids (GUI).
+// Call only when the plate prints by object. False (ap unchanged) when the copy needs no tower: the setting or the
+// prime tower off, the object opted out (object_prime_tower), one filament, or no unit that fits the bed.
+bool reserve_object_prime_tower(ArrangePolygon &ap, const ModelObject &object, const DynamicPrintConfig &config,
+                                const MixedFilamentManager *mixed = nullptr);
 }
 
 #endif // MODELARRANGE_HPP

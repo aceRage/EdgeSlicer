@@ -4046,6 +4046,20 @@ void TabPrint::build()
         optgroup->append_single_option_line("stabilizer_infill_density");
         optgroup->append_single_option_line("stabilizer_infill_pattern");
 
+        // Support fins: breakaway walls with one-layer tines beside a part printed tilted onto an edge
+        // (libslic3r/Support/Fins.hpp).
+        optgroup = page->new_optgroup(L("Support fins"), L"param_support_tree");
+        optgroup->append_single_option_line("support_fins");
+        optgroup->append_single_option_line("support_fin_thickness");
+        optgroup->append_single_option_line("support_fin_depth");
+        optgroup->append_single_option_line("support_fin_height");
+        optgroup->append_single_option_line("support_fin_spacing");
+        optgroup->append_single_option_line("support_fin_gap");
+        optgroup->append_single_option_line("support_fin_tine_spacing");
+        optgroup->append_single_option_line("support_fin_tine_depth");
+        optgroup->append_single_option_line("support_fin_tine_base_rows");
+        optgroup->append_single_option_line("support_fin_lean_side_only");
+
     page = add_options_page(L("Multimaterial"), "custom-gcode_multi_material"); // ORCA: icon only visible on placeholders
         optgroup = page->new_optgroup(L("Prime tower"), L"param_tower");
         optgroup->append_single_option_line("enable_prime_tower", "multimaterial_settings_prime_tower");
@@ -4117,6 +4131,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("preload_all_filaments", "multimaterial_settings_prime_tower");
         // Per-object prime towers (print by object; shown with the tower on).
         optgroup->append_single_option_line("prime_tower_per_object", "multimaterial_settings_prime_tower");
+        // ... and an object's own opt-out (shown in the object settings only, see ConfigManipulation).
+        optgroup->append_single_option_line("object_prime_tower", "multimaterial_settings_prime_tower");
 
         optgroup = page->new_optgroup(L("Filament for Features"), L"param_filament_for_features");
         optgroup->append_single_option_line("wall_filament", "multimaterial_settings_filament_for_features#walls");
@@ -6238,6 +6254,19 @@ PageShp TabFilament::add_filament_overrides_page()
                                      })
         append_single_option_line(opt_key);
 
+    // Bambu Studio 02.09.01.70 (Tab.cpp:4663-4673): Speed, the filament overhang overrides. Plain lines under one
+    // switch, as in Bambu: override_process_overhang_speed shows the rest (update_filament_overrides_page).
+    ConfigOptionsGroupShp speed_optgroup = page->new_optgroup(L("Speed"), L"param_speed");
+    for (const char *opt_key : { "override_process_overhang_speed",
+                                 "filament_enable_overhang_speed",
+                                 "filament_overhang_1_4_speed",
+                                 "filament_overhang_2_4_speed",
+                                 "filament_overhang_3_4_speed",
+                                 "filament_overhang_4_4_speed",
+                                 "filament_overhang_totally_speed",
+                                 "filament_bridge_speed" })
+        speed_optgroup->append_single_option_line(opt_key);
+
     // Orca #11194: filament ironing overrides. Unlike the retraction overrides above, these
     // fall back to the PROCESS preset (ironing_flow / ironing_spacing / ironing_inset /
     // ironing_speed), not the printer preset.
@@ -6298,6 +6327,26 @@ void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* print
 {
     if (!m_active_page || m_active_page->title() != "Setting Overrides")
         return;
+
+    // Bambu Studio 02.09.01.70 (Tab.cpp:4764-4777): the overhang override rows follow its switch, the speed rows
+    // also the filament's own slowdown switch. Read at the flow variant on view, as the slice reads them.
+    {
+        const size_t flow_index = flow_variant_view_index();
+        auto bool_at = [this, flow_index](const char *opt_key, bool fallback) {
+            const auto *opt = m_config->option<ConfigOptionBoolsNullable>(opt_key);
+            if (opt == nullptr || opt->values.empty())
+                return fallback;
+            const size_t i = flow_index < opt->values.size() ? flow_index : 0;
+            return opt->is_nil(i) ? fallback : opt->values[i] != 0;
+        };
+        const bool overhang_override = bool_at("override_process_overhang_speed", false);
+        const bool overhang_slowdown = bool_at("filament_enable_overhang_speed", true);
+        toggle_line("filament_enable_overhang_speed", overhang_override);
+        toggle_line("filament_bridge_speed", overhang_override);
+        for (const char *opt_key : { "filament_overhang_1_4_speed", "filament_overhang_2_4_speed", "filament_overhang_3_4_speed",
+                                     "filament_overhang_4_4_speed", "filament_overhang_totally_speed" })
+            toggle_line(opt_key, overhang_override && overhang_slowdown);
+    }
 
     //BBS: GUI refactor
     if (m_overrides_options.size() <= 0)
@@ -6634,6 +6683,8 @@ void TabFilament::build()
         //BBS
         optgroup = page->new_optgroup(L("Volumetric speed limitation"), L"param_volumetric_speed");
         optgroup->append_single_option_line("filament_max_volumetric_speed");
+        // Orca #12688 / Bambu Studio: cap the flow at the fit of layer height and line width as well.
+        optgroup->append_single_option_line("filament_adaptive_volumetric_speed");
 
         // Per-nozzle process P4 (spec 09-07 "Phase 5"): values this filament takes on particular nozzles, e.g. a hotter
         // temperature and a higher volumetric speed on a 0.6. Resolved when the print is sliced
@@ -7387,6 +7438,16 @@ void TabFilament::toggle_options()
         bool pa = m_config->opt_bool("enable_pressure_advance", variant_index);
         toggle_option("pressure_advance", pa);
 
+        // Orca #12688: the fit needs six usable coefficients, which only a calibrated profile carries. A line
+        // that is already on stays editable, so it can always be switched off.
+        {
+            const auto *adaptive = m_config->option<ConfigOptionBoolsNullable>("filament_adaptive_volumetric_speed");
+            const bool  adaptive_on = adaptive != nullptr && !adaptive->values.empty() && !adaptive->is_nil(size_t(variant_index)) &&
+                                      adaptive->get_at(size_t(variant_index));
+            toggle_option("filament_adaptive_volumetric_speed",
+                adaptive_on || parse_volumetric_speed_coefficients(m_config->opt_string("volumetric_speed_coefficients", (unsigned int) variant_index)).valid);
+        }
+
         // BBS: 控制床温选项的显示
         auto support_multi_bed_types = is_BBL_printer || cfg.opt_bool("support_multi_bed_types");
         bool is_snapmaker_u1 = false;
@@ -7742,6 +7803,7 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("auxiliary_fan", "auxiliary-fan");
         optgroup->append_single_option_line("support_chamber_temp_control", "chamber-temperature");
         optgroup->append_single_option_line("support_air_filtration", "air-filtration");
+        optgroup->append_single_option_line("cooling_filter_enabled");
 
         // Only a Snapmaker tool changer can do this; toggle_options() hides the whole line for
         // every other printer, so nobody is offered a switch their machine will ignore.
@@ -9093,6 +9155,12 @@ void TabPrinter::toggle_options()
         // "Unload filaments after print" is a Snapmaker tool-changer preference: the flag goes
         // to the printer with the print start, and only that firmware's PRINT_END acts on it.
         toggle_line("unload_filaments_at_end", is_snapmaker_toolchanger(*m_config));
+
+        // Orca #14685: the cooling filter and air filtration are alternative accessories on one duct;
+        // show the one the printer profile declares (support_cooling_filter), like Bambu Studio.
+        const bool cooling_filter_printer = m_config->opt_bool("support_cooling_filter");
+        toggle_line("support_air_filtration", !cooling_filter_printer);
+        toggle_line("cooling_filter_enabled", cooling_filter_printer);
     }
 
     if (m_active_page->title() == L("Multimaterial")) {

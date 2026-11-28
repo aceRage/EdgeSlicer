@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic PP @base P3C",
+    "inherits": "fdm_filament_pp_p3c",
+    "from": "system",
+    "filament_id": "GFP97",
+    "instantiation": "false"
+}

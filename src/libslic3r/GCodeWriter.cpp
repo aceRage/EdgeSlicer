@@ -1321,7 +1321,7 @@ std::string GCodeWriter::_retract(double length, double restart_extra, const std
     return gcode;
 }
 
-std::string GCodeWriter::unretract(double extra)
+std::string GCodeWriter::unretract(double extra, double speed)
 {
     std::string gcode;
     
@@ -1339,7 +1339,7 @@ std::string GCodeWriter::unretract(double extra)
             GCodeG1Formatter w;
             w.emit_e(m_extruder->E());
             this->seed_formatter_guard(w);
-            w.emit_f(m_extruder->deretract_speed() * 60.);
+            w.emit_f((speed > 0. ? speed : m_extruder->deretract_speed()) * 60.);
             //BBS
             w.emit_comment(GCodeWriter::full_gcode_comment, " ; unretract");
             gcode += w.string();

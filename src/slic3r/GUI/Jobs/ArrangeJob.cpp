@@ -140,7 +140,18 @@ ArrangePolygon ArrangeJob::prepare_arrange_polygon(void* model_instance)
 {
     ModelInstance* instance = (ModelInstance*)model_instance;
     const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
-    return get_instance_arrange_poly(instance, config);
+    ArrangePolygon ap = get_instance_arrange_poly(instance, config);
+    // Per-object prime towers (design 2.5): printing by object with Prime tower per object on, a multi-colour copy and
+    // its tower are arranged as one unit, the fixed (unselected) copies' included, so the arrange leaves room for every
+    // tower. Before, each item was grown on all sides by its whole tower, and the copies were pushed onto new plates.
+    // A lone copy prints the plate's own tower (by layer), so it reserves none, as in the CLI.
+    size_t copies = 0;
+    for (const ModelObject *object : m_plater->model().objects)
+        for (const ModelInstance *mi : object->instances)
+            copies += mi->printable ? 1 : 0;
+    if (params.is_seq_print && copies > 1 && instance != nullptr && instance->get_object() != nullptr)
+        reserve_object_prime_tower(ap, *instance->get_object(), config, &wxGetApp().preset_bundle->mixed_filaments);
+    return ap;
 }
 
 void ArrangeJob::prepare_selected() {
@@ -677,7 +688,8 @@ void ArrangeJob::process(Ctl &ctl)
 
     Points      bedpts = get_shrink_bedpts(m_plater->config(),params);
     // EdgeSlicer "Avoid nozzle reach zones": arrange on the part of the bed every nozzle reaches.
-    arrangement::clip_bed_to_nozzle_reach(bedpts, m_reach_areas);
+    // Printing by object the bed was grown by half the clearance (update_arrange_params); the reach keeps that growth.
+    arrangement::clip_bed_to_nozzle_reach(bedpts, m_reach_areas, scaled(std::max(0.f, -std::min(params.bed_shrink_x, params.bed_shrink_y))));
 
     partplate_list.preprocess_exclude_areas(params.excluded_regions, 1, scale_(1));
     for (arrangement::ArrangePolygon &ap : m_reach_regions)

@@ -378,6 +378,34 @@ TEST_CASE("AMS 3H slots and the rack's spool holders are labelled as Bambu Studi
     CHECK(BambuExtruderMap::ams_list_entry("0", "1").tray_name == "A2");
 }
 
+TEST_CASE("AMS 3P slots and the P3C's spool holders are labelled as Bambu Studio labels them", "[BambuAmsReport]")
+{
+    namespace AD = GUI::AmsDual;
+    AD::UnitRef rack;
+    rack.ams_id     = "32";
+    rack.type       = AD::UNIT_RACK_B;
+    rack.slot_count = 7;
+    CHECK(AD::slot_label(rack, 0) == "1");
+    CHECK(AD::slot_label(rack, 6) == "7");
+
+    // One extruder, the AMS 3P and seven holders: one side, the AMS first, then "1-Ext".."7-Ext".
+    std::vector<AD::UnitRef> units{rack};
+    for (int id = 249; id <= 255; ++id) {
+        AD::UnitRef u;
+        u.ams_id = std::to_string(id);
+        u.type   = AD::UNIT_EXT_SPOOL;
+        units.push_back(u);
+    }
+    const std::vector<AD::Side> sides = AD::group_units(units, 1);
+    REQUIRE(sides.size() == 1);
+    REQUIRE(sides[0].units.size() == 8);
+    CHECK(sides[0].units[0].ams_id == "32");
+    CHECK(sides[0].units[1].ams_id == "255");
+    CHECK(AD::slot_label(sides[0].units[1], 0) == "1-Ext");
+    CHECK(AD::slot_label(sides[0].units[7], 0) == "7-Ext");
+    CHECK(sides[0].pages.front() == std::vector<int>({0}));
+}
+
 TEST_CASE("Sync filaments takes the AMS 3H's loaded slots", "[BambuAmsReport]")
 {
     MachineObject obj { nullptr, "fake-h3c", "FAKEN100000003", "127.0.0.1" };

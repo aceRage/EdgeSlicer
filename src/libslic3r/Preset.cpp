@@ -1288,12 +1288,12 @@ static std::vector<std::string> s_Preset_print_options {
     "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
     "skin_infill_line_width","skeleton_infill_line_width", "locked_skin_infill_pattern", "locked_skeleton_infill_pattern", "infill_instead_top_bottom_surfaces",
     "top_surface_line_width", "support_line_width", "infill_wall_overlap","top_bottom_infill_wall_overlap", "bridge_flow", "bridge_line_width", "bridge_expansion_extra", "internal_bridge_flow",
-    "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation", "enable_circle_compensation", "circle_compensation_manual_offset", "apply_scarf_seam_on_circles", "resolution", "enable_prime_tower", "preload_all_filaments", "prime_tower_per_object",
+    "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation", "enable_circle_compensation", "circle_compensation_manual_offset", "apply_scarf_seam_on_circles", "resolution", "enable_prime_tower", "preload_all_filaments", "prime_tower_per_object", "object_prime_tower",
     "prime_tower_width", "prime_tower_brim_width", "prime_volume", "prime_tower_brim_chamfer", "prime_tower_brim_chamfer_max_width",
     "wipe_tower_no_sparse_layers", "wipe_tower_sparse_layers_combination", "compatible_printers", "compatible_printers_condition", "inherits",
     "flush_into_infill", "flush_into_objects", "flush_into_support",
      "tree_support_branch_angle", "tree_support_angle_slow", "tree_support_wall_count",
-     "stabilizer_supports", "stabilizer_ring_spacing", "stabilizer_points_per_ring", "stabilizer_tip_diameter", "stabilizer_tip_gap", "stabilizer_pillar_diameter", "stabilizer_max_island_width", "stabilizer_pillar_base_diameter", "stabilizer_bracing", "stabilizer_brace_max_unbraced", "stabilizer_brace_max_span", "stabilizer_column_shape", "stabilizer_column_width", "stabilizer_column_length", "stabilizer_column_min_height", "stabilizer_wall_loops", "stabilizer_infill_density", "stabilizer_infill_pattern", "hollow_interior", "hollow_shell_thickness",
+     "stabilizer_supports", "stabilizer_ring_spacing", "stabilizer_points_per_ring", "stabilizer_tip_diameter", "stabilizer_tip_gap", "stabilizer_pillar_diameter", "stabilizer_max_island_width", "stabilizer_pillar_base_diameter", "stabilizer_bracing", "stabilizer_brace_max_unbraced", "stabilizer_brace_max_span", "stabilizer_column_shape", "stabilizer_column_width", "stabilizer_column_length", "stabilizer_column_min_height", "stabilizer_wall_loops", "stabilizer_infill_density", "stabilizer_infill_pattern", "support_fins", "support_fin_thickness", "support_fin_depth", "support_fin_height", "support_fin_spacing", "support_fin_gap", "support_fin_tine_spacing", "support_fin_tine_depth", "support_fin_tine_base_rows", "support_fin_lean_side_only", "hollow_interior", "hollow_shell_thickness",
      "tree_support_top_rate", "tree_support_branch_distance", "tree_support_tip_diameter",
      "tree_support_branch_diameter", "tree_support_branch_diameter_angle",
      "detect_narrow_internal_solid_infill",
@@ -1351,7 +1351,7 @@ static std::vector<std::string> s_Preset_filament_options {
     "filament_extruder_variant", "filament_self_index", // Ultra (dual-nozzle)
     "filament_nozzle_variants", // per-nozzle process P4: values per nozzle size / flow / tool
     /*"filament_colour", */ "default_filament_colour","required_nozzle_HRC","filament_diameter", "pellet_flow_coefficient", "filament_type", "filament_soluble", "filament_is_support",
-    "filament_max_volumetric_speed",
+    "filament_max_volumetric_speed", "filament_adaptive_volumetric_speed", "volumetric_speed_coefficients",
     "filament_flow_ratio", "filament_density", "filament_cost", "filament_z_offset", "filament_minimal_purge_on_wipe_tower",
     "nozzle_temperature", "nozzle_temperature_initial_layer",
     // BBS
@@ -1384,6 +1384,9 @@ static std::vector<std::string> s_Preset_filament_options {
     "pre_start_fan_time",
     // Orca #11194: filament ironing overrides
     "filament_ironing_flow", "filament_ironing_spacing", "filament_ironing_inset", "filament_ironing_speed",
+    // Bambu Studio 02.09.01.70 filament overhang overrides (Setting Overrides > Speed)
+    "override_process_overhang_speed", "filament_enable_overhang_speed", "filament_overhang_1_4_speed", "filament_overhang_2_4_speed",
+    "filament_overhang_3_4_speed", "filament_overhang_4_4_speed", "filament_overhang_totally_speed", "filament_bridge_speed",
     "filament_loading_speed", "filament_loading_speed_start",
     "filament_unloading_speed", "filament_unloading_speed_start", "filament_toolchange_delay", "filament_cooling_moves", "filament_stamping_loading_speed", "filament_stamping_distance",
     "filament_cooling_initial_speed", "filament_cooling_final_speed", "filament_ramming_parameters",
@@ -1412,6 +1415,7 @@ static std::vector<std::string> s_Preset_filament_options {
     // (M620.10, M620.11, M620.15). The BBL, Orca filament library and Snapmaker profiles carry them;
     // without them here the loader dropped them and the G-code always ran on the defaults.
     "filament_flush_volumetric_speed", "filament_flush_temp", "filament_flush_temp_fast", "filament_cooling_before_tower",
+    "min_temperature_when_ec",
     "filament_flow_support"
     };
 
@@ -1448,7 +1452,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "default_print_profile", "inherits",
     "silent_mode",
     "scan_first_layer", "enable_power_loss_recovery", "machine_load_filament_time", "machine_unload_filament_time", "machine_tool_change_time", "machine_prepare_time", "tool_change_temprature_wait", "time_cost", "machine_pause_gcode", "template_custom_gcode",
-    "nozzle_type", "nozzle_hrc","auxiliary_fan", "sync_auxiliary_fan_to_second_fan", "aux_fan_independent_control", "aux_fan_standard_side","nozzle_volume","upward_compatible_machine", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_enforce","support_chamber_temp_control","support_air_filtration","printer_structure","farthest_point_timelapse",
+    "nozzle_type", "nozzle_hrc","auxiliary_fan", "sync_auxiliary_fan_to_second_fan", "aux_fan_independent_control", "aux_fan_standard_side", "nozzle_volume","upward_compatible_machine", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_enforce","support_chamber_temp_control","support_air_filtration","support_cooling_filter","cooling_filter_enabled","printer_structure","farthest_point_timelapse",
     "best_object_pos","head_wrap_detect_zone",
     "host_type", "print_host", "printhost_apikey", "flashforge_serial_number", "bbl_use_printhost",
     "print_host_webui",

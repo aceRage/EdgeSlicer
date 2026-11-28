@@ -27,7 +27,7 @@ const char *const s_runtime_names[] = {
     "adaptive_bed_mesh_max", "adaptive_bed_mesh_min", "bed_mesh_algo",
     "bed_mesh_probe_count", "bed_temperature", "bed_temperature_initial_layer", "bed_temperature_initial_layer_single",
     "bed_temperature_initial_layer_vector", "chamber_cooling_mode", "chamber_minimal_temperature", "chamber_temperature",
-    "clear_to_x0", "color_change_extruder", "cooling_filter_enabled",
+    "clear_to_x0", "color_change_extruder",
     "curr_accumulated_mass", "curr_layer_mass", "curr_physical_extruder_id", "current_extruder", "current_filament_id",
     "current_hotend", "current_nozzle_id", "current_object_idx", "day", "deretraction_from_wipe_tower_generator",
     "during_print_exhaust_fan_speed_num", "e_position", "e_restart_extra", "e_retracted", "extruded_volume",

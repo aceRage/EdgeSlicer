@@ -24,7 +24,7 @@ enum UnitType : int {
     UNIT_N3S       = 4, // AMS HT (1 slot, heated)
     UNIT_LITE_MIXED = 5, // AMS lite on an N9
     UNIT_RACK_A    = 6, // AMS 3H (H3C: 9 slots, one per rack nozzle; labelled "1".."9")
-    UNIT_RACK_B    = 7, // AMS-B (rack, labelled by number)
+    UNIT_RACK_B    = 7, // AMS 3P (P3C: 7 slots, labelled "1".."7")
 };
 
 constexpr int MAIN_EXTRUDER   = 0; // right-hand extruder on two-extruder machines
@@ -89,8 +89,8 @@ int page_of_unit(const Side &side, const std::string &ams_id);
 // Index into group_units()'s result of the side that holds `ams_id`, or -1.
 int side_of_unit(const std::vector<Side> &sides, const std::string &ams_id);
 
-// Label drawn above a slot: "A1".."D4" for 4-slot units, "A".."H" for AMS HT, "1".."9" for a rack
-// AMS (AMS 3H), "Ext" for a spool ("1-Ext".."9-Ext" for a nozzle rack's numbered holders).
+// Label drawn above a slot: "A1".."D4" for 4-slot units, "A".."H" for AMS HT, "1".."N" for a rack
+// AMS (AMS 3H / AMS 3P), "Ext" for a spool ("1-Ext".."N-Ext" for a nozzle rack's numbered holders).
 std::string slot_label(const UnitRef &unit, int slot_index);
 
 // The extruder's "snow" (slot now) pair decoded by DeviceManager: an unloaded extruder reports

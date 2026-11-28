@@ -5503,6 +5503,8 @@ int CLI::run(int argc, char **argv)
                         unselected.clear();
                         unprintable.clear();
                         locked_aps.clear();
+                        // The model was copied back: its objects are new.
+                        selected_objects.clear();
                     }
                     else {
                         first_run = false;
@@ -5551,8 +5553,13 @@ int CLI::run(int argc, char **argv)
                             if (!locked)
                             {
                                 ap.itemid = selected.size();
-                                if (minst->printable)
+                                if (minst->printable) {
+                                    // Per-object prime towers: the object of each selected item, by its itemid.
+                                    if (selected_objects.size() < selected.size())
+                                        selected_objects.resize(selected.size(), nullptr);
+                                    selected_objects.push_back(mo);
                                     selected.emplace_back(ap);
+                                }
                                 else
                                     unprintable.emplace_back(ap);
                             }
@@ -5826,46 +5833,17 @@ int CLI::run(int argc, char **argv)
                 if (const auto *best_object_pos = m_print_config.option<ConfigOptionPoint>("best_object_pos"))
                     arrange_cfg.align_center = best_object_pos->value;
 
+                // Per-object prime towers (design 2.5): printing by object with prime_tower_per_object, a multi-colour
+                // copy and its tower are arranged as one unit (ModelArrange reserve_object_prime_tower, as the application
+                // arranges), so the arrange leaves room beside the copy for the tower the slicer places there.
+                if (arrange_cfg.is_seq_print && selected.size() > 1)
+                    for (ArrangePolygon &ap : selected)
+                        if (ap.itemid >= 0 && size_t(ap.itemid) < selected_objects.size() && selected_objects[size_t(ap.itemid)] != nullptr)
+                            reserve_object_prime_tower(ap, *selected_objects[size_t(ap.itemid)], m_print_config);
                 arrangement::update_arrange_params(arrange_cfg, &m_print_config, selected);
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
                 arrangement::update_unselected_items_inflation(unselected, &m_print_config, arrange_cfg);
                 arrangement::update_selected_items_axis_align(selected, &m_print_config, arrange_cfg);
-                // Per-object prime towers (design 2.5): printing by object with prime_tower_per_object, a multi-colour
-                // copy needs room beside it for its own tower. Grow such an item by its estimated tower, so the arrange
-                // leaves that room (the slicer places the tower beside the copy afterwards).
-                if (arrange_cfg.is_seq_print && selected.size() > 1 && m_print_config.has("prime_tower_per_object") &&
-                    m_print_config.opt_bool("prime_tower_per_object") && m_print_config.has("enable_prime_tower") &&
-                    m_print_config.opt_bool("enable_prime_tower")) {
-                    auto filament_key = [this](const ModelObject &object, const char *key) -> int {
-                        if (const ConfigOption *opt = object.config.option(key); opt != nullptr && opt->getInt() > 0)
-                            return opt->getInt();
-                        return m_print_config.has(key) ? m_print_config.option(key)->getInt() : 0;
-                    };
-                    const double layer_height = m_print_config.has("layer_height") ? m_print_config.opt_float("layer_height") : 0.2;
-                    for (ArrangePolygon &ap : selected) {
-                        if (ap.itemid < 0 || size_t(ap.itemid) >= selected_objects.size())
-                            continue;
-                        const ModelObject &object = *selected_objects[size_t(ap.itemid)];
-                        std::vector<unsigned int> filaments;
-                        for (const ModelVolume *volume : object.volumes)
-                            if (volume->is_model_part())
-                                for (int extruder : volume->get_extruders())
-                                    if (extruder > 0)
-                                        filaments.push_back(unsigned(extruder - 1));
-                        for (const char *key : { "wall_filament", "sparse_infill_filament", "solid_infill_filament" })
-                            if (const int f = filament_key(object, key); f > 0)
-                                filaments.push_back(unsigned(f - 1));
-                        sort_remove_duplicates(filaments);
-                        if (filaments.size() < 2)
-                            continue;
-                        const WipeTowerFootprint tower = estimate_wipe_tower_footprint(m_print_config, resolve_wipe_tower_type(m_print_config), filaments, layer_height,
-                                                                                       object.instance_bounding_box(0).size().z());
-                        if (tower.depth <= EPSILON)
-                            continue;
-                        ap.inflation += scaled<coord_t>(std::max(tower.width, tower.depth) + 2. * tower.brim_width + 5.);
-                    }
-                }
-
                 beds=get_shrink_bedpts(&m_print_config, arrange_cfg);
 
                 partplate_list.preprocess_exclude_areas(arrange_cfg.excluded_regions, 1, scale_(1));

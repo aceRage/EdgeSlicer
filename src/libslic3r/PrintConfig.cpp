@@ -11,7 +11,10 @@
 #include "Format/BambuKeyAliases.hpp"
 #include "ToolSlots.hpp"
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <set>
+#include <sstream>
 #include <string_view>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/case_conv.hpp>
@@ -480,6 +483,13 @@ static const t_config_enum_values s_keys_map_StabilizerMode = {
     { "manual", smManual }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(StabilizerMode)
+
+static const t_config_enum_values s_keys_map_SupportFinsMode = {
+    { "off",     sfmOff     },
+    { "auto",    sfmAuto    },
+    { "painted", sfmPainted }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportFinsMode)
 
 // Bambu Studio 02.09.01.70 PrintConfig.cpp:929-942.
 static const t_config_enum_values s_keys_map_ReduceInfillRetractionMode = {
@@ -2104,6 +2114,100 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloatsOrPercents { FloatOrPercent{150, true} });
 
+    // Bambu Studio 02.09.01.70 filament overhang overrides (PrintConfig.cpp:101-108, 7548-7581; Tab.cpp:4663-4673):
+    // Filament > Setting Overrides > Speed. With override_process_overhang_speed on, the filament's overhang slowdown
+    // switch, its overhang speeds and its bridge speed replace the process ones for the walls and bridges it prints.
+    // Same keys, types (mm/s, nullable, per flow variant: filament_flow_variant_options) and defaults as Bambu's,
+    // which copies them from its process keys. Read by GCode::_extrude through FilamentOverhangOverride.
+    def = this->add("override_process_overhang_speed", coBools);
+    def->label = L("Override overhang speed");
+    def->category = L("Speed");
+    def->tooltip = L("Override the overhang speed in process page.\n\n"
+                     "When on, this filament's overhang slowdown switch, overhang speeds and bridge speed are used "
+                     "instead of the process ones.");
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionBoolsNullable{ false });
+
+    def = this->add("filament_enable_overhang_speed", coBools);
+    def->label = L("Slow down for overhang");
+    def->category = L("Speed");
+    def->tooltip = L("Enable this option to slow printing down for different overhang degree.");
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionBoolsNullable{ true });
+
+    def = this->add("filament_overhang_1_4_speed", coFloats);
+    def->label = "(10%, 25%)";
+    def->category = L("Speed");
+    def->full_label = "(10%, 25%)";
+    def->tooltip = L("Speed for walls whose overhang is between 10% and 25% of the line width. 0 means using the wall speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 0 });
+
+    def = this->add("filament_overhang_2_4_speed", coFloats);
+    def->label = "[25%, 50%)";
+    def->category = L("Speed");
+    def->full_label = "[25%, 50%)";
+    def->tooltip = L("Speed for walls whose overhang is between 25% and 50% of the line width. 0 means using the wall speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 0 });
+
+    def = this->add("filament_overhang_3_4_speed", coFloats);
+    def->label = "[50%, 75%)";
+    def->category = L("Speed");
+    def->full_label = "[50%, 75%)";
+    def->tooltip = L("Speed for walls whose overhang is between 50% and 75% of the line width. 0 means using the wall speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 0 });
+
+    def = this->add("filament_overhang_4_4_speed", coFloats);
+    def->label = "[75%, 100%)";
+    def->category = L("Speed");
+    def->full_label = "[75%, 100%)";
+    def->tooltip = L("Speed for walls whose overhang is between 75% and 100% of the line width. 0 means using the wall speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 0 });
+
+    // Owner decision D6 (2026-11-25): we have no fifth process bucket. This is the speed of the fully unsupported
+    // (0% overlap) part of a wall, the slot our process fills with the bridge speed (or the 4/4 speed with "Slow
+    // down for curled perimeters"). Bridge infill keeps filament_bridge_speed there.
+    def = this->add("filament_overhang_totally_speed", coFloats);
+    def->label = "100%";
+    def->category = L("Speed");
+    def->full_label = "100%";
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Speed of 100% overhang wall which has 0 overlap with the lower layer. "
+                     "0 means using the bridge speed there (the 75%-100% speed with Slow down for curled perimeters).");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 10 });
+
+    def = this->add("filament_bridge_speed", coFloats);
+    def->label = L("Bridge");
+    def->category = L("Speed");
+    def->tooltip = L("Speed of bridge and completely overhang wall. A percentage internal bridge speed is taken of this "
+                     "speed. 0 means using the process bridge speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 25 });
+
     def = this->add("brim_width", coFloat);
     def->label = L("Brim width");
     def->category = L("Support");
@@ -3295,6 +3399,25 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 2. });
 
+    // Orca #12688 / Bambu Studio 02.09.01.70: the flow cap fitted from layer height and line width.
+    // Off by default; the stock presets all carry 0. Bambu shows it as an Advanced line; Orca keeps it in
+    // developer mode with the note below. Stored per flow variant, like filament_max_volumetric_speed.
+    def = this->add("filament_adaptive_volumetric_speed", coBools);
+    def->label = L("Adaptive volumetric speed");
+    def->tooltip = L("When enabled, the extrusion flow is limited by the smaller of "
+        "the fitted value (calculated from line width and layer height) and the user-defined maximum flow."
+        " When disabled, only the user-defined maximum flow is applied.\n\n"
+        "Note: Experimental and incomplete feature imported from BBS. Functional for some profiles that already have the variable saved.");
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionBoolsNullable {false});
+
+    // Six coefficients "a b c d e f" of f(h, w) = a*h^2 + b*w^2 + c*h*w + d*h + e*w + f, in mm3/s, for layer
+    // height h and line width w. Written by Bambu's calibration; empty or all zero means no fit.
+    def        = this->add("volumetric_speed_coefficients", coStrings);
+    def->label = L("Max volumetric speed multinomial coefficients");
+    def->set_default_value(new ConfigOptionStrings{""});
+
     // BBS: per-filament flush settings (Bambu Studio PrintConfig.cpp 2547-2575). GCode.cpp turns them
     // into the flush_temperatures / flush_volumetric_speeds placeholders of the BBL change_filament
     // and machine_start templates (M620.10 ... T<temp> / F<speed>, M620.11 ... F<speed>). Nullable
@@ -3343,6 +3466,15 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->nullable = true;
     def->set_default_value(new ConfigOptionFloatsNullable { 10. });
+
+    // BBS 2.9.2 (P3C fdm_filament_template_p3c): idle-nozzle floor during pre-cooling, degrees C.
+    // Negative: no extra floor (Bambu Studio PrintConfig.cpp default -1). The P3C template sets 80.
+    def = this->add("min_temperature_when_ec", coFloats);
+    def->label = L("Idle nozzle floor");
+    def->tooltip = L("Lowest temperature an idle nozzle may cool to between uses. Negative disables the extra floor.");
+    def->sidetext = "°C";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats { -1. });
 
     // Ultra (H2C rack): BambuStudio PrintConfig.cpp:3041. The nozzle-change pre-cool target,
     // read by the wipe tower's nozzle-change block (M104 T<e> S<t> N0 ;Wipe tower nozzle change
@@ -5536,6 +5668,18 @@ void PrintConfigDef::init_fff_params()
     def->tooltip=L("Enable this if printer support air filtration\nG-code command: M106 P3 S(0-255)");
     def->mode=comDevelop;
     def->set_default_value(new ConfigOptionBool(true));
+
+    // Orca #14685 / Bambu Studio 02.09.01.70: printer capability flag that switches the accessory UI between
+    // air filtration and the cooling filter (the two share one duct, a printer has one or the other).
+    def = this->add("support_cooling_filter", coBool);
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("cooling_filter_enabled", coBool);
+    def->label = L("Use cooling filter");
+    def->tooltip = L("Enable this if the printer supports a cooling filter");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("gcode_flavor", coEnum);
     def->label = L("G-code flavor");
@@ -9655,6 +9799,116 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipRectilinear));
 
+    // Support fins (Support/Fins.hpp). The fin keys share OrcaSlicer PR #15839's support_fin_* names where the
+    // meaning is the same (thickness, height, spacing, tine spacing and depth, base rows, lean side only), so a
+    // later upstream merge maps cleanly; the switch, depth and gap are EdgeSlicer's own.
+    def = this->add("support_fins", coEnum);
+    def->label = L("Support fins");
+    def->category = L("Support");
+    def->tooltip = L("Thin breakaway walls that stand on the build plate beside a part printed tilted onto an edge or a "
+                     "corner, with one-layer tines that bridge the gap and fuse into the part every few millimetres, "
+                     "so the part cannot tip away from them. Printed with the support filament, speed and line width; "
+                     "Enable supports does not need to be on. Not with a raft.\n\n"
+                     "Off: no fins.\n"
+                     "Auto: fins on the side the part leans to (both sides when it is balanced on its edge), plus any "
+                     "fin spots painted with the support painting tool.\n"
+                     "Painted: only the painted fin spots.");
+    def->enum_keys_map = &ConfigOptionEnum<SupportFinsMode>::get_enum_values();
+    def->enum_values.push_back("off");
+    def->enum_values.push_back("auto");
+    def->enum_values.push_back("painted");
+    def->enum_labels.push_back(L("Off"));
+    def->enum_labels.push_back(L("Auto"));
+    def->enum_labels.push_back(L("Painted"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<SupportFinsMode>(sfmOff));
+
+    def = this->add("support_fin_thickness", coFloat);
+    def->label = L("Fin thickness");
+    def->category = L("Support");
+    def->tooltip = L("Thickness of each fin wall. Fins get a wider foot on their first millimetre.");
+    def->sidetext = L("mm");
+    def->min = 0.4;
+    def->max = 10.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.2));
+
+    def = this->add("support_fin_depth", coFloat);
+    def->label = L("Fin depth");
+    def->category = L("Support");
+    def->tooltip = L("How far a fin reaches out from the part on the build plate. Deeper fins stand steadier.");
+    def->sidetext = L("mm");
+    def->min = 1.;
+    def->max = 100.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(8.));
+
+    def = this->add("support_fin_height", coFloat);
+    def->label = L("Fin height");
+    def->category = L("Support");
+    def->tooltip = L("Fins are generated up to this height above the bed. Set to 0 to generate them up to the height of "
+                     "the part's centre of mass.");
+    def->sidetext = L("mm");
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("support_fin_spacing", coFloat);
+    def->label = L("Fin spacing");
+    def->category = L("Support");
+    def->tooltip = L("Largest distance between neighbouring fins along the part. A part shorter than half of it gets one fin "
+                     "in the middle, a longer one a fin near each end and more between them.");
+    def->sidetext = L("mm");
+    def->min = 2.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(15.));
+
+    def = this->add("support_fin_gap", coFloat);
+    def->label = L("Fin gap");
+    def->category = L("Support");
+    def->tooltip = L("Space between a fin and the part, beside it and under it. Only the tines cross it.");
+    def->sidetext = L("mm");
+    def->min = 0.1;
+    def->max = 2.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.2));
+
+    def = this->add("support_fin_tine_spacing", coFloat);
+    def->label = L("Tine spacing");
+    def->category = L("Support");
+    def->tooltip = L("Vertical distance between tines. A tine is a one-layer bead that bridges the gap and fuses the fin "
+                     "to the part, always on one of the part's own layers.");
+    def->sidetext = L("mm");
+    def->min = 0.5;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(3.));
+
+    def = this->add("support_fin_tine_depth", coFloat);
+    def->label = L("Tine depth");
+    def->category = L("Support");
+    def->tooltip = L("How far a tine reaches into the part. Deeper tines hold better but leave a larger mark after removal.");
+    def->sidetext = L("mm");
+    def->min = 0.;
+    def->max = 2.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.3));
+
+    def = this->add("support_fin_tine_base_rows", coBool);
+    def->label = L("Extra tines near the bed");
+    def->category = L("Support");
+    def->tooltip = L("Tines on every other layer up to 2 mm above the bed, where the part is least stable, before the "
+                     "tine spacing takes over.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("support_fin_lean_side_only", coBool);
+    def->label = L("Lean side only");
+    def->category = L("Support");
+    def->tooltip = L("Only generate fins on the side the part leans to (where its centre of mass lies beyond its bed "
+                     "contact). A part balanced on its edge gets fins on both sides either way.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
     // FDM hollowing: an even-thickness shell around an empty cavity (FDMHollowing.hpp).
     def = this->add("hollow_interior", coBool);
     def->label = L("Hollow interior");
@@ -10164,9 +10418,35 @@ void PrintConfigDef::init_fff_params()
     def = this->add("prime_tower_per_object", coBool);
     def->label = L("Prime tower per object");
     def->tooltip = L("With print sequence By object, give each multi-colour object its own small prime tower beside it, "
-                     "printed with that object. At most 2 towers per plate.");
+                     "printed with that object. At most 4 towers per plate.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    // Per-object prime towers, PR 5: the object setting that drops one object's tower (design D13), and where the user
+    // dragged a tower (offset from the copy's bounding-box centre to the tower's front left corner; 0, 0 is automatic).
+    def = this->add("object_prime_tower", coBool);
+    def->label = L("Prime tower for this object");
+    def->category = L("Support");
+    def->tooltip = L("With Prime tower per object on, this object gets its own prime tower. Turn it off for an object "
+                     "whose colour changes need no priming.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("prime_tower_offset_x", coFloat);
+    def->label = L("Prime tower offset X");
+    def->tooltip = L("Where this object's prime tower was moved to, from the object's centre. 0 places it automatically.");
+    def->sidetext = L("mm");
+    def->mode = comDevelop;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("prime_tower_offset_y", coFloat);
+    def->label = L("Prime tower offset Y");
+    def->tooltip = L("Where this object's prime tower was moved to, from the object's centre. 0 places it automatically.");
+    def->sidetext = L("mm");
+    def->mode = comDevelop;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
     def = this->add("flush_volumes_vector", coFloats);
     // BBS: remove _L()
@@ -12021,6 +12301,9 @@ const std::vector<std::string>& filament_flow_variant_options()
         "nozzle_temperature_initial_layer",
         "nozzle_temperature",
         "filament_max_volumetric_speed",
+        // Orca #12688 / BBS: the fitted flow cap is stored per variant slot too.
+        "filament_adaptive_volumetric_speed",
+        "volumetric_speed_coefficients",
         "fan_min_speed",
         "fan_max_speed",
         "additional_cooling_fan_speed",
@@ -12045,6 +12328,15 @@ const std::vector<std::string>& filament_flow_variant_options()
         "filament_ramming_travel_time_nc",
         "filament_ramming_volumetric_speed",
         "filament_ramming_volumetric_speed_nc",
+        // Bambu Studio 02.09.01.70 filament overhang overrides (filament_options_with_variant, PrintConfig.cpp:8578-8585).
+        "override_process_overhang_speed",
+        "filament_enable_overhang_speed",
+        "filament_overhang_1_4_speed",
+        "filament_overhang_2_4_speed",
+        "filament_overhang_3_4_speed",
+        "filament_overhang_4_4_speed",
+        "filament_overhang_totally_speed",
+        "filament_bridge_speed",
     };
     return options;
 }
@@ -12175,9 +12467,10 @@ int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx)
     const auto *variants = config.option<ConfigOptionStrings>("printer_extruder_variant");
     if (ids == nullptr || variants == nullptr || ids->values.size() != variants->values.size())
         return -1;
-    const auto *types   = config.option<ConfigOptionEnumsGeneric>("extruder_type");
     const auto *volumes = config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
-    const int   type    = types != nullptr && extruder_idx < types->values.size() ? types->values[extruder_idx] : int(etDirectDrive);
+    // Flow variants PR 1 (D3): the drive as resolved_extruder_types derives it. extruder_type itself is dropped on
+    // load, so the X2D's right extruder used to look for "Direct Drive Standard" and fall back to its first slot.
+    const int   type    = resolved_extruder_types(config, extruder_idx + 1)[extruder_idx];
     NozzleVolumeType volume = volumes != nullptr && extruder_idx < volumes->values.size() ? NozzleVolumeType(volumes->values[extruder_idx]) :
                                                                                             nvtStandard;
     if (volume == nvtHybrid)
@@ -12195,36 +12488,52 @@ int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx)
     return first;
 }
 
-std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count)
+std::vector<int> resolved_extruder_types(const ConfigBase &config, size_t extruder_count)
 {
-    std::vector<int> types;
-    if (const auto *opt = config.option<ConfigOptionEnumsGeneric>("extruder_type"))
-        types = opt->values;
-    if (extruder_count == 0 || types.size() >= extruder_count) {
-        if (types.size() > extruder_count)
-            types.resize(extruder_count);
-        return types;
-    }
-    const auto *variants = config.option<ConfigOptionStrings>("extruder_variant_list");
-    std::vector<int> out(extruder_count, types.empty() ? int(etDirectDrive) : types.back());
+    const auto      *types    = config.option<ConfigOptionEnumsGeneric>("extruder_type");
+    const auto      *variants = config.option<ConfigOptionStrings>("extruder_variant_list");
+    std::vector<int> out(extruder_count, int(etDirectDrive));
     for (size_t e = 0; e < extruder_count; ++e) {
-        if (variants != nullptr && e < variants->values.size()) {
-            const std::string &v = variants->values[e];
-            if (boost::starts_with(v, "Bowden")) {
-                out[e] = int(etBowden);
-                continue;
-            }
-            if (boost::starts_with(v, "Direct Drive")) {
-                out[e] = int(etDirectDrive);
-                continue;
-            }
-        }
-        if (e < types.size())
-            out[e] = types[e];
-        else if (e > 0)
-            out[e] = out[e - 1];
+        const bool listed_bowden = variants != nullptr && e < variants->values.size() && boost::starts_with(variants->values[e], "Bowden");
+        const bool named_bowden  = types != nullptr && e < types->values.size() && types->values[e] == int(etBowden);
+        if (listed_bowden || named_bowden)
+            out[e] = int(etBowden);
     }
     return out;
+}
+
+std::vector<int> resolved_extruder_types(const ConfigBase &config)
+{
+    const auto *nozzle_diameter = dynamic_cast<const ConfigOptionVectorBase *>(config.option("nozzle_diameter"));
+    return resolved_extruder_types(config, nozzle_diameter != nullptr ? std::max<size_t>(1, nozzle_diameter->size()) : 1);
+}
+
+bool has_mixed_extruder_types(const ConfigBase &config)
+{
+    const std::vector<int> types = resolved_extruder_types(config);
+    return std::adjacent_find(types.begin(), types.end(), std::not_equal_to<>()) != types.end();
+}
+
+double toolchange_deretract_speed(const ConfigBase &config, int new_filament_id)
+{
+    if (new_filament_id < 0 || !has_mixed_extruder_types(config))
+        return 0.;
+    const auto *deretract = config.option<ConfigOptionFloats>("deretraction_speed");
+    const auto *retract   = config.option<ConfigOptionFloats>("retraction_speed");
+    // Extruder::deretract_speed: rounded to whole mm/s, the retraction speed when 0.
+    double speed = deretract != nullptr && !deretract->values.empty() ? std::floor(deretract->get_at(size_t(new_filament_id)) + 0.5) : 0.;
+    if (!(speed > 0.) && retract != nullptr && !retract->values.empty())
+        speed = std::floor(retract->get_at(size_t(new_filament_id)) + 0.5);
+    return speed > 0. ? speed : 0.;
+}
+
+std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count)
+{
+    if (extruder_count == 0) {
+        const auto *opt = config.option<ConfigOptionEnumsGeneric>("extruder_type");
+        return opt != nullptr ? opt->values : std::vector<int>();
+    }
+    return resolved_extruder_types(config, extruder_count);
 }
 
 std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config)
@@ -12237,14 +12546,31 @@ std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &c
     if (slots.empty() || nozzle_diameter == nullptr || nozzle_diameter->size() != slots.size())
         return {};
 
-    // Which slot each extruder reads. Bambu's grouping machines (H2D, H2C, X2D) index these vectors by
-    // filament, not by extruder, so they keep the values Preset::normalize used to cut them down to.
+    // Which slot each extruder reads. Bambu's grouping machines (H2D, H2C) index these vectors by filament, not
+    // by extruder, so they keep the values Preset::normalize used to cut them down to. A grouping machine whose
+    // extruders have different drives (the X2D: left Direct Drive, right Bowden) reads each extruder's own slot,
+    // which printer_extruder_variant_filament_sources then hands to that extruder's filaments (flow variants PR 1).
     int        extruder_count = 0;
-    const bool grouping       = config.support_different_extruders(extruder_count);
+    const bool grouping       = config.support_different_extruders(extruder_count) && !has_mixed_extruder_types(config);
     std::vector<size_t> sources(slots.size());
     for (size_t e = 0; e < slots.size(); ++e)
         sources[e] = grouping ? e : size_t(std::max(0, printer_extruder_variant_slot(config, e)));
     return sources;
+}
+
+std::vector<size_t> printer_extruder_variant_filament_sources(const DynamicPrintConfig &config)
+{
+    int extruder_count = 0;
+    if (!config.support_different_extruders(extruder_count) || !has_mixed_extruder_types(config))
+        return {};
+    const std::vector<size_t> sources   = printer_extruder_variant_sources(config);
+    const size_t              filaments = flow_variant_filament_count(config);
+    if (sources.empty() || filaments == 0)
+        return {};
+    std::vector<size_t> out(filaments);
+    for (size_t f = 0; f < filaments; ++f)
+        out[f] = sources[std::min(sources.size() - 1, process_extruder_for_filament(config, (unsigned int) f, sources.size()))];
+    return out;
 }
 
 size_t printer_extruder_variant_value_index(const ConfigBase &config, const std::vector<size_t> &sources, const std::string &key,
@@ -12272,9 +12598,13 @@ bool upgrade_missing_power_loss_recovery(DynamicPrintConfig &config)
 
 void resolve_printer_extruder_variants(DynamicPrintConfig &config)
 {
-    const std::vector<size_t> sources = printer_extruder_variant_sources(config);
+    std::vector<size_t> sources = printer_extruder_variant_sources(config);
     if (sources.empty())
         return;
+    // A mixed-drive grouping machine (X2D) reads these vectors by filament: one value per filament, from the slot
+    // of the extruder filament_map puts it on (flow variants PR 1). Every other machine keeps one value per extruder.
+    if (std::vector<size_t> per_filament = printer_extruder_variant_filament_sources(config); !per_filament.empty())
+        sources = std::move(per_filament);
     const size_t slot_count = config.option<ConfigOptionInts>("printer_extruder_id")->values.size();
     for (const std::string &key : print_config_def.extruder_option_keys()) {
         if (!is_printer_extruder_variant_option(key))
@@ -12344,6 +12674,89 @@ size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigne
     }
 
     return 0;
+}
+
+// ---- Filament overhang overrides (Bambu Studio 02.09.01.70, D6) ------------------------------------
+
+namespace {
+// The value at `idx` of a Floats / Bools option, nullable or not, or `fallback` when the key is missing, the vector
+// is empty or the slot is nil. An index past the vector reads the first slot (ConfigOptionVector::get_at).
+template<class TNullable, class TPlain, class T>
+T overhang_override_value(const ConfigBase &config, const char *key, size_t idx, T fallback)
+{
+    const ConfigOption *opt = config.option(key);
+    if (const auto *nullable = dynamic_cast<const TNullable *>(opt); nullable != nullptr) {
+        if (nullable->values.empty())
+            return fallback;
+        const size_t i = idx < nullable->values.size() ? idx : 0;
+        if (nullable->is_nil(i))
+            return fallback;
+        return T(nullable->values[i]);
+    }
+    if (const auto *plain = dynamic_cast<const TPlain *>(opt); plain != nullptr && !plain->values.empty())
+        return T(plain->values[idx < plain->values.size() ? idx : 0]);
+    return fallback;
+}
+
+double overhang_override_speed(const ConfigBase &config, const char *key, size_t idx)
+{
+    const double fallback = static_cast<const ConfigOptionFloatsNullable *>(print_config_def.get(key)->default_value.get())->values.front();
+    const double value    = overhang_override_value<ConfigOptionFloatsNullable, ConfigOptionFloats>(config, key, idx, fallback);
+    return std::isfinite(value) && value > 0. ? value : 0.;
+}
+} // namespace
+
+FilamentOverhangOverride filament_overhang_override(const ConfigBase &config, unsigned int filament_id)
+{
+    FilamentOverhangOverride ovr;
+    const size_t idx = get_config_idx(config, ConfigFlowDomain::Filament, filament_id);
+    ovr.on = overhang_override_value<ConfigOptionBoolsNullable, ConfigOptionBools>(config, "override_process_overhang_speed", idx, false);
+    if (!ovr.on)
+        return ovr;
+    ovr.enable   = overhang_override_value<ConfigOptionBoolsNullable, ConfigOptionBools>(config, "filament_enable_overhang_speed", idx, true);
+    ovr.speed[0] = overhang_override_speed(config, "filament_overhang_1_4_speed", idx);
+    ovr.speed[1] = overhang_override_speed(config, "filament_overhang_2_4_speed", idx);
+    ovr.speed[2] = overhang_override_speed(config, "filament_overhang_3_4_speed", idx);
+    ovr.speed[3] = overhang_override_speed(config, "filament_overhang_4_4_speed", idx);
+    ovr.totally  = overhang_override_speed(config, "filament_overhang_totally_speed", idx);
+    ovr.bridge   = overhang_override_speed(config, "filament_bridge_speed", idx);
+    return ovr;
+}
+
+bool any_filament_overhang_override_enabled(const ConfigBase &config)
+{
+    const auto *on = dynamic_cast<const ConfigOptionVectorBase *>(config.option("override_process_overhang_speed"));
+    if (on == nullptr)
+        return false;
+    for (size_t i = 0; i < on->size(); ++i)
+        if (overhang_override_value<ConfigOptionBoolsNullable, ConfigOptionBools>(config, "override_process_overhang_speed", i, false) &&
+            overhang_override_value<ConfigOptionBoolsNullable, ConfigOptionBools>(config, "filament_enable_overhang_speed", i, true))
+            return true;
+    return false;
+}
+
+bool overhang_slowdown_enabled(const FilamentOverhangOverride &ovr, bool process_enable)
+{
+    return ovr.on ? ovr.enable : process_enable;
+}
+
+double overhang_bridge_speed(const FilamentOverhangOverride &ovr, double process_bridge_speed)
+{
+    return ovr.on && ovr.bridge >= 0.5 ? ovr.bridge : process_bridge_speed;
+}
+
+double overhang_bucket_speed(const FilamentOverhangOverride &ovr, int bucket, double process_abs)
+{
+    return ovr.on && bucket >= 0 && bucket < 4 ? ovr.speed[bucket] : process_abs;
+}
+
+double overhang_fully_unsupported_speed(const FilamentOverhangOverride &ovr, bool bridge_infill, bool slowdown_curled,
+                                        double oh4_abs, double bridge_speed)
+{
+    if (ovr.on && !bridge_infill && ovr.totally >= 0.5)
+        return ovr.totally;
+    // Orca #17144: the bridge speed for bridge infill; with the curled slowdown every other role keeps the 4/4 speed.
+    return slowdown_curled && !bridge_infill ? oh4_abs : bridge_speed;
 }
 
 // ---- Per-nozzle process values (per-nozzle process P1) -------------------------------------------
@@ -12575,13 +12988,27 @@ double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int f
             cooling = opt->values[idx];
     }
     if (with_switcher_extra) {
+        // Flow variants PR 1 (owner decision D4): extruders of different types as resolved_extruder_types derives
+        // them; extruder_type itself is dropped on load, so the X2D never got the extra 10.
         const auto *switcher = dynamic_cast<const ConfigOptionBool *>(config.option("has_filament_switcher"));
-        const auto *types    = dynamic_cast<const ConfigOptionEnumsGeneric *>(config.option("extruder_type"));
-        if (switcher != nullptr && switcher->value && types != nullptr && types->values.size() > 1 &&
-            std::adjacent_find(types->values.begin(), types->values.end(), [](int lhs, int rhs) { return lhs != rhs; }) != types->values.end())
+        if (switcher != nullptr && switcher->value && has_mixed_extruder_types(config))
             cooling += 10.;
     }
     return cooling;
+}
+
+double min_temperature_when_ec_at(const ConfigBase &config, unsigned int filament_id)
+{
+    const auto *opt = dynamic_cast<const ConfigOptionFloats *>(config.option("min_temperature_when_ec"));
+    if (opt == nullptr || opt->values.empty())
+        return 0.;
+    // Not a flow-variant key: PresetBundle stores one value per filament. Packed get_config_idx
+    // would skip slots on a P3C Std+HF filament (step_size 2) and read filament 0's floor for 1+.
+    // Past the end is no floor (BambuStudio indexes by filament id), not get_at's fallback to slot 0.
+    if (filament_id >= opt->values.size())
+        return 0.;
+    const double v = opt->values[filament_id];
+    return v >= 0. ? v : 0.;
 }
 
 double ResolvedFilamentFlow::uncached_flow_ratio(const ConfigBase &config, unsigned int filament_id)
@@ -12607,6 +13034,40 @@ bool ResolvedFilamentFlow::uncached_enable_pressure_advance(const ConfigBase &co
     if (opt == nullptr || opt->values.empty())
         return false;
     return get_value_at(config, *opt, ConfigFlowDomain::Filament, filament_id);
+}
+
+double VolumetricSpeedFit::max_volumetric_speed(double layer_height, double line_width) const
+{
+    if (!valid)
+        return std::numeric_limits<double>::max();
+    const double x = layer_height;
+    const double y = line_width;
+    return c[0] * x * x + c[1] * y * y + c[2] * x * y + c[3] * x + c[4] * y + c[5];
+}
+
+VolumetricSpeedFit parse_volumetric_speed_coefficients(const std::string &coefficients)
+{
+    VolumetricSpeedFit fit;
+    std::istringstream ss(coefficients);
+    std::string        token;
+    size_t             count = 0;
+    while (ss >> token) {
+        if (count == 6)
+            return {}; // seven or more numbers: not a fit
+        try {
+            size_t used = 0;
+            const double v = std::stod(token, &used);
+            if (used != token.size() || !std::isfinite(v))
+                return {};
+            fit.c[count++] = v;
+        } catch (...) {
+            return {};
+        }
+    }
+    if (count != 6 || std::all_of(std::begin(fit.c), std::end(fit.c), [](double v) { return v == 0.; }))
+        return {};
+    fit.valid = true;
+    return fit;
 }
 
 ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
@@ -12635,6 +13096,26 @@ ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
             out.process_extruder_idx.reserve(count);
             for (size_t i = 0; i < count; ++i)
                 out.process_extruder_idx.push_back(Slic3r::process_config_idx(config, out.process_layout_size, static_cast<unsigned int>(i)));
+        }
+    }
+    // Orca #12688: adaptive volumetric speed. Nil (inherit) reads as off; only a filament that turned it on and
+    // has a usable fit gets an entry.
+    {
+        const auto *adaptive = config.option<ConfigOptionBoolsNullable>("filament_adaptive_volumetric_speed");
+        const auto *coeffs   = config.option<ConfigOptionStrings>("volumetric_speed_coefficients");
+        if (adaptive != nullptr && coeffs != nullptr && !adaptive->values.empty() && !coeffs->values.empty()) {
+            const size_t                    n = flow_variant_filament_count(config);
+            std::vector<VolumetricSpeedFit> fits(n);
+            bool                            any = false;
+            for (size_t i = 0; i < n; ++i) {
+                const size_t idx = get_config_idx(config, ConfigFlowDomain::Filament, static_cast<unsigned int>(i));
+                if (adaptive->is_nil(idx) || !adaptive->get_at(idx))
+                    continue;
+                fits[i] = parse_volumetric_speed_coefficients(coeffs->get_at(idx));
+                any |= fits[i].valid;
+            }
+            if (any)
+                out.adaptive_fit = std::move(fits);
         }
     }
     const auto *ratio   = config.option<ConfigOptionFloats>("filament_flow_ratio");
@@ -13911,7 +14392,7 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
         return 1; \
     }
 PRINT_CONFIG_CACHE_INITIALIZE((
-    PrintObjectConfig, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintConfig, FullPrintConfig,
+    PrintObjectConfig, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig, PrintIdleFloorConfig, PrintConfig, FullPrintConfig,
     SLAMaterialConfig, SLAPrintConfig, SLAPrintObjectConfig, SLAPrinterConfig, SLAFullPrintConfig))
 static int print_config_static_initialized = print_config_static_initializer();
 
@@ -13926,7 +14407,7 @@ static int print_config_static_initialized = print_config_static_initializer();
         visit_option_pairs(*dst, *this, [](const char*, ConfigOption &a, const ConfigOption &b) { a.set(&b); return true; }); \
         return true; \
     }
-BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_APPLY_TO_DEFINITION, _, (PrintObjectConfig)(PrintRegionConfig)(MachineEnvelopeConfig)(GCodeConfig)(PrintTowerConfig)
+BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_APPLY_TO_DEFINITION, _, (PrintObjectConfig)(PrintRegionConfig)(MachineEnvelopeConfig)(GCodeConfig)(PrintTowerConfig)(PrintIdleFloorConfig)
     (SLAMaterialConfig)(SLAPrintConfig)(SLAPrintObjectConfig)(SLAPrinterConfig))
 #undef PRINT_CONFIG_APPLY_TO_DEFINITION
 

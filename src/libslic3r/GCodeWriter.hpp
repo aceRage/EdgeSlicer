@@ -169,7 +169,8 @@ public:
     std::string retract(bool before_wipe = false, double retract_length = 0);
     std::string retract_for_toolchange(bool before_wipe = false, double retract_length = 0);
     // Bambu Studio 2.9.1 unretract(extra_retract): `extra` mm more, only when something is unretracted.
-    std::string unretract(double extra = 0.);
+    // speed (mm/s): when > 0, the unretract runs at it instead of the current extruder's deretraction speed.
+    std::string unretract(double extra = 0., double speed = 0.);
     std::string lift(LiftType lift_type = LiftType::NormalLift, bool spiral_vase = false);
     std::string unlift();
     const Vec3d& get_position() const { return m_pos; }

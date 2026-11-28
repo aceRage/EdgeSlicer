@@ -643,6 +643,9 @@ public:
     static bool                 has_raft(const PrintObjectConfig &config)             { return config.raft_layers > 0; }
     static bool                 has_support_material(const PrintObjectConfig &config) { return has_support(config) || has_raft(config); }
     static bool                 has_stabilizers(const PrintObjectConfig &config)      { return config.stabilizer_supports.value != smOff; }
+    static bool                 has_fins(const PrintObjectConfig &config)             { return config.support_fins.value != sfmOff; }
+    // Support-role additions that print without Enable supports: side stabilizers and support fins.
+    static bool                 has_support_addons(const PrintObjectConfig &config)   { return has_stabilizers(config) || has_fins(config); }
     bool                        has_support()           const { return has_support(m_config); }
     bool                        has_raft()              const { return has_raft(m_config); }
     bool                        has_support_material()  const { return has_support_material(m_config); }
@@ -650,9 +653,15 @@ public:
     // Enable supports: they print as support-role extrusions of their own, so with supports off the
     // support step runs in a stabilizers-only mode (no support, interface or raft is made).
     bool                        has_stabilizers()       const { return has_stabilizers(m_config); }
-    // Something prints with the support filament: supports, a raft or stabilizers. The support
+    // Support fins (Support/Fins.hpp) are configured for this object. Like the stabilizers they print as
+    // support-role extrusions of their own, with or without Enable supports.
+    bool                        has_fins()              const { return has_fins(m_config); }
+    // Stabilizers or fins: support-role extrusions with the support filament (never the interface
+    // filament) whether or not supports are on.
+    bool                        has_support_addons()    const { return has_support_addons(m_config); }
+    // Something prints with the support filament: supports, a raft, stabilizers or fins. The support
     // INTERFACE filament is used only when has_support_material().
-    bool                        uses_support_filament() const { return this->has_support_material() || this->has_stabilizers(); }
+    bool                        uses_support_filament() const { return this->has_support_material() || this->has_support_addons(); }
     // Checks if the model object is painted using the multi-material painting gizmo.
     bool                        is_mm_painted()         const { return this->model_object()->is_mm_painted(); }
     // Checks if the model object is painted using the fuzzy skin painting gizmo.
@@ -1428,14 +1437,27 @@ struct ObjectTowerPlacement
     double               width      = 0.;
     double               depth      = 0.;
     double               brim_width = 0.;
+    // PR 5 (GUI): the estimated height (the copy's), and the centre of the copy's bounding box in plate coordinates,
+    // which the object's prime_tower_offset_x/y are measured from.
+    double               height     = 0.;
+    Vec2d                copy_center { 0., 0. };
+    // The tower stands where the user dragged it (the object's prime_tower_offset_x/y).
+    bool                 from_offset = false;
+    // The object asks for a dragged position that is not clear (requested_pos, plate coordinates): the tower is placed
+    // automatically instead, with a warning, and the GUI draws the dragged one red.
+    bool                 offset_rejected = false;
+    Vec2d                requested_pos { 0., 0. };
 };
 
 struct ObjectTowerPlan
 {
-    static constexpr size_t max_object_towers = 2;
+    // Owner 2026-11-27: 4 (was 2 in phase 1). Nothing technical caps it lower: the GUI ids leave 64 slots per plate, and
+    // the planner and the arrange (ModelArrange reserve_object_prime_tower) treat any number of units alike.
+    static constexpr size_t max_object_towers = 4;
     // The candidates within the cap, in model list order, placed or not.
     std::vector<ObjectTowerPlacement> towers;
-    // One line per copy printed without a tower the user asked for (over the cap, no room).
+    // One line per copy printed without a tower the user asked for (over the cap, no room), or whose dragged tower is
+    // not clear where it was put.
     std::vector<std::string>          warnings;
 
     const ObjectTowerPlacement *find(const PrintInstance *instance) const
@@ -1538,6 +1560,10 @@ public:
     // Edge: Plater sets the live AMS inventory in restart_background_process(), after apply(). This installs
     // a pending payload there, the way apply() would. True when the grouping steps were taken back.
     bool install_pending_extruder_filament_info();
+    // Flow variants PR 1: on a mixed-drive grouping machine (X2D) the printer's per-variant retraction values follow
+    // the filament map the grouping computed (ToolOrdering): each filament reads its extruder's slot, then its own
+    // filament overrides. True when a value changed. A no-op on every other printer.
+    bool realign_printer_variants_to_filament_map(const std::vector<int> &filament_map);
     std::unordered_map<int, std::unordered_map<int, double>> get_filament_print_time() const { return m_filament_print_time; }
     void set_filament_print_time(const std::unordered_map<int, std::unordered_map<int, double>>& v) { m_filament_print_time = v; }
     const std::vector<std::set<int>>& get_geometric_unprintable_filaments() const { return m_geometric_unprintable_filaments; }
@@ -1943,6 +1969,11 @@ private:
     // support the slice rewrites m_config.filament_volume_type from the final filament_map (ToolOrdering,
     // BambuFlowSupport::apply_filament_volume_types_from_map); same keep rule as m_filament_map_input.
     std::vector<int>                                      m_filament_volume_type_input;
+    // Flow variants PR 1: the unresolved per-variant printer values (every slot, before
+    // resolve_printer_extruder_variants) of the last apply() on a mixed-drive grouping machine (X2D), else null.
+    // Read by realign_printer_variants_to_filament_map from the slicing thread, hence the mutex.
+    std::shared_ptr<const DynamicPrintConfig>             m_printer_variant_layout;
+    std::mutex                                            m_printer_variant_layout_mutex;
     // Print config keys that differed in the last apply() (diagnostics for the GUI).
     std::vector<std::string>                              m_last_apply_changed_keys;
 

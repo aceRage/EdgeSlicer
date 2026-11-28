@@ -1,4 +1,5 @@
 #include "AMSDualView.hpp"
+#include "../AmsTypes.hpp"
 
 #include "Label.hpp"
 #include "StateColor.hpp"
@@ -402,19 +403,16 @@ void AMSDualView::draw_unit_icon(wxDC &dc, const wxRect &r, const DualUnitView *
         };
 
         if (unit->ref.slot_count > 1) {
-            // A rack AMS (AMS 3H, nine slots) has no frame picture in Bambu Studio's resources: its
-            // cubes share the icon's width and a plain border stands in for the four-slot frame.
-            const bool   many  = int(unit->slots.size()) > 4;
-            const int    n_cub = std::max<int>(1, int(unit->slots.size()));
-            const wxSize cube(many ? std::max<int>(FromDIP(3), (r.width - FromDIP(12)) / n_cub) : FromDIP(9), FromDIP(14));
-            int          x = r.x + (many ? (r.width - cube.x * n_cub) / 2 : FromDIP(8));
-            const int    y = r.y + (r.height - cube.y) / 2;
-            for (const DualSlotView &sv : unit->slots) {
+            // A rack AMS has no frame picture in Bambu Studio's resources: its cubes share the
+            // icon's width and a plain border stands in for the four-slot frame.
+            const bool many  = int(unit->slots.size()) > 4;
+            const int  n_cub = std::max<int>(1, int(unit->slots.size()));
+            auto draw_cube_at = [&](int x, int y, const wxSize &cube, const DualSlotView &sv) {
                 bool transparent = false, empty = false;
                 const wxColour c = cube_colour(sv, transparent, empty);
                 if (transparent) {
                     const ScalableBitmap &ts = dark ? m_ts_cube_dark : m_ts_cube;
-                    dc.DrawBitmap(ts.bmp(), x - FromDIP(1), r.y + (r.height - ts.GetBmpHeight()) / 2, true);
+                    dc.DrawBitmap(ts.bmp(), x - FromDIP(1), y + (cube.y - ts.GetBmpHeight()) / 2, true);
                 } else if (!sv.cols.empty() && sv.cols.size() > 1) {
                     const int n = int(sv.cols.size());
                     for (int i = 0; i < n; ++i) {
@@ -430,15 +428,53 @@ void AMSDualView::draw_unit_icon(wxDC &dc, const wxRect &r, const DualUnitView *
                         dc.SetPen(*wxTRANSPARENT_PEN);
                     }
                 }
-                x += cube.x;
-            }
-            if (many) {
+            };
+            const std::vector<std::vector<int>> rows = GUI::AmsTypes::rack_preview_rows(unit->ref.type, n_cub);
+            if (!rows.empty()) {
+                // AMS 3P (seven slots): Bambu Studio's two-row AMS_PREVIEW_SLOT_GRID, looked up by
+                // can_id / slot id (0..63) so a missing or out-of-order tray still lands in the
+                // right cell. A count other than 7 falls through to the one-row strip below.
+                std::vector<int> slot_ids;
+                slot_ids.reserve(unit->slots.size());
+                for (const DualSlotView &sv : unit->slots)
+                    slot_ids.push_back(GUI::AmsTypes::parse_rack_slot_id(sv.slot_id));
+                int max_cols = 1;
+                for (const auto &row : rows)
+                    max_cols = std::max(max_cols, int(row.size()));
+                const wxSize cube(std::max<int>(FromDIP(3), (r.width - FromDIP(12)) / max_cols),
+                                  std::max<int>(FromDIP(5), (r.height - FromDIP(8)) / int(rows.size())));
+                const int    y0 = r.y + (r.height - cube.y * int(rows.size())) / 2;
+                for (int ri = 0; ri < int(rows.size()); ++ri) {
+                    const auto &row = rows[ri];
+                    int         x   = r.x + (r.width - cube.x * int(row.size())) / 2;
+                    const int   y   = y0 + ri * cube.y;
+                    for (int si : row) {
+                        const int idx = GUI::AmsTypes::rack_preview_slot_index(slot_ids, si);
+                        if (idx >= 0)
+                            draw_cube_at(x, y, cube, unit->slots[size_t(idx)]);
+                        x += cube.x;
+                    }
+                }
                 dc.SetPen(wxPen(pal.icon_border, 1));
                 dc.SetBrush(*wxTRANSPARENT_BRUSH);
                 dc.DrawRoundedRectangle(r, FromDIP(3));
                 dc.SetPen(*wxTRANSPARENT_PEN);
-            } else
-                dc.DrawBitmap((dark ? m_four_slot_dark : m_four_slot).bmp(), r.x, r.y, true);
+            } else {
+                const wxSize cube(many ? std::max<int>(FromDIP(3), (r.width - FromDIP(12)) / n_cub) : FromDIP(9), FromDIP(14));
+                int          x = r.x + (many ? (r.width - cube.x * n_cub) / 2 : FromDIP(8));
+                const int    y = r.y + (r.height - cube.y) / 2;
+                for (const DualSlotView &sv : unit->slots) {
+                    draw_cube_at(x, y, cube, sv);
+                    x += cube.x;
+                }
+                if (many) {
+                    dc.SetPen(wxPen(pal.icon_border, 1));
+                    dc.SetBrush(*wxTRANSPARENT_BRUSH);
+                    dc.DrawRoundedRectangle(r, FromDIP(3));
+                    dc.SetPen(*wxTRANSPARENT_PEN);
+                } else
+                    dc.DrawBitmap((dark ? m_four_slot_dark : m_four_slot).bmp(), r.x, r.y, true);
+            }
         } else if (!unit->slots.empty()) {
             const DualSlotView &sv = unit->slots.front();
             bool transparent = false, empty = false;
