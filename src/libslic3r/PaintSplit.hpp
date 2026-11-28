@@ -247,10 +247,11 @@ struct PaintSplitSkinParams
     bool   seam_snap{ true };
     // Tuning of the two above (tests and the hidden harness; -1 = the default): the seam band pinned (mm), the extra
     // passes next to the skin, displacement along the normal only (no sliding of the fine mesh), and the snap radius
-    // in near-skin voxels.
+    // in near-skin voxels (-1: 3).
     double skin_pin{ -1. };
+    double skin_ramp{ -1. };          // mm from the skin where the skin smoothing reaches full weight (-1: 3 voxels)
     int    skin_extra_passes{ -1 };
-    bool   skin_normal_only{ true };
+    bool   skin_normal_only{ false }; // (unstable on the claim's slivers: off)
     double snap_radius{ -1. };
     // R2 (E7): these components' selected skin counts as neither side: the claim reaches into their territory, which an
     // earlier cut of the same pass took already. Their shared wall is then that earlier cut alone (one surface, not two
