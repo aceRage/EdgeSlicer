@@ -28,6 +28,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoEdit.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoCadFillet.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSplitToFit.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoPaintSplit.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoEmboss.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSVG.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMeshBoolean.hpp"
@@ -81,14 +82,20 @@ std::vector<size_t> GLGizmosManager::get_selectable_idxs() const
         // stays last, so m_gizmos, the sprite ids and icon texture rows, the shortcut lookup and every
         // index by EType are unchanged. Everything that maps a toolbar slot to a gizmo goes through
         // this list (mouse hit test, drawing, the arrow, lookup by icon name).
-        const bool split_fit_known = size_t(SplitToFit) < m_gizmos.size();
+        // Paint Split (D14) follows Split to Fit the same way.
+        const bool split_fit_known   = size_t(SplitToFit) < m_gizmos.size();
+        const bool paint_split_known = size_t(PaintSplit) < m_gizmos.size();
         for (size_t i = 0; i < m_gizmos.size(); ++i) {
             if (split_fit_known && i == size_t(SplitToFit))
+                continue;
+            if (paint_split_known && i == size_t(PaintSplit))
                 continue;
             if (m_gizmos[i]->is_selectable())
                 out.push_back(i);
             if (split_fit_known && i == size_t(Cut) && m_gizmos[SplitToFit]->is_selectable())
                 out.push_back(size_t(SplitToFit));
+            if (paint_split_known && i == size_t(Cut) && m_gizmos[PaintSplit]->is_selectable())
+                out.push_back(size_t(PaintSplit));
         }
     }
     return out;
@@ -209,6 +216,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::SplitToFit):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_split_fit_dark.svg" : "toolbar_split_fit.svg");
             break;
+        case (EType::PaintSplit):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_paint_split_dark.svg" : "toolbar_paint_split.svg");
+            break;
         }
 
     }
@@ -257,6 +267,7 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoEdit(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::Edit));
     m_gizmos.emplace_back(new GLGizmoCadFillet(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::CadFillet));
     m_gizmos.emplace_back(new GLGizmoSplitToFit(m_parent, m_is_dark ? "toolbar_split_fit_dark.svg" : "toolbar_split_fit.svg", EType::SplitToFit));
+    m_gizmos.emplace_back(new GLGizmoPaintSplit(m_parent, m_is_dark ? "toolbar_paint_split_dark.svg" : "toolbar_paint_split.svg", EType::PaintSplit));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));
@@ -598,6 +609,8 @@ bool GLGizmosManager::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_p
         return dynamic_cast<GLGizmoCut3D*>(m_gizmos[Cut].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == FuzzySkin)
         return dynamic_cast<GLGizmoFuzzySkin*>(m_gizmos[FuzzySkin].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
+    else if (m_current == PaintSplit)
+        return dynamic_cast<GLGizmoPaintSplit*>(m_gizmos[PaintSplit].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == TextureDisplacement)
         return dynamic_cast<GLGizmoTextureDisplacement*>(m_gizmos[TextureDisplacement].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == MeshBoolean)
@@ -616,7 +629,14 @@ bool GLGizmosManager::is_paint_gizmo()
            m_current == EType::MmSegmentation ||
            m_current == EType::FuzzySkin ||
            m_current == EType::TextureDisplacement ||
+           m_current == EType::PaintSplit ||
            m_current == EType::Seam;
+}
+
+bool GLGizmosManager::owns_mesh_annotations(EType type)
+{
+    return type == EType::FdmSupports || type == EType::Seam || type == EType::FuzzySkin || type == EType::MmSegmentation ||
+           type == EType::TextureDisplacement || type == EType::PaintSplit;
 }
 
 bool GLGizmosManager::is_allow_select_all() {
@@ -733,7 +753,8 @@ bool GLGizmosManager::on_mouse_wheel(const wxMouseEvent &evt)
             return true;
     }
 
-    if (/*m_current == SlaSupports || m_current == Hollow ||*/ m_current == FdmSupports || m_current == Seam || m_current == MmSegmentation || m_current == FuzzySkin || m_current == BrimEars || m_current == Sculpt) {
+    if (/*m_current == SlaSupports || m_current == Hollow ||*/ m_current == FdmSupports || m_current == Seam || m_current == MmSegmentation || m_current == FuzzySkin || m_current == BrimEars || m_current == Sculpt ||
+        m_current == PaintSplit) {
         float rot = (float)evt.GetWheelRotation() / (float)evt.GetWheelDelta();
         if (gizmo_event((rot > 0.f ? SLAGizmoEventType::MouseWheelUp : SLAGizmoEventType::MouseWheelDown), Vec2d::Zero(), evt.ShiftDown(), evt.AltDown()
             // BBS
@@ -801,7 +822,10 @@ bool GLGizmosManager::gizmos_toolbar_on_mouse(const wxMouseEvent &mouse_event) {
                 GLGizmoBase *gizmo_emboss = m_gizmos[Emboss].get();
                 dynamic_cast<GLGizmoEmboss *>(gizmo_emboss)->on_shortcut_key();
             } else {
-                open_gizmo(gizmo);
+                // Paint Split asks before a click drops its selection (D13).
+                auto *paint_split = m_current == PaintSplit ? dynamic_cast<GLGizmoPaintSplit *>(m_gizmos[PaintSplit].get()) : nullptr;
+                if (paint_split == nullptr || !paint_split->defer_close([this, gizmo]() { open_gizmo(gizmo); }))
+                    open_gizmo(gizmo);
             }
             return true;
         }
@@ -971,6 +995,9 @@ bool GLGizmosManager::on_char(wxKeyEvent& evt)
             if (m_current != Undefined) {
                 if ((m_current == Measure || m_current == Assembly) && gizmo_event(SLAGizmoEventType::Escape)) {
                     // do nothing
+                } else if (m_current == PaintSplit &&
+                           dynamic_cast<GLGizmoPaintSplit *>(m_gizmos[PaintSplit].get())->defer_close([this]() { reset_all_states(); })) {
+                    // asked "Discard?" first (D13)
                 } else
                 //if ((m_current != SlaSupports) || !gizmo_event(SLAGizmoEventType::DiscardChanges))
                     reset_all_states();
@@ -1654,6 +1681,8 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
         return "CAD Fillet";
     case GLGizmosManager::EType::SplitToFit:
         return "Split to Fit";
+    case GLGizmosManager::EType::PaintSplit:
+        return "Paint Split";
     case GLGizmosManager::EType::TextureDisplacement:
         return "Texture Displacement";
     default:

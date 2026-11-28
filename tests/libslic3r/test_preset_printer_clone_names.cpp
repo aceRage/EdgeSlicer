@@ -8,6 +8,7 @@
 // printer (process): a space too many for every filament, and an alias that is not the template's name
 // up to the "@" for a user preset (empty, unless it is a stand-alone filament) or a name with "/" in it.
 // So the check missed presets that were there. These tests make the copies and look them up both ways.
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/Preset.hpp"
@@ -30,7 +31,7 @@ struct ScopedTemporaryDir
     fs::path root;
     ScopedTemporaryDir()
     {
-        root = fs::temp_directory_path() / "snorca_tests" / fs::unique_path("clone_names_%%%%%%%%");
+        root = edge_test::snorca_tests_dir() / fs::unique_path("clone_names_%%%%%%%%");
         fs::create_directories(root);
     }
     ~ScopedTemporaryDir()

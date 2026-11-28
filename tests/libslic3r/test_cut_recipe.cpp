@@ -20,6 +20,7 @@
 //      behaves exactly as the tool did before this feature.
 // ---------------------------------------------------------------------------
 
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <libslic3r/CutRecipe.hpp>
@@ -233,7 +234,7 @@ static CutRecipe recipe_make(CutRecipeKind kind)
 // PROJECT writer, not the generic 3MF one.
 static void recipe_round_trip(Model &src, Model &dst, const std::string &file)
 {
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
 
@@ -260,7 +261,7 @@ static void recipe_round_trip(Model &src, Model &dst, const std::string &file)
 
 static std::string recipe_tmp_file(const std::string &name)
 {
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path tmp_root = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(tmp_root);
     return (tmp_root / name).string();
 }

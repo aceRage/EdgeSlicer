@@ -1,5 +1,6 @@
 #define NOMINMAX
 #include "OpenVDBUtils.hpp"
+#include "MeshRepair.hpp"
 
 #ifdef _MSC_VER
 // Suppress warning C4146 in OpenVDB: unary minus operator applied to unsigned type, result still unsigned 
@@ -97,6 +98,47 @@ openvdb::FloatGrid::Ptr mesh_to_grid(const indexed_triangle_set &    mesh,
     grid->insertMeta("voxel_scale", openvdb::FloatMetadata(voxel_scale));
 
     return grid;
+}
+
+// declared in MeshRepair.hpp (kept free of OpenVDB includes)
+indexed_triangle_set mesh_dense_field(const std::vector<float> &values, int nx, int ny, int nz, const Vec3d &origin, double voxel)
+{
+    if (nx < 2 || ny < 2 || nz < 2 || voxel <= 0. || values.size() != size_t(nx) * size_t(ny) * size_t(nz))
+        return {};
+    try {
+        openvdb::initialize();
+        float vmax = 0.f;
+        for (float v : values)
+            vmax = std::max(vmax, std::abs(v));
+        openvdb::FloatGrid::Ptr grid = openvdb::FloatGrid::create(std::max(vmax, float(voxel)));
+        openvdb::math::Transform::Ptr tr = openvdb::math::Transform::createLinearTransform(voxel);
+        tr->postTranslate(openvdb::Vec3d(origin.x(), origin.y(), origin.z()));
+        grid->setTransform(tr);
+        auto acc = grid->getAccessor();
+        for (int k = 0; k < nz; ++k)
+            for (int j = 0; j < ny; ++j)
+                for (int i = 0; i < nx; ++i)
+                    acc.setValue(openvdb::Coord(i, j, k), values[(size_t(k) * size_t(ny) + size_t(j)) * size_t(nx) + size_t(i)]);
+        std::vector<openvdb::Vec3s> points;
+        std::vector<openvdb::Vec3I> triangles;
+        std::vector<openvdb::Vec4I> quads;
+        openvdb::tools::volumeToMesh(*grid, points, triangles, quads, 0.0, 0.0, true);
+        indexed_triangle_set its;
+        its.vertices.reserve(points.size());
+        for (const openvdb::Vec3s &p : points)
+            its.vertices.emplace_back(p.x(), p.y(), p.z());
+        for (const openvdb::Vec3I &t : triangles)
+            its.indices.emplace_back(int(t[0]), int(t[1]), int(t[2]));
+        for (const openvdb::Vec4I &q : quads) {
+            its.indices.emplace_back(int(q[0]), int(q[1]), int(q[2]));
+            its.indices.emplace_back(int(q[2]), int(q[3]), int(q[0]));
+        }
+        // volumeToMesh winds for inward normals (see remesh_by_voxels): flip to outward.
+        its_flip_triangles(its);
+        return its;
+    } catch (const std::exception &) {
+        return {};
+    }
 }
 
 // declared in MeshRepair.hpp (kept free of OpenVDB includes)

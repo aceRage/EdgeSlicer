@@ -1,3 +1,4 @@
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include "libslic3r/PrintConfig.hpp"
@@ -401,7 +402,7 @@ SCENARIO("A config built from the static defaults survives a JSON round trip", "
     GIVEN("DynamicPrintConfig::full_print_config()") {
         const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         WHEN("it is written with save_to_json and read back") {
-            const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / "snorca_tests";
+            const boost::filesystem::path dir = edge_test::snorca_tests_dir();
             boost::filesystem::create_directories(dir);
             const boost::filesystem::path path = dir / "full_print_config_round_trip.json";
             // This is the call that crashed on the first coEnums member.
@@ -547,7 +548,7 @@ TEST_CASE("save_to_json writes the same document to a stream as to a file", "[Co
     config.set_key_value("filament_type", new ConfigOptionStrings({ "PLA", "PETG" }));
     config.set_key_value("machine_start_gcode", new ConfigOptionString("G28\nG1 Z5"));
 
-    const boost::filesystem::path dir  = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path dir  = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(dir);
     const boost::filesystem::path path = dir / "save_to_json_stream.json";
     // Pass is_custom so the Ultra header round-trips on the file path (preset saves).
@@ -586,7 +587,7 @@ TEST_CASE("save_to_json leaves an existing file untouched when the config cannot
     DynamicPrintConfig config;
     config.set_key_value("machine_start_gcode", new ConfigOptionString("G28 ; \xff"));
 
-    const boost::filesystem::path dir  = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path dir  = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(dir);
     const boost::filesystem::path path = dir / "save_to_json_untouched.json";
     {
@@ -690,7 +691,7 @@ TEST_CASE("No ConfigDef registers the same option key twice in itself", "[Config
 namespace {
 DynamicPrintConfig load_temp_json(const std::string &filename, const std::string &body, std::map<std::string, std::string> &key_values)
 {
-    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / "snorca_tests";
+    const boost::filesystem::path dir = edge_test::snorca_tests_dir();
     boost::filesystem::create_directories(dir);
     const boost::filesystem::path path = dir / filename;
     {

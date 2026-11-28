@@ -28,4 +28,6 @@ indexed_triangle_set round_band_by_voxels(const indexed_triangle_set &, const st
 
 bool voxel_ops_available() { return false; }
 
+indexed_triangle_set mesh_dense_field(const std::vector<float> &, int, int, int, const Vec3d &, double) { return {}; }
+
 } // namespace Slic3r

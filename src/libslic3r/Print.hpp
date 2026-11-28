@@ -643,6 +643,9 @@ public:
     static bool                 has_raft(const PrintObjectConfig &config)             { return config.raft_layers > 0; }
     static bool                 has_support_material(const PrintObjectConfig &config) { return has_support(config) || has_raft(config); }
     static bool                 has_stabilizers(const PrintObjectConfig &config)      { return config.stabilizer_supports.value != smOff; }
+    static bool                 has_fins(const PrintObjectConfig &config)             { return config.support_fins.value != sfmOff; }
+    // Support-role additions that print without Enable supports: side stabilizers and support fins.
+    static bool                 has_support_addons(const PrintObjectConfig &config)   { return has_stabilizers(config) || has_fins(config); }
     bool                        has_support()           const { return has_support(m_config); }
     bool                        has_raft()              const { return has_raft(m_config); }
     bool                        has_support_material()  const { return has_support_material(m_config); }
@@ -650,9 +653,15 @@ public:
     // Enable supports: they print as support-role extrusions of their own, so with supports off the
     // support step runs in a stabilizers-only mode (no support, interface or raft is made).
     bool                        has_stabilizers()       const { return has_stabilizers(m_config); }
-    // Something prints with the support filament: supports, a raft or stabilizers. The support
+    // Support fins (Support/Fins.hpp) are configured for this object. Like the stabilizers they print as
+    // support-role extrusions of their own, with or without Enable supports.
+    bool                        has_fins()              const { return has_fins(m_config); }
+    // Stabilizers or fins: support-role extrusions with the support filament (never the interface
+    // filament) whether or not supports are on.
+    bool                        has_support_addons()    const { return has_support_addons(m_config); }
+    // Something prints with the support filament: supports, a raft, stabilizers or fins. The support
     // INTERFACE filament is used only when has_support_material().
-    bool                        uses_support_filament() const { return this->has_support_material() || this->has_stabilizers(); }
+    bool                        uses_support_filament() const { return this->has_support_material() || this->has_support_addons(); }
     // Checks if the model object is painted using the multi-material painting gizmo.
     bool                        is_mm_painted()         const { return this->model_object()->is_mm_painted(); }
     // Checks if the model object is painted using the fuzzy skin painting gizmo.
@@ -1374,6 +1383,10 @@ struct ByObjectBlock
     int                                    ordering        = -1;
     unsigned int                           first_extruder  = (unsigned int) -1;
     unsigned int                           last_extruder   = (unsigned int) -1;
+    // The filament loaded when the block's first layer starts: the start G-code's for the first block (which gets no
+    // tool change before it, though its ordering may start with another), else first_extruder. GCode::process_layer
+    // starts each layer with the loaded filament, so a copy's prime tower plans from this one.
+    unsigned int                           loaded_extruder = (unsigned int) -1;
     MultiNozzleUtils::NozzleStatusRecorder nozzle_status_before;
 };
 
@@ -1400,6 +1413,66 @@ struct ByObjectPlan
                 return &o.tool_ordering;
         return nullptr;
     }
+};
+
+// Per-object prime towers (PR 3 and PR 4 of tests/design_per_object_prime_towers.md): with prime_tower_per_object on a plate
+// printed by object, every copy that changes filament gets its own tower beside it (Type 1 on Bambu Lab printers, Type 2
+// on the U1, Voron and other WipeTower2 printers), printed inside that copy's block, up to the block's last tool change.
+// - ObjectTowerPlan: where the towers go, decided from the model alone (the copies' outlines and an estimate of each
+//   tower's size), so validate() before slicing, process() and the export see the same towers. At most
+//   max_object_towers candidates, in model list order (object, then instance) among copies whose object uses more than
+//   one filament; never print order, which itself depends on the towers.
+// - ObjectWipeTower: a generated tower, one per towered copy. Owns the copy's tool ordering (the block's chained one from
+//   the by-object plan, with the tower's own marks) and the tower data; the export prints the block with both.
+struct ObjectTowerPlacement
+{
+    const PrintInstance *instance   = nullptr;
+    // False when no position beside the copy is clear (the copy then prints without a tower).
+    bool                 placed     = false;
+    // The tower body's front left corner, plate coordinates (as wipe_tower_x / wipe_tower_y).
+    Vec2d                pos        { 0., 0. };
+    // The estimated first-layer outline at pos, brim included, in bed coordinates (plate origin added) and scaled, as
+    // the instances' hulls in the sequential clearance check.
+    Polygon              outline;
+    double               width      = 0.;
+    double               depth      = 0.;
+    double               brim_width = 0.;
+    // PR 5 (GUI): the estimated height (the copy's), and the centre of the copy's bounding box in plate coordinates,
+    // which the object's prime_tower_offset_x/y are measured from.
+    double               height     = 0.;
+    Vec2d                copy_center { 0., 0. };
+    // The tower stands where the user dragged it (the object's prime_tower_offset_x/y).
+    bool                 from_offset = false;
+    // The object asks for a dragged position that is not clear (requested_pos, plate coordinates): the tower is placed
+    // automatically instead, with a warning, and the GUI draws the dragged one red.
+    bool                 offset_rejected = false;
+    Vec2d                requested_pos { 0., 0. };
+};
+
+struct ObjectTowerPlan
+{
+    static constexpr size_t max_object_towers = 2;
+    // The candidates within the cap, in model list order, placed or not.
+    std::vector<ObjectTowerPlacement> towers;
+    // One line per copy printed without a tower the user asked for (over the cap, no room), or whose dragged tower is
+    // not clear where it was put.
+    std::vector<std::string>          warnings;
+
+    const ObjectTowerPlacement *find(const PrintInstance *instance) const
+    {
+        for (const ObjectTowerPlacement &t : towers)
+            if (t.instance == instance)
+                return &t;
+        return nullptr;
+    }
+};
+
+struct ObjectWipeTower
+{
+    const PrintInstance           *instance = nullptr;
+    Vec2d                          pos { 0., 0. };
+    std::unique_ptr<ToolOrdering>  tool_ordering;
+    std::unique_ptr<WipeTowerData> data;
 };
 
 // The complete print tray with possibly multiple objects.
@@ -1663,6 +1736,26 @@ public:
     // bed shape (a delta or custom bed's missing corner); empty when it fits or there is no tower.
     std::string                 prime_tower_off_bed_error() const;
     const WipeTowerData&        wipe_tower_data(size_t filaments_cnt = 0) const;
+
+    // Per-object prime towers (see ObjectTowerPlan).
+    // The plate asks for them: printed by object, more than one printed copy, prime_tower_per_object on and the prime
+    // tower kept on by normalize_fdm_2 (more than one filament, no spiral vase), no smooth timelapse.
+    // has_wipe_tower() (the plate tower) is false on such a plate, as it was when normalize turned the tower off.
+    bool                        object_towers_requested() const;
+    // Why a plate that asks for them gets none (a feature that does not combine with them); empty when none.
+    std::string                 object_towers_unsupported_reason() const;
+    bool                        object_tower_mode() const { return this->object_towers_requested() && this->object_towers_unsupported_reason().empty(); }
+    // Where the towers go (empty unless object_tower_mode()). Model geometry and config only: the same before slicing.
+    ObjectTowerPlan             plan_object_towers() const;
+    // At least one tower was generated (process(), psWipeTower).
+    bool                        has_object_wipe_towers() const { return !m_object_wipe_towers.empty(); }
+    const std::vector<std::unique_ptr<ObjectWipeTower>> &object_wipe_towers() const { return m_object_wipe_towers; }
+    // The tower generated for that copy, or null.
+    const ObjectWipeTower      *object_wipe_tower(const PrintInstance *instance) const;
+    // The towers' used filament and tool changes summed (the plate statistics of a print with object towers).
+    const WipeTowerData        &object_tower_statistics() const { return m_object_tower_statistics; }
+    // Printed copies on the plate (what normalize_fdm_2 counts as objects).
+    size_t                      printed_copies_count() const;
     // Re-run clearance with current instance / tower / z_offset / toolhead values and
     // copy the matching TCR into wipe_tower_data().final_purge. Safe when the tower
     // step was skipped (N2: drag object or tower, change clearance, change z_offset).
@@ -1742,6 +1835,8 @@ public:
 
     // Return 4 wipe tower corners in the world coordinates (shifted and rotated), including the wipe tower brim.
     Points first_layer_wipe_tower_corners(bool check_wipe_tower_existance=true) const;
+    // Per-object prime towers: each generated tower's first-layer outline (brim included), on the bed (plate origin added).
+    std::vector<Points> object_towers_first_layer_corners() const;
 
     //SoftFever
     bool &is_BBL_printer() { return m_isBBLPrinter; }
@@ -1808,6 +1903,12 @@ private:
     //   in the by-object plan, keeps its tower-only layers in data.virtual_support_layers, and leaves the plate's fake
     //   tower and final purge alone. Nothing calls it this way yet.
     void                _make_wipe_tower(WipeTowerData &data, const PrintInstance *inst, const Vec2d &pos);
+    // Per-object prime towers: generate one tower per towered copy of the plan into m_object_wipe_towers (psWipeTower).
+    // notices: raise the copies printed without a tower as a warning of the active step (none is active between steps).
+    void                make_object_wipe_towers(bool notices = true);
+    // What the object towers were generated from (placements, print order, chained first filaments); a change re-runs
+    // psWipeTower, which moving a copy alone does not invalidate.
+    std::string         object_towers_signature() const;
     // The plate tower's position, the left front corner (wipe_tower_x / wipe_tower_y of this plate).
     Vec2d               plate_wipe_tower_position() const;
     void                finalize_first_layer_convex_hull();
@@ -1835,6 +1936,11 @@ private:
     // Print by object: see ByObjectPlan. Rebuilt by every process() call, cleared in clear().
     ByObjectPlan                                            m_by_object_plan;
     mutable size_t                                          m_by_object_plan_misses { 0 };
+    // Per-object prime towers: the generated towers, what they were generated from, and their summed statistics.
+    std::vector<std::unique_ptr<ObjectWipeTower>>           m_object_wipe_towers;
+    std::string                                             m_object_towers_signature;
+    ToolOrdering                                            m_object_tower_statistics_ordering;
+    WipeTowerData                                           m_object_tower_statistics { m_object_tower_statistics_ordering };
     // EdgeSlicer: support_interface_nozzle_temperature resolved per filament (apply()).
     SupportInterfaceTemperatures                            m_support_interface_temperatures;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.

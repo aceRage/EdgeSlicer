@@ -253,6 +253,7 @@
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Support/StabilizerBake.hpp"
+#include "libslic3r/Support/Fins.hpp"
 #include "nlohmann/json.hpp"
 
 #include "PhysicalPrinterDialog.hpp"
@@ -16739,6 +16740,13 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     Print::ApplyStatus invalidated = background_process.apply(this->model, wxGetApp().preset_bundle->full_config());
     notify_filament_compatibility_after_apply();
 
+    // Per-object prime towers (PR 5): re-plan the current plate's towers for the 3D view while nothing slices (the plan
+    // reads the Print's objects, which slicing writes to), and redraw the scene when they changed.
+    if (printer_technology == ptFFF && !background_process.running()) {
+        if (PartPlate *plate = this->partplate_list.get_curr_plate(); plate != nullptr && plate->update_object_tower_previews())
+            return_state |= UPDATE_BACKGROUND_PROCESS_REFRESH_SCENE;
+    }
+
     if ((invalidated == Print::APPLY_STATUS_CHANGED) || (invalidated == Print::APPLY_STATUS_INVALIDATED))
         // BBS: add only gcode mode
         q->set_only_gcode(false);
@@ -26074,6 +26082,22 @@ static void warn_live_stabilizers_dropped(NotificationManager *notifications, co
                list));
 }
 
+// Support fins are EdgeSlicer-only settings too: say which objects lose them in a Bambu Studio export.
+static void warn_live_fins_dropped(NotificationManager *notifications, const Model &model)
+{
+    const std::vector<std::string> names =
+        fins::objects_with_live_fins(model, wxGetApp().preset_bundle->prints.get_edited_preset().config);
+    if (names.empty() || notifications == nullptr)
+        return;
+    std::string list;
+    for (size_t i = 0; i < names.size() && i < 3; ++i)
+        list += (i == 0 ? "\"" : ", \"") + names[i] + "\"";
+    if (names.size() > 3)
+        list += " " + format(_u8L("and %1% more"), names.size() - 3);
+    notifications->push_plater_warning_notification(
+        format(_u8L("The support fins of %1% are EdgeSlicer settings and were left out, so Bambu Studio will not print them."), list));
+}
+
 void Plater::export_bambu_3mf()
 {
     wxString path = p->get_export_file(FT_3MF);
@@ -26091,6 +26115,7 @@ void Plater::export_bambu_3mf()
     p->notification_manager->push_notification(NotificationType::CustomNotification,
                                                NotificationManager::NotificationLevel::RegularNotificationLevel, into_u8(msg));
     warn_live_stabilizers_dropped(p->notification_manager.get(), p->model);
+    warn_live_fins_dropped(p->notification_manager.get(), p->model);
 }
 
 // "Bambu Connect is not installed" (or could not be opened): a link to Bambu's own page, nothing else.
@@ -26196,6 +26221,7 @@ void Plater::export_and_open_in_bambu_studio()
     p->notification_manager->push_notification(NotificationType::CustomNotification,
                                                NotificationManager::NotificationLevel::RegularNotificationLevel, into_u8(msg));
     warn_live_stabilizers_dropped(p->notification_manager.get(), p->model);
+    warn_live_fins_dropped(p->notification_manager.get(), p->model);
 
     // The export succeeded regardless of what happens below - never turn a launch problem into
     // an export failure.
@@ -30345,8 +30371,7 @@ void Plater::split_by_color()
     // A painting gizmo owns the very paint this action is about to consume - and its own undo stack.
     if (const GLCanvas3D *canvas = canvas3D()) {
         const GLGizmosManager::EType gizmo = canvas->get_gizmos_manager().get_current_type();
-        if (gizmo == GLGizmosManager::FdmSupports || gizmo == GLGizmosManager::Seam ||
-            gizmo == GLGizmosManager::FuzzySkin || gizmo == GLGizmosManager::MmSegmentation) {
+        if (GLGizmosManager::owns_mesh_annotations(gizmo)) {
             get_notification_manager()->push_plater_warning_notification(_u8L("Close the painting tool before splitting by colour."));
             return;
         }

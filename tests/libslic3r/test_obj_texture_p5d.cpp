@@ -1,6 +1,7 @@
 // ImageMap Phase 5d: a textured OBJ (mtl map_Kd) is painted from its texture, the way a GLB is.
 //
 // Spec: docs/superpowers/specs/2026-10-16-imagemap-phase5-completion.md, criterion K.
+#include <edge_test_scratch.hpp>
 #include <catch2/catch.hpp>
 
 #include <boost/filesystem.hpp>
@@ -70,7 +71,7 @@ ObjImportColorFn nearest_of_four()
 
 boost::filesystem::path make_case_dir(const char *name, const char *map_kd)
 {
-    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / "snorca_tests" / name;
+    const boost::filesystem::path dir = edge_test::snorca_tests_dir() / name;
     boost::filesystem::create_directories(dir);
     write_text(dir / "cube.obj", kCubeObj);
     write_text(dir / "cube.mtl", std::string("newmtl tex\nKd 0.8 0.8 0.8\nmap_Kd ") + map_kd + "\n");

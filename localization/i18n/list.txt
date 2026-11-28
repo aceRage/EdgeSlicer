@@ -223,6 +223,9 @@ src/slic3r/GUI/RemoteSend.cpp
 src/slic3r/Utils/ElegooLink.cpp
 src/slic3r/GUI/Gizmos/GLGizmoSplitToFit.cpp
 src/slic3r/GUI/Jobs/SplitToFitJob.cpp
+src/slic3r/GUI/Gizmos/GLGizmoPaintSplit.cpp
+src/slic3r/GUI/Jobs/PaintSplitJob.cpp
+src/libslic3r/PaintSplit.cpp
 src/slic3r/GUI/PluginPermissionValidation.cpp
 src/slic3r/GUI/PluginsInspectorLogic.cpp
 src/slic3r/GUI/PluginsInspectorDialog.cpp

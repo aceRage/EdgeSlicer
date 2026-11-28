@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp
 	test_bambu_parity_infill_retraction.cpp
+	test_bambu_parity_orca_package5.cpp
 	test_bambu_ui_keys.cpp
 	test_settings_view.cpp
 	test_bambu_nil_override.cpp
@@ -97,6 +98,7 @@ add_executable(${_TEST_NAME}_tests
 	test_height_colour_pattern.cpp
 	test_height_pattern_input.cpp
 	test_cut_paint.cpp
+	test_paint_split.cpp
 	test_paint_transfer_cut.cpp
 	test_paint_transfer_boolean.cpp
 	test_repair_paint.cpp

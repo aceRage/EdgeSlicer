@@ -30,7 +30,8 @@ enum class PainterGizmoType {
     SEAM,
     MM_SEGMENTATION,
     FUZZY_SKIN,
-    TEXTURE_DISPLACEMENT
+    TEXTURE_DISPLACEMENT,
+    PAINT_SPLIT
 };
 
 class TriangleSelectorGUI : public TriangleSelector {
@@ -240,7 +241,8 @@ protected:
     // that is not one FacetsAnnotation per volume, and then every stroke is taken as a change.
     virtual const FacetsAnnotation *painted_facets(const ModelVolume &mv) const { return nullptr; }
     // Whether the selectors hold paint the model does not have yet, i.e. whether a stroke changed anything.
-    bool paint_differs_from_model() const;
+    // Virtual for Paint Split, whose selection is not volume paint and is compared with its own archive.
+    virtual bool paint_differs_from_model() const;
 
     virtual ColorRGBA get_cursor_sphere_left_button_color() const  { return { 0.0f, 0.0f, 1.0f, 0.25f }; }
     virtual ColorRGBA get_cursor_sphere_right_button_color() const { return { 1.0f, 0.0f, 0.0f, 0.25f }; }

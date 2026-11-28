@@ -7,10 +7,14 @@
 #include "format.hpp"
 
 #include "GCode/Thumbnails.hpp"
+#include "GCode/WipeTowerEstimate.hpp"
 #include "Format/BambuKeyAliases.hpp"
 #include "ToolSlots.hpp"
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <set>
+#include <sstream>
 #include <string_view>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/case_conv.hpp>
@@ -479,6 +483,13 @@ static const t_config_enum_values s_keys_map_StabilizerMode = {
     { "manual", smManual }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(StabilizerMode)
+
+static const t_config_enum_values s_keys_map_SupportFinsMode = {
+    { "off",     sfmOff     },
+    { "auto",    sfmAuto    },
+    { "painted", sfmPainted }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportFinsMode)
 
 // Bambu Studio 02.09.01.70 PrintConfig.cpp:929-942.
 static const t_config_enum_values s_keys_map_ReduceInfillRetractionMode = {
@@ -3208,6 +3219,25 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 2. });
 
+    // Orca #12688 / Bambu Studio 02.09.01.70: the flow cap fitted from layer height and line width.
+    // Off by default; the stock presets all carry 0. Bambu shows it as an Advanced line; Orca keeps it in
+    // developer mode with the note below. Stored per flow variant, like filament_max_volumetric_speed.
+    def = this->add("filament_adaptive_volumetric_speed", coBools);
+    def->label = L("Adaptive volumetric speed");
+    def->tooltip = L("When enabled, the extrusion flow is limited by the smaller of "
+        "the fitted value (calculated from line width and layer height) and the user-defined maximum flow."
+        " When disabled, only the user-defined maximum flow is applied.\n\n"
+        "Note: Experimental and incomplete feature imported from BBS. Functional for some profiles that already have the variable saved.");
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionBoolsNullable {false});
+
+    // Six coefficients "a b c d e f" of f(h, w) = a*h^2 + b*w^2 + c*h*w + d*h + e*w + f, in mm3/s, for layer
+    // height h and line width w. Written by Bambu's calibration; empty or all zero means no fit.
+    def        = this->add("volumetric_speed_coefficients", coStrings);
+    def->label = L("Max volumetric speed multinomial coefficients");
+    def->set_default_value(new ConfigOptionStrings{""});
+
     // BBS: per-filament flush settings (Bambu Studio PrintConfig.cpp 2547-2575). GCode.cpp turns them
     // into the flush_temperatures / flush_volumetric_speeds placeholders of the BBL change_filament
     // and machine_start templates (M620.10 ... T<temp> / F<speed>, M620.11 ... F<speed>). Nullable
@@ -5435,6 +5465,18 @@ void PrintConfigDef::init_fff_params()
     def->tooltip=L("Enable this if printer support air filtration\nG-code command: M106 P3 S(0-255)");
     def->mode=comDevelop;
     def->set_default_value(new ConfigOptionBool(true));
+
+    // Orca #14685 / Bambu Studio 02.09.01.70: printer capability flag that switches the accessory UI between
+    // air filtration and the cooling filter (the two share one duct, a printer has one or the other).
+    def = this->add("support_cooling_filter", coBool);
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("cooling_filter_enabled", coBool);
+    def->label = L("Use cooling filter");
+    def->tooltip = L("Enable this if the printer supports a cooling filter");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("gcode_flavor", coEnum);
     def->label = L("G-code flavor");
@@ -9554,6 +9596,116 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipRectilinear));
 
+    // Support fins (Support/Fins.hpp). The fin keys share OrcaSlicer PR #15839's support_fin_* names where the
+    // meaning is the same (thickness, height, spacing, tine spacing and depth, base rows, lean side only), so a
+    // later upstream merge maps cleanly; the switch, depth and gap are EdgeSlicer's own.
+    def = this->add("support_fins", coEnum);
+    def->label = L("Support fins");
+    def->category = L("Support");
+    def->tooltip = L("Thin breakaway walls that stand on the build plate beside a part printed tilted onto an edge or a "
+                     "corner, with one-layer tines that bridge the gap and fuse into the part every few millimetres, "
+                     "so the part cannot tip away from them. Printed with the support filament, speed and line width; "
+                     "Enable supports does not need to be on. Not with a raft.\n\n"
+                     "Off: no fins.\n"
+                     "Auto: fins on the side the part leans to (both sides when it is balanced on its edge), plus any "
+                     "fin spots painted with the support painting tool.\n"
+                     "Painted: only the painted fin spots.");
+    def->enum_keys_map = &ConfigOptionEnum<SupportFinsMode>::get_enum_values();
+    def->enum_values.push_back("off");
+    def->enum_values.push_back("auto");
+    def->enum_values.push_back("painted");
+    def->enum_labels.push_back(L("Off"));
+    def->enum_labels.push_back(L("Auto"));
+    def->enum_labels.push_back(L("Painted"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<SupportFinsMode>(sfmOff));
+
+    def = this->add("support_fin_thickness", coFloat);
+    def->label = L("Fin thickness");
+    def->category = L("Support");
+    def->tooltip = L("Thickness of each fin wall. Fins get a wider foot on their first millimetre.");
+    def->sidetext = L("mm");
+    def->min = 0.4;
+    def->max = 10.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.2));
+
+    def = this->add("support_fin_depth", coFloat);
+    def->label = L("Fin depth");
+    def->category = L("Support");
+    def->tooltip = L("How far a fin reaches out from the part on the build plate. Deeper fins stand steadier.");
+    def->sidetext = L("mm");
+    def->min = 1.;
+    def->max = 100.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(8.));
+
+    def = this->add("support_fin_height", coFloat);
+    def->label = L("Fin height");
+    def->category = L("Support");
+    def->tooltip = L("Fins are generated up to this height above the bed. Set to 0 to generate them up to the height of "
+                     "the part's centre of mass.");
+    def->sidetext = L("mm");
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("support_fin_spacing", coFloat);
+    def->label = L("Fin spacing");
+    def->category = L("Support");
+    def->tooltip = L("Largest distance between neighbouring fins along the part. A part shorter than half of it gets one fin "
+                     "in the middle, a longer one a fin near each end and more between them.");
+    def->sidetext = L("mm");
+    def->min = 2.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(15.));
+
+    def = this->add("support_fin_gap", coFloat);
+    def->label = L("Fin gap");
+    def->category = L("Support");
+    def->tooltip = L("Space between a fin and the part, beside it and under it. Only the tines cross it.");
+    def->sidetext = L("mm");
+    def->min = 0.1;
+    def->max = 2.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.2));
+
+    def = this->add("support_fin_tine_spacing", coFloat);
+    def->label = L("Tine spacing");
+    def->category = L("Support");
+    def->tooltip = L("Vertical distance between tines. A tine is a one-layer bead that bridges the gap and fuses the fin "
+                     "to the part, always on one of the part's own layers.");
+    def->sidetext = L("mm");
+    def->min = 0.5;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(3.));
+
+    def = this->add("support_fin_tine_depth", coFloat);
+    def->label = L("Tine depth");
+    def->category = L("Support");
+    def->tooltip = L("How far a tine reaches into the part. Deeper tines hold better but leave a larger mark after removal.");
+    def->sidetext = L("mm");
+    def->min = 0.;
+    def->max = 2.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.3));
+
+    def = this->add("support_fin_tine_base_rows", coBool);
+    def->label = L("Extra tines near the bed");
+    def->category = L("Support");
+    def->tooltip = L("Tines on every other layer up to 2 mm above the bed, where the part is least stable, before the "
+                     "tine spacing takes over.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("support_fin_lean_side_only", coBool);
+    def->label = L("Lean side only");
+    def->category = L("Support");
+    def->tooltip = L("Only generate fins on the side the part leans to (where its centre of mass lies beyond its bed "
+                     "contact). A part balanced on its edge gets fins on both sides either way.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
     // FDM hollowing: an even-thickness shell around an empty cavity (FDMHollowing.hpp).
     def = this->add("hollow_interior", coBool);
     def->label = L("Hollow interior");
@@ -10056,6 +10208,42 @@ void PrintConfigDef::init_fff_params()
                      "of the print. Requires the prime tower.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    // Per-object prime towers (tests/design_per_object_prime_towers.md, PR 3): print by object with more than one copy
+    // turns the prime tower off (normalize_fdm_2). With this on, a Bambu-style (Type 1) tower stays on and every copy
+    // that changes filament gets its own small tower beside it, printed inside that copy's block.
+    def = this->add("prime_tower_per_object", coBool);
+    def->label = L("Prime tower per object");
+    def->tooltip = L("With print sequence By object, give each multi-colour object its own small prime tower beside it, "
+                     "printed with that object. At most 2 towers per plate.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // Per-object prime towers, PR 5: the object setting that drops one object's tower (design D13), and where the user
+    // dragged a tower (offset from the copy's bounding-box centre to the tower's front left corner; 0, 0 is automatic).
+    def = this->add("object_prime_tower", coBool);
+    def->label = L("Prime tower for this object");
+    def->category = L("Support");
+    def->tooltip = L("With Prime tower per object on, this object gets its own prime tower. Turn it off for an object "
+                     "whose colour changes need no priming.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("prime_tower_offset_x", coFloat);
+    def->label = L("Prime tower offset X");
+    def->tooltip = L("Where this object's prime tower was moved to, from the object's centre. 0 places it automatically.");
+    def->sidetext = L("mm");
+    def->mode = comDevelop;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("prime_tower_offset_y", coFloat);
+    def->label = L("Prime tower offset Y");
+    def->tooltip = L("Where this object's prime tower was moved to, from the object's centre. 0 places it automatically.");
+    def->sidetext = L("mm");
+    def->mode = comDevelop;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
     def = this->add("flush_volumes_vector", coFloats);
     // BBS: remove _L()
@@ -11910,6 +12098,9 @@ const std::vector<std::string>& filament_flow_variant_options()
         "nozzle_temperature_initial_layer",
         "nozzle_temperature",
         "filament_max_volumetric_speed",
+        // Orca #12688 / BBS: the fitted flow cap is stored per variant slot too.
+        "filament_adaptive_volumetric_speed",
+        "volumetric_speed_coefficients",
         "fan_min_speed",
         "fan_max_speed",
         "additional_cooling_fan_speed",
@@ -12498,6 +12689,40 @@ bool ResolvedFilamentFlow::uncached_enable_pressure_advance(const ConfigBase &co
     return get_value_at(config, *opt, ConfigFlowDomain::Filament, filament_id);
 }
 
+double VolumetricSpeedFit::max_volumetric_speed(double layer_height, double line_width) const
+{
+    if (!valid)
+        return std::numeric_limits<double>::max();
+    const double x = layer_height;
+    const double y = line_width;
+    return c[0] * x * x + c[1] * y * y + c[2] * x * y + c[3] * x + c[4] * y + c[5];
+}
+
+VolumetricSpeedFit parse_volumetric_speed_coefficients(const std::string &coefficients)
+{
+    VolumetricSpeedFit fit;
+    std::istringstream ss(coefficients);
+    std::string        token;
+    size_t             count = 0;
+    while (ss >> token) {
+        if (count == 6)
+            return {}; // seven or more numbers: not a fit
+        try {
+            size_t used = 0;
+            const double v = std::stod(token, &used);
+            if (used != token.size() || !std::isfinite(v))
+                return {};
+            fit.c[count++] = v;
+        } catch (...) {
+            return {};
+        }
+    }
+    if (count != 6 || std::all_of(std::begin(fit.c), std::end(fit.c), [](double v) { return v == 0.; }))
+        return {};
+    fit.valid = true;
+    return fit;
+}
+
 ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
 {
     ResolvedFilamentFlow out;
@@ -12524,6 +12749,26 @@ ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
             out.process_extruder_idx.reserve(count);
             for (size_t i = 0; i < count; ++i)
                 out.process_extruder_idx.push_back(Slic3r::process_config_idx(config, out.process_layout_size, static_cast<unsigned int>(i)));
+        }
+    }
+    // Orca #12688: adaptive volumetric speed. Nil (inherit) reads as off; only a filament that turned it on and
+    // has a usable fit gets an entry.
+    {
+        const auto *adaptive = config.option<ConfigOptionBoolsNullable>("filament_adaptive_volumetric_speed");
+        const auto *coeffs   = config.option<ConfigOptionStrings>("volumetric_speed_coefficients");
+        if (adaptive != nullptr && coeffs != nullptr && !adaptive->values.empty() && !coeffs->values.empty()) {
+            const size_t                    n = flow_variant_filament_count(config);
+            std::vector<VolumetricSpeedFit> fits(n);
+            bool                            any = false;
+            for (size_t i = 0; i < n; ++i) {
+                const size_t idx = get_config_idx(config, ConfigFlowDomain::Filament, static_cast<unsigned int>(i));
+                if (adaptive->is_nil(idx) || !adaptive->get_at(idx))
+                    continue;
+                fits[i] = parse_volumetric_speed_coefficients(coeffs->get_at(idx));
+                any |= fits[i].valid;
+            }
+            if (any)
+                out.adaptive_fit = std::move(fits);
         }
     }
     const auto *ratio   = config.option<ConfigOptionFloats>("filament_flow_ratio");
@@ -13253,6 +13498,21 @@ void DynamicPrintConfig::normalize_fdm_1()
     return;
 }
 
+bool DynamicPrintConfig::keeps_object_prime_towers(const ConfigBase &config, int num_copies, int used_filaments)
+{
+    if (num_copies < 2 || used_filaments < 2)
+        return false;
+    const ConfigOption *per_object = config.option("prime_tower_per_object");
+    if (per_object == nullptr || !per_object->getBool())
+        return false;
+    const ConfigOption *sequence = config.option("print_sequence");
+    if (sequence == nullptr || PrintSequence(sequence->getInt()) != PrintSequence::ByObject)
+        return false;
+    // Both tower types build per-object towers: Type 1 (Bambu Lab) and, since PR 4, Type 2 (U1, Voron, Prusa MMU).
+    const ConfigOption *spiral = config.option("spiral_mode");
+    return spiral == nullptr || !spiral->getBool();
+}
+
 t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int used_filaments)
 {
     t_config_option_keys changed_keys;
@@ -13264,7 +13524,8 @@ t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int us
         // as ConfigOptionEnumGeneric, where a typed downcast would be UB.
         const bool by_object = this->has("print_sequence") && this->opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject;
         const bool is_smooth_timelapse = this->has("timelapse_type") && this->opt_enum<TimelapseType>("timelapse_type") == TimelapseType::tlSmooth;
-        if (!is_smooth_timelapse && (used_filaments == 1 || (by_object && num_objects > 1))) {
+        if (!is_smooth_timelapse && (used_filaments == 1 || (by_object && num_objects > 1 &&
+                                                              !keeps_object_prime_towers(*this, num_objects, used_filaments)))) {
             if (ept_opt->value) {
                 ept_opt->value = false;
                 changed_keys.push_back("enable_prime_tower");

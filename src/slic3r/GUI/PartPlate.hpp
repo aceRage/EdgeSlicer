@@ -86,6 +86,34 @@ bool wipe_tower_rotation_supported();
 // Safe in the CLI.
 double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config);
 
+// Per-object prime towers (PR 5 of tests/design_per_object_prime_towers.md): one tower the plate's Print planned, as the
+// 3D view draws it (ObjectTowerPlacement copied out of the Print, whose PrintInstances the GUI must not keep). Taken
+// right after the background apply, while no slicing runs; the 3D view moves it along with its copy until the next.
+struct ObjectTowerPreview
+{
+    // The copy it belongs to: the plater's ModelInstance (the Print's copy of the model keeps the ids).
+    ObjectID instance_id;
+    // The instance's offset when planned; a copy moved since then carries its tower along.
+    Vec3d    instance_offset { 0., 0., 0. };
+    // Plate coordinates: the tower's front left corner (where it prints), and the copy's bounding-box centre that the
+    // object's prime_tower_offset_x/y are measured from.
+    Vec2d    pos { 0., 0. };
+    Vec2d    copy_center { 0., 0. };
+    // placed: a tower prints for the copy (at pos). rejected: dragged where it is not clear, drawn red at requested_pos.
+    bool     placed   = false;
+    bool     rejected = false;
+    Vec2d    requested_pos { 0., 0. };
+    double   width = 0., depth = 0., height = 0., brim_width = 0.;
+
+    bool operator==(const ObjectTowerPreview &rhs) const
+    {
+        return instance_id == rhs.instance_id && instance_offset == rhs.instance_offset && pos == rhs.pos && copy_center == rhs.copy_center &&
+               placed == rhs.placed && rejected == rhs.rejected && requested_pos == rhs.requested_pos && width == rhs.width &&
+               depth == rhs.depth && height == rhs.height && brim_width == rhs.brim_width;
+    }
+    bool operator!=(const ObjectTowerPreview &rhs) const { return !(*this == rhs); }
+};
+
 // Orca #16728: what estimate_wipe_tower_polygon did to a saved tower position that no longer fits.
 struct WipeTowerRelocation
 {
@@ -135,6 +163,8 @@ private:
     float m_slice_percent;
 
     Print *m_print; //Print reference, not own it, no need to serialize
+    // Per-object prime towers as last planned (not serialized; see ObjectTowerPreview).
+    std::vector<ObjectTowerPreview> m_object_tower_previews;
     GCodeProcessorResult *m_gcode_result;
     std::vector<FilamentInfo> slice_filaments_info;
     int m_print_index;
@@ -561,6 +591,11 @@ public:
     void update_slice_context(BackgroundSlicingProcess& process);
     //return the fff print object
     Print* fff_print() { return m_print; }
+    // Per-object prime towers: re-plan from this plate's Print (call only while it is not slicing, right after apply);
+    // true when the towers changed. The towers in plan order: a tower's index is its slot in its 3D view id.
+    bool update_object_tower_previews();
+    const std::vector<ObjectTowerPreview> &object_tower_previews() const { return m_object_tower_previews; }
+    std::vector<ObjectTowerPreview>       &object_tower_previews() { return m_object_tower_previews; }
     //return the slice result
     GCodeProcessorResult* get_slice_result() { return m_gcode_result; }
 
