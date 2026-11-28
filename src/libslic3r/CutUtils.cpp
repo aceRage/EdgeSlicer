@@ -2535,8 +2535,203 @@ const ModelObjectPtrs& Cut::perform_with_cutter_solid(const indexed_triangle_set
     return m_model.objects;
 }
 
+const ModelObjectPtrs& Cut::perform_paint_split_one_pass(const PaintSplitKeep& keep, PaintSplitReport* report)
+{
+    PaintSplitReport  local_report;
+    PaintSplitReport& rep = report != nullptr ? *report : local_report;
+    rep                   = PaintSplitReport();
+    const auto t_start    = std::chrono::steady_clock::now();
+    auto refuse = [this, &rep](PaintSplitError err) -> const ModelObjectPtrs& {
+        BOOST_LOG_TRIVIAL(error) << "Cut::perform_paint_split_one_pass - refused: " << paint_split_error_message(err);
+        rep.error = err;
+        m_model.clear_objects();
+        return m_model.objects;
+    };
+    if (m_model.objects.empty() || keep.region == nullptr || keep.components.empty())
+        return refuse(PaintSplitError::EmptyMask);
+    for (size_t k = 0; k < keep.components.size(); ++k)
+        if (!keep.region->component_ok(keep.components[k])) {
+            rep.bad_index = int(k);
+            return refuse(keep.region->error != PaintSplitError::None ? keep.region->error : PaintSplitError::BadComponent);
+        }
+    ModelObject* mo = m_model.objects.front();
+    if (keep.mask_volume_idx < 0 || size_t(keep.mask_volume_idx) >= mo->volumes.size() ||
+        !mo->volumes[size_t(keep.mask_volume_idx)]->is_model_part())
+        return refuse(PaintSplitError::BadComponent);
+
+    const auto           instance_matrix    = mo->instances[m_instance]->get_transformation().get_matrix_no_offset();
+    const Transformation cut_transformation = Transformation(m_cut_matrix);
+    const Transform3d    inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
+    auto mesh_in_cut_frame = [&](const ModelVolume* volume) {
+        TriangleMesh mesh(volume->mesh());
+        mesh.transform(inverse_cut_matrix * instance_matrix * volume->get_matrix(), true);
+        return mesh;
+    };
+
+    // The masked part first: a refusal must leave nothing cloned.
+    const ModelVolume*    mask_volume = mo->volumes[size_t(keep.mask_volume_idx)];
+    const TriangleMesh    mask_mesh   = mesh_in_cut_frame(mask_volume);
+    PaintSplitMultiPieces pieces      = paint_split_assign_nearest_multi(mask_mesh.its, *keep.region, keep.components, keep.skin, keep.claims);
+    if (!pieces.ok()) {
+        rep.bad_index = pieces.bad_index;
+        return refuse(pieces.error);
+    }
+    const size_t n           = pieces.pieces.size();
+    rep.returned_components  = pieces.returned_components;
+    rep.loose_parts          = int(pieces.loose.size());
+    rep.warnings             = pieces.warnings;
+    rep.times                = pieces.total;
+    rep.region_times         = pieces.times;
+    rep.region_piece_volume  = pieces.piece_volume;
+    rep.claims_reused        = pieces.claims_reused;
+    rep.body_volume          = pieces.body_volume;
+    rep.loose_volume         = pieces.loose_volume;
+    for (double v : pieces.piece_volume)
+        rep.piece_volume += v;
+    if (!pieces.claims.empty())
+        rep.claim = pieces.claims.front();
+
+    // E10 / D30: the mask part's pieces painted by facet provenance, uncut parts verbatim; the rest by finalize().
+    double                          paint_s = 0.;
+    std::vector<const ModelVolume*> exact_parts;
+    if (keep.exact_paint)
+        for (const ModelVolume* v : mo->volumes)
+            if (exact_cut_paint(*v, instance_matrix, m_attributes))
+                exact_parts.push_back(v);
+    auto is_exact = [&exact_parts](const ModelVolume* v) { return std::find(exact_parts.begin(), exact_parts.end(), v) != exact_parts.end(); };
+    std::vector<std::vector<int>> piece_maps(n), loose_maps(pieces.loose.size());
+    std::vector<int>              body_map;
+    if (is_exact(mask_volume)) {
+        const auto                        t0 = std::chrono::steady_clock::now();
+        const PaintTransfer::FacetMatcher matcher(mask_mesh.its);
+        for (size_t k = 0; k < n; ++k)
+            piece_maps[k] = paint_split_facet_map(matcher, pieces.pieces[k], pieces.pieces_from_source[k], rep);
+        body_map = paint_split_facet_map(matcher, pieces.body, pieces.body_from_source, rep);
+        for (size_t k = 0; k < pieces.loose.size(); ++k)
+            loose_maps[k] = paint_split_facet_map(matcher, pieces.loose[k], pieces.loose_from_source[k], rep);
+        rep.exact_paint = true;
+        paint_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
+    const SavedPaintings saved_paintings = save_paintings(mo, exact_parts);
+
+    const bool                as_parts = m_attributes.has(ModelObjectCutAttribute::KeepAsParts);
+    std::vector<ModelObject*> piece_objs(as_parts ? 1 : n, nullptr);
+    for (ModelObject*& o : piece_objs)
+        mo->clone_for_cut(&o);
+    ModelObject* lower{ nullptr };
+    if (!as_parts)
+        mo->clone_for_cut(&lower);
+    // Where a mesh of the cut frame goes: as parts everything into the one object, the body marked as from lower.
+    auto add_to = [&](TriangleMesh& mesh, const ModelVolume* src, int piece, const std::string& suffix) {
+        const Transform3d pre = cut_pre_transform(m_cut_matrix, instance_matrix, src);
+        ModelObject*      dst = as_parts ? piece_objs.front() : piece >= 0 ? piece_objs[size_t(piece)] : lower;
+        ModelVolume*      vol = add_cut_volume(mesh, dst, src, m_cut_matrix, suffix, ModelVolumeType::MODEL_PART, &pre);
+        if (vol != nullptr && as_parts && piece < 0)
+            vol->cut_info.is_from_upper = false;
+        return vol;
+    };
+    auto carry_exact = [&](ModelVolume* volume, const std::vector<std::pair<ModelVolume*, const std::vector<int>*>>& targets) {
+        const auto t0 = std::chrono::steady_clock::now();
+        carry_cut_painting(*volume, instance_matrix * volume->get_matrix(), targets);
+        volume->reset_extra_facets();
+        paint_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    };
+
+    for (size_t vi = 0; vi < mo->volumes.size(); ++vi) {
+        ModelVolume* volume = mo->volumes[vi];
+        const bool   exact  = is_exact(volume);
+        if (!exact)
+            volume->reset_extra_facets();
+        if (!volume->is_model_part()) {
+            volume->set_transformation(Transformation(instance_matrix * volume->get_matrix()));
+            for (ModelObject* o : piece_objs)
+                o->add_volume(*volume);
+            if (lower != nullptr)
+                lower->add_volume(*volume);
+            continue;
+        }
+        if (volume->mesh().empty())
+            continue;
+        if (int(vi) == keep.mask_volume_idx) {
+            std::vector<std::pair<ModelVolume*, const std::vector<int>*>> targets;
+            for (size_t k = 0; k < n; ++k) {
+                TriangleMesh piece(pieces.pieces[k]);
+                targets.emplace_back(add_to(piece, volume, int(k), as_parts ? "_A" + std::to_string(k + 1) : std::string()),
+                                     piece_maps[k].empty() ? nullptr : &piece_maps[k]);
+            }
+            TriangleMesh body(pieces.body);
+            targets.emplace_back(add_to(body, volume, -1, as_parts ? "_B" : std::string()), body_map.empty() ? nullptr : &body_map);
+            for (size_t k = 0; k < pieces.loose.size(); ++k) {
+                TriangleMesh loose(pieces.loose[k]);
+                targets.emplace_back(add_to(loose, volume, -1, "_loose" + std::to_string(k + 1)), loose_maps[k].empty() ? nullptr : &loose_maps[k]);
+            }
+            if (exact)
+                carry_exact(volume, targets);
+            continue;
+        }
+        // D19: another model part is not cut; it goes whole to the piece holding most of it, else to the body.
+        TriangleMesh whole = mesh_in_cut_frame(volume);
+        int          to    = -1;
+        if (!keep.cut_only_painted_part)
+            for (size_t k = 0; k < n && to < 0; ++k)
+                if (paint_split_inside_fraction(whole.its, pieces.pieces[k]) > 0.5)
+                    to = int(k);
+        (to >= 0 ? rep.other_parts_to_piece : rep.other_parts_to_body)++;
+        const size_t nf  = whole.its.indices.size();
+        ModelVolume* vol = add_to(whole, volume, to, std::string());
+        if (exact) {
+            std::vector<int> identity(nf);
+            std::iota(identity.begin(), identity.end(), 0);
+            carry_exact(volume, { { vol, &identity } });
+        }
+    }
+
+    ModelObjectPtrs cut_object_ptrs;
+    if (as_parts) {
+        reset_instance_transformation(piece_objs.front(), m_instance, m_cut_matrix);
+        cut_object_ptrs.push_back(piece_objs.front());
+    } else {
+        auto delete_extra_modifiers = [this](ModelObject* obj) {
+            if (!obj)
+                return;
+            const BoundingBoxf3 obj_bb      = obj->instance_bounding_box(m_instance);
+            const Transform3d   inst_matrix = obj->instances[m_instance]->get_transformation().get_matrix();
+            for (int i = int(obj->volumes.size()) - 1; i >= 0; --i)
+                if (const ModelVolume* vol = obj->volumes[i]; !vol->is_model_part() && !vol->is_cut_connector()) {
+                    auto bb = vol->mesh().transformed_bounding_box(inst_matrix * vol->get_matrix());
+                    if (!obj_bb.intersects(bb))
+                        obj->delete_volume(i);
+                }
+        };
+        for (ModelObject* o : piece_objs)
+            post_process(o, cut_object_ptrs, true, false, false);
+        post_process(lower, cut_object_ptrs, true, false, false);
+        for (ModelObject* o : cut_object_ptrs)
+            delete_extra_modifiers(o);
+        if (cut_object_ptrs.size() != n + 1) {
+            for (ModelObject* o : cut_object_ptrs)
+                m_model.objects.push_back(o); // deleted by refuse()
+            return refuse(PaintSplitError::EmptyBody);
+        }
+    }
+
+    const auto t_fin = std::chrono::steady_clock::now();
+    finalize(cut_object_ptrs, saved_paintings);
+    paint_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_fin).count();
+    rep.times.paint   = paint_s;
+    rep.times.total   = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
+    rep.times.wrapper = std::max(0., rep.times.total - rep.times.engine() - rep.times.paint);
+    BOOST_LOG_TRIVIAL(info) << "Paint split one pass cut: " << n << " piece(s), engine " << rep.times.engine() << " s, wrapper "
+                            << rep.times.wrapper << " s, paint " << rep.times.paint << " s (" << (rep.exact_paint ? "exact" : "remap")
+                            << ": " << rep.paint_copied << " copied, " << rep.paint_resampled << " resampled, " << rep.paint_unpainted
+                            << " on the cut faces)";
+    return m_model.objects;
+}
+
 const ModelObjectPtrs& Cut::perform_with_paint_split_planes(const PaintSplitKeep& keep, PaintSplitReport* report)
 {
+    if (keep.nearest_skin && !keep.components.empty() && !m_model.objects.empty())
+        return perform_paint_split_one_pass(keep, report);
     if ((keep.nearest_skin || !keep.cutters.empty()) && !m_model.objects.empty())
         return perform_with_cutter_solid(indexed_triangle_set(), true, keep, report);
     if (keep.planes.empty() || m_model.objects.empty()) {

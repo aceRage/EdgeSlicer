@@ -98,6 +98,8 @@ set(lisbslic3r_sources
     PaintSplit.cpp
     PaintSplit.hpp
     PaintSplitField.cpp
+    PaintSplitPreview.cpp
+    PaintSplitPreview.hpp
     PaintTransfer.cpp
     PaintTransfer.hpp
     RepairPaint.cpp
