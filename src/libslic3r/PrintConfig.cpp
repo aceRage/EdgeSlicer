@@ -10210,7 +10210,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("prime_tower_per_object", coBool);
     def->label = L("Prime tower per object");
     def->tooltip = L("With print sequence By object, give each multi-colour object its own small prime tower beside it, "
-                     "printed with that object. At most 2 towers per plate.");
+                     "printed with that object. At most 4 towers per plate.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 

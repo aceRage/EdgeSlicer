@@ -1451,7 +1451,9 @@ struct ObjectTowerPlacement
 
 struct ObjectTowerPlan
 {
-    static constexpr size_t max_object_towers = 2;
+    // Owner 2026-11-27: 4 (was 2 in phase 1). Nothing technical caps it lower: the GUI ids leave 64 slots per plate, and
+    // the planner and the arrange (ModelArrange reserve_object_prime_tower) treat any number of units alike.
+    static constexpr size_t max_object_towers = 4;
     // The candidates within the cap, in model list order, placed or not.
     std::vector<ObjectTowerPlacement> towers;
     // One line per copy printed without a tower the user asked for (over the cap, no room), or whose dragged tower is
