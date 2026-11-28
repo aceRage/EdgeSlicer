@@ -1560,6 +1560,10 @@ public:
     // Edge: Plater sets the live AMS inventory in restart_background_process(), after apply(). This installs
     // a pending payload there, the way apply() would. True when the grouping steps were taken back.
     bool install_pending_extruder_filament_info();
+    // Flow variants PR 1: on a mixed-drive grouping machine (X2D) the printer's per-variant retraction values follow
+    // the filament map the grouping computed (ToolOrdering): each filament reads its extruder's slot, then its own
+    // filament overrides. True when a value changed. A no-op on every other printer.
+    bool realign_printer_variants_to_filament_map(const std::vector<int> &filament_map);
     std::unordered_map<int, std::unordered_map<int, double>> get_filament_print_time() const { return m_filament_print_time; }
     void set_filament_print_time(const std::unordered_map<int, std::unordered_map<int, double>>& v) { m_filament_print_time = v; }
     const std::vector<std::set<int>>& get_geometric_unprintable_filaments() const { return m_geometric_unprintable_filaments; }
@@ -1965,6 +1969,11 @@ private:
     // support the slice rewrites m_config.filament_volume_type from the final filament_map (ToolOrdering,
     // BambuFlowSupport::apply_filament_volume_types_from_map); same keep rule as m_filament_map_input.
     std::vector<int>                                      m_filament_volume_type_input;
+    // Flow variants PR 1: the unresolved per-variant printer values (every slot, before
+    // resolve_printer_extruder_variants) of the last apply() on a mixed-drive grouping machine (X2D), else null.
+    // Read by realign_printer_variants_to_filament_map from the slicing thread, hence the mutex.
+    std::shared_ptr<const DynamicPrintConfig>             m_printer_variant_layout;
+    std::mutex                                            m_printer_variant_layout_mutex;
     // Print config keys that differed in the last apply() (diagnostics for the GUI).
     std::vector<std::string>                              m_last_apply_changed_keys;
 

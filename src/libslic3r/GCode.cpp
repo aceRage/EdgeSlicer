@@ -1693,7 +1693,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             toolchange_gcode_str += gcodegen.writer().unlift();
             side_scrape_deretract_pending = true;
         } else
-            toolchange_gcode_str += gcodegen.unretract(side_scrape_extra_unretract);
+            toolchange_gcode_str += gcodegen.unretract(side_scrape_extra_unretract, toolchange_deretract_speed(gcodegen.config(), new_extruder_id));
         check_add_eol(toolchange_gcode_str);
     }
 
