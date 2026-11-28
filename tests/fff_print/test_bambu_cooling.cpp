@@ -127,6 +127,18 @@ std::string first_difference(const std::string &a, const std::string &b)
     return out;
 }
 
+// The line numbers of the lines that start with `prefix`.
+std::vector<size_t> line_numbers_starting(const std::string &gcode, const std::string &prefix)
+{
+    std::istringstream  in(gcode);
+    std::string         line;
+    std::vector<size_t> out;
+    for (size_t n = 0; std::getline(in, line); ++n)
+        if (line.rfind(prefix, 0) == 0)
+            out.push_back(n);
+    return out;
+}
+
 size_t count_lines_starting(const std::string &gcode, const std::string &prefix)
 {
     std::istringstream in(gcode);
@@ -296,7 +308,20 @@ TEST_CASE("The part fan starts before an overhang by the pre-start time", "[Bamb
     INFO(cooled_without << " moves at the overhang fan speed without the pre-start, " << cooled_with << " with it");
     INFO(first_difference(without_config(gcode_with), without_config(gcode_without)));
     REQUIRE(cooled_without > 0);
-    CHECK(cooled_with > cooled_without);
+    CHECK(cooled_with >= cooled_without);
+    // The overhang fan commands move earlier (here to before the travel into the overhang wall that opens a
+    // layer); none is added or lost.
+    const std::vector<size_t> on_with    = line_numbers_starting(without_config(gcode_with), "M106 S255");
+    const std::vector<size_t> on_without = line_numbers_starting(without_config(gcode_without), "M106 S255");
+    REQUIRE(on_with.size() == on_without.size());
+    REQUIRE(! on_with.empty());
+    size_t earlier = 0;
+    for (size_t i = 0; i < on_with.size(); ++i) {
+        CHECK(on_with[i] <= on_without[i]);
+        if (on_with[i] < on_without[i])
+            ++earlier;
+    }
+    CHECK(earlier > 0);
     // Not the whole print: only moves within 2 s before an overhang start early.
     CHECK(extrusions_at_part_fan(gcode_with, 51) > 0);
 }
