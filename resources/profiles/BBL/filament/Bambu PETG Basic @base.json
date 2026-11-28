@@ -42,6 +42,9 @@
     "filament_vendor": [
         "Bambu Lab"
     ],
+    "first_x_layer_fan_speed": [
+        "0"
+    ],
     "hot_plate_temp": [
         "70"
     ],

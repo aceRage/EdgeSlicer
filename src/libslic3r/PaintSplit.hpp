@@ -11,7 +11,9 @@
 #include "TriangleSelector.hpp"
 #include <admesh/stl.h>
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -234,6 +236,23 @@ struct PaintSplitSkinParams
     int    root_iterations{ 4 };      // sparse: regula falsi steps per edge root (0 = linear roots)
     bool   allow_complement{ true };  // sparse: mesh the complement when the selected skin is the larger side
     double simplify{ 0.02 };          // sparse: mm; Manifold collapses the claim's edges that move it less (0 = off)
+    // R2 (owner's R1 hand test, 2026-11-27: "still a bit rough around the skin selection"), sparse only, 0..1 (Advanced,
+    // "Smooth along the skin"). 0 is R1: everything within 1.5 voxels of the skin is pinned and the smoothing reaches
+    // full weight at 3 voxels, so the wall next to the skin keeps every wiggle of the paint line. Above 0 only a thin seam
+    // band (2 near-skin voxels, at least 0.1 mm) is pinned, the smoothing reaches full weight much closer to the skin
+    // (0.5 mm at 1), and extra passes (40 at 1) smooth the finer mesh there. The seam itself stays where it was.
+    double skin_smoothing{ 0.75 };
+    // Tuning of the above (tests and the hidden harness; -1 = from skin_smoothing): the seam band pinned (mm), where
+    // the smoothing reaches full weight (mm from the skin), and the extra passes next to the skin.
+    double skin_pin{ -1. };
+    double skin_ramp{ -1. };
+    int    skin_extra_passes{ -1 };
+    // R2 (E7): these components' selected skin counts as neither side: the claim reaches into their territory, which an
+    // earlier cut of the same pass took already. Their shared wall is then that earlier cut alone (one surface, not two
+    // near-coincident ones). paint_split_assign_nearest_multi() sets it; it is part of a cached claim's key.
+    std::vector<int> exclude_components;
+    // R2 (E5): set from another thread to stop the evaluation; the claim then comes back empty with stats.canceled.
+    const std::atomic<bool>* cancel{ nullptr };
 };
 
 // What evaluating one claim cost and gave (the stage timers, design 8.1 step 0).
@@ -241,6 +260,7 @@ struct PaintSplitClaimStats
 {
     double voxel{ 0. }, near_skin_voxel{ 0. };
     bool   complement{ false };
+    bool   canceled{ false };
     size_t cells{ 0 }, samples{ 0 }, queries{ 0 }, triangles{ 0 };
     size_t simplified{ 0 };           // triangles of the cutter after Manifold's simplify (paint_split_assign_nearest)
     double setup_s{ 0. }, field_s{ 0. }, mesh_s{ 0. }, smooth_s{ 0. };
@@ -251,10 +271,31 @@ struct PaintSplitClaim
     indexed_triangle_set mesh;                // closed, outward
     bool                 complement{ false }; // the mesh is the claim's complement near the part: piece = part - mesh
     PaintSplitClaimStats stats;
+    uint64_t             key{ 0 };            // paint_split_claim_key() of what it was computed from (0 = unknown)
 };
+
+// R2 (E4/E7): a part prepared once for any number of claims and one cut: repaired (when open), hashed, and its
+// "surely outside" flood grid built once per voxel size and shared.
+class PaintSplitOutside; // PaintSplitField.cpp
+struct PaintSplitPart
+{
+    bool                  ok{ false };   // closed (paint_split_repair succeeded)
+    indexed_triangle_set  mesh;          // the closed part: the input, or its repair
+    PaintSplitRepairStats repair;
+    uint64_t              hash{ 0 };     // of `mesh`
+    struct Cache;
+    std::shared_ptr<Cache> cache;        // the flood grids, built on first use (thread-safe)
+};
+PaintSplitPart paint_split_prepare_part(const indexed_triangle_set& mesh);
+// What a claim depends on: the part, the region (its skin and components), the component and every parameter
+// that changes the claim. A cached claim whose key differs is computed again.
+uint64_t paint_split_claim_key(const PaintSplitPart& part, const PaintSplitRegion& region, int comp, const PaintSplitSkinParams& params);
 
 // The cutter of component `comp` (same frame as the region), empty on failure.
 PaintSplitClaim paint_split_nearest_cutter(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
+                                           const PaintSplitSkinParams& params);
+// The same on a prepared part (no repair, the flood grid shared); the claim's key is set.
+PaintSplitClaim paint_split_nearest_cutter(const PaintSplitPart& part, const PaintSplitRegion& region, int comp,
                                            const PaintSplitSkinParams& params);
 // The claim of component `comp` as a closed mesh (never the complement), empty on failure. `voxel_used`
 // receives the voxel size.
@@ -262,6 +303,11 @@ indexed_triangle_set paint_split_nearest_claim(const indexed_triangle_set& mesh,
                                                const PaintSplitSkinParams& params, double* voxel_used = nullptr);
 // The part of the claim's surface that lies inside the part: the cut surface, for the preview.
 indexed_triangle_set paint_split_claim_cut_surface(const indexed_triangle_set& mesh, const indexed_triangle_set& claim);
+// One pass's claims (each computed with the earlier ones excluded): claim k's surface inside the part and outside
+// every earlier claim, so a shared wall is drawn once, where the cut will be.
+std::vector<indexed_triangle_set> paint_split_claim_cut_surfaces(const indexed_triangle_set& mesh,
+                                                                 const std::vector<const PaintSplitClaim*>& claims,
+                                                                 const std::atomic<bool>* cancel = nullptr);
 
 // ---------------------------------------------------------------------------------------------------------
 // The keep-connected rule (design 4.2)
@@ -364,6 +410,38 @@ PaintSplitPieces paint_split_assign_cutters(const indexed_triangle_set& mesh, co
 PaintSplitPieces paint_split_assign_nearest(const indexed_triangle_set& mesh, const PaintSplitRegion& region, int comp,
                                             const PaintSplitSkinParams& skin, const PaintSplitAssignParams& params = {});
 
+// R2 (E7): every component in `comps` in one pass. The part is repaired and imported once; claim k is computed (in
+// parallel) with comps[0..k) excluded, so it reaches into the earlier pieces' territory and its wall against them is
+// the earlier cut alone; piece k is then the rest AND claim k, the rest loses it, and what is left in the end falls
+// into connected pieces: the biggest is the body, the others come back in `loose`. `cached` (optional, one per comps
+// entry, null = compute) are reused when their key matches.
+struct PaintSplitMultiPieces
+{
+    PaintSplitError                   error{ PaintSplitError::None };
+    int                               bad_index{ -1 }; // the comps entry that failed
+    std::vector<indexed_triangle_set> pieces;          // per comps entry
+    std::vector<std::vector<uint8_t>> pieces_from_source;
+    std::vector<double>               piece_volume;
+    indexed_triangle_set              body;
+    std::vector<uint8_t>              body_from_source;
+    std::vector<indexed_triangle_set> loose;
+    std::vector<std::vector<uint8_t>> loose_from_source;
+    double                            body_volume{ 0. }, loose_volume{ 0. }, source_volume{ 0. };
+    int                               returned_components{ 0 };
+    int                               claims_reused{ 0 };
+    std::vector<PaintSplitWarning>    warnings;
+    std::vector<PaintSplitTimes>      times;  // per comps entry: field, mesh, smooth (its claim) and cut (its booleans)
+    std::vector<PaintSplitClaimStats> claims; // per comps entry
+    PaintSplitTimes                   total;  // repair, field..smooth summed, cut = every boolean incl. the rest
+
+    bool ok() const { return error == PaintSplitError::None; }
+};
+PaintSplitMultiPieces paint_split_assign_nearest_multi(const indexed_triangle_set& mesh, const PaintSplitRegion& region,
+                                                       const std::vector<int>& comps, const PaintSplitSkinParams& skin,
+                                                       const std::vector<std::shared_ptr<const PaintSplitClaim>>& cached = {});
+// The parameters claim k of such a pass is computed with (comps[0..k) excluded).
+PaintSplitSkinParams paint_split_pass_params(const PaintSplitSkinParams& skin, const std::vector<int>& comps, size_t k);
+
 // What Cut::perform_with_cutter_solid() needs besides the cutter (design 4.4).
 struct PaintSplitKeep
 {
@@ -380,6 +458,11 @@ struct PaintSplitKeep
     // for bit, a seam-crossed one resampled, the cut face unpainted) and copy uncut parts' painting verbatim,
     // instead of the spatial remap in Cut::finalize(). Mirrored or airbrushed parts keep the remap.
     bool                    exact_paint{ true };
+    // R2 (E7): with nearest_skin, every one of these components in ONE cut (paint_split_assign_nearest_multi): the
+    // results are one piece per entry ("_A1".."_AN" as parts; objects 0..N-1 otherwise), the body ("_B" / the last
+    // object) and the rest pieces ("_looseN"). `component` is then unused. `claims` (optional, per entry) are reused.
+    std::vector<int>                                    components;
+    std::vector<std::shared_ptr<const PaintSplitClaim>> claims;
 };
 
 // What the cut did, for the panel's Output Log.
@@ -400,6 +483,11 @@ struct PaintSplitReport
     double                         piece_volume{ 0. }, body_volume{ 0. }, loose_volume{ 0. };
     bool                           exact_paint{ false };   // the mask part was painted by provenance
     size_t                         paint_copied{ 0 }, paint_resampled{ 0 }, paint_unpainted{ 0 }; // facets
+    // R2 one pass (PaintSplitKeep::components): per entry, and the entry that failed.
+    std::vector<PaintSplitTimes>   region_times;
+    std::vector<double>            region_piece_volume;
+    int                            bad_index{ -1 };
+    int                            claims_reused{ 0 };
 };
 
 // D19 (a): the share of `mesh`'s volume inside the closed `cutter` (0..1; -1 when the boolean fails). A part

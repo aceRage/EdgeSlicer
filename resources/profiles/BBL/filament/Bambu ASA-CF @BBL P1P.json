@@ -5,6 +5,9 @@
     "from": "system",
     "setting_id": "GFSB51_02",
     "instantiation": "true",
+    "pre_start_fan_time": [
+        "3"
+    ],
     "compatible_printers": [
         "Bambu Lab P1P 0.4 nozzle"
     ]

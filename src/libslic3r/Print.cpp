@@ -960,6 +960,18 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "support_material_interface_fan_speed",
         "internal_bridge_fan_speed", // ORCA: Add support for separate internal bridge fan speed control
         "ironing_fan_speed",
+        // Bambu Studio 02.09.01.70: read by CoolingBuffer and the start/end G-code only.
+        "close_additional_fan_first_x_layers",
+        "first_x_layer_fan_speed",
+        "additional_fan_full_speed_layer",
+        "optional_cooling_fan_speed",
+        "close_optional_fan_first_x_layers",
+        "first_x_layer_optional_fan_speed",
+        "optional_fan_full_speed_layer",
+        "pre_start_fan_time",
+        "sync_auxiliary_fan_to_second_fan",
+        "aux_fan_independent_control",
+        "aux_fan_standard_side",
         "single_extruder_multi_material_priming",
         "cooling_filter_enabled",
         "volumetric_speed_coefficients",
