@@ -262,8 +262,10 @@ inline uint32_t ps_kk(uint64_t key) { return uint32_t(key >> 42); }
 
 // ----------------------------------------------------------------------------------------- smoothing
 
-// Taubin (lambda 0.5, mu -0.53) on the claim with a weight per vertex (0 = pinned).
-void ps_taubin(indexed_triangle_set& its, const std::vector<float>& weight, int passes)
+// Taubin (lambda 0.5, mu -0.53) on the claim with a weight per vertex (0 = pinned). `normal_only`: each step moves a
+// vertex along its normal only, so a mesh much finer in places (next to the skin) does not slide towards the coarse
+// part and the shape alone is smoothed.
+void ps_taubin(indexed_triangle_set& its, const std::vector<float>& weight, int passes, bool normal_only = false)
 {
     const size_t nv = its.vertices.size();
     if (passes <= 0 || nv == 0 || weight.size() != nv)
@@ -284,6 +286,21 @@ void ps_taubin(indexed_triangle_set& its, const std::vector<float>& weight, int 
         start[v + 1] += start[v];
     for (size_t i = 0; i < pairs.size(); ++i)
         nbr[i] = pairs[i].second;
+    // Vertex -> faces, for the normals.
+    std::vector<uint32_t> fstart, faces;
+    if (normal_only) {
+        fstart.assign(nv + 1, 0);
+        faces.resize(its.indices.size() * 3);
+        for (const Vec3i32& t : its.indices)
+            for (int k = 0; k < 3; ++k)
+                ++fstart[size_t(t[k]) + 1];
+        for (size_t v = 0; v < nv; ++v)
+            fstart[v + 1] += fstart[v];
+        std::vector<uint32_t> fill(fstart.begin(), fstart.end() - 1);
+        for (size_t f = 0; f < its.indices.size(); ++f)
+            for (int k = 0; k < 3; ++k)
+                faces[fill[size_t(its.indices[f][k])]++] = uint32_t(f);
+    }
     std::vector<Vec3f> next(nv);
     auto step = [&](float factor) {
         tbb::parallel_for(tbb::blocked_range<size_t>(0, nv), [&](const tbb::blocked_range<size_t>& r) {
@@ -297,7 +314,17 @@ void ps_taubin(indexed_triangle_set& its, const std::vector<float>& weight, int 
                 for (uint32_t i = start[v]; i < start[v + 1]; ++i)
                     c += its.vertices[nbr[i]];
                 c /= float(start[v + 1] - start[v]);
-                next[v] = p + factor * weight[v] * (c - p);
+                Vec3f d = c - p;
+                if (normal_only) {
+                    Vec3f n = Vec3f::Zero();
+                    for (uint32_t i = fstart[v]; i < fstart[v + 1]; ++i) {
+                        const Vec3i32& t = its.indices[faces[i]];
+                        n += (its.vertices[t[1]] - its.vertices[t[0]]).cross(its.vertices[t[2]] - its.vertices[t[0]]);
+                    }
+                    const float nl = n.norm();
+                    d              = nl > 0.f ? Vec3f(n * (n.dot(d) / (nl * nl))) : Vec3f::Zero();
+                }
+                next[v] = p + factor * weight[v] * d;
             }
         });
         its.vertices.swap(next);
@@ -635,9 +662,11 @@ PaintSplitClaim ps_nearest_cutter(const indexed_triangle_set& mesh, const PaintS
     // R2: the Depth wall follows a smoothed copy of the selected skin (the paint's sub-triangles and the skin's
     // facets are not copied into the wall), when Depth is set and skin smoothing is on.
     const double                    skin_s = std::clamp(params.skin_smoothing, 0., 1.);
+    // (AABBMesh keeps a pointer to its mesh: Ss lives as long as the tree.)
+    indexed_triangle_set            Ss;
     std::unique_ptr<const AABBMesh> tree_ss;
     if (depth > 0. && skin_s > 0.) {
-        indexed_triangle_set Ss = S;
+        Ss = S;
         ps_taubin(Ss, std::vector<float>(Ss.vertices.size(), 1.f), int(std::lround(10. * skin_s)));
         tree_ss = std::make_unique<const AABBMesh>(Ss);
     }
@@ -981,25 +1010,26 @@ PaintSplitClaim ps_nearest_cutter(const indexed_triangle_set& mesh, const PaintS
         if (skin_s > 0.) {
             // R2 (owner 2026-11-27, "too exact on skin depth / triangle following"): only a thin seam band is pinned
             // (two near-skin voxels, at least 0.1 mm), and the wall rises smoothly to full weight at 3 voxels.
-            const double       pin_s = std::max(2. * fine, 0.1);
+            const double       pin_s = params.skin_pin > 0. ? params.skin_pin : std::max(2. * fine, 0.1);
             std::vector<float> w2    = weights(pin_s, 3. * h, true);
             for (size_t v = 0; v < w.size(); ++v)
                 w[v] = float((1. - skin_s) * double(w[v]) + skin_s * double(w2[v]));
-            ps_taubin(claim, w, passes);
+            ps_taubin(claim, w, passes, params.skin_normal_only);
             if (canceled())
                 return stop();
             // The wall next to the skin was refined to the fine voxel, where Taubin reaches about sqrt(passes) edges:
             // extra passes there only (fading out between 3 and 4 voxels) give it the same reach in mm.
             for (size_t v = 0; v < w2.size(); ++v)
                 w2[v] = float(skin_s * double(w2[v]) * std::clamp((4. * h - double(dist[v])) / h, 0., 1.));
-            ps_taubin(claim, w2, int(std::lround(40. * skin_s)));
+            ps_taubin(claim, w2, params.skin_extra_passes >= 0 ? params.skin_extra_passes : int(std::lround(40. * skin_s)),
+                      params.skin_normal_only);
         } else
             ps_taubin(claim, w, passes);
     }
     // ---- D23 (b): the seam through the paint line's corners.
     if (params.seam_snap && size_t(comp) < region.loops.size()) {
         double worst = 0.;
-        st.snapped   = ps_snap_seam(claim, dist, region.loops[size_t(comp)], 2. * fine, &worst);
+        st.snapped   = ps_snap_seam(claim, dist, region.loops[size_t(comp)], (params.snap_radius > 0. ? params.snap_radius : 2.) * fine, &worst);
         BOOST_LOG_TRIVIAL(debug) << "Paint split claim: " << st.snapped << " vertices snapped to the paint line, by up to " << worst << " mm";
     }
     st.smooth_s = ps_secs_since(t3);
@@ -1047,8 +1077,11 @@ uint64_t paint_split_claim_key(const PaintSplitPart& part, const PaintSplitRegio
         h = ps_hash_val(h, v);
     h = ps_hash_val(h, uint64_t(p.max_samples));
     h = ps_hash_val(h, uint64_t(p.max_cells));
-    for (int v : { int(p.dense), p.skin_refine, p.root_iterations, int(p.allow_complement), int(p.seam_snap) })
+    for (int v : { int(p.dense), p.skin_refine, p.root_iterations, int(p.allow_complement), int(p.seam_snap), p.skin_extra_passes,
+                   int(p.skin_normal_only) })
         h = ps_hash_val(h, v);
+    h = ps_hash_val(h, p.skin_pin);
+    h = ps_hash_val(h, p.snap_radius);
     h = ps_hash_vec(h, p.exclude_components);
     return h == 0 ? 1 : h;
 }

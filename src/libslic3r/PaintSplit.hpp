@@ -245,6 +245,13 @@ struct PaintSplitSkinParams
     // R2 (D23 b): the claim vertex nearest to each point of the paint line, within two near-skin voxels, is put on it,
     // so the seam passes through the paint line's corners. Sparse only.
     bool   seam_snap{ true };
+    // Tuning of the two above (tests and the hidden harness; -1 = the default): the seam band pinned (mm), the extra
+    // passes next to the skin, displacement along the normal only (no sliding of the fine mesh), and the snap radius
+    // in near-skin voxels.
+    double skin_pin{ -1. };
+    int    skin_extra_passes{ -1 };
+    bool   skin_normal_only{ true };
+    double snap_radius{ -1. };
     // R2 (E7): these components' selected skin counts as neither side: the claim reaches into their territory, which an
     // earlier cut of the same pass took already. Their shared wall is then that earlier cut alone (one surface, not two
     // near-coincident ones). paint_split_assign_nearest_multi() sets it; it is part of a cached claim's key.

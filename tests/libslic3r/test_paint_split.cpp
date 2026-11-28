@@ -1996,6 +1996,7 @@ TEST_CASE("Paint split R1: the pieces' painting is copied facet for facet", "[Pa
 
 namespace {
 double ps_roughness_near_skin(const indexed_triangle_set& face, const indexed_triangle_set& part, double band); // R2, below
+double ps_roughness_band(const indexed_triangle_set& face, const AABBMesh& tree, double lo, double hi);
 } // namespace
 
 // The owner's figure, through the Cut the way PaintSplitJob runs it: every multi-edge patch in turn on the body the
@@ -2115,6 +2116,10 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
             skin.max_cells       = size_t(env_d("PAINT_SPLIT_MAXCELLS", double(skin.max_cells)));
             skin.skin_smoothing  = env_d("PAINT_SPLIT_SKIN_SMOOTH", skin.skin_smoothing);
             skin.seam_snap       = env_d("PAINT_SPLIT_SNAP", 1.) != 0.;
+            skin.skin_pin          = env_d("PAINT_SPLIT_PIN", skin.skin_pin);
+            skin.skin_extra_passes = int(env_d("PAINT_SPLIT_EXTRA", double(skin.skin_extra_passes)));
+            skin.skin_normal_only  = env_d("PAINT_SPLIT_NORMAL", 1.) != 0.;
+            skin.snap_radius       = env_d("PAINT_SPLIT_SNAPR", skin.snap_radius);
         }
         if (eng == "r1") {
             skin.skin_smoothing = 0.;
@@ -2134,6 +2139,7 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
             PaintSplitRepairStats rs;
             const bool            repaired = paint_split_repair(in_cut.its, fixed, nullptr, rs);
             const indexed_triangle_set& part = repaired && rs.needed ? fixed : in_cut.its;
+            const AABBMesh              part_tree(part);
             for (size_t k = 0; k < regions.size(); ++k) {
                 const auto            t0    = std::chrono::steady_clock::now();
                 const PaintSplitClaim claim = paint_split_nearest_cutter(part, regions[k], 0, skin);
@@ -2155,7 +2161,8 @@ TEST_CASE("Paint split R1: owner's figure through the Cut, timed", "[.][PaintSpl
                             << " triangles" << (claim.complement ? " (complement)" : "") << ", open half-edges " << open
                             << ", repeated half-edges " << repeated << "; cut face " << face.indices.size() << " triangles, roughness "
                             << ps_roughness(face) << " deg, within 2 mm of the skin " << ps_roughness_near_skin(face, part, 2.)
-                            << " deg, within 1 mm " << ps_roughness_near_skin(face, part, 1.) << " deg, area " << ps_its_area(face)
+                            << " deg, 0.3-2 mm " << ps_roughness_band(face, part_tree, 0.3, 2.) << " deg, 0-0.3 mm "
+                            << ps_roughness_band(face, part_tree, 0., 0.3) << " deg, area " << ps_its_area(face)
                             << " mm2, " << claim.stats.snapped << " snapped");
             }
         }
@@ -2576,4 +2583,83 @@ TEST_CASE("Paint split R2: smoothing along the skin keeps the seam on the paint 
     REQUIRE(d2.ok());
     WARN("Depth 2 mm: piece " << d1.piece_volume << " -> " << d2.piece_volume << " mm3");
     CHECK_THAT(d2.piece_volume, WithinRel(d1.piece_volume, 0.05));
+}
+
+namespace {
+// ps_roughness over the face's triangles whose centroid lies between `lo` and `hi` mm from the part's skin.
+double ps_roughness_band(const indexed_triangle_set& face, const AABBMesh& tree, double lo, double hi)
+{
+    indexed_triangle_set sub;
+    sub.vertices = face.vertices;
+    for (const Vec3i32& t : face.indices) {
+        const double d = std::sqrt(tree.squared_distance((face.vertices[t[0]] + face.vertices[t[1]] + face.vertices[t[2]]).cast<double>() / 3.));
+        if (d >= lo && d < hi)
+            sub.indices.push_back(t);
+    }
+    return ps_roughness(sub);
+}
+} // namespace
+
+// Tuning sweep for the R2 skin smoothing on the band fixture (run by hand): roughness by distance from the skin, the
+// seam's distance from the paint line and where its worst point is.
+TEST_CASE("Paint split R2: skin smoothing sweep", "[.][PaintSplitSweep]")
+{
+    const indexed_triangle_set cyl = ps_ring_cylinder(10., 0., 40., 40, 48);
+    auto in_band = [](const Vec3d& g) {
+        const double th = std::atan2(g.y(), g.x());
+        return std::hypot(g.x(), g.y()) > 5. && g.z() > 16. + 2. * std::sin(3. * th) && g.z() < 24.;
+    };
+    const PaintSplitRegion r = paint_split_region(cyl, ps_mask_where(cyl, [&](int, const Vec3d& g) { return in_band(g); }));
+    REQUIRE(r.error == PaintSplitError::None);
+    const AABBMesh tree(cyl);
+    struct Cfg
+    {
+        const char* name;
+        double      skin, pin, snapr;
+        int         extra;
+        bool        normal, snap;
+        double      smooth;
+    };
+    const std::vector<Cfg> cfgs = {
+        { "r1", 0., -1., -1., -1, true, false, 0.5 },          { "r1_snap", 0., -1., -1., -1, true, true, 0.5 },
+        { "s05", 0.5, -1., -1., -1, true, true, 0.5 },         { "s05_nosnap", 0.5, -1., -1., -1, true, false, 0.5 },
+        { "s05_uniform", 0.5, -1., -1., -1, false, false, 0.5 }, { "s05_extra0", 0.5, -1., -1., 0, true, false, 0.5 },
+        { "s05_pin03", 0.5, 0.3, -1., -1, true, false, 0.5 },  { "s1_nosnap", 1., -1., -1., -1, true, false, 0.5 },
+        { "s1_extra120", 1., -1., -1., 120, true, false, 0.5 }, { "s05_snapr4", 0.5, -1., 4., -1, true, true, 0.5 },
+        { "smooth1_s1", 1., -1., -1., -1, true, false, 1.0 },  { "smooth0", 0., -1., -1., -1, true, false, 0. },
+    };
+    for (const Cfg& c : cfgs) {
+        PaintSplitSkinParams p;
+        p.skin_smoothing    = c.skin;
+        p.skin_pin          = c.pin;
+        p.snap_radius       = c.snapr;
+        p.skin_extra_passes = c.extra;
+        p.skin_normal_only  = c.normal;
+        p.seam_snap         = c.snap;
+        p.smoothing         = c.smooth;
+        const PaintSplitClaim      cl   = paint_split_nearest_cutter(cyl, r, 0, p);
+        const indexed_triangle_set face = paint_split_claim_cut_surface(cyl, cl.mesh);
+        const PaintSplitPieces     pc   = paint_split_assign_nearest(cyl, r, 0, p);
+        double                     worst = 0., sum = 0.;
+        Vec3d                      wp    = Vec3d::Zero();
+        const std::vector<Vec3f>   seam  = ps_seam(pc);
+        for (const Vec3f& v : seam) {
+            const double d = ps_dist_to_loops(r, v.cast<double>());
+            sum += d;
+            if (d > worst)
+                worst = d, wp = v.cast<double>();
+        }
+        // The claim vertex nearest the worst seam point, and the loop point nearest it.
+        double cv = 1e9, lp = 1e9;
+        for (const Vec3f& v : cl.mesh.vertices)
+            cv = std::min(cv, (v.cast<double>() - wp).norm());
+        for (const PaintSplitLoop& loop : r.loops[0])
+            for (const DrawCutSample& sm : loop.pts)
+                lp = std::min(lp, (sm.pos - wp).norm());
+        WARN(c.name << ": roughness 0-0.3 " << ps_roughness_band(face, tree, 0., 0.3) << ", 0.3-1 " << ps_roughness_band(face, tree, 0.3, 1.)
+                    << ", 1-2 " << ps_roughness_band(face, tree, 1., 2.) << ", 2+ " << ps_roughness_band(face, tree, 2., 1e9) << ", all "
+                    << ps_roughness(face) << " deg; seam mean " << sum / double(std::max<size_t>(1, seam.size())) << " worst " << worst
+                    << " mm at " << wp.transpose() << " (claim vertex " << cv << " mm, loop point " << lp << " mm away); snapped "
+                    << cl.stats.snapped << "; piece " << pc.piece_volume << " mm3; " << cl.mesh.indices.size() << " tris");
+    }
 }
