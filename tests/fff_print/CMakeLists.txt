@@ -116,6 +116,7 @@ add_executable(${_TEST_NAME}_tests
 	test_extra_bridge_layer_determinism.cpp
 	test_bridge_controls.cpp
 	test_bridge_anchor.cpp
+	test_first_filament_toolchange.cpp
 	test_ironing_overrides.cpp
 	test_bed_temperature.cpp
 	test_chamber_temperature.cpp
